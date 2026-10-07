@@ -203,14 +203,18 @@ async fn oversized_frame_closes_the_connection() {
 async fn stalled_client_is_closed() {
     let s = start(FakeAdapter::new()).await;
     let (mut ws, _, _) = authed(&s.url).await;
-    for i in 0..3000 {
+    for i in 0..3000 { // > RING_CAPACITY
         s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
         if i % 100 == 0 { tokio::task::yield_now().await; }
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         assert!(tokio::time::Instant::now() < deadline, "never closed");
-        if next(&mut ws).await.get("closed").is_some() { break; }
+        let m = next(&mut ws).await;
+        if let Some(code) = m.get("closed") {
+            assert!(code.is_null() || *code == 4408, "unexpected close code {code}");
+            break;
+        }
     }
 }
 
@@ -266,4 +270,26 @@ async fn preauth_cap_returns_503() {
     let _first = connect(&s.url).await;
     let err = connect_async(s.url.as_str()).await.unwrap_err();
     assert!(err.to_string().contains("503"), "got {err}");
+}
+
+#[tokio::test]
+async fn disconnect_mid_delivery_then_retry_gets_cached_result() {
+    let fake = FakeAdapter::gated();
+    let s = start(fake.clone()).await;
+    s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
+    s.core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    let (mut a, _, snap) = authed(&s.url).await;
+    let rid = snap["agents"][0]["pending"]["id"].as_str().unwrap().to_string();
+    let cmd = json!({"type":"request.answer","id":"x","request_id":rid,"option_id":"allow"});
+    send(&mut a, cmd.clone()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fake.open_gate();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (mut b, _, _) = authed(&s.url).await;
+    send(&mut b, cmd).await;
+    let r = loop { let m = next(&mut b).await; if m["type"] == "result" { break m; } };
+    assert_eq!((r["ok"].clone(), r["outcome"].clone()), (json!(true), json!("delivered")));
+    assert_eq!(s.fake.delivered().len(), 1);
 }

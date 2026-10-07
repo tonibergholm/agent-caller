@@ -13,7 +13,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
-use crate::engine::Core;
+use crate::engine::{Core, RING_CAPACITY};
 
 pub const CLOSE_BAD_PROTOCOL: u16 = 4400;
 pub const CLOSE_UNAUTHORIZED: u16 = 4401;
@@ -103,7 +103,6 @@ const PREAUTH_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITER_GRACE: Duration = Duration::from_secs(1);
-const OUT_QUEUE: usize = 64;
 const MAX_INFLIGHT: usize = 32;
 
 async fn preauth_send(socket: &mut WebSocket, m: Message) {
@@ -149,7 +148,7 @@ async fn session(st: AppState, mut socket: WebSocket, permit: OwnedSemaphorePerm
     drop(permit);
 
     let (mut sink, mut stream) = socket.split();
-    let (out, mut out_rx) = mpsc::channel::<Message>(OUT_QUEUE);
+    let (out, mut out_rx) = mpsc::channel::<Message>(RING_CAPACITY);
     let (close_tx, close_rx) = oneshot::channel::<Closing>();
     let mut writer = tokio::spawn(async move {
         while let Some(m) = out_rx.recv().await {
@@ -167,7 +166,8 @@ async fn session(st: AppState, mut socket: WebSocket, permit: OwnedSemaphorePerm
     let mut tasks: JoinSet<()> = JoinSet::new();
     let closing = run(&st, &client.id, resume, generation, &mut gen_rx, &mut stream, &out, &inflight, &mut tasks).await;
 
-    tasks.abort_all();
+    // Detach, not abort: an in-flight delivery must finish so a retry sees its cached result.
+    tasks.detach_all();
     drop(out);
     if let Err(closing) = closing {
         let _ = close_tx.send(closing);
