@@ -1,8 +1,8 @@
 # Agent inbox v1: design spec
 
 Date: 2026-10-07
-Status: revision 4. It folds in the P0 findings and the P1 review rulings
-(see §15) and awaits a Sol review of the revision.
+Status: revision 4.2. It folds in the P0 findings and the P1 review
+rulings, plus Sol rounds 4 and 5 (see §15).
 Research: `docs/research/2026-10-07-landscape.md`, which includes the spike
 log.
 
@@ -228,10 +228,9 @@ open ──claim──► answering ──confirmed──► resolved
 enough. The evidence per answer path:
 
 - **`hook` (Claude).**
-  - acd's reply was written and the connection completed normally. Then
-    either a `PostToolUse` or `Stop` arrives for the session, or herdr
-    shows that the request's fingerprint is gone. The result is
-    `by: "inbox"`.
+  - The result follows the correlated outcome evidence of §6.2 (step 3,
+    Attribution). The fingerprint leaving the screen alone yields
+    `uncertain`.
   - If the connection closes before acd replies, acd reconciles as
     described in §6.2.
   - **Hooks-only agents** have no screen to check. If acd has delivered an
@@ -239,10 +238,14 @@ enough. The evidence per answer path:
     the request resolves `by: "uncertain"`.
 - **`keys`.** After sending the key, acd polls the detection snapshot for
   up to 3 s, and checks the prompt line for a stray keystroke (§6.2).
-  - If the fingerprint disappears in two consecutive reads, the result is
-    `by: "inbox"`.
-  - Otherwise the request resolves as `by: "uncertain"`. Clients show
-    "check the terminal", and acd sends nothing further.
+  - The dialog closing (the fingerprint absent in two consecutive reads)
+    is required, but it is not enough on its own.
+  - The result is `by: "inbox"` only when the correlated outcome evidence
+    of §6.2 or §6.3 is consistent with the sent option, and no stray
+    keystroke is detected.
+  - A contradicting outcome gives `terminal`. Anything else gives
+    `uncertain`: clients show "check the terminal", and acd sends nothing
+    further.
   - Codex's transient `working` state while hooks run is not evidence.
 - **`t3`.** The T3 command is acknowledged and the thread's request
   disappears from its projection.
@@ -253,8 +256,13 @@ enough. The evidence per answer path:
 - **`lost`.** The source can no longer observe the request. Examples: the
   hold expires on a hooks-only agent; the agent is removed.
 
-**Attribution.** `by: "inbox"` (with the claimed `option_id`) needs
-delivery evidence from the adapter (§6). A request that a client has
+**Attribution.** `by: "inbox"` (with the claimed `option_id`) means that
+acd delivered the client's answer **and** the observed outcome is
+consistent with it. Agents do not report which decider was used, so
+another hook or the user making the same choice at the same time is
+indistinguishable. It is also harmless, because the effect is the one the
+client asked for. A contradicting outcome gives `terminal`, without
+`option_id`. Missing evidence gives `uncertain`. A request that a client has
 claimed but that ends for another reason, such as the user answering in
 the terminal first, resolves `by: "terminal"`. acd never relabels it as
 `inbox`.
@@ -347,14 +355,20 @@ header, so these rules apply:
   holding a token is always 0600.
 - Backups go to `~/.config/acd/backups/` (directory 0700, files 0600), never
   next to the settings file.
+- Before writing, the installer checks whether the settings file is
+  tracked by a Git repository. If it is, the installer refuses, telling
+  the user the token would be committed, unless `--allow-tracked` is
+  given.
 - `acd token rotate hook`:
   1. writes the new token;
   2. rewrites every managed Claude header;
   3. reports any file it could not update.
 
-  The hook endpoint accepts the previous token for 10 minutes after a
-  rotation, so a partial failure can be retried without hooks silently
-  failing open.
+  If every managed header was updated, the endpoint accepts the previous
+  token for 10 more minutes, for hooks already in flight. If any update
+  failed, rotation exits non-zero, and the endpoint keeps accepting the
+  previous token until a later `acd hooks install` succeeds. `acd status`
+  shows "hook token rotation incomplete" until then.
 
 Claude may rewrite `.claude/settings*.json` formatting when it persists a
 rule, so ownership is matched by marker, never by byte layout.
@@ -398,8 +412,9 @@ stays usable while it waits (§4, invariant 1).
 - A live entry creates or updates a hooks-only agent with its `sessionId`,
   `cwd`, `name` and `status`.
 - A hooks-only agent can therefore exist before its first hook.
-- Discovery is best-effort. An unreadable directory or an unparseable
-  entry is skipped and logged once. An unknown `status` value maps to
+- Discovery is best-effort. An unreadable directory, an unparseable entry,
+  or an entry whose `pid`/`procStart` cannot be verified (process metadata
+  unreadable) is skipped and logged once. It never creates an agent. An unknown `status` value maps to
   `unknown`. A missing or failed scan never removes an agent that hooks
   keep alive.
 - Discovery applies the same ownership filter as hooks (below), so the
@@ -462,8 +477,9 @@ T3 exposes the provider session id is gated by §11 item 3.
      - This writes to the user's project settings, so the client must show
        the exact rule before sending.
 
-   **Attribution.** Writing the reply does not prove Claude used it,
-   because another hook may already have decided (P0 items 6 and 8b).
+   **Attribution** (§5.1: the outcome must be consistent with the answer).
+   Writing the reply does not prove Claude used it, because another hook
+   may already have decided (P0 items 6 and 8b).
    acd correlates the outcome with this request's `tool_name` and
    `tool_input`:
    - **allow:** a `PostToolUse` with the same tool and input gives
@@ -514,8 +530,9 @@ T3 exposes the provider session id is gated by §11 item 3.
 **After a keystroke.** A key that arrives after the dialog has closed lands
 in the agent's input box (P0 item 8b).
 
-- acd reads the prompt line just before sending, and again 300 ms and
-  1 s after.
+- acd reads the prompt line just before sending, and again 300 ms, 1 s
+  and 3 s after. The last read coincides with the end of the
+  confirmation poll in §5.1.
 - If the prompt line gained the sent character, the request resolves
   `by: "uncertain"`, with the client message "a stray keystroke may be in
   the input box".
@@ -997,8 +1014,11 @@ until it has been checked and the spec updated.
    - header env interpolation with `allowedEnvVars`;
    - the held connection closing on a terminal answer;
    - a held hook left open while another hook decides;
-   - an acd reply written after another hook decided is ignored, with the
-     correlated evidence of §6.2 telling the two outcomes apart;
+   - an acd reply written after another hook decided is ignored, and the
+     correlated outcome evidence of §6.2 gives `terminal` when the
+     decisions differ;
+   - `allow_always` with `addRules`/`localSettings` persists across a new
+     session (re-confirms P0 item 2);
    - a stalled endpoint bounded by the 1 s lifecycle timeout.
 3. **T3, live (blocks P4):**
    - ticket issuance with `POST /api/auth/websocket-ticket`, then connect;
@@ -1186,3 +1206,16 @@ non-blocking items and 1 question. All were accepted and fixed in place:
 - Discovery degrades gracefully, the stray-keystroke check compares the
   prompt line before and after, and §11 gates now name the plan each one
   blocks.
+
+**Round 5, Sol (revision 4.1), 2026-10-07.** B1, B4, B5, B6 and Q1 were
+resolved. B2, B3, NB1, NB2 and NB3 were partly resolved, and one new
+contradiction was found. Revision 4.2 fixes them:
+
+- `inbox` now means "delivered and the outcome is consistent". The same
+  rule applies to the `hook` and `keys` paths, which removes the §5.1
+  versus §6.2 contradiction.
+- The prompt check now extends to 3 s.
+- The installer refuses Git-tracked settings files, and an incomplete
+  hook-token rotation keeps the old token valid and is reported.
+- Session entries whose process metadata can't be verified are skipped.
+- The `allow_always` persistence check is added to the §11 item 2 gate.
