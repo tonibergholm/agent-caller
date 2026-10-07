@@ -219,3 +219,50 @@ async fn hello_and_ping_do_not_reserve_ids() {
     let seen = core.handle("cl", ClientMessage::AgentMarkSeen { id: "x".into(), agent_id: "nope".into() }).await;
     assert_ne!(seen.error_code(), Some(ErrorCode::DuplicateMismatch));
 }
+
+#[tokio::test]
+async fn not_delivered_is_never_cached_whatever_the_code() {
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    let rid = open_request(&core);
+    fake.fail_next(DeliverError::NotDelivered(ErrorCode::ScreenMismatch));
+    assert_eq!(core.handle("cl", answer("same", &rid)).await.error_code(), Some(ErrorCode::ScreenMismatch));
+    assert_eq!(core.handle("cl", answer("same", &rid)).await, CommandResult::delivered("same"), "retry runs again");
+    assert_eq!(fake.delivered().len(), 1);
+}
+
+#[tokio::test]
+async fn oversized_ids_and_texts_are_bad_requests() {
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    core.observe(Observation::AgentUpsert(AgentObs { state: AgentState::Done, ..agent_obs("a1") }));
+    let long = "x".repeat(MAX_ID_BYTES + 1);
+    let text = "y".repeat(MAX_TEXT_BYTES + 1);
+    let cases = [
+        ClientMessage::AgentMarkSeen { id: long.clone(), agent_id: "a1".into() },
+        ClientMessage::AgentMarkSeen { id: "m".into(), agent_id: long.clone() },
+        ClientMessage::RequestAnswer { id: "a".into(), request_id: long.clone(), option_id: Some("allow".into()), text: None },
+        ClientMessage::RequestAnswer { id: "b".into(), request_id: "r1".into(), option_id: None, text: Some(text.clone()) },
+        ClientMessage::AgentSend { id: "s".into(), agent_id: long.clone(), text: "hi".into() },
+        ClientMessage::AgentSend { id: "t".into(), agent_id: "a1".into(), text: text.clone() },
+    ];
+    for msg in cases {
+        let res = core.handle("cl", msg.clone()).await;
+        assert_eq!(res.error_code(), Some(ErrorCode::BadRequest), "{msg:?}");
+    }
+    assert!(fake.sent().is_empty());
+    let edge = "z".repeat(MAX_ID_BYTES);
+    let ok = core.handle("cl", ClientMessage::AgentSend { id: edge.clone(), agent_id: "a1".into(), text: "y".repeat(MAX_TEXT_BYTES) }).await;
+    assert_eq!(ok, CommandResult::delivered(&edge));
+}
+
+#[tokio::test]
+async fn rejected_oversized_command_does_not_reserve_its_id() {
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    core.observe(Observation::AgentUpsert(AgentObs { state: AgentState::Done, ..agent_obs("a1") }));
+    let big = ClientMessage::AgentSend { id: "x".into(), agent_id: "a1".into(), text: "y".repeat(MAX_TEXT_BYTES + 1) };
+    assert_eq!(core.handle("cl", big).await.error_code(), Some(ErrorCode::BadRequest));
+    let small = ClientMessage::AgentSend { id: "x".into(), agent_id: "a1".into(), text: "run tests".into() };
+    assert_eq!(core.handle("cl", small).await, CommandResult::delivered("x"));
+}

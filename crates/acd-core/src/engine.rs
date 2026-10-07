@@ -12,6 +12,10 @@ use crate::registry::{Answer, Change, Observation, Registry};
 
 pub const RING_CAPACITY: usize = 1000;
 pub const IDEM_TTL: Duration = Duration::from_secs(900);
+/// Longest command `id`, `request_id`, `agent_id` or `client.id`, in bytes.
+pub const MAX_ID_BYTES: usize = 128;
+/// Longest answer or follow-up `text`, in bytes.
+pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 
 struct Inner {
     machine: Machine,
@@ -98,6 +102,10 @@ impl Core {
         let Some(id) = msg.command_id().map(str::to_owned) else {
             return CommandResult::err("", ErrorCode::BadRequest, "not a command");
         };
+        // Checked before the reservation, so an oversized command never holds an id.
+        if let Err(why) = check_limits(&msg) {
+            return CommandResult::err(&id, ErrorCode::BadRequest, why);
+        }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&Sha256::digest(serde_json::to_vec(&msg).expect("serializable")));
         let begin = self.inner.lock().unwrap().idem.begin(client_id, &id, hash, Instant::now());
@@ -113,9 +121,10 @@ impl Core {
             Begin::Run => {}
         }
         let mut guard = AbandonGuard { core: self, client_id, id: &id, phase: Mutex::new(Phase::Start), armed: true };
-        let result = self.execute(&id, msg, &guard.phase).await;
+        let (result, delivery) = self.execute(&id, msg, &guard.phase).await;
         guard.armed = false;
-        let cacheable = !matches!(
+        // Nothing reached the agent: the id stays retryable whatever the code.
+        let cacheable = delivery != Delivery::NotDelivered && !matches!(
             result.error_code(),
             Some(ErrorCode::RequestNotReady | ErrorCode::RequestBusy | ErrorCode::SourceUnavailable)
         );
@@ -123,13 +132,13 @@ impl Core {
         result
     }
 
-    async fn execute(&self, id: &str, msg: ClientMessage, phase: &Mutex<Phase>) -> CommandResult {
-        match msg {
+    async fn execute(&self, id: &str, msg: ClientMessage, phase: &Mutex<Phase>) -> (CommandResult, Delivery) {
+        let result = match msg {
             ClientMessage::RequestAnswer { request_id, option_id, text, .. } => {
                 let answer = match (option_id, text) {
                     (Some(o), None) => Answer::Option(o),
                     (None, Some(t)) => Answer::Text(t),
-                    _ => return CommandResult::err(id, ErrorCode::BadRequest, "exactly one of option_id or text is required"),
+                    _ => return (CommandResult::err(id, ErrorCode::BadRequest, "exactly one of option_id or text is required"), Delivery::Attempted),
                 };
                 let request = {
                     let mut st = self.inner.lock().unwrap();
@@ -139,19 +148,19 @@ impl Core {
                             self.publish(&mut st, changes);
                             req
                         }
-                        Err(code) => return CommandResult::err(id, code, code.describe()),
+                        Err(code) => return (CommandResult::err(id, code, code.describe()), Delivery::Attempted),
                     }
                 };
                 let Some(adapter) = self.adapters.iter().find(|a| a.answer_paths().contains(&request.answer_path)).cloned() else {
                     self.release(&request_id);
-                    return CommandResult::err(id, ErrorCode::SourceUnavailable, ErrorCode::SourceUnavailable.describe());
+                    return (CommandResult::err(id, ErrorCode::SourceUnavailable, ErrorCode::SourceUnavailable.describe()), Delivery::Attempted);
                 };
                 *phase.lock().unwrap() = Phase::Delivering(Some(request_id.clone()));
                 match adapter.deliver(&request, &answer).await {
                     Ok(()) => CommandResult::delivered(id),
                     Err(DeliverError::NotDelivered(code)) => {
                         self.release(&request_id);
-                        CommandResult::err(id, code, code.describe())
+                        return (CommandResult::err(id, code, code.describe()), Delivery::NotDelivered);
                     }
                     Err(DeliverError::Uncertain(why)) => {
                         tracing::warn!(request_id, adapter = adapter.name(), %why, "answer delivery uncertain");
@@ -165,15 +174,17 @@ impl Core {
             ClientMessage::AgentSend { agent_id, text, .. } => {
                 let agent = match self.inner.lock().unwrap().registry.check_send(&agent_id, &text) {
                     Ok(a) => a,
-                    Err(code) => return CommandResult::err(id, code, code.describe()),
+                    Err(code) => return (CommandResult::err(id, code, code.describe()), Delivery::Attempted),
                 };
                 let Some(adapter) = self.adapter_for_source(agent.source) else {
-                    return CommandResult::err(id, ErrorCode::SourceUnavailable, ErrorCode::SourceUnavailable.describe());
+                    return (CommandResult::err(id, ErrorCode::SourceUnavailable, ErrorCode::SourceUnavailable.describe()), Delivery::Attempted);
                 };
                 *phase.lock().unwrap() = Phase::Delivering(None);
                 match adapter.send(&agent, &text).await {
                     Ok(()) => CommandResult::delivered(id),
-                    Err(DeliverError::NotDelivered(code)) => CommandResult::err(id, code, code.describe()),
+                    Err(DeliverError::NotDelivered(code)) => {
+                        return (CommandResult::err(id, code, code.describe()), Delivery::NotDelivered);
+                    }
                     Err(DeliverError::Uncertain(why)) => {
                         tracing::warn!(agent_id, %why, "follow-up delivery uncertain");
                         CommandResult::delivered(id)
@@ -185,7 +196,7 @@ impl Core {
                     let mut st = self.inner.lock().unwrap();
                     match st.registry.mark_seen(&agent_id) {
                         Ok(changes) => self.publish(&mut st, changes),
-                        Err(code) => return CommandResult::err(id, code, code.describe()),
+                        Err(code) => return (CommandResult::err(id, code, code.describe()), Delivery::Attempted),
                     }
                     st.registry.agent(&agent_id).cloned()
                 };
@@ -198,7 +209,8 @@ impl Core {
             ClientMessage::Hello { .. } | ClientMessage::Ping { .. } => {
                 CommandResult::err(id, ErrorCode::BadRequest, "not a command")
             }
-        }
+        };
+        (result, Delivery::Attempted)
     }
 
     fn adapter_for_source(&self, source: Source) -> Option<Arc<dyn Adapter>> {
@@ -217,6 +229,28 @@ impl Core {
             let _ = self.events.send(msg);
         }
     }
+}
+
+/// Size limits on a command's ids and text (spec §7.1 resource limits).
+fn check_limits(msg: &ClientMessage) -> Result<(), &'static str> {
+    let (ids, text): (Vec<&str>, Option<&str>) = match msg {
+        ClientMessage::RequestAnswer { id, request_id, text, .. } => (vec![id, request_id], text.as_deref()),
+        ClientMessage::AgentSend { id, agent_id, text } => (vec![id, agent_id], Some(text)),
+        ClientMessage::AgentMarkSeen { id, agent_id } => (vec![id, agent_id], None),
+        ClientMessage::Hello { .. } | ClientMessage::Ping { .. } => (vec![], None),
+    };
+    if ids.iter().any(|s| s.len() > MAX_ID_BYTES) { return Err("id longer than 128 bytes"); }
+    if text.is_some_and(|t| t.len() > MAX_TEXT_BYTES) { return Err("text longer than 64 KiB"); }
+    Ok(())
+}
+
+/// Whether a finished command reported that nothing reached the agent.
+#[derive(PartialEq, Eq)]
+enum Delivery {
+    /// The adapter returned `NotDelivered`: never cached.
+    NotDelivered,
+    /// Anything else; caching follows the error code.
+    Attempted,
 }
 
 /// How far a command got. Decides what an abandoned command may do (spec §5.1:
