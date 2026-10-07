@@ -1,7 +1,7 @@
 # Agent inbox v1: design spec
 
 Date: 2026-10-07
-Status: revision 4.2. It folds in the P0 findings and the P1 review
+Status: revision 4.3. It folds in the P0 findings and the P1 review
 rulings, plus Sol rounds 4 and 5 (see §15).
 Research: `docs/research/2026-10-07-landscape.md`, which includes the spike
 log.
@@ -298,9 +298,13 @@ trait (P1):
 - `deliver`, `send` and `mark_seen` finish within 10 s and are
   cancellation-safe.
 - `NotDelivered` is returned only when nothing reached the agent.
-- An adapter reports `by: "inbox"` only when it has evidence that its own
-  delivery took effect. Any other "the dialog ended" evidence is
-  `by: "terminal"`.
+- Attribution follows §5.1:
+  - `by: "inbox"` when the adapter delivered the answer and the observed
+    outcome is consistent with it;
+  - `by: "terminal"` when the outcome contradicts it, or when the dialog
+    ended without any acd delivery;
+  - `by: "uncertain"` when acd delivered but the evidence is
+    insufficient.
 - After a resolution that changes the agent's state, the adapter emits an
   agent upsert.
 
@@ -1219,3 +1223,7 @@ contradiction was found. Revision 4.2 fixes them:
   hook-token rotation keeps the old token valid and is reported.
 - Session entries whose process metadata can't be verified are skipped.
 - The `allow_always` persistence check is added to the §11 item 2 gate.
+
+**Round 6, Sol (revision 4.2), 2026-10-07.** All items were resolved
+except one remaining contradiction: the §6 adapter contract still used the
+old attribution rule. Revision 4.3 aligns it with §5.1.
