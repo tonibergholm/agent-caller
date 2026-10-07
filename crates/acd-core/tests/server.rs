@@ -35,11 +35,46 @@ async fn send(ws: &mut Ws, v: Value) { ws.send(Message::text(v.to_string())).awa
 /// The next JSON frame, or the close code as `{"closed": code}`.
 async fn next(ws: &mut Ws) -> Value {
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), ws.next()).await.expect("timed out") {
+        match tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("timed out after 2s waiting for the next websocket frame or close")
+        {
             Some(Ok(Message::Text(t))) => return serde_json::from_str(t.as_str()).unwrap(),
             Some(Ok(Message::Close(frame))) => return json!({"closed": frame.map(|f| u16::from(f.code))}),
             Some(Ok(_)) => continue,
             Some(Err(_)) | None => return json!({"closed": null}),
+        }
+    }
+}
+
+/// An upsert whose frame is ~60 KiB. Flood tests need the server's outbound queue to overflow
+/// regardless of OS: small frames fit entirely in Linux's autotuned loopback socket buffers, so
+/// the writer never blocks. 3000 of these (~180 MB) dwarf any socket buffer.
+fn flood_obs(id: &str) -> AgentObs {
+    let mut o = agent_obs(id);
+    o.title = "x".repeat(60 * 1024);
+    o
+}
+
+/// Reads until the server closes the connection (4408, or a bare drop), counting what arrived.
+/// A stall reports how many frames and bytes were received first, which distinguishes
+/// "the server never overflowed" from "it closed but the connection never ended".
+async fn expect_slow_close(ws: &mut Ws) {
+    let (mut frames, mut bytes) = (0usize, 0usize);
+    loop {
+        let m = match tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+            Ok(m) => m,
+            Err(_) => panic!("no close after {frames} frames / {bytes} bytes"),
+        };
+        match m {
+            Some(Ok(Message::Text(t))) => { frames += 1; bytes += t.len(); }
+            Some(Ok(Message::Close(frame))) => {
+                let code = frame.map(|f| u16::from(f.code));
+                assert!(code.is_none() || code == Some(4408), "unexpected close code {code:?}");
+                return;
+            }
+            Some(Ok(_)) => {}
+            Some(Err(_)) | None => return,
         }
     }
 }
@@ -205,18 +240,10 @@ async fn stalled_client_is_closed() {
     let s = start(FakeAdapter::new()).await;
     let (mut ws, _, _) = authed(&s.url).await;
     for i in 0..3000 { // > RING_CAPACITY
-        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+        s.core.observe(Observation::AgentUpsert(flood_obs(&format!("a{i}"))));
         if i % 100 == 0 { tokio::task::yield_now().await; }
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        assert!(tokio::time::Instant::now() < deadline, "never closed");
-        let m = next(&mut ws).await;
-        if let Some(code) = m.get("closed") {
-            assert!(code.is_null() || *code == 4408, "unexpected close code {code}");
-            break;
-        }
-    }
+    expect_slow_close(&mut ws).await;
 }
 
 #[tokio::test]
@@ -369,17 +396,10 @@ async fn rotation_after_a_slow_client_close_does_not_deliver() {
     send(&mut a, answer_cmd("x", &rid)).await;
     wait_pending(&s.core, "a1", Some(RequestStatus::Answering)).await;
     for i in 0..3000 {
-        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("flood{i}"))));
+        s.core.observe(Observation::AgentUpsert(flood_obs(&format!("flood{i}"))));
         if i % 100 == 0 { tokio::task::yield_now().await; }
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        assert!(tokio::time::Instant::now() < deadline, "never closed");
-        if let Some(code) = next(&mut a).await.get("closed") {
-            assert!(code.is_null() || *code == 4408, "unexpected close code {code}");
-            break;
-        }
-    }
+    expect_slow_close(&mut a).await;
     s.auth.rotate("new-secret".into());
     wait_pending(&s.core, "a1", None).await;
     fake.open_gate();
