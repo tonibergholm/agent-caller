@@ -302,3 +302,60 @@ impl Registry {
         Some(Change::AgentUpdated(a.clone()))
     }
 }
+
+/// Control characters other than newline and tab are never forwarded to an agent.
+pub fn has_forbidden_control(text: &str) -> bool {
+    text.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+}
+
+impl Registry {
+    pub fn claim(&mut self, request_id: &str, answer: Answer) -> Result<(Request, Vec<Change>), ErrorCode> {
+        let e = self.requests.get_mut(request_id).ok_or(ErrorCode::RequestGone)?;
+        match e.req.status {
+            RequestStatus::Answering => return Err(ErrorCode::RequestBusy),
+            RequestStatus::Resolved => return Err(ErrorCode::RequestGone),
+            RequestStatus::Open => {}
+        }
+        if !e.req.is_answerable() { return Err(ErrorCode::NotAnswerable); }
+        if !e.ready { return Err(ErrorCode::RequestNotReady); }
+        match &answer {
+            Answer::Option(id) => {
+                let valid = e.req.options.iter().any(|o| &o.id == id && o.effect != Effect::Unknown);
+                if !valid { return Err(ErrorCode::BadRequest); }
+            }
+            Answer::Text(t) => {
+                if !e.req.free_text || t.trim().is_empty() || has_forbidden_control(t) {
+                    return Err(ErrorCode::BadRequest);
+                }
+            }
+        }
+        e.req.status = RequestStatus::Answering;
+        e.claimed = Some(answer);
+        let req = e.req.clone();
+        Ok((req, self.sync_pending(request_id).into_iter().collect()))
+    }
+
+    pub fn release(&mut self, request_id: &str) -> Vec<Change> {
+        let Some(e) = self.requests.get_mut(request_id) else { return vec![] };
+        if e.req.status != RequestStatus::Answering { return vec![]; }
+        e.req.status = RequestStatus::Open;
+        e.claimed = None;
+        self.sync_pending(request_id).into_iter().collect()
+    }
+
+    pub fn check_send(&self, agent_id: &str, text: &str) -> Result<Agent, ErrorCode> {
+        let a = self.agents.get(agent_id).ok_or(ErrorCode::AgentGone)?;
+        if !a.can_send { return Err(ErrorCode::NotSupported); }
+        if text.trim().is_empty() || has_forbidden_control(text) { return Err(ErrorCode::BadRequest); }
+        if a.pending.is_some() || a.state == AgentState::NeedsYou { return Err(ErrorCode::AgentBusy); }
+        Ok(a.clone())
+    }
+
+    pub fn mark_seen(&mut self, agent_id: &str) -> Result<Vec<Change>, ErrorCode> {
+        let a = self.agents.get_mut(agent_id).ok_or(ErrorCode::AgentGone)?;
+        if a.state != AgentState::Done { return Ok(vec![]); }
+        a.state = AgentState::Idle;
+        a.state_since = Utc::now();
+        Ok(vec![Change::AgentUpdated(a.clone())])
+    }
+}
