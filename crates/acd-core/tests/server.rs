@@ -14,9 +14,12 @@ type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 struct Server { core: Arc<Core>, auth: Arc<Auth>, url: String, fake: Arc<FakeAdapter> }
 
 async fn start(fake: Arc<FakeAdapter>) -> Server {
+    start_with(fake, ServerOptions { hello_timeout: Duration::from_millis(300), ..Default::default() }).await
+}
+
+async fn start_with(fake: Arc<FakeAdapter>, opts: ServerOptions) -> Server {
     let core = Core::new(test_machine(), vec![fake.clone()]);
     let auth = Arc::new(Auth::new("secret".into()));
-    let opts = ServerOptions { hello_timeout: Duration::from_millis(300), rotation_check: Duration::from_millis(50), ..Default::default() };
     let app = router(core.clone(), auth.clone(), opts);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/", listener.local_addr().unwrap());
@@ -194,4 +197,73 @@ async fn oversized_frame_closes_the_connection() {
     let big = "x".repeat(2 * 1024 * 1024);
     let _ = ws.send(Message::text(format!("{{\"type\":\"ping\",\"id\":\"{big}\"}}"))).await;
     assert!(next(&mut ws).await.get("closed").is_some());
+}
+
+#[tokio::test]
+async fn stalled_client_is_closed() {
+    let s = start(FakeAdapter::new()).await;
+    let (mut ws, _, _) = authed(&s.url).await;
+    for i in 0..3000 {
+        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+        if i % 100 == 0 { tokio::task::yield_now().await; }
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(tokio::time::Instant::now() < deadline, "never closed");
+        if next(&mut ws).await.get("closed").is_some() { break; }
+    }
+}
+
+#[tokio::test]
+async fn ping_during_large_replay_gets_pong() {
+    let s = start(FakeAdapter::new()).await;
+    for i in 0..500 {
+        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+    }
+    let mut ws = connect(&s.url).await;
+    send(&mut ws, hello("secret", Some(json!({"epoch": s.core.epoch(), "seq": 0})))).await;
+    send(&mut ws, json!({"type":"ping","id":"p1"})).await;
+    loop {
+        let m = next(&mut ws).await;
+        assert!(m.get("closed").is_none(), "closed: {m}");
+        if m["type"] == "pong" { break; }
+    }
+}
+
+#[tokio::test]
+async fn rotation_closes_idle_session_immediately() {
+    let s = start(FakeAdapter::new()).await;
+    let (mut ws, _, _) = authed(&s.url).await;
+    s.auth.rotate("new".into());
+    let m = tokio::time::timeout(Duration::from_millis(200), next(&mut ws)).await.expect("not closed within 200ms");
+    assert_eq!(m["closed"], 4401);
+}
+
+#[tokio::test]
+async fn too_many_in_flight_commands_get_bad_request() {
+    let fake = FakeAdapter::gated();
+    let s = start(fake.clone()).await;
+    for i in 0..33 {
+        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+        s.core.observe(Observation::RequestSeen(permission_obs(&format!("a{i}"), "k")));
+    }
+    let (mut ws, _, snap) = authed(&s.url).await;
+    let ids: Vec<String> = snap["agents"].as_array().unwrap().iter().map(|a| a["pending"]["id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(ids.len(), 33);
+    for (i, rid) in ids.iter().take(32).enumerate() {
+        send(&mut ws, json!({"type":"request.answer","id":format!("c{i}"),"request_id":rid,"option_id":"allow"})).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    send(&mut ws, json!({"type":"request.answer","id":"c32","request_id":ids[32],"option_id":"allow"})).await;
+    let r = loop { let m = next(&mut ws).await; if m["type"] == "result" { break m; } };
+    assert_eq!((r["id"].clone(), r["error"]["code"].clone()), (json!("c32"), json!("bad_request")));
+    fake.open_gate();
+}
+
+#[tokio::test]
+async fn preauth_cap_returns_503() {
+    let s = start_with(FakeAdapter::new(), ServerOptions { max_preauth: 1, hello_timeout: Duration::from_secs(5), ..Default::default() }).await;
+    let _first = connect(&s.url).await;
+    let err = connect_async(s.url.as_str()).await.unwrap_err();
+    assert!(err.to_string().contains("503"), "got {err}");
 }
