@@ -64,6 +64,9 @@ pub enum ErrorCode {
     SourceUnavailable,
     Unauthorized,
     UnsupportedProtocol,
+    /// A code this version does not know (spec §7.2: tolerate unknown input).
+    #[serde(other)]
+    Unknown,
 }
 
 impl ErrorCode {
@@ -82,6 +85,7 @@ impl ErrorCode {
             ErrorCode::SourceUnavailable => "the source for this agent is unavailable",
             ErrorCode::Unauthorized => "invalid token",
             ErrorCode::UnsupportedProtocol => "unsupported protocol",
+            ErrorCode::Unknown => "unknown error",
         }
     }
 }
@@ -166,4 +170,25 @@ impl ServerMessage {
             ServerMessage::Result(_) | ServerMessage::Pong { .. } | ServerMessage::Error { .. } => None,
         }
     }
+}
+
+/// The `type` of every message this version of the daemon sends.
+pub const SERVER_MESSAGE_TYPES: [&str; 10] = [
+    "welcome", "snapshot", "agent.updated", "agent.removed", "request.opened",
+    "request.resolved", "machine.updated", "result", "pong", "error",
+];
+
+/// Decodes a daemon frame, tolerating newer daemons (spec §7.2).
+///
+/// Returns `Ok(None)` for a JSON object whose `type` this version does not
+/// know; the client skips it. Returns an error for malformed JSON, a frame
+/// that is not an object with a string `type`, or a known type whose body
+/// does not match.
+pub fn decode_server(raw: &str) -> Result<Option<ServerMessage>, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    if let Some(t) = value.get("type").and_then(|t| t.as_str())
+        && !SERVER_MESSAGE_TYPES.contains(&t) {
+            return Ok(None);
+        }
+    serde_json::from_value(value).map(Some)
 }

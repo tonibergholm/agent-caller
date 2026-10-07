@@ -91,3 +91,53 @@ fn timestamps_round_trip_with_millisecond_utc() {
     let back: Request = serde_json::from_value(v).unwrap();
     assert_eq!(back.opened_at, opened_at());
 }
+
+#[test]
+fn unknown_answer_path_alone_makes_a_request_read_only() {
+    let mut v = serde_json::to_value(permission()).unwrap();
+    v["answer_path"] = json!("carrier_pigeon");
+    let r: Request = serde_json::from_value(v).unwrap();
+    assert_eq!((r.kind, r.answer_path), (RequestKind::Permission, AnswerPath::Unknown));
+    assert!(!r.is_answerable());
+}
+
+#[test]
+fn source_status_omits_an_absent_message() {
+    assert_eq!(serde_json::to_value(SourceStatus::unconfigured()).unwrap(), json!({"state": "unconfigured"}));
+    let degraded = SourceStatus { state: SourceState::Degraded, message: Some("t3 unreachable".into()) };
+    assert_eq!(serde_json::to_value(&degraded).unwrap(), json!({"state": "degraded", "message": "t3 unreachable"}));
+}
+
+#[test]
+fn machine_serializes_to_wire_shape() {
+    let m = Machine {
+        id: "mac-1a2b3c4d".into(), name: "Mac".into(), acd_version: "0.1.0".into(),
+        sources: Sources {
+            hooks: SourceStatus::unconfigured(),
+            herdr: SourceStatus { state: SourceState::Ok, message: None },
+            t3: SourceStatus { state: SourceState::Disabled, message: None },
+        },
+    };
+    assert_eq!(serde_json::to_value(&m).unwrap(), json!({
+        "id": "mac-1a2b3c4d", "name": "Mac", "acd_version": "0.1.0",
+        "sources": {"hooks": {"state": "unconfigured"}, "herdr": {"state": "ok"}, "t3": {"state": "disabled"}}
+    }));
+}
+
+#[test]
+fn agent_serializes_to_wire_shape() {
+    let a = Agent {
+        id: "t3:th_1".into(), machine_id: "m".into(), source: Source::T3, kind: AgentKind::Codex,
+        title: "fix bug".into(), cwd: None, project: Some("app".into()), state: AgentState::NeedsYou,
+        state_since: opened_at(), failed: false, last_message: Some("done?".into()),
+        pending: Some(permission()), can_send: true,
+    };
+    let v = serde_json::to_value(&a).unwrap();
+    assert_eq!(v, json!({
+        "id": "t3:th_1", "machine_id": "m", "source": "t3", "kind": "codex", "title": "fix bug",
+        "cwd": null, "project": "app", "state": "needs_you", "state_since": "2026-10-07T12:00:00.000Z",
+        "failed": false, "last_message": "done?", "pending": serde_json::to_value(permission()).unwrap(),
+        "can_send": true
+    }));
+    assert_eq!(serde_json::from_value::<Agent>(v).unwrap(), a);
+}

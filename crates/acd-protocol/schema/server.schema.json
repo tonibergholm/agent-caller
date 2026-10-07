@@ -428,21 +428,30 @@
       ]
     },
     "ErrorCode": {
-      "type": "string",
-      "enum": [
-        "request_gone",
-        "request_busy",
-        "request_not_ready",
-        "not_answerable",
-        "agent_gone",
-        "agent_busy",
-        "not_supported",
-        "screen_mismatch",
-        "bad_request",
-        "duplicate_mismatch",
-        "source_unavailable",
-        "unauthorized",
-        "unsupported_protocol"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "request_gone",
+            "request_busy",
+            "request_not_ready",
+            "not_answerable",
+            "agent_gone",
+            "agent_busy",
+            "not_supported",
+            "screen_mismatch",
+            "bad_request",
+            "duplicate_mismatch",
+            "source_unavailable",
+            "unauthorized",
+            "unsupported_protocol"
+          ]
+        },
+        {
+          "description": "A code this version does not know (spec §7.2: tolerate unknown input).",
+          "type": "string",
+          "const": "unknown"
+        }
       ]
     },
     "Machine": {
