@@ -34,6 +34,10 @@ pub struct RequestObs {
     pub free_text: bool,
     pub raw_screen: Option<String>,
     pub ready: bool,
+    /// Whether the key can identify a later occurrence of the same dialog
+    /// (Codex and herdr fingerprint keys). Claude `prompt_id` and T3 request
+    /// ids are unique per occurrence, so once resolved they never reopen.
+    pub reusable_key: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -41,10 +45,10 @@ pub enum Observation {
     AgentUpsert(AgentObs),
     AgentGone { agent_id: String },
     RequestSeen(RequestObs),
-    RequestReady { key: CorrelationKey, ready: bool },
-    RequestPath { key: CorrelationKey, answer_path: AnswerPath },
-    RequestEnded { key: CorrelationKey, by: ResolvedBy },
-    DialogGone { key: CorrelationKey },
+    RequestReady { agent_id: String, key: CorrelationKey, ready: bool },
+    RequestPath { agent_id: String, key: CorrelationKey, answer_path: AnswerPath },
+    RequestEnded { agent_id: String, key: CorrelationKey, by: ResolvedBy },
+    DialogGone { agent_id: String, key: CorrelationKey },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +79,8 @@ struct KeyState {
     generation: u64,
     open_request: Option<String>,
     confirmed_gone: bool,
+    /// A non-reusable key is tombstoned once its request resolves.
+    reusable: bool,
 }
 
 pub struct Registry {
@@ -102,50 +108,38 @@ impl Registry {
             Observation::AgentUpsert(o) => self.upsert_agent(o),
             Observation::AgentGone { agent_id } => self.agent_gone(&agent_id),
             Observation::RequestSeen(o) => self.request_seen(o),
-            Observation::RequestReady { key, ready } => {
-                for rid in self.primary_requests_for(&key) {
-                    if let Some(e) = self.requests.get_mut(&rid) { e.ready = ready; }
-                }
+            Observation::RequestReady { agent_id, key, ready } => {
+                if let Some(rid) = self.primary_request_for(&agent_id, &key)
+                    && let Some(e) = self.requests.get_mut(&rid) { e.ready = ready; }
                 vec![]
             }
-            Observation::RequestPath { key, answer_path } => {
-                let mut out = Vec::new();
-                for rid in self.primary_requests_for(&key) {
-                    let Some(e) = self.requests.get_mut(&rid) else { continue };
-                    if e.req.status != RequestStatus::Open || e.req.answer_path == answer_path { continue; }
-                    e.req.answer_path = answer_path;
-                    out.extend(self.sync_pending(&rid));
-                }
-                out
+            Observation::RequestPath { agent_id, key, answer_path } => {
+                let Some(rid) = self.primary_request_for(&agent_id, &key) else { return vec![] };
+                let Some(e) = self.requests.get_mut(&rid) else { return vec![] };
+                if e.req.status != RequestStatus::Open || e.req.answer_path == answer_path { return vec![]; }
+                e.req.answer_path = answer_path;
+                self.sync_pending(&rid).into_iter().collect()
             }
-            Observation::RequestEnded { key, by } => {
-                if matches!(by, ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent) {
-                    for ((_, k), st) in self.keys.iter_mut() {
-                        if *k == key { st.confirmed_gone = true; }
-                    }
-                }
+            Observation::RequestEnded { agent_id, key, by } => {
                 let confirming = matches!(by, ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent);
-                let rids = if confirming { self.any_requests_for(&key) } else { self.primary_requests_for(&key) };
-                let mut out = Vec::new();
-                for rid in rids {
-                    out.extend(self.resolve_request(&rid, by));
+                if confirming && let Some(st) = self.keys.get_mut(&(agent_id.clone(), key.clone())) {
+                    st.confirmed_gone = true;
                 }
-                out
+                let rid = if confirming { self.open_request_for(&agent_id, &key) } else { self.primary_request_for(&agent_id, &key) };
+                rid.map(|rid| self.resolve_request(&rid, by)).unwrap_or_default()
             }
-            Observation::DialogGone { key } => {
-                for ((_, k), st) in self.keys.iter_mut() {
-                    if *k == key { st.confirmed_gone = true; }
-                }
+            Observation::DialogGone { agent_id, key } => {
+                if let Some(st) = self.keys.get_mut(&(agent_id, key)) { st.confirmed_gone = true; }
                 vec![]
             }
         }
     }
 
-    /// Resolves an unresolved request. A `Terminal` resolution of a claimed
-    /// request is attributed to the inbox, with the claimed option.
+    /// Resolves an unresolved request. `by` is taken as reported: the adapter
+    /// decides between `Inbox` and `Terminal`. An `Inbox` resolution of a
+    /// claimed request carries the claimed option.
     pub fn resolve_request(&mut self, request_id: &str, by: ResolvedBy) -> Vec<Change> {
         let Some(e) = self.requests.remove(request_id) else { return vec![] };
-        let by = if e.req.status == RequestStatus::Answering && by == ResolvedBy::Terminal { ResolvedBy::Inbox } else { by };
         let option_id = match (by, &e.claimed) {
             (ResolvedBy::Inbox, Some(Answer::Option(o))) => Some(o.clone()),
             _ => None,
@@ -168,25 +162,10 @@ impl Registry {
         self.keys.get(&(agent_id.to_string(), key.clone())).and_then(|k| k.open_request.clone())
     }
 
-    /// Open requests reached through `key`, primary or alias, across agents.
-    fn any_requests_for(&self, key: &CorrelationKey) -> Vec<String> {
-        let mut v: Vec<String> = self.keys.iter()
-            .filter(|((_, k), _)| k == key)
-            .filter_map(|(_, st)| st.open_request.clone())
-            .collect();
-        v.sort();
-        v.dedup();
-        v
-    }
-
-    /// Open requests whose primary key is `key`, across agents. Aliases
-    /// left behind by an upgrade are skipped.
-    fn primary_requests_for(&self, key: &CorrelationKey) -> Vec<String> {
-        self.keys.iter()
-            .filter(|((_, k), _)| k == key)
-            .filter_map(|(_, st)| st.open_request.clone())
-            .filter(|rid| self.requests.get(rid).is_some_and(|e| e.key == *key))
-            .collect()
+    /// The agent's open request whose primary key is `key`. An alias left
+    /// behind by an upgrade is skipped.
+    fn primary_request_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String> {
+        self.open_request_for(agent_id, key).filter(|rid| self.requests.get(rid).is_some_and(|e| e.key == *key))
     }
 
     fn upsert_agent(&mut self, mut o: AgentObs) -> Vec<Change> {
@@ -234,9 +213,10 @@ impl Registry {
             if self.requests.get(&rid).is_some_and(|e| e.key != o.key) { return vec![]; }
             return self.update_request(&rid, &o);
         }
-        // 2. Replay of a resolved occurrence whose dialog was never confirmed gone.
+        // 2. Replay of a resolved occurrence: its dialog was never confirmed
+        //    gone, or its key is unique per occurrence and so never reopens.
         if let Some(k) = self.keys.get(&(o.agent_id.clone(), o.key.clone()))
-            && k.generation > 0 && !k.confirmed_gone { return vec![]; }
+            && k.generation > 0 && (!k.confirmed_gone || !k.reusable) { return vec![]; }
         // 3. Upgrade a fallback request in place.
         if let (Some(p), Some(from)) = (&pending, &o.upgrade_from)
             && p.status == RequestStatus::Open
@@ -244,7 +224,7 @@ impl Registry {
             {
                 let rid = p.id.clone();
                 // Keep `from` aliased to the request so replays of it are ignored.
-                self.claim_key(&o.key, &o.agent_id, &rid);
+                self.claim_key(&o.key, &o.agent_id, &rid, o.reusable_key);
                 if let Some(e) = self.requests.get_mut(&rid) { e.key = o.key.clone(); }
                 return self.update_request(&rid, &o);
             }
@@ -253,7 +233,9 @@ impl Registry {
         if let Some(p) = pending {
             out.extend(self.resolve_request(&p.id, ResolvedBy::Superseded));
         }
-        // 5. Open a new occurrence.
+        // 5. Open a new occurrence. A new request means the agent's next
+        //    `done` is a new completion, so the seen marker no longer applies.
+        self.seen.remove(&o.agent_id);
         self.next_id += 1;
         let rid = format!("r{}", self.next_id);
         let req = Request {
@@ -262,7 +244,7 @@ impl Registry {
             options: o.options.clone(), questions: o.questions.clone(), free_text: o.free_text,
             raw_screen: o.raw_screen.clone(), opened_at: Utc::now(),
         };
-        self.claim_key(&o.key, &o.agent_id, &rid);
+        self.claim_key(&o.key, &o.agent_id, &rid, o.reusable_key);
         self.requests.insert(rid.clone(), ReqEntry { req: req.clone(), key: o.key, ready: o.ready, claimed: None });
         let a = self.agents.get_mut(&o.agent_id).expect("agent checked above");
         if a.state != AgentState::NeedsYou {
@@ -275,9 +257,10 @@ impl Registry {
         out
     }
 
-    fn claim_key(&mut self, key: &CorrelationKey, agent_id: &str, rid: &str) {
+    fn claim_key(&mut self, key: &CorrelationKey, agent_id: &str, rid: &str, reusable: bool) {
         let k = self.keys.entry((agent_id.to_string(), key.clone())).or_default();
         k.agent_id = agent_id.to_string();
+        k.reusable = reusable;
         k.generation += 1;
         k.open_request = Some(rid.to_string());
         k.confirmed_gone = false;

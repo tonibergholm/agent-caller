@@ -79,6 +79,6 @@ pub fn permission_obs(agent_id: &str, key: &str) -> RequestObs {
             RequestOption { id: "allow".into(), label: "Yes".into(), description: None, effect: Effect::Allow },
             RequestOption { id: "deny".into(), label: "No".into(), description: None, effect: Effect::Deny },
         ],
-        questions: None, free_text: false, raw_screen: None, ready: true,
+        questions: None, free_text: false, raw_screen: None, ready: true, reusable_key: true,
     }
 }

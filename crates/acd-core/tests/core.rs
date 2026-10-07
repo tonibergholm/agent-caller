@@ -25,7 +25,7 @@ async fn answer_is_delivered_then_resolved_by_source_evidence() {
     assert_eq!(res, CommandResult::delivered("c1"));
     assert_eq!(fake.delivered(), vec![(rid.clone(), Answer::Option("allow".into()))]);
     let (_, mut rx) = core.attach(None);
-    core.observe(Observation::RequestEnded { key: CorrelationKey("k1".into()), by: ResolvedBy::Terminal });
+    core.observe(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("k1".into()), by: ResolvedBy::Inbox });
     loop {
         if let ServerMessage::RequestResolved { by, option_id, .. } = rx.recv().await.unwrap() {
             assert_eq!((by, option_id.as_deref()), (ResolvedBy::Inbox, Some("allow")));
