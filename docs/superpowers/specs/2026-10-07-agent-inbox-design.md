@@ -1,8 +1,8 @@
 # Agent inbox v1: design spec
 
 Date: 2026-10-07
-Status: revision 2. Sol review round 1 is addressed (see §15). The spec is
-awaiting re-review and owner approval.
+Status: revision 3. Sol review rounds 1 and 2 are addressed (see §15). The
+spec is awaiting owner approval.
 Research: `docs/research/2026-10-07-landscape.md`, which includes the spike
 log.
 
@@ -188,8 +188,19 @@ requests across sources:
 | herdr fallback | `(socket, pane_id, dialog fingerprint)` |
 | T3 | the runtime request id |
 
-Observing the same key again updates the existing request. It never opens
-a new one.
+**Occurrences.** A key identifies one *occurrence* of a dialog.
+
+- While a request with that key is not yet resolved, observing the key
+  again updates the existing request.
+- Once the request is resolved, and the source has confirmed the dialog is
+  gone, a later observation of the same key starts a **new occurrence**:
+  acd increments a per-key generation counter and opens a new request with
+  a new id.
+- "Confirmed gone" means the fingerprint was absent from two consecutive
+  detection reads, or the hook source reported the end of the request.
+- Claude's `prompt_id` and T3 request ids are already unique per
+  occurrence. The generation counter matters for Codex and for the herdr
+  fallback keys.
 
 **States.**
 
@@ -218,6 +229,9 @@ enough. The evidence per answer path:
     `by: "inbox"`.
   - If the connection closes before acd replies, acd reconciles as
     described in §6.2.
+  - **Hooks-only agents** have no screen to check. If acd has delivered an
+    answer and no `PostToolUse`, `Stop` or new request arrives within 30 s,
+    the request resolves `by: "uncertain"`.
 - **`keys`.** After sending the key, acd polls the detection snapshot for
   up to 3 s.
   - If the fingerprint disappears in two consecutive reads, the result is
@@ -300,7 +314,7 @@ this.
 **Coexisting permission hooks.** Other `PermissionRequest` hooks may decide
 first. Claude and Codex combine hook decisions themselves (deny wins). acd
 treats the effect like a terminal answer and resolves through
-reconciliation. This behavior is verified in §11, item 6.
+reconciliation. This behavior is pending verification in §11, item 6.
 
 ### 6.2 Claude adapter (hooks)
 
@@ -355,7 +369,8 @@ ignored:
    `answering`:
    - allow: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
    - deny: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from agent inbox"}}}`
-     (deny is pending verification as a recorded fixture, §11 item 2)
+     (the deny shape is pending verification as a recorded fixture, §11
+     item 2)
 4. Resolve as in §5.1.
 5. **The connection closes before acd replies.** acd reconciles:
    - **Bound to herdr:** read the detection snapshot.
@@ -381,15 +396,16 @@ ignored:
    - `questions` = the full `tool_input.questions` (`header`, `question`,
      `options`, `multiSelect`)
    - `options` mirroring `questions[0]`
-   - `free_text: true`
+   - `free_text: false` (see step 5)
 3. It is answerable only for a single question with `multiSelect: false`,
    and only when bound to herdr (`answer_path: "keys"`). Anything else is
    read-only.
 4. **Answer with an option:** send the option's 1-based number key,
    guarded by the fingerprint.
-5. **Answer with free text:** use the "Type something" row. The key
-   sequence is unverified (§11, item 1). Until it is verified,
-   `free_text` is `false`.
+5. **Free text is not supported on the `keys` path in v1.** Typing text
+   into a blocked dialog breaks invariant 3. Claude questions therefore
+   have `free_text: false`. T3 questions (`answer_path: "t3"`) may accept
+   free text because T3 receives it as structured `answers`.
 
 **Completion.**
 - `Stop` sets `done`. `last_message` comes from `last_assistant_message`,
@@ -421,7 +437,7 @@ while the hook runs, so the request is opened instead:
 
 **Answering.**
 - acd waits up to 3 s for the dialog fingerprint to appear. The timing is
-  verified in §11, item 5.
+  pending verification in §11, item 5.
 - Until the fingerprint appears, the request is visible but **not yet
   claimable**. A claim gets `request_not_ready`, and the app shows a
   spinner.
@@ -459,7 +475,7 @@ subscription and the snapshot:
 4. Resync with steps 1–3 on `events_lost`, on reconnect, or on a gap in
    `state_change_seq`.
 
-Exact sequence semantics are verified in §11, item 7.
+Exact sequence semantics are pending verification in §11, item 7.
 
 **State mapping.** `blocked` becomes `needs_you`. The other states map
 directly. Panes without an agent are ignored.
@@ -518,8 +534,10 @@ Otherwise acd keeps its own flag.
 **Answers.**
 - `runtime-request.respond`, with `decision` for an approval or `answers`
   keyed by question id.
-- A stale answer must be rejected by T3. That behavior is verified in
-  §11, item 3.
+- T3 is expected to reject a stale answer. This is pending verification
+  in §11, item 3. If T3 does not reject it, acd must check that the
+  request is still in the thread projection immediately before
+  dispatching.
 
 **Follow-ups.** `message.dispatch`.
 
@@ -529,10 +547,11 @@ Otherwise acd keeps its own flag.
 
 **Binding.**
 - WebSocket on port 47800 by default.
-- acd binds only to loopback and to addresses inside Tailscale's ranges:
-  `100.64.0.0/10` and `fd7a:115c:a1e0::/48`. Addresses come from the local
-  interfaces. A configured address outside this allowlist is refused at
-  startup.
+- acd binds only to loopback and to addresses that the local Tailscale
+  daemon reports as its own (`tailscale ip`, or the LocalAPI). Each such
+  address must also fall in `100.64.0.0/10` or `fd7a:115c:a1e0::/48`.
+- A configured address that fails either check is refused at startup.
+- When Tailscale's addresses change, acd rebinds.
 - When the Mac app connects to a MagicDNS name, it checks that the name
   resolved to an address in these ranges before sending `hello`.
 
@@ -555,8 +574,10 @@ Otherwise acd keeps its own flag.
 
 **Logs.**
 - Logs never contain tokens.
-- Request details and screen content are logged only at `debug` level,
-  and truncated to 4 KiB.
+- Request details and screen content are logged only at `debug` level.
+  Even there they are redacted, using the same secret patterns as the hook
+  payload sanitizer (API keys, bearer tokens, `KEY=value` environment
+  assignments), and truncated to 4 KiB.
 
 **Hook endpoint.** It is a separate HTTP listener on `127.0.0.1` only, using
 `hook.token`.
@@ -645,16 +666,30 @@ cursor from the `seq` in `snapshot`.
   after it.
 - Otherwise acd sends a full snapshot.
 - A different epoch always gets a snapshot.
+- **Ordering.** acd sends replayed events, or the snapshot, before any
+  live event, in strictly increasing `seq` order with no gaps.
+- **The client cursor** is the `seq` of the last snapshot or event it
+  applied. `welcome.seq` is informational: the daemon's current `seq`
+  when the connection was accepted. It never moves the cursor.
 
 **Slow clients.** A client with more than 1000 queued events is closed with
 code 4408.
 
 **Idempotency.**
 - Command ids are scoped to `client.id`.
-- acd caches each command's result for 15 minutes.
-- A retry with the same id and the same payload returns the cached result
-  without running the command again. The same id with a different payload
-  returns `duplicate_mismatch`.
+- **Reservation.** Before running a command, acd atomically reserves
+  `(client.id, id)` along with a hash of the payload.
+- **Retries:**
+  - A retry with the same id and payload while the command is still
+    running waits for that run's result. It never starts a second run.
+  - Once the command finishes, the same retry returns the cached result.
+  - The same id with a different payload returns `duplicate_mismatch`.
+- **Retention.** Reservations and results are kept for 15 minutes after
+  the command finishes.
+- **Pre-delivery errors are not cached.** If a command fails before
+  anything is delivered (`request_not_ready`, `request_busy`,
+  `source_unavailable`), its reservation is released, so the same id can
+  be retried.
 
 **Recovery after a lost result.** The cache does not survive an epoch
 change. After a reconnect into a new epoch, a client with commands in
@@ -721,7 +756,8 @@ react to events, such as notifications.
 - `request_gone` shows "Answered elsewhere".
 - `uncertain` and `lost` show "Check the terminal".
 - `request_not_ready` keeps the spinner, and the app retries the claim
-  automatically for up to 3 s.
+  automatically for up to 3 s. The retries reuse the command id, which
+  works because pre-delivery errors are not cached (§7.4).
 
 **Notifications.** A macOS notification is posted on `request.opened`
 while the panel is closed.
@@ -780,8 +816,9 @@ Each item is a bounded check. Its result updates this spec before any
 dependent work begins. Live checks use an isolated herdr session, as in the
 spike.
 
-1. **Claude `AskUserQuestion` free text.** Find the key sequence for the
-   "Type something" row.
+1. **Deferred past v1: Claude `AskUserQuestion` free text.** A guarded
+   text-entry protocol would cover framing, submission and confirmation.
+   v1 does not offer free text on the `keys` path (§6.2).
 2. **Claude permission decisions.** Record fixtures for allow and for deny
    with the `hookSpecificOutput` envelope. Confirm that the field which
    persists "always allow" works, if one exists.
@@ -805,8 +842,11 @@ spike.
 8. **Shim lifecycle edge cases.**
    - Kill the shim during a hold, and confirm the dialog stays and the
      request moves to `keys`.
-   - Answer in the terminal and in the inbox within the same 100 ms, and
-     confirm exactly one outcome.
+   - Answer in the terminal and in the inbox within the same 100 ms:
+     - for `hook` and `t3`, confirm exactly one outcome;
+     - for `keys`, confirm that acd sends at most one keystroke, never
+       retries, and reports `screen_mismatch` or `uncertain` when the
+       guard or the confirmation fails.
    - Restart acd during a hold.
 9. **Claude hooks-only discovery.** Check whether already-running Claude
    sessions outside herdr can be discovered before their next hook, for
@@ -879,10 +919,16 @@ isolated herdr session, covering:
    3 s of appearing. Yes and No both act as chosen.
 3. **T3.** A T3 approval and a T3 single-select question can each be
    answered from the panel.
-4. **Answered elsewhere.** Answering any of the above in the terminal or in
-   T3 first resolves the card on every client within 2 s. The second
-   answer gets `request_gone`, or for `keys` `screen_mismatch` or
-   `uncertain`. It never produces a second keystroke.
+4. **Answered elsewhere.**
+   - Answering any of the above in the terminal or in T3 first resolves the
+     card on every client within 2 s.
+   - **`hook` and `t3` requests:** a later inbox answer gets
+     `request_gone`, and the agent applies only the first answer.
+   - **`keys` requests:** if the terminal answer lands before acd's guard
+     check, the inbox answer gets `request_gone` or `screen_mismatch`. If
+     it lands between the guard check and the keystroke (the race accepted
+     in §4), acd sends at most one keystroke, never redelivers, and reports
+     `uncertain` when it cannot confirm the outcome.
 5. **Follow-ups.** A free-text follow-up reaches an idle herdr agent and a
    T3 thread exactly once, even if the client retries after a dropped
    connection in the same epoch.
@@ -914,5 +960,22 @@ items, 4 non-blocking items and 2 questions. All were accepted.
 | 9 | Coexisting hooks | Idempotent install, backup, owned-entry record and exact uninstall. Live test in §11.6. |
 | 10 | Auth hardening | Modes enforced, pre-auth limits, Origin policy, bind allowlist, MagicDNS check, rotation, redaction (§7.1). |
 | 11 | Wire definitions | §7.2: discriminator, formats, unknown-value handling, version rejection. |
-| 12 | Deny envelope, competing answer paths | Deny envelope corrected. Verified in §11.2. Exclusive paths (§5.1). |
+| 12 | Deny envelope, competing answer paths | Deny envelope corrected; a recorded fixture is pending in §11.2. Exclusive paths (§5.1). |
 | 13 | More assumptions to verify | §11, items 3 and 6–9. herdr range bounded to `< 0.10`. |
+
+**Round 2, Sol, 2026-10-07.** Seven round-1 items were resolved and six
+partly resolved. It found four new blocking items and three non-blocking
+items. All were accepted.
+
+| Item | Resolution |
+|---|---|
+| R1 #1 and new #4: the race acceptance criteria could not be met | §11.8 and §14.4 now separate `hook`/`t3`, which are atomic, from `keys`, which is guarded, sends at most one keystroke, never retries, and reports `uncertain`. |
+| R1 #3 and new #1: a returning dialog was deduplicated forever | Per-key occurrence generations (§5.1). |
+| R1 #4: replay ordering and cursor | Ordering rule and cursor definition (§7.4). |
+| R1 #5 and new #2: concurrent retries | Atomic reservation before dispatch; retries attach to the running command (§7.4). |
+| R1 #10: log redaction and Tailscale ownership | Redaction at debug level; addresses must be reported by `tailscale ip` (§7.1). |
+| R1 #12: §15 overstated verification | Wording corrected. |
+| New #3: free text vs invariant 3 | Free text on the `keys` path is deferred past v1 (§6.2, §11.1). |
+| Non-blocking: readiness retries vs the cache | Pre-delivery errors are not cached (§7.4, §8). |
+| Non-blocking: hooks-only confirmation could wait forever | 30 s bound, then `uncertain` (§5.1). |
+| Non-blocking: "verified" wording | Changed to "pending verification" throughout. |
