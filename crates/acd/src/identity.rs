@@ -12,7 +12,6 @@ pub fn create_machine_id(dir: &Path) -> Result<String> {
     Ok(id)
 }
 
-#[allow(dead_code)] // used by `acd run` in Task 10
 pub fn machine_id(dir: &Path) -> Result<String> {
     Ok(std::fs::read_to_string(dir.join("machine-id")).context("machine-id missing; run `acd init`")?.trim().to_string())
 }

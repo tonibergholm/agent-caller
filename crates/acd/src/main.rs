@@ -55,10 +55,14 @@ fn main() {
 
 fn real_main() -> Result<()> {
     let cli = Cli::parse();
-    let dir = paths::config_dir();
+    let dir = paths::config_dir()?;
     match cli.cmd {
         Cmd::Init { force } => init(&dir, force),
         Cmd::Token { cmd: TokenCmd::Rotate { which } } => {
+            if !dir.is_dir() {
+                bail!("{} not initialized; run `acd init`", dir.display());
+            }
+            preflight(&dir)?;
             let file = match which { TokenKind::Client => "client.token", TokenKind::Hook => "hook.token" };
             let token = secrets::new_token();
             secrets::write_secret(&dir.join(file), &token)?;
@@ -84,20 +88,39 @@ pub(crate) fn preflight(dir: &Path) -> Result<()> {
 }
 
 fn init(dir: &Path, force: bool) -> Result<()> {
-    if dir.join("client.token").exists() && !force {
+    const FILES: [&str; 4] = ["client.token", "hook.token", "machine-id", "config.toml"];
+    if FILES.iter().all(|f| dir.join(f).exists()) && !force {
         bail!("{} is already initialized; use --force to regenerate tokens", dir.display());
     }
     secrets::ensure_private_dir(dir)?;
-    let client = secrets::new_token();
-    secrets::write_secret(&dir.join("client.token"), &client)?;
-    secrets::write_secret(&dir.join("hook.token"), &secrets::new_token())?;
-    let id = identity::create_machine_id(dir)?;
+    let mut created = Vec::new();
+    let mut client = None;
+    for (file, is_client) in [("client.token", true), ("hook.token", false)] {
+        let path = dir.join(file);
+        if force || !path.exists() {
+            let token = secrets::new_token();
+            secrets::write_secret(&path, &token)?;
+            created.push(file);
+            if is_client { client = Some(token); }
+        }
+    }
+    let id_path = dir.join("machine-id");
+    let id = if id_path.exists() {
+        identity::machine_id(dir)?
+    } else {
+        created.push("machine-id");
+        identity::create_machine_id(dir)?
+    };
     let cfg_path = dir.join("config.toml");
     if !cfg_path.exists() {
         secrets::write_secret(&cfg_path, &toml::to_string(&config::Config::default())?)?;
+        created.push("config.toml");
     }
     println!("Initialized acd in {}", dir.display());
+    println!("created: {}", created.join(", "));
     println!("machine id: {id}");
-    println!("client token (add it to the Mac app): {client}");
+    if let Some(client) = client {
+        println!("client token (add it to the Mac app): {client}");
+    }
     Ok(())
 }
