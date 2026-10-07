@@ -52,3 +52,11 @@ fn cached_results_expire_after_ttl() {
     c.finish("cl", "1", CommandResult::ok("1"), true, t);
     assert!(matches!(c.begin("cl", "1", H1, t + Duration::from_secs(901)), Begin::Run));
 }
+
+#[test]
+fn pending_entries_survive_ttl_pruning() {
+    let mut c = IdemCache::new(Duration::from_secs(900));
+    let t = Instant::now();
+    assert!(matches!(c.begin("cl", "1", H1, t), Begin::Run));
+    assert!(matches!(c.begin("cl", "1", H1, t + Duration::from_secs(901)), Begin::Wait(_)));
+}

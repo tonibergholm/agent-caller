@@ -15,6 +15,7 @@ pub struct EventLog {
 
 impl EventLog {
     pub fn new(epoch: String, capacity: usize) -> Self {
+        assert!(capacity > 0, "EventLog capacity must be positive");
         Self { epoch, seq: 0, ring: VecDeque::with_capacity(capacity), capacity }
     }
 

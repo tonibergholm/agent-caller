@@ -30,6 +30,7 @@ fn replay_refuses_other_epoch_future_seq_and_gaps() {
     assert!(log.replay_after(&cursor("e0", 9)).is_none(), "other epoch");
     assert!(log.replay_after(&cursor("e1", 11)).is_none(), "future seq");
     assert!(log.replay_after(&cursor("e1", 5)).is_none(), "evicted range");
+    assert!(log.replay_after(&cursor("e1", 6)).is_none(), "first cursor that would skip seq 7");
     assert_eq!(log.replay_after(&cursor("e1", 7)).unwrap().len(), 3);
 }
 
@@ -37,4 +38,10 @@ fn replay_refuses_other_epoch_future_seq_and_gaps() {
 fn empty_log_replays_nothing_for_zero_cursor() {
     let log = EventLog::new("e1".into(), 1000);
     assert_eq!(log.replay_after(&cursor("e1", 0)).unwrap().len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "capacity must be positive")]
+fn zero_capacity_is_rejected() {
+    let _ = EventLog::new("e1".into(), 0);
 }
