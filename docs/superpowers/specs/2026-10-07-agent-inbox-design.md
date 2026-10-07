@@ -1,8 +1,8 @@
 # Agent inbox v1: design spec
 
 Date: 2026-10-07
-Status: revision 3. Sol review rounds 1 and 2 are addressed (see §15). The
-spec is awaiting owner approval.
+Status: revision 4. It folds in the P0 findings and the P1 review rulings
+(see §15) and awaits a Sol review of the revision.
 Research: `docs/research/2026-10-07-landscape.md`, which includes the spike
 log.
 
@@ -68,7 +68,7 @@ It is built for two audiences, in this order:
 | **Answer path** | How acd delivers an answer: `hook` (the reply to a held hook), `keys` (keystrokes through herdr), `t3` (a T3 command), or `none` (read-only). |
 | **Dialog fingerprint** | A normalized hash of the dialog block on screen: the title line, the detail text (for example the command), and the option labels. It ties a keystroke to the dialog that was observed. |
 | **Client** | Anything connected to acd over `acd/1`. |
-| **Hook shim** | `acd hook …`. Hook configs call it, and it forwards the hook to acd. |
+| **Hook shim** | `acd hook codex …`. Codex hook configs call it, and it forwards the hook to acd. Claude uses native `http` hooks instead. |
 
 ## 4. Architecture
 
@@ -77,7 +77,7 @@ It is built for two audiences, in this order:
         │  acd/1 over WebSocket, one connection per machine, via Tailscale
         ▼
  acd (Rust daemon, one per machine; the laptop runs one too)
-   ├─ hook endpoint (HTTP, 127.0.0.1)  ◄── `acd hook` shim ◄── Claude/Codex hooks
+   ├─ hook endpoint (HTTP, 127.0.0.1)  ◄── Claude http hooks / `acd hook codex` shim
    ├─ herdr adapter  ◄─► herdr Unix socket(s): state, events, screen, keys, prompt
    ├─ t3 adapter     ◄─► T3 server WebSocket RPC: threads, requests, messages
    └─ core: agent registry, request lifecycle (§5.1), acd/1 server
@@ -181,12 +181,16 @@ Anything else is shown read-only, with the label "answer in terminal".
 **Correlation keys.** acd uses these keys to deduplicate and to match
 requests across sources:
 
-| Origin | Key |
-|---|---|
-| Claude hook | `prompt_id`. It links `PermissionRequest` and `PreToolUse` for the same `AskUserQuestion`. |
-| Codex hook | `(session_id, turn_id, sha256(tool_name + tool_input))` |
-| herdr fallback | `(socket, pane_id, dialog fingerprint)` |
-| T3 | the runtime request id |
+| Origin | Key | Reusable |
+|---|---|---|
+| Claude hook | `prompt_id`. It links `PermissionRequest` and `PreToolUse` for the same `AskUserQuestion`. | no |
+| Codex hook | `(session_id, turn_id, sha256(tool_name + tool_input))` | yes |
+| herdr fallback | `(socket, pane_id, dialog fingerprint)` | yes |
+| T3 | the runtime request id | no |
+
+Keys are scoped to their agent. Every key-based observation (`ready`,
+answer path, end, gone) names its agent and affects only that agent's
+requests.
 
 **Occurrences.** A key identifies one *occurrence* of a dialog.
 
@@ -198,9 +202,10 @@ requests across sources:
   a new id.
 - "Confirmed gone" means the fingerprint was absent from two consecutive
   detection reads, or the hook source reported the end of the request.
-- Claude's `prompt_id` and T3 request ids are already unique per
-  occurrence. The generation counter matters for Codex and for the herdr
-  fallback keys.
+- **Non-reusable keys** (Claude `prompt_id`, T3 request ids) are
+  tombstoned once their request resolves. They never open another
+  request, even after the dialog is confirmed gone. The generation counter
+  only applies to reusable keys.
 
 **States.**
 
@@ -233,7 +238,7 @@ enough. The evidence per answer path:
     answer and no `PostToolUse`, `Stop` or new request arrives within 30 s,
     the request resolves `by: "uncertain"`.
 - **`keys`.** After sending the key, acd polls the detection snapshot for
-  up to 3 s.
+  up to 3 s, and checks the prompt line for a stray keystroke (§6.2).
   - If the fingerprint disappears in two consecutive reads, the result is
     `by: "inbox"`.
   - Otherwise the request resolves as `by: "uncertain"`. Clients show
@@ -245,8 +250,14 @@ enough. The evidence per answer path:
   - For `keys`, `none` and herdr fallback requests: the fingerprint
     disappears from the screen without a claim from acd.
   - For `hook`: see §6.2.
-- **`lost`.** The source can no longer observe the request. Examples: a
-  hooks-only agent whose held connection dropped; an agent removed.
+- **`lost`.** The source can no longer observe the request. Examples: the
+  hold expires on a hooks-only agent; the agent is removed.
+
+**Attribution.** `by: "inbox"` (with the claimed `option_id`) needs
+delivery evidence from the adapter (§6). A request that a client has
+claimed but that ends for another reason, such as the user answering in
+the terminal first, resolves `by: "terminal"`. acd never relabels it as
+`inbox`.
 
 **Upgrade and supersede.**
 - A herdr `blocked_unparsed` request is **upgraded in place** when a
@@ -273,151 +284,202 @@ enough. The evidence per answer path:
 
 ## 6. Sources and adapters
 
-### 6.1 Hook shim, hook endpoint and installation
+All adapters follow the **adapter contract** documented on the `Adapter`
+trait (P1):
 
-**The shim.** `acd hook <agent> <event>`:
+- `deliver`, `send` and `mark_seen` finish within 10 s and are
+  cancellation-safe.
+- `NotDelivered` is returned only when nothing reached the agent.
+- An adapter reports `by: "inbox"` only when it has evidence that its own
+  delivery took effect. Any other "the dialog ended" evidence is
+  `by: "terminal"`.
+- After a resolution that changes the agent's state, the adapter emits an
+  agent upsert.
 
-1. Reads the stdin payload, up to 1 MiB. A larger payload makes the shim
-   reply empty.
-2. Adds these values from the environment: `HERDR_PANE_ID`,
-   `HERDR_SOCKET_PATH`, `HERDR_ENV`, `CLAUDE_CODE_ENTRYPOINT`, and the
-   parent PID.
-3. POSTs to `http://127.0.0.1:<hook_port>/hook/<agent>/<event>` with
-   `hook.token`.
-4. Prints acd's response body and exits 0.
+### 6.1 Hook endpoint and installation
 
-**Failure.** Any failure makes the shim print nothing and exit 0. That
-covers connect refused, a timeout, or a malformed response.
-- Connect timeout: 500 ms.
-- Response timeout: per event (§6.2, §6.3).
-- **acd always replies before the shim's timeout.** It times out its own
-  holds first, so the shim timeout is only a backstop.
+acd's hook endpoint is an HTTP listener on `127.0.0.1:<hook_port>` only. It
+accepts `POST /hook/<agent>/<event>` with the header
+`X-Acd-Token: <hook.token>`. Any other request gets 401.
+
+The two agents reach it in different ways (P0 item 8 and the additional
+findings):
+
+- **Claude: native `http` hooks, no shim.**
+  - Each hook entry has `type: "http"`, a `url`, the header
+    `X-Acd-Token` (the literal token value), and these environment headers:
+    - `X-Herdr-Pane: $HERDR_PANE_ID`
+    - `X-Herdr-Socket: $HERDR_SOCKET_PATH`
+    - `X-Claude-Entrypoint: $CLAUDE_CODE_ENTRYPOINT`
+
+    The entry lists those variables in `allowedEnvVars`.
+  - Claude itself fails open:
+    - a connection error, a non-2xx reply or a timeout lets execution
+      continue;
+    - a malformed `decision` falls back to the dialog (P0 item 2).
+  - When the user answers in the terminal, the held connection closes.
+- **Codex: the command shim `acd hook codex <event>`.** Codex supports only
+  `command` hooks.
+  - The shim reads stdin, up to 1 MiB.
+  - It adds `CODEX_*` and `HERDR_*` environment values as hints. They are
+    unreliable; see §6.3.
+  - It POSTs with the token read from `hook.token`.
+  - It prints acd's body and exits 0. Any failure prints nothing.
+  - Connect timeout: 500 ms.
 
 **Installation.** `acd hooks install claude|codex`:
 
-- It is **idempotent.** It finds existing entries by the marker
-  `acd-managed:v1` in the command string and replaces them in place, so
-  running it twice never duplicates entries.
-- Before any write, it backs up the file to `<file>.acd-backup-<timestamp>`.
-- It writes atomically: a temporary file, then a rename. It keeps the
-  file's mode.
-- It records the entries it added in `~/.config/acd/hooks-installed.json`.
-- It never edits or reorders entries it does not own, including those
-  from herdr, Supacode and Warp.
+- is idempotent: owned entries carry the marker `acd-managed:v1` in the
+  URL query or the command;
+- backs up the file before writing;
+- writes atomically and keeps the file's mode;
+- records its entries in `~/.config/acd/hooks-installed.json`;
+- never edits or reorders entries it doesn't own.
 
-`acd hooks uninstall` removes exactly the recorded entries. If the user
-has edited an owned entry by hand, it refuses and lists the difference.
+Claude may rewrite `.claude/settings*.json` formatting when it persists a
+rule, so ownership is matched by marker, never by byte layout.
+`acd hooks uninstall` removes exactly the recorded entries, matched
+semantically. The Claude settings file must be mode 0600, because it holds
+the literal hook token. The installer enforces that.
 
-Codex shows a one-time hook review after install. The README documents
-this.
+**Coexisting permission hooks** (verified, P0 item 6):
 
-**Coexisting permission hooks.** Other `PermissionRequest` hooks may decide
-first. Claude and Codex combine hook decisions themselves (deny wins). acd
-treats the effect like a terminal answer and resolves through
-reconciliation. This behavior is pending verification in §11, item 6.
+- Any decisive hook beats an empty reply, and deny beats allow.
+- If another hook decides a Claude request that acd is holding, Claude
+  leaves acd's held connection open and ignores it.
+- acd therefore resolves such requests through reconciliation:
+  `PostToolUse`, `Stop`, or the fingerprint leaving the screen.
+- Once acd knows the request ended, it replies empty to the held hook.
 
-### 6.2 Claude adapter (hooks)
+### 6.2 Claude adapter (http hooks)
 
-**Hooks installed:**
+**Hooks installed** (all `type: "http"`):
 
-| Hook | Matcher | Shim response timeout |
+| Hook | Matcher | Hook `timeout` |
 |---|---|---|
-| `SessionStart` | — | 2 s |
-| `UserPromptSubmit` | — | 2 s (sets `working`) |
-| `PermissionRequest` | — | `permission_hold` + 10 s |
-| `PreToolUse` | `AskUserQuestion` | 2 s |
-| `PostToolUse` | — | 2 s (resolution evidence) |
-| `Stop` | — | 2 s |
-| `SessionEnd` | — | 2 s |
+| `SessionStart` | — | 5 s |
+| `UserPromptSubmit` | — | 5 s |
+| `PermissionRequest` | — | `permission_hold` + 10 s (default 3600 s + 10 s) |
+| `PreToolUse` | `AskUserQuestion` | 5 s |
+| `PostToolUse` | — | 5 s |
+| `Stop` | — | 5 s |
+| `SessionEnd` | — | 5 s |
 
-- `permission_hold` defaults to 3600 s.
-- The hook entry's `timeout` is set to the shim timeout plus 5 s.
+acd always replies before the hook timeout.
 
-**Filter.** These payloads get an immediate empty reply and are otherwise
-ignored:
+**Session discovery** (P0 item 9). Every 30 s and at startup, acd scans
+`~/.claude/sessions/*.json` and never opens the `.key` files there.
 
-- `CLAUDE_CODE_ENTRYPOINT` is in the configurable ignore list (default
-  `["sdk-ts"]`). T3-hosted sessions belong to the T3 adapter.
-- `agent_id` is present, meaning the payload comes from a subagent.
+- Each live entry is validated by its `pid` and `procStart`.
+- A live entry creates or updates a hooks-only agent with its `sessionId`,
+  `cwd`, `name` and `status`.
+- A hooks-only agent can therefore exist before its first hook.
 
-**Binding.** The binding is reconciled on **every** hook, not only on
-`SessionStart`:
+**Binding.** The binding is reconciled on every hook and on every scan.
 
-- If `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` are present, the session
-  belongs to the herdr agent `herdr:<hash(socket)>:<pane>`.
-- The herdr adapter also records `agent_session.value` (the Claude
-  `session_id`) for each pane. Either signal is enough to bind.
-- A hooks-only agent `claude:<session_id>` is created only when neither
-  signal exists.
-- When herdr later reports a pane with that session id, the hooks-only
-  agent **migrates** into the herdr agent. Its open request moves with it,
-  keeping the same request id, and `agent.removed` is emitted for the old
-  id.
-- Hooks-only agents have `can_send: false`.
+- A session belongs to a herdr agent `herdr:<hash(socket)>:<pane>` if
+  either of these holds:
+  - the `X-Herdr-Pane` and `X-Herdr-Socket` headers name a pane whose herdr
+    agent is `claude`;
+  - herdr reports `agent_session.value == session_id`.
+- Otherwise the session is hooks-only, `claude:<session_id>`, with
+  `can_send: false`.
+- When a binding appears later, a hooks-only agent migrates into the herdr
+  agent. Its open request moves too and keeps its id.
+
+**Filter** (P0 additional finding 2). `CLAUDE_CODE_ENTRYPOINT` is
+inherited from the launching shell, so the value alone is not proof that
+T3 owns the session.
+
+- A payload is dropped as T3-owned only if both hold:
+  - its entrypoint is in the ignore list (default `["sdk-ts"]`);
+  - the session is **not** bound to a herdr pane and not listed in
+    `~/.claude/sessions` with an interactive (`cli`) entrypoint.
+- Payloads from subagents (`agent_id` present) are always dropped.
 
 **Permission requests** (`tool_name` ≠ `AskUserQuestion`):
 
-1. Open a `permission` request:
-   - `answer_path: "hook"`
-   - `title`: `tool_name`
-   - `detail`: `tool_input.command`, `tool_input.file_path`, or compact JSON
-   - options: `allow` "Yes", and `deny` "No"
-   - `allow_always` "Yes, always" only if §11, item 2 confirms a working
-     field. Otherwise it is omitted for held requests.
-2. Hold the HTTP response. acd watches the connection for close.
-3. On a claim, reply with one of these and set the request to
-   `answering`:
-   - allow: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
-   - deny: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from agent inbox"}}}`
-     (the deny shape is pending verification as a recorded fixture, §11
-     item 2)
-4. Resolve as in §5.1.
-5. **The connection closes before acd replies.** acd reconciles:
-   - **Bound to herdr:** read the detection snapshot.
-     - If the request's fingerprint is still present, the dialog is still
-       open. Keep the request `open` and switch to `answer_path: "keys"`.
-       This happens when the shim crashed or was killed by a timeout.
-     - Otherwise resolve `by: "terminal"`. The spike showed this case
-       arrives as a closed connection.
-   - **Hooks-only:** acd cannot tell which case happened. Resolve
-     `by: "lost"`, shown as "check the terminal".
-6. **`permission_hold` expires.** acd replies empty. If the request is
-   bound to herdr, it switches to `keys`; otherwise it resolves `lost`.
-7. **Fingerprint capture.** When a request is bound to herdr, acd records
-   the dialog fingerprint from the detection snapshot within 2 s of
-   opening it. Matching uses the option labels **and** the detail text, so
-   a different dialog with the same labels does not match.
+1. Open a `permission` request with the key `prompt_id`, not reusable.
+   - `answer_path`: `hook`.
+   - `title`: the tool name.
+   - `detail`: the command, the file path, or compact JSON.
+   - Options:
+     - `allow` "Yes";
+     - `deny` "No";
+     - `allow_always` "Yes, always", only when `permission_suggestions`
+       contains an `addRules` entry.
+2. Hold the HTTP response.
+3. On a claim, reply with one of these:
+   - **allow:**
+     `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
+   - **deny:** the same envelope with
+     `"decision":{"behavior":"deny","message":"Denied from agent inbox"}`.
+     Fixture: `tests/fixtures/hooks/claude/response-deny.json`.
+   - **allow_always:** allow, plus
+     `"updatedPermissions":[{"type":"addRules","rules":[{"toolName":…,"ruleContent":…}],"behavior":"allow","destination":"localSettings"}]`,
+     taken from the suggestion.
+     - Only `localSettings`, `projectSettings` and `userSettings` persist
+       (P0 item 2).
+     - This writes to the user's project settings, so the client must show
+       the exact rule before sending.
+
+   Once the reply is written and the connection completes, acd reports
+   `by: "inbox"` on the next `PostToolUse` or `Stop` for the session, or
+   when the fingerprint leaves the screen.
+4. **The connection closes before acd replies.** With `http` hooks this
+   means the user answered in the terminal, Claude was interrupted, or the
+   process died.
+   - Herdr-bound: if the fingerprint is still on screen, switch to
+     `answer_path: "keys"`. Otherwise resolve `by: "terminal"`.
+   - Hooks-only: resolve `by: "terminal"` if `PostToolUse` or `Stop`
+     arrives within 30 s, otherwise `uncertain`.
+5. **`permission_hold` expires.** acd replies empty. A herdr-bound request
+   switches to `keys`; otherwise it resolves `lost`.
+6. **Fingerprint.** Captured from herdr's detection snapshot within 2 s
+   after the request opens.
+   - It covers the option labels and the detail text.
+   - Directory paths in the "always allow access to …" option are
+     normalized.
 
 **Questions** (`AskUserQuestion`):
 
-1. Both `PreToolUse` and `PermissionRequest` reply empty at once, so the
-   terminal dialog stays visible. They are joined by `prompt_id`.
-2. A `question` request opens with:
-   - `questions` = the full `tool_input.questions` (`header`, `question`,
-     `options`, `multiSelect`)
-   - `options` mirroring `questions[0]`
-   - `free_text: false` (see step 5)
-3. It is answerable only for a single question with `multiSelect: false`,
-   and only when bound to herdr (`answer_path: "keys"`). Anything else is
-   read-only.
-4. **Answer with an option:** send the option's 1-based number key,
-   guarded by the fingerprint.
-5. **Free text is not supported on the `keys` path in v1.** Typing text
-   into a blocked dialog breaks invariant 3. Claude questions therefore
-   have `free_text: false`. T3 questions (`answer_path: "t3"`) may accept
-   free text because T3 receives it as structured `answers`.
+- The `PreToolUse` and `PermissionRequest` events share `prompt_id`. Both
+  reply empty at once.
+- A `question` request keeps the full `questions` array, with `free_text`
+  false. It is answerable only when all of these hold:
+  - it has a single question;
+  - `multiSelect` is false;
+  - it is herdr-bound.
+
+  Any other question is read-only.
+- The dialog adds two rows that are not in the tool input: "Type
+  something." and "Chat about this". These are not offered as options.
+- A multi-question dialog shows a tab strip. Its fingerprint includes the
+  strip, so it stays read-only.
+- Answering sends the option's 1-based number key, guarded by the
+  fingerprint.
+
+**After a keystroke.** A key that arrives after the dialog has closed lands
+in the agent's input box (P0 item 8b).
+
+- The post-send check reads the prompt line.
+- If the sent character appears there, the request resolves
+  `by: "uncertain"`, with the client message "a stray keystroke may be in
+  the input box".
+- acd never sends a corrective backspace.
 
 **Completion.**
-- `Stop` sets `done`. `last_message` comes from `last_assistant_message`,
-  or from the last assistant entry in `transcript_path`.
-- `UserPromptSubmit` sets `working`. This keeps hooks-only agents current;
-  herdr-bound agents take their state from herdr.
 
-### 6.3 Codex adapter (hooks + herdr)
+- `Stop` sets `done` and fills `last_message`, at most 500 characters.
+- `UserPromptSubmit` sets `working`.
+- `SessionEnd`, or the entry disappearing from `~/.claude/sessions`, marks
+  a hooks-only agent for removal.
+
+### 6.3 Codex adapter (command shim + herdr)
 
 **Hooks installed:**
 
-| Hook | Shim response timeout |
+| Hook | Shim timeout |
 |---|---|
 | `SessionStart` | 2 s |
 | `UserPromptSubmit` | 2 s |
@@ -425,119 +487,147 @@ ignored:
 | `PostToolUse` | 2 s |
 | `Stop` | 2 s |
 
-**`PermissionRequest` replies empty at once.** Codex hides its dialog
-while the hook runs, so the request is opened instead:
+**Binding** (P0 additional finding 1). Codex runs hooks inside a shared
+`codex app-server` daemon, so `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` in the
+hook environment can be stale. acd binds a Codex session to a herdr pane by,
+in order of preference:
 
-- `answer_path: "keys"` when bound to herdr, `"none"` otherwise
-- `detail`: `tool_input.command`, followed by `tool_input.description`
+1. herdr reporting `agent_session` equal to the Codex `session_id`
+   (herdr's own Codex integration reports it);
+2. a single herdr `codex` pane with the same `cwd` whose detection snapshot
+   shows the request's dialog;
+3. the environment hint, but only when the pane's agent is `codex` and its
+   `cwd` matches.
+
+With no binding, the request is read-only.
+
+**`PermissionRequest`.** It replies empty at once. The request opens with:
+
+- key `(session_id, turn_id, sha256(tool_name + tool_input))`, reusable;
 - options:
-  - `allow` "Yes": key `1`
-  - `allow_always` "Yes, don't ask again": key `2`
-  - `deny` "No": key `esc`
+  - `allow` "Yes" (key `1`);
+  - `allow_always` "Yes, don't ask again" (key `2`);
+  - `deny` "No, and tell Codex what to do differently" (key `esc`);
+- `detail`: the command, then the description.
 
 **Answering.**
-- acd waits up to 3 s for the dialog fingerprint to appear. The timing is
-  pending verification in §11, item 5.
-- Until the fingerprint appears, the request is visible but **not yet
-  claimable**. A claim gets `request_not_ready`, and the app shows a
-  spinner.
 
-Resolution and binding follow the same rules as Claude: §5.1 and §6.2's
-binding rule. The herdr pane owns the agent. Hook data adds detail, and
-the hook's structured request upgrades herdr's fallback.
+- acd waits up to 1 s for the fingerprint. The measured delay is
+  35–118 ms (P0 item 5).
+- Until the fingerprint appears, a claim gets `request_not_ready`.
+- If the pane is too short, Codex collapses the dialog
+  (`[… N lines] ctrl+a view all`). The command text is then missing, so the
+  fingerprint cannot match and the request stays not ready (read-only).
+  Clients show "enlarge the pane to answer here".
+
+**Completion.** `PostToolUse` or `Stop` serve as resolution evidence, along
+with the fingerprint leaving the screen.
 
 ### 6.4 herdr adapter
 
-**Discovery.** The adapter scans for sockets at startup and every 30 s:
+**Discovery.** Sockets at startup and every 30 s:
 
-- the default socket, from `$HERDR_SOCKET_PATH` or
-  `~/.config/herdr/herdr.sock`;
+- `$HERDR_SOCKET_PATH`, or `~/.config/herdr/herdr.sock`;
 - `~/.config/herdr/sessions/*/herdr.sock`;
-- extra paths from the config.
+- the configured extra paths.
 
-Agent ids include a hash of the socket path, so panes in different sessions
-never collide.
+Agent ids include a hash of the socket path.
 
-**Compatibility.**
-- `ping` checks the server.
-- Supported: herdr `>= 0.9.3, < 0.10` and protocol `22`. This is a tested
-  range, widened only after a contract-test run. Anything outside it puts
-  the session in `degraded` with a reason.
+**Compatibility.** `ping` must report a supported version: herdr
+`>= 0.9.3, < 0.10` with protocol `22`.
 
-**Sync.** The subscription opens first, so no change is missed between the
-subscription and the snapshot:
+**Sync** (P0 item 7). The stream carries no `state_change_seq` and has no
+`events_lost` message.
 
-1. Subscribe with `events.subscribe` to `pane_agent_status_changed`,
-   `pane_agent_detected` and `pane_closed`, and buffer the events.
-2. Call `agent.list`.
-3. Apply the buffered events whose `state_change_seq` is newer than the
-   list entry.
-4. Resync with steps 1–3 on `events_lost`, on reconnect, or on a gap in
-   `state_change_seq`.
+1. Open one subscription connection for `pane.created`, `pane.closed` and
+   `pane.agent_detected`, plus one `pane.agent_status_changed{pane_id}` per
+   known pane. Add per-pane subscriptions as panes appear.
+2. Build the initial state from `agent.list`, on a separate connection.
+3. Treat every stream event as a hint. On an event, call `agent.get` for
+   that pane and replace its state with the result. The order between the
+   stream and the list therefore doesn't matter.
+4. Reconcile with `agent.list`:
+   - on reconnect;
+   - every 5 s while any agent is `blocked`;
+   - every 30 s otherwise.
 
-Exact sequence semantics are pending verification in §11, item 7.
+   A pane whose `state_change_seq` rose without an event counts as a missed
+   change. A dropped connection always triggers a full resync.
 
-**State mapping.** `blocked` becomes `needs_you`. The other states map
-directly. Panes without an agent are ignored.
+**State mapping.** `blocked` maps to `needs_you`; the other states map
+directly.
 
-**Fallback.** A pane that stays `blocked` for 2 s with no structured
-request opens a read-only `blocked_unparsed` request:
+**Fallback.** A pane that stays `blocked` for 2 s with no structured request
+opens a read-only `blocked_unparsed` request:
 
-- `answer_path: "none"`
-- `raw_screen` = the detection snapshot, at most 40 lines
-- the request is keyed by its fingerprint
+- key `(socket, pane, fingerprint)`, reusable;
+- `raw_screen` at most 40 lines.
 
 **Follow-ups.**
-- `agent.send` calls herdr `agent.prompt` with the text as one paste.
-- Text containing control characters other than `\n` and `\t` is
+
+- `agent.send` uses `agent.prompt`.
+- Text containing control characters (except `\n` and `\t`), Unicode
+  format characters (bidi overrides, U+2028/2029) or more than 16 KiB is
   rejected with `bad_request`.
-- herdr's `agent_blocked` is returned as `agent_busy`.
 
-**Seen state.** acd uses herdr's own mark-seen if one exists (§11, item 4).
-Otherwise acd keeps its own flag.
+**Seen state** (P0 item 4). herdr has no mark-seen method.
 
-**Known gap.** herdr reports Codex's trust and hook-review screens as
-`idle`. These appear only at startup, and v1 accepts the gap.
+- acd keeps its own seen flag (P1).
+- acd never calls `agent.focus`, because that moves the user's herdr UI.
 
 ### 6.5 T3 adapter
 
-**Connection.**
-- WebSocket RPC to the local T3 server, at the URL in the config.
-- Bearer token from
+**Connection** (P0 item 3, from source).
+
+- `POST /api/auth/websocket-ticket` with `Authorization: Bearer <t3.token>`
+  returns a ticket valid for 5 minutes. acd requests a fresh ticket for
+  every connect.
+- The WebSocket URL is
+  `ws://<host>:<port>/ws?orchestrationProtocol=2&wsTicket=<ticket>`.
+- Framing is effect/rpc JSON.
+- The token comes from
   `t3 auth session issue --scope orchestration:read --scope orchestration:operate`.
 
 **Contract.**
-- Hand-written Rust types for `subscribeShell`, `subscribeThread`, and
-  `dispatchCommand` (`message.dispatch`, `runtime-request.respond`).
-- The T3 version is pinned. Unknown fields are ignored. Unknown statuses
-  and request kinds become `unknown`, or a read-only request.
 
-**State mapping.**
+- Hand-written Rust types cover `subscribeShell`, `subscribeThread` and
+  `dispatchCommand` (`message.dispatch` and `runtime-request.respond`).
+- Subscriptions resume with `afterSequence`.
+- The T3 version is pinned. Unknown fields are ignored. An unknown status
+  maps to `unknown`, and an unknown request kind becomes read-only.
+
+**State mapping** is unchanged:
 
 | T3 status | acd state |
 |---|---|
 | `running`, `starting`, `preparing`, `queued` | `working` |
 | `waiting` | `needs_you` |
 | `completed` | `done` |
-| `failed`, `interrupted` | `done`, with `failed: true` |
+| `failed`, `interrupted` | `done` with `failed: true` |
 | `idle`, `cancelled`, `rolled_back` | `idle` |
 
 **Requests.**
-- acd subscribes to each waiting thread to read its pending runtime
-  requests.
-- Approvals become `permission` requests with `answer_path: "t3"`. Their
-  options come from the request's decision values.
-- User-input questions become `question` requests that keep T3's full
-  structure in `questions`. They are answerable under the same shape rule
-  as Claude questions.
+
+- A waiting thread's shell entry carries `pendingRuntimeRequest {id, kind}`.
+- The detail comes from the `turnItems` of type `approval_request` or
+  `user_input_request` (same `requestId`) in `subscribeThread`.
+- The key is the request id, not reusable.
+- Approval options come from `options[].decision`. If there are none, acd
+  falls back to `accept`, `acceptForSession` and `decline`. Effects:
+  - `accept` → allow;
+  - `acceptAlways` and `acceptForSession` → allow_always;
+  - `decline` and `cancel` → deny.
+- Questions keep their full structure.
 
 **Answers.**
-- `runtime-request.respond`, with `decision` for an approval or `answers`
-  keyed by question id.
-- T3 is expected to reject a stale answer. This is pending verification
-  in §11, item 3. If T3 does not reject it, acd must check that the
-  request is still in the thread projection immediately before
-  dispatching.
+
+- Answers use `runtime-request.respond` with `decision`, or with `answers`
+  as `Record<questionId, string | string[]>`. The value is
+  `option.value ?? option.label`.
+- Each claim uses one `commandId`.
+- T3 rejects stale answers ("Runtime request … is resolved") and serializes
+  dispatch per thread.
+- A T3 acknowledgement counts as delivery evidence (`by: "inbox"`).
 
 **Follow-ups.** `message.dispatch`.
 
@@ -551,7 +641,9 @@ Otherwise acd keeps its own flag.
   daemon reports as its own (`tailscale ip`, or the LocalAPI). Each such
   address must also fall in `100.64.0.0/10` or `fd7a:115c:a1e0::/48`.
 - A configured address that fails either check is refused at startup.
-- When Tailscale's addresses change, acd rebinds.
+- When Tailscale's addresses change, or Tailscale stays unreachable for
+  5 minutes while a Tailscale address is bound, acd exits with code 75 and
+  its supervisor restarts it. Clients see a new epoch.
 - When the Mac app connects to a MagicDNS name, it checks that the name
   resolved to an address in these ranges before sending `hello`.
 
@@ -569,8 +661,12 @@ Otherwise acd keeps its own flag.
 - acd refuses to start if these modes are looser.
 - Tokens are 32 random bytes, base64url-encoded, and compared in constant
   time.
-- `acd token rotate client|hook` replaces a token and closes the sessions
-  that used the old one.
+- `acd token rotate client|hook` replaces a token. It closes the sessions
+  that used the old token with code 4401 ("token rotated"), and cancels
+  their commands, including commands detached from earlier disconnects:
+  - a command that was not yet delivered is released;
+  - a command that was mid-delivery resolves `uncertain`;
+  - neither is ever re-delivered.
 
 **Logs.**
 - Logs never contain tokens.
@@ -581,6 +677,20 @@ Otherwise acd keeps its own flag.
 
 **Hook endpoint.** It is a separate HTTP listener on `127.0.0.1` only, using
 `hook.token`.
+
+**Local socket.** acd also serves `acd/1` on the Unix socket
+`<config_dir>/acd.sock`, with mode 0600 inside the 0700 directory, using the
+same hello and token authentication. Local tools such as `acd status` use
+it, so a process squatting the TCP port can never receive the token.
+
+**Limits.**
+- Ids (`id`, `request_id`, `agent_id`, `client.id`) are at most 128 bytes.
+- Answer and follow-up text is at most 64 KiB. Adapters may set lower
+  limits (§6.4).
+- At most 32 commands per session and 256 daemon-wide may be in flight.
+  Excess commands get `bad_request`, rejected before the idempotency
+  reservation.
+- When the pre-authentication cap is reached, acd answers HTTP 503.
 
 ### 7.2 Wire format
 
@@ -810,58 +920,44 @@ tests/fixtures/            hook payloads, herdr samples, T3 samples, detection s
 docs/                      research, specs, plans
 ```
 
-## 11. Open items to settle first in implementation
+## 11. Open items
 
-Each item is a bounded check. Its result updates this spec before any
-dependent work begins. Live checks use an isolated herdr session, as in the
-spike.
+P0 (`docs/research/2026-10-07-p0-checks.md`, fixtures in `tests/fixtures/`)
+settled items 2–9 of revision 3. Their results are folded into §5.1 and §6.
+The items below are still open. Each is a bounded check that must be done
+before the work that depends on it.
 
-1. **Deferred past v1: Claude `AskUserQuestion` free text.** A guarded
-   text-entry protocol would cover framing, submission and confirmation.
-   v1 does not offer free text on the `keys` path (§6.2).
-2. **Claude permission decisions.** Record fixtures for allow and for deny
-   with the `hookSpecificOutput` envelope. Confirm that the field which
-   persists "always allow" works, if one exists.
-3. **T3.** Settle these from `packages/client-runtime/src/{rpc,connection}`
-   and a live server, recording fixtures:
-   - the WebSocket URL and how the token is passed;
-   - the decision literals;
-   - the shape of a pending request in the thread projection;
-   - the question and answer shape, including multiple questions;
-   - whether T3 rejects a stale or duplicate `runtime-request.respond`;
-   - replay behavior when the subscription reconnects.
-4. **herdr seen state.** Can the socket API mark a pane seen?
-5. **Codex dialog timing.** Measure the delay from hook return to dialog,
-   to settle the 3 s wait.
-6. **Coexisting permission hooks.** Run Claude and Codex with an extra
-   `PermissionRequest` hook alongside acd's, one deciding allow and one
-   deny. Confirm that acd reconciles to the correct outcome.
-7. **herdr sequencing.** Check what `state_change_seq` covers (per pane or
-   per server). Check the ordering between `events.subscribe` and
-   `agent.list`, and whether a gap can be detected.
-8. **Shim lifecycle edge cases.**
-   - Kill the shim during a hold, and confirm the dialog stays and the
-     request moves to `keys`.
-   - Answer in the terminal and in the inbox within the same 100 ms:
-     - for `hook` and `t3`, confirm exactly one outcome;
-     - for `keys`, confirm that acd sends at most one keystroke, never
-       retries, and reports `screen_mismatch` or `uncertain` when the
-       guard or the confirmation fails.
-   - Restart acd during a hold.
-9. **Claude hooks-only discovery.** Check whether already-running Claude
-   sessions outside herdr can be discovered before their next hook, for
-   example from `~/.claude/projects` transcripts. If they cannot, v1
-   accepts that they appear on their next hook.
-10. **Upstream ask, not blocking.** Propose a conditional-input method to
-    herdr, such as "send keys if the detection fingerprint equals X". That
-    would make the `keys` path atomic.
+1. **Deferred past v1:** free text in Claude `AskUserQuestion` on the
+   `keys` path.
+2. **Claude `http` hooks, live (blocks P3).** Confirm these behaviours of
+   http hooks on Claude Code 2.1.292 or later:
+   - header env interpolation with `allowedEnvVars`;
+   - the held connection closing on a terminal answer;
+   - a lingering held hook when another hook decides first.
+
+   The spike observed the close only with an http PermissionRequest hook.
+3. **T3, live (blocks P4).** Confirm against a live server:
+   - whether a direct `Authorization: Bearer` header works on the upgrade;
+   - the effect/rpc envelope;
+   - replay retention for `afterSequence`;
+   - per-RPC scopes;
+   - how `prompt` is filled for commands.
+
+   Record fixtures from a throwaway T3 project.
+4. **Codex stale environment (P3).** Reproduce the stale `HERDR_*` values
+   with a freshly restarted `codex app-server`, and confirm that herdr's
+   Codex integration reports `agent_session`.
+5. **herdr `done` → `idle`.** Check whether anything other than focus marks
+   a pane seen (informational).
+6. **Upstream ask, not blocking.** Propose a conditional-input method to
+   herdr, so the `keys` path becomes atomic.
 
 ## 12. Error handling
 
 | Failure | Behavior |
 |---|---|
-| acd down or the hook endpoint unreachable | The shim replies empty within about 1 s, and the normal dialog shows. |
-| A held hook's connection closes early | Reconcile as in §6.2, step 5: switch to `keys` if the dialog is still on screen, otherwise resolve `terminal`. Hooks-only agents resolve `lost`. |
+| acd down or the hook endpoint unreachable | Claude's http hook fails open, and the Codex shim replies empty within about 1 s. The normal dialog shows. |
+| A held hook's connection closes early | Reconcile as in §6.2, step 4: switch to `keys` if the dialog is still on screen, otherwise resolve `terminal`. Hooks-only agents resolve `terminal` on later evidence, otherwise `uncertain`. |
 | `permission_hold` expires | acd replies empty. Herdr-bound requests switch to `keys`; others resolve `lost`. |
 | Key answer cannot be confirmed | `by: "uncertain"`, with no automatic retry. |
 | Wrong dialog on screen | `screen_mismatch`. The request stays `open`, and the client may refresh. |
@@ -897,7 +993,7 @@ spike.
 **Integration tests in CI:**
 - a fake herdr socket;
 - a fake T3 server;
-- real HTTP through the shim, including shim kill and timeout boundaries.
+- real HTTP from a fake Claude http hook and through the Codex shim, including connection close and timeout boundaries.
 
 **Live end-to-end, manual (`just e2e`):** real Claude Code and Codex in an
 isolated herdr session, covering:
@@ -982,3 +1078,18 @@ items. All were accepted.
 
 **Round 3, Sol, 2026-10-07.** All round-2 items are resolved. No new
 blocking contradictions were found. The independent review is complete.
+
+**Revision 4, 2026-10-07.** This revision folds in:
+
+- the P0 verification results (`docs/research/2026-10-07-p0-checks.md`);
+- the P1 review rulings (agent-scoped keys, non-reusable key tombstones, no
+  relabelling of terminal answers as inbox, the local Unix socket, limits,
+  and revoking older-generation commands on rotation).
+
+The main design changes:
+
+- Claude uses native `http` hooks with environment headers, not a shim.
+- Codex binding no longer trusts the herdr environment values.
+- The T3 filter keeps sessions bound to a herdr pane.
+- herdr sync treats events as hints and reconciles periodically.
+- The T3 connection uses a WebSocket ticket.
