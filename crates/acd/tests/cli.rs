@@ -118,27 +118,130 @@ fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-#[test]
-fn run_serves_loopback_and_status_reports_machine() {
+/// A running `acd run`, killed when dropped so a failed assert cannot leave
+/// it behind.
+struct Daemon(std::process::Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        self.0.kill().ok();
+        self.0.wait().ok();
+    }
+}
+
+/// An initialized config dir listening on a free loopback port.
+fn init_loopback(name: &str) -> (tempfile::TempDir, std::path::PathBuf, u16) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("acd");
     assert!(acd(&dir).arg("init").status().unwrap().success());
     let port = free_port();
-    let cfg = format!("machine_name = \"e2e-box\"\nport = {port}\nlisten = [\"loopback\"]\n");
+    let cfg = format!("machine_name = \"{name}\"\nport = {port}\nlisten = [\"loopback\"]\n");
     std::fs::write(dir.join("config.toml"), cfg).unwrap();
+    (tmp, dir, port)
+}
 
-    let mut daemon = acd(&dir).arg("run").spawn().unwrap();
-    let mut ok = None;
-    for _ in 0..50 {
-        let out = acd(&dir).arg("status").output().unwrap();
-        if out.status.success() { ok = Some(String::from_utf8_lossy(&out.stdout).into_owned()); break; }
+/// Runs `acd status` until it succeeds, for at most 10 s.
+fn status_when_ready(dir: &std::path::Path, rust_log: Option<&str>) -> std::process::Output {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let mut cmd = acd(dir);
+        if let Some(l) = rust_log { cmd.env("RUST_LOG", l); }
+        let out = cmd.arg("status").output().unwrap();
+        if out.status.success() { return out; }
+        assert!(std::time::Instant::now() < deadline, "status never succeeded: {}", String::from_utf8_lossy(&out.stderr));
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    daemon.kill().unwrap();
-    daemon.wait().ok();
-    let out = ok.expect("status never succeeded");
+}
+
+#[test]
+fn run_serves_loopback_and_status_reports_machine() {
+    use std::os::unix::fs::FileTypeExt;
+    let (_tmp, dir, _) = init_loopback("e2e-box");
+    // A socket left by a crashed daemon is replaced.
+    drop(std::os::unix::net::UnixListener::bind(dir.join("acd.sock")).unwrap());
+
+    let _daemon = Daemon(acd(&dir).arg("run").spawn().unwrap());
+    let out = String::from_utf8_lossy(&status_when_ready(&dir, None).stdout).into_owned();
     assert!(out.contains("machine: e2e-box"), "{out}");
     assert!(out.contains("agents: 0"), "{out}");
+    let sock = std::fs::symlink_metadata(dir.join("acd.sock")).unwrap();
+    assert!(sock.file_type().is_socket());
+    assert_eq!(mode(dir.join("acd.sock")), 0o600);
+}
+
+/// Every form in which a log line could carry `token`: as text, as hex or
+/// decimal bytes of the text, and as hex of the decoded bytes.
+fn token_forms(token: &str) -> Vec<String> {
+    use base64::Engine;
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token).unwrap();
+    let decimal = token.as_bytes()[..12].iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", ");
+    vec![token.to_string(), hex(token.as_bytes()), hex(token.as_bytes()).to_uppercase(), decimal, hex(&decoded)]
+}
+
+#[test]
+fn trace_logs_never_contain_the_token() {
+    for rust_log in ["trace", "trace,tungstenite::protocol::frame=trace,tokio_tungstenite=trace,axum::extract::ws=trace"] {
+        let (tmp, dir, _) = init_loopback("log-box");
+        let token = std::fs::read_to_string(dir.join("client.token")).unwrap().trim().to_string();
+        let log_path = tmp.path().join("daemon.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        let daemon = Daemon(acd(&dir).env("RUST_LOG", rust_log).arg("run").stderr(log).spawn().unwrap());
+        let status = status_when_ready(&dir, Some(rust_log));
+        drop(daemon);
+        let daemon_log = std::fs::read_to_string(&log_path).unwrap();
+        let status_log = String::from_utf8_lossy(&status.stderr).into_owned();
+        assert!(daemon_log.contains("TRACE"), "{rust_log}: expected trace output from the daemon");
+        for form in token_forms(&token) {
+            assert!(!daemon_log.contains(&form), "{rust_log}: daemon log contains the token as {form}");
+            assert!(!status_log.contains(&form), "{rust_log}: status log contains the token as {form}");
+        }
+    }
+}
+
+#[test]
+fn status_never_sends_the_token_over_tcp() {
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+    let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = squatter.local_addr().unwrap().port();
+    squatter.set_nonblocking(true).unwrap();
+    let received = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let seen = received.clone();
+    // Completes the WebSocket handshake, so an old client would go on to send hello.
+    let thread = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let Ok((stream, _)) = squatter.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+            let mut raw = stream.try_clone().unwrap();
+            match tokio_tungstenite::tungstenite::accept(stream) {
+                Ok(mut ws) => {
+                    while let Ok(m) = ws.read() { seen.lock().unwrap().extend_from_slice(&m.into_data()); }
+                }
+                Err(_) => {
+                    let mut rest = Vec::new();
+                    let _ = raw.read_to_end(&mut rest);
+                    seen.lock().unwrap().extend_from_slice(&rest);
+                }
+            }
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("acd");
+    assert!(acd(&dir).arg("init").status().unwrap().success());
+    std::fs::write(dir.join("config.toml"), format!("port = {port}\nlisten = [\"loopback\"]\n")).unwrap();
+    let token = std::fs::read_to_string(dir.join("client.token")).unwrap().trim().to_string();
+    let out = acd(&dir).arg("status").output().unwrap();
+    thread.join().unwrap();
+    assert!(!out.status.success(), "status succeeded against a squatter");
+    let got = String::from_utf8_lossy(&received.lock().unwrap()).into_owned();
+    assert!(!got.contains(&token), "the squatter received the token");
 }
 
 #[test]

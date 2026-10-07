@@ -1,23 +1,27 @@
-use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
 
-use acd_protocol::{Agent, ClientInfo, ClientMessage, ServerMessage, PROTOCOL};
+use acd_protocol::{decode_server, Agent, ClientInfo, ClientMessage, ServerMessage, PROTOCOL};
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{client_async, tungstenite::Message};
 
-use crate::{config::Config, secrets};
+use crate::{daemon::socket_path, secrets};
 
+/// Connects through `<config_dir>/acd.sock` only. The token never goes over
+/// TCP, where any local process holding the port could receive it.
 pub async fn status(dir: &Path) -> Result<()> {
-    let cfg = Config::load(dir)?;
+    crate::preflight(dir)?;
     let token = secrets::read_secret(&dir.join("client.token"))?;
-    let host = loopback_addr(&cfg.listen)?;
-    let url = format!("ws://{}/", SocketAddr::new(host, cfg.port));
-    let (mut ws, _) = tokio::time::timeout(Duration::from_secs(3), connect_async(&url))
+    let sock = socket_path(dir);
+    let stream = tokio::time::timeout(Duration::from_secs(3), tokio::net::UnixStream::connect(&sock))
         .await
         .context("timed out connecting to the local acd")?
-        .context("cannot connect to the local acd; is `acd run` running?")?;
+        .with_context(|| format!("cannot connect to {}; is `acd run` running?", sock.display()))?;
+    let (mut ws, _) = tokio::time::timeout(Duration::from_secs(3), client_async("ws://localhost/", stream))
+        .await
+        .context("timed out connecting to the local acd")?
+        .context("WebSocket handshake with the local acd failed")?;
     let hello = ClientMessage::Hello {
         protocol: PROTOCOL.into(),
         token,
@@ -30,20 +34,6 @@ pub async fn status(dir: &Path) -> Result<()> {
         .context("timed out waiting for the daemon's snapshot")?
 }
 
-/// First loopback address the config listens on. The token is only ever sent
-/// to an address acd itself binds.
-fn loopback_addr(listen: &[String]) -> Result<IpAddr> {
-    let loopback: Vec<String> = listen
-        .iter()
-        .filter(|e| e.as_str() == "loopback" || e.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()))
-        .cloned()
-        .collect();
-    crate::bind::resolve_listen(&loopback, &[])?
-        .into_iter()
-        .next()
-        .context("acd status needs a loopback listen address")
-}
-
 async fn read_status<S>(ws: &mut S) -> Result<()>
 where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
@@ -51,7 +41,9 @@ where
     let mut welcome = None;
     while let Some(frame) = ws.next().await {
         let Message::Text(t) = frame? else { continue };
-        match serde_json::from_str::<ServerMessage>(t.as_str())? {
+        // A newer daemon may send message types this version does not know.
+        let Some(msg) = decode_server(t.as_str())? else { continue };
+        match msg {
             ServerMessage::Welcome { machine, epoch, .. } => welcome = Some((machine, epoch)),
             ServerMessage::Snapshot { agents, .. } => {
                 let Some((machine, epoch)) = welcome else { bail!("snapshot before welcome") };
@@ -77,11 +69,12 @@ fn line(a: &Agent) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn status_requires_a_loopback_entry() {
-        assert_eq!(loopback_addr(&["loopback".into(), "tailscale".into()]).unwrap().to_string(), "127.0.0.1");
-        assert_eq!(loopback_addr(&["::1".into()]).unwrap().to_string(), "::1");
-        let err = loopback_addr(&["tailscale".into()]).unwrap_err().to_string();
-        assert!(err.contains("acd status needs a loopback listen address"), "{err}");
+    #[tokio::test]
+    async fn unknown_message_types_are_skipped() {
+        let welcome = include_str!("../../acd-protocol/examples/server/welcome.json");
+        let snapshot = r#"{"type":"snapshot","epoch":"e1","seq":42,"agents":[]}"#;
+        let raw = [welcome, r#"{"type":"agent.launched","x":1}"#, snapshot];
+        let mut ws = futures_util::stream::iter(raw.map(|t| Ok(Message::text(t))));
+        read_status(&mut ws).await.unwrap();
     }
 }

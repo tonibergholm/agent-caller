@@ -1,17 +1,21 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::path::Path;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use acd_core::{router, Auth, Core, ServerOptions};
 use acd_protocol::{Machine, SourceStatus, Sources};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::{bind, config::Config, identity, secrets};
 
 /// Exit code that asks the supervisor (launchd or systemd) to restart acd
 /// after the Tailscale addresses change.
 pub const EXIT_ADDRESSES_CHANGED: i32 = 75;
+
+/// The Unix socket in the config dir that local tools such as `acd status` use.
+pub fn socket_path(dir: &Path) -> PathBuf { dir.join("acd.sock") }
 
 pub async fn run(dir: &Path) -> Result<()> {
     crate::preflight(dir)?;
@@ -30,10 +34,10 @@ pub async fn run(dir: &Path) -> Result<()> {
     let app = router(core, auth.clone(), ServerOptions { allowed_origins: cfg.allowed_origins.clone(), ..Default::default() });
 
     let probe = bind::tailscale_reported().await;
-    let ips_wanted_tailscale = cfg.listen.iter().any(|e| e == "tailscale");
+    let listen_includes_tailscale = cfg.listen.iter().any(|e| e == "tailscale");
     let reported = probe.clone().unwrap_or_default();
     let ips = bind::resolve_listen(&cfg.listen, &reported)?;
-    if ips_wanted_tailscale {
+    if listen_includes_tailscale {
         if probe.is_none() {
             tracing::warn!("`tailscale ip` failed or timed out; Tailscale addresses unavailable");
         } else if !reported.iter().any(bind::in_tailscale_range) {
@@ -61,6 +65,15 @@ pub async fn run(dir: &Path) -> Result<()> {
             if let Err(e) = axum::serve(listener, app).await { tracing::error!(%addr, error = %e, "server stopped"); }
         });
     }
+    // The same router (and so the same limits) on the Unix socket. Hello and
+    // token auth still apply; the Origin check passes trivially because no
+    // browser can reach a Unix socket, and there is no address to allowlist.
+    let sock = socket_path(dir);
+    let local = bind_local_socket(&sock)?;
+    tracing::info!(path = %sock.display(), "listening");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(local, app).await { tracing::error!(error = %e, "local socket server stopped"); }
+    });
 
     // Token rotation: re-read client.token every 2 s.
     let token_path = dir.join("client.token");
@@ -89,7 +102,8 @@ pub async fn run(dir: &Path) -> Result<()> {
         let mut failures = 0u32;
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            // A failed probe says nothing about the addresses; ignore it.
+            // A failed probe says nothing about the addresses, so it never
+            // counts as a change; a long failure streak exits on its own rule.
             let Some(reported) = bind::tailscale_reported().await else {
                 failures = bind::next_failure_count(failures, false);
                 if bind::should_exit_on_probe_failures(failures, &ips) {
@@ -106,8 +120,29 @@ pub async fn run(dir: &Path) -> Result<()> {
         }
     });
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => Ok(()),
-        _ = watch => std::process::exit(EXIT_ADDRESSES_CHANGED),
+    let exit_code = tokio::select! {
+        _ = tokio::signal::ctrl_c() => None,
+        _ = watch => Some(EXIT_ADDRESSES_CHANGED),
+    };
+    let _ = std::fs::remove_file(&sock);
+    match exit_code {
+        Some(code) => std::process::exit(code),
+        None => Ok(()),
     }
+}
+
+/// Binds `path` with mode 0600, replacing a socket left by an earlier run.
+/// Called only after every TCP listener is bound: a second `acd run` fails on
+/// the port first, so it never removes a live daemon's socket.
+fn bind_local_socket(path: &Path) -> Result<tokio::net::UnixListener> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_socket() => std::fs::remove_file(path)
+            .with_context(|| format!("removing stale {}", path.display()))?,
+        Ok(_) => bail!("{} exists and is not a socket; remove it", path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+    let listener = tokio::net::UnixListener::bind(path).with_context(|| format!("cannot bind {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }

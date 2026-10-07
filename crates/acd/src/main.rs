@@ -45,10 +45,27 @@ enum TokenCmd {
 #[derive(clap::ValueEnum, Clone, Copy)]
 enum TokenKind { Client, Hook }
 
+/// Targets that log WebSocket frames, including `hello.token`, at debug and
+/// trace level.
+const FRAME_LOGGING_TARGETS: [&str; 3] = ["tungstenite", "tokio_tungstenite", "axum::extract::ws"];
+
+/// Caps frame-logging targets at `info`, whatever `RUST_LOG` says, so tokens
+/// never reach the logs (spec §7.1).
+fn below_frame_logging(meta: &tracing::Metadata<'_>) -> bool {
+    let target = meta.target();
+    let frames = FRAME_LOGGING_TARGETS.iter().any(|p| {
+        target.strip_prefix(p).is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+    });
+    !frames || *meta.level() <= tracing::Level::INFO
+}
+
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .with_writer(std::io::stderr)
+    use tracing_subscriber::prelude::*;
+    let env = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(env)
+        .with(tracing_subscriber::filter::filter_fn(below_frame_logging))
         .init();
     if let Err(e) = real_main() {
         eprintln!("acd: {e:#}");
