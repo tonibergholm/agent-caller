@@ -27,7 +27,6 @@ impl Default for Config {
 }
 
 impl Config {
-    #[expect(dead_code)] // used by `acd run` in Task 10
     pub fn load(dir: &Path) -> Result<Config> {
         let path = dir.join("config.toml");
         if !path.exists() { return Ok(Config::default()); }

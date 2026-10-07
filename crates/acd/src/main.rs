@@ -1,7 +1,10 @@
+mod bind;
 mod config;
+mod daemon;
 mod identity;
 mod paths;
 mod secrets;
+mod status;
 
 use std::path::Path;
 
@@ -69,11 +72,8 @@ fn real_main() -> Result<()> {
             println!("{token}");
             Ok(())
         }
-        Cmd::Run => {
-            preflight(&dir)?;
-            bail!("`acd run` is implemented in Task 10")
-        }
-        Cmd::Status => bail!("`acd status` is implemented in Task 10"),
+        Cmd::Run => tokio::runtime::Runtime::new()?.block_on(daemon::run(&dir)),
+        Cmd::Status => tokio::runtime::Runtime::new()?.block_on(status::status(&dir)),
     }
 }
 

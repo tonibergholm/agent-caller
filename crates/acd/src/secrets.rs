@@ -45,7 +45,6 @@ pub fn check_mode(path: &Path, max_mode: u32) -> Result<()> {
     Ok(())
 }
 
-#[expect(dead_code)] // used by `acd run` in Task 10
 pub fn read_secret(path: &Path) -> Result<String> {
     check_mode(path, 0o600)?;
     Ok(fs::read_to_string(path)?.trim().to_string())

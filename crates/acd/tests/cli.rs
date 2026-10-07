@@ -93,3 +93,30 @@ fn init_repairs_partial_dir_and_force_keeps_machine_id() {
     assert_ne!(client, std::fs::read_to_string(dir.join("client.token")).unwrap());
     assert_eq!(id, std::fs::read_to_string(dir.join("machine-id")).unwrap());
 }
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+#[test]
+fn run_serves_loopback_and_status_reports_machine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("acd");
+    assert!(acd(&dir).arg("init").status().unwrap().success());
+    let port = free_port();
+    let cfg = format!("machine_name = \"e2e-box\"\nport = {port}\nlisten = [\"loopback\"]\n");
+    std::fs::write(dir.join("config.toml"), cfg).unwrap();
+
+    let mut daemon = acd(&dir).arg("run").spawn().unwrap();
+    let mut ok = None;
+    for _ in 0..50 {
+        let out = acd(&dir).arg("status").output().unwrap();
+        if out.status.success() { ok = Some(String::from_utf8_lossy(&out.stdout).into_owned()); break; }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    daemon.kill().unwrap();
+    daemon.wait().ok();
+    let out = ok.expect("status never succeeded");
+    assert!(out.contains("machine: e2e-box"), "{out}");
+    assert!(out.contains("agents: 0"), "{out}");
+}
