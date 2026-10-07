@@ -63,8 +63,8 @@ These come from the spec and apply to every task.
   `tailscale ip` reports **and** that fall in `100.64.0.0/10` or
   `fd7a:115c:a1e0::/48`. Any other address is refused at startup.
 - **Logs.** Never log tokens.
-- **License.** `MIT OR Apache-2.0` (pending owner confirmation; see the
-  handoff note).
+- **License.** MIT. The workspace manifest sets `license = "MIT"`, and
+  Task 1 adds a `LICENSE` file (MIT, copyright 2026 Toni Bergholm).
 
 ## Review Focus
 
@@ -121,7 +121,7 @@ crates/acd/tests/cli.rs
 ### Task 1: Workspace and protocol model types
 
 **Files:**
-- Create: `Cargo.toml`, `crates/acd-protocol/Cargo.toml`, `crates/acd-protocol/src/lib.rs`, `crates/acd-protocol/src/model.rs`
+- Create: `LICENSE` (standard MIT text, `Copyright (c) 2026 Toni Bergholm`), `Cargo.toml`, `crates/acd-protocol/Cargo.toml`, `crates/acd-protocol/src/lib.rs`, `crates/acd-protocol/src/model.rs`
 - Test: `crates/acd-protocol/tests/model.rs`
 
 **Interfaces:**
@@ -154,7 +154,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 rust-version = "1.90"
 
 [workspace.dependencies]
@@ -518,7 +518,7 @@ Expected: 5 passed.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add Cargo.toml crates/acd-protocol
+git add LICENSE Cargo.toml crates/acd-protocol
 git commit -m "feat(protocol): acd/1 model types with tolerant enums"
 ```
 
