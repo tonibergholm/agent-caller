@@ -189,11 +189,10 @@ impl Core {
                     }
                     st.registry.agent(&agent_id).cloned()
                 };
-                if let (Some(agent), Some(adapter)) = (agent.as_ref(), agent.as_ref().and_then(|a| self.adapter_for_source(a.source))) {
-                    if let Err(e) = adapter.mark_seen(agent).await {
+                if let (Some(agent), Some(adapter)) = (agent.as_ref(), agent.as_ref().and_then(|a| self.adapter_for_source(a.source)))
+                    && let Err(e) = adapter.mark_seen(agent).await {
                         tracing::debug!(agent_id, error = %e, "adapter mark_seen failed; acd keeps its own flag");
                     }
-                }
                 CommandResult::ok(id)
             }
             ClientMessage::Hello { .. } | ClientMessage::Ping { .. } => {

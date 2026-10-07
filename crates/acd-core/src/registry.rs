@@ -156,12 +156,11 @@ impl Registry {
         let mut out = vec![Change::RequestResolved {
             request_id: request_id.to_string(), agent_id: e.req.agent_id.clone(), by, option_id,
         }];
-        if let Some(a) = self.agents.get_mut(&e.req.agent_id) {
-            if a.pending.as_ref().map(|p| p.id.as_str()) == Some(request_id) {
+        if let Some(a) = self.agents.get_mut(&e.req.agent_id)
+            && a.pending.as_ref().map(|p| p.id.as_str()) == Some(request_id) {
                 a.pending = None;
                 out.push(Change::AgentUpdated(a.clone()));
             }
-        }
         out
     }
 
@@ -236,12 +235,11 @@ impl Registry {
             return self.update_request(&rid, &o);
         }
         // 2. Replay of a resolved occurrence whose dialog was never confirmed gone.
-        if let Some(k) = self.keys.get(&(o.agent_id.clone(), o.key.clone())) {
-            if k.generation > 0 && !k.confirmed_gone { return vec![]; }
-        }
+        if let Some(k) = self.keys.get(&(o.agent_id.clone(), o.key.clone()))
+            && k.generation > 0 && !k.confirmed_gone { return vec![]; }
         // 3. Upgrade a fallback request in place.
-        if let (Some(p), Some(from)) = (&pending, &o.upgrade_from) {
-            if p.status == RequestStatus::Open
+        if let (Some(p), Some(from)) = (&pending, &o.upgrade_from)
+            && p.status == RequestStatus::Open
                 && self.open_request_for(&o.agent_id, from).as_deref() == Some(p.id.as_str())
             {
                 let rid = p.id.clone();
@@ -250,7 +248,6 @@ impl Registry {
                 if let Some(e) = self.requests.get_mut(&rid) { e.key = o.key.clone(); }
                 return self.update_request(&rid, &o);
             }
-        }
         let mut out = Vec::new();
         // 4. A different request on the same agent supersedes the pending one.
         if let Some(p) = pending {

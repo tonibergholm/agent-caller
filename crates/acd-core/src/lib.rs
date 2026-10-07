@@ -12,3 +12,5 @@ pub use engine::{Core, IDEM_TTL, RING_CAPACITY};
 pub use idem::{Begin, IdemCache};
 pub use log::EventLog;
 pub use registry::*;
+pub mod server;
+pub use server::{router, Auth, ServerOptions};
