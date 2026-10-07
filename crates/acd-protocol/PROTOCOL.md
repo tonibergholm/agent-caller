@@ -10,26 +10,54 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
   daemon reports as its own (`tailscale ip`, or the LocalAPI). Each such
   address must also fall in `100.64.0.0/10` or `fd7a:115c:a1e0::/48`.
 - A configured address that fails either check is refused at startup.
-- When Tailscale's addresses change, acd rebinds.
+- When Tailscale's addresses change (the same new set seen on two probes
+  30 s apart), acd exits with code 75 and is restarted by its supervisor
+  (launchd or systemd). Clients reconnect and see a new epoch.
+- **Local socket.** acd also serves the same server on the Unix socket
+  `acd.sock` in the config directory, with mode 0600. It is meant for local
+  tools such as `acd status`, so the client token never travels over TCP
+  to whatever process holds the port. `hello` and token authentication
+  apply as on TCP. A stale socket from an earlier run is replaced at
+  startup.
 - When the Mac app connects to a MagicDNS name, it checks that the name
   resolved to an address in these ranges before sending `hello`.
 
 **Limits.**
 - `hello` must arrive within 5 s.
 - Frames are limited to 1 MiB.
-- At most 8 unauthenticated connections at once.
+- At most 8 unauthenticated connections at once. Past that, the upgrade
+  request gets HTTP 503.
 - A request carrying an `Origin` header is rejected with HTTP 403 unless
   the origin is in `allowed_origins`, which is empty by default. This
   blocks connections opened from web pages.
+- **Ids and text.** A command `id`, `request_id`, `agent_id` and
+  `hello.client.id` are at most 128 bytes. Answer `text` and `agent.send`
+  `text` are at most 64 KiB. An oversized command gets a `bad_request`
+  result and reserves nothing. A `hello` with an oversized `client.id` gets
+  `error {code: "bad_request"}` and the connection is closed with 4401.
+- **Commands in flight.** At most 32 per session and 256 across the daemon,
+  counting commands whose session has already closed. Past either cap the
+  command gets a `bad_request` result with the message
+  `too many in-flight commands` and reserves nothing.
+- **Idempotency table.** At most 16384 reservations and cached results.
+  When it is full, a new command id gets a `bad_request` result
+  (`too many recent commands; retry later`) until cached results expire.
 
 **Tokens.**
-- `~/.config/acd/` has mode 0700. `client.token`, `hook.token` and
-  `t3.token` have mode 0600.
-- acd refuses to start if these modes are looser.
-- Tokens are 32 random bytes, base64url-encoded, and compared in constant
-  time.
-- `acd token rotate client|hook` replaces a token and closes the sessions
-  that used the old one.
+- The config directory is `$ACD_CONFIG_DIR`, or `~/.config/acd/`. It has
+  mode 0700. It holds `client.token`, `hook.token`, `config.toml`,
+  `t3.token` (from the T3 adapter onwards), `machine-id` and `acd.sock`.
+- `client.token`, `hook.token`, `config.toml` and `t3.token` have mode
+  0600. acd refuses to start if any of them, or the directory, is looser.
+- Tokens are 32 random bytes, base64url-encoded without padding, and
+  compared in constant time.
+- `acd token rotate client|hook` replaces a token. acd picks up a new
+  client token within about 2 s.
+- **Rotation.** Every session authenticated with the old client token is
+  closed with code 4401, reason `token rotated`. Commands authorized under
+  the old token are cancelled, including those whose session had already
+  closed: a request not yet delivered goes back to `open`, and one that
+  was mid-delivery resolves `by: "uncertain"`. Nothing is re-sent.
 
 **Logs.**
 - Logs never contain tokens.
@@ -49,7 +77,13 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
 - **Integers.** Values stay within ±2^53.
 - **Ids.** Opaque strings.
 - **Unknown input.**
-  - Clients ignore unknown `type`s and unknown fields.
+  - Clients ignore unknown `type`s and unknown fields. The daemon ignores
+    unknown fields in client messages.
+  - In Rust, `acd_protocol::decode_server` implements this: it returns
+    `Ok(None)` for a JSON object with an unknown `type`, and an error only
+    for malformed JSON, a frame without a string `type`, or a known type
+    whose body does not match. An unknown error code decodes as
+    `ErrorCode::Unknown`.
   - Unknown enum values are treated as follows:
     - unknown agent state: `unknown`;
     - unknown request `kind` or `answer_path`: shown read-only;
@@ -108,6 +142,15 @@ pong             {id}
 | `duplicate_mismatch` | The command id was reused with a different payload. |
 | `source_unavailable` | The owning adapter is disconnected. |
 | `unauthorized` | The token was rejected; the daemon closes with code 4401. |
+| `unsupported_protocol` | `hello.protocol` is not supported. Sent as an `error` with `supported`; the daemon closes with code 4400. |
+
+**Close codes:**
+
+| Code | Reason |
+|---|---|
+| 4400 | Unsupported protocol. |
+| 4401 | No valid `hello`, invalid token (`unauthorized`), or `token rotated`. |
+| 4408 | The client is too slow (`client too slow`). |
 
 ## 4. Sequencing, resync and idempotency
 
@@ -147,8 +190,9 @@ code 4408.
   the command finishes.
 - **Pre-delivery errors are not cached.** If a command fails before
   anything is delivered (`request_not_ready`, `request_busy`,
-  `source_unavailable`), its reservation is released, so the same id can
-  be retried.
+  `source_unavailable`, or any error the adapter reports as not delivered,
+  such as `screen_mismatch`), its reservation is released, so the same id
+  can be retried.
 
 **Recovery after a lost result.** The cache does not survive an epoch
 change. After a reconnect into a new epoch, a client with commands in
@@ -319,5 +363,8 @@ enough. The evidence per answer path:
 ## 7. Machine-readable definitions
 
 `schema/client.schema.json` and `schema/server.schema.json` are generated
-from the Rust types in this crate. The `examples/` directory holds golden
-messages, validated by `cargo test -p acd-protocol`.
+from the Rust types in this crate (regenerate with
+`UPDATE_SCHEMA=1 cargo test -p acd-protocol`). The `examples/` directory
+holds a golden message for every message type. `cargo test -p acd-protocol`
+checks that each one round-trips through the Rust types and validates
+against the committed schema; CI runs it on every push and pull request.

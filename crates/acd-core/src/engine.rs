@@ -232,7 +232,7 @@ impl Core {
     }
 }
 
-/// Size limits on a command's ids and text (spec §7.1 resource limits).
+/// Size limits on a command's ids and text (PROTOCOL.md §1, Limits).
 fn check_limits(msg: &ClientMessage) -> Result<(), &'static str> {
     let (ids, text): (Vec<&str>, Option<&str>) = match msg {
         ClientMessage::RequestAnswer { id, request_id, text, .. } => (vec![id, request_id], text.as_deref()),
