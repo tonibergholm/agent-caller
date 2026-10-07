@@ -1,0 +1,16 @@
+{
+ "session_id": "01a116d3-e8a3-7ef0-9f57-79c5413ed009",
+ "turn_id": "01a116d4-2f61-7c03-a4a8-89ba95212702",
+ "transcript_path": "/Users/user/.codex/sessions/2026/10/07/rollout-2026-10-07T17-45-48-01a116d3-e8a3-7ef0-9f57-79c5413ed009.jsonl",
+ "cwd": "/private/tmp/acp0/codex1",
+ "hook_event_name": "UserPromptSubmit",
+ "model": "gpt-6.1-sol",
+ "permission_mode": "default",
+ "prompt": "Run exactly this shell command and nothing else: touch ~/acp0_test_1.txt",
+ "_env": {
+  "HERDR_PANE_ID": "w1:p2",
+  "HERDR_SOCKET_PATH": "/Users/user/.config/herdr/sessions/spike/herdr.sock",
+  "HERDR_ENV": "1",
+  "CLAUDE_CODE_ENTRYPOINT": "sdk-ts"
+ }
+}
