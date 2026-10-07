@@ -1,5 +1,7 @@
 # acd/1 protocol (normative)
 
+References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agent-inbox-design.md.
+
 ## 1. Transport and security
 
 **Binding.**
@@ -271,7 +273,7 @@ enough. The evidence per answer path:
     shows that the request's fingerprint is gone. The result is
     `by: "inbox"`.
   - If the connection closes before acd replies, acd reconciles as
-    described in §6.2.
+    described in spec §6.2 (Claude adapter).
   - **Hooks-only agents** have no screen to check. If acd has delivered an
     answer and no `PostToolUse`, `Stop` or new request arrives within 30 s,
     the request resolves `by: "uncertain"`.
@@ -287,7 +289,7 @@ enough. The evidence per answer path:
 - **Terminal answer.**
   - For `keys`, `none` and herdr fallback requests: the fingerprint
     disappears from the screen without a claim from acd.
-  - For `hook`: see §6.2.
+  - For `hook`: see spec §6.2 (Claude adapter).
 - **`lost`.** The source can no longer observe the request. Examples: a
   hooks-only agent whose held connection dropped; an agent removed.
 
@@ -318,4 +320,4 @@ enough. The evidence per answer path:
 
 `schema/client.schema.json` and `schema/server.schema.json` are generated
 from the Rust types in this crate. The `examples/` directory holds golden
-messages for every message type, validated in CI.
+messages, validated by `cargo test -p acd-protocol`.

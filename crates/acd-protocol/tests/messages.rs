@@ -9,6 +9,7 @@ fn golden<T: serde::de::DeserializeOwned + serde::Serialize>(rel: &str) {
     let mut n = 0;
     for entry in fs::read_dir(dir(rel)).unwrap() {
         let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
         let raw = fs::read_to_string(&path).unwrap();
         let original: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let parsed: T = serde_json::from_value(original.clone())
