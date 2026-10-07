@@ -979,3 +979,6 @@ items. All were accepted.
 | Non-blocking: readiness retries vs the cache | Pre-delivery errors are not cached (§7.4, §8). |
 | Non-blocking: hooks-only confirmation could wait forever | 30 s bound, then `uncertain` (§5.1). |
 | Non-blocking: "verified" wording | Changed to "pending verification" throughout. |
+
+**Round 3, Sol, 2026-10-07.** All round-2 items are resolved. No new
+blocking contradictions were found. The independent review is complete.
