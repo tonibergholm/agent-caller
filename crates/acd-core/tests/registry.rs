@@ -185,3 +185,33 @@ fn same_key_from_another_agent_is_independent() {
     assert_eq!(r.request(&a1req).unwrap().detail, "ls");
     assert_eq!(r.agent("a1").unwrap().pending.as_ref().unwrap().id, a1req);
 }
+
+#[test]
+fn confirming_end_via_alias_key_resolves_upgraded_request() {
+    let mut r = reg_with_agent();
+    let fallback = RequestObs {
+        kind: RequestKind::BlockedUnparsed, answer_path: AnswerPath::None,
+        raw_screen: Some("Do you want to proceed?".into()), options: vec![], ..perm("a1", "fp:1", "")
+    };
+    let id = opened(&r.apply(Observation::RequestSeen(fallback.clone())))[0].id.clone();
+    r.apply(Observation::RequestSeen(RequestObs { upgrade_from: Some(CorrelationKey("fp:1".into())), ..perm("a1", "prompt:9", "ls") }));
+    let ch = r.apply(Observation::RequestEnded { key: CorrelationKey("fp:1".into()), by: ResolvedBy::Terminal });
+    assert_eq!(resolved(&ch), vec![(id.clone(), ResolvedBy::Terminal, None)]);
+    assert!(r.request(&id).is_none());
+    r.apply(Observation::DialogGone { key: CorrelationKey("fp:1".into()) });
+    let again = opened(&r.apply(Observation::RequestSeen(fallback)));
+    assert_eq!(again.len(), 1);
+    assert_ne!(again[0].id, id);
+}
+
+#[test]
+fn unconfirmed_end_via_alias_key_is_skipped() {
+    let mut r = reg_with_agent();
+    let fallback = RequestObs {
+        kind: RequestKind::BlockedUnparsed, answer_path: AnswerPath::None, options: vec![], ..perm("a1", "fp:1", "")
+    };
+    let id = opened(&r.apply(Observation::RequestSeen(fallback)))[0].id.clone();
+    r.apply(Observation::RequestSeen(RequestObs { upgrade_from: Some(CorrelationKey("fp:1".into())), ..perm("a1", "prompt:9", "ls") }));
+    assert!(r.apply(Observation::RequestEnded { key: CorrelationKey("fp:1".into()), by: ResolvedBy::Uncertain }).is_empty());
+    assert!(r.request(&id).is_some());
+}

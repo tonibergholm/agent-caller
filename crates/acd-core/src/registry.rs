@@ -122,8 +122,10 @@ impl Registry {
                         if *k == key { st.confirmed_gone = true; }
                     }
                 }
+                let confirming = matches!(by, ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent);
+                let rids = if confirming { self.any_requests_for(&key) } else { self.primary_requests_for(&key) };
                 let mut out = Vec::new();
-                for rid in self.primary_requests_for(&key) {
+                for rid in rids {
                     out.extend(self.resolve_request(&rid, by));
                 }
                 out
@@ -163,6 +165,17 @@ impl Registry {
 
     fn open_request_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String> {
         self.keys.get(&(agent_id.to_string(), key.clone())).and_then(|k| k.open_request.clone())
+    }
+
+    /// Open requests reached through `key`, primary or alias, across agents.
+    fn any_requests_for(&self, key: &CorrelationKey) -> Vec<String> {
+        let mut v: Vec<String> = self.keys.iter()
+            .filter(|((_, k), _)| k == key)
+            .filter_map(|(_, st)| st.open_request.clone())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
     }
 
     /// Open requests whose primary key is `key`, across agents. Aliases
