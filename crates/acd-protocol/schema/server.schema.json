@@ -1,0 +1,690 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ServerMessage",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "machine": {
+          "$ref": "#/$defs/Machine"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "welcome"
+        }
+      },
+      "required": [
+        "type",
+        "machine",
+        "capabilities",
+        "epoch",
+        "seq"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Agent"
+          }
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "snapshot"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "agents"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/Agent"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "agent.updated"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "agent"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "agent.removed"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "agent_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/Request"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "request.opened"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "request"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "by": {
+          "$ref": "#/$defs/ResolvedBy"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "option_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "request.resolved"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "request_id",
+        "agent_id",
+        "by"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "machine": {
+          "$ref": "#/$defs/Machine"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "machine.updated"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "machine"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "result"
+        }
+      },
+      "$ref": "#/$defs/CommandResult",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "pong"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "supported": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "error"
+        }
+      },
+      "required": [
+        "type",
+        "code",
+        "message"
+      ]
+    }
+  ],
+  "$defs": {
+    "Agent": {
+      "type": "object",
+      "properties": {
+        "can_send": {
+          "type": "boolean"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/AgentKind"
+        },
+        "last_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "machine_id": {
+          "type": "string"
+        },
+        "pending": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Request"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "state": {
+          "$ref": "#/$defs/AgentState"
+        },
+        "state_since": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "machine_id",
+        "source",
+        "kind",
+        "title",
+        "state",
+        "state_since",
+        "failed",
+        "can_send"
+      ]
+    },
+    "AgentKind": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex",
+        "other"
+      ]
+    },
+    "AgentState": {
+      "type": "string",
+      "enum": [
+        "working",
+        "needs_you",
+        "done",
+        "idle",
+        "unknown"
+      ]
+    },
+    "AnswerPath": {
+      "type": "string",
+      "enum": [
+        "hook",
+        "keys",
+        "t3",
+        "none",
+        "unknown"
+      ]
+    },
+    "CommandResult": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorBody"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Outcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "ok"
+      ]
+    },
+    "Effect": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "allow_always",
+        "deny",
+        "choose",
+        "unknown"
+      ]
+    },
+    "ErrorBody": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "ErrorCode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "request_gone",
+            "request_busy",
+            "request_not_ready",
+            "not_answerable",
+            "agent_gone",
+            "agent_busy",
+            "not_supported",
+            "screen_mismatch",
+            "bad_request",
+            "duplicate_mismatch",
+            "source_unavailable",
+            "unauthorized",
+            "unsupported_protocol"
+          ]
+        },
+        {
+          "description": "A code this version does not know (spec §7.2: tolerate unknown input).",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "Machine": {
+      "type": "object",
+      "properties": {
+        "acd_version": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "sources": {
+          "$ref": "#/$defs/Sources"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "acd_version",
+        "sources"
+      ]
+    },
+    "Outcome": {
+      "type": "string",
+      "enum": [
+        "delivered"
+      ]
+    },
+    "Question": {
+      "type": "object",
+      "properties": {
+        "header": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "multi_select": {
+          "type": "boolean"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RequestOption"
+          }
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "multi_select",
+        "options"
+      ]
+    },
+    "Request": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "answer_path": {
+          "$ref": "#/$defs/AnswerPath"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "free_text": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RequestKind"
+        },
+        "opened_at": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RequestOption"
+          }
+        },
+        "questions": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Question"
+          }
+        },
+        "raw_screen": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/RequestStatus"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "agent_id",
+        "kind",
+        "status",
+        "answer_path",
+        "title",
+        "detail",
+        "options",
+        "free_text",
+        "opened_at"
+      ]
+    },
+    "RequestKind": {
+      "type": "string",
+      "enum": [
+        "permission",
+        "question",
+        "blocked_unparsed",
+        "unknown"
+      ]
+    },
+    "RequestOption": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "effect"
+      ]
+    },
+    "RequestStatus": {
+      "type": "string",
+      "enum": [
+        "open",
+        "answering",
+        "resolved"
+      ]
+    },
+    "ResolvedBy": {
+      "type": "string",
+      "enum": [
+        "inbox",
+        "terminal",
+        "agent",
+        "superseded",
+        "uncertain",
+        "lost"
+      ]
+    },
+    "Source": {
+      "type": "string",
+      "enum": [
+        "herdr",
+        "t3",
+        "hooks"
+      ]
+    },
+    "SourceState": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "degraded",
+        "disabled",
+        "unconfigured"
+      ]
+    },
+    "SourceStatus": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/SourceState"
+        }
+      },
+      "required": [
+        "state"
+      ]
+    },
+    "Sources": {
+      "type": "object",
+      "properties": {
+        "herdr": {
+          "$ref": "#/$defs/SourceStatus"
+        },
+        "hooks": {
+          "$ref": "#/$defs/SourceStatus"
+        },
+        "t3": {
+          "$ref": "#/$defs/SourceStatus"
+        }
+      },
+      "required": [
+        "hooks",
+        "herdr",
+        "t3"
+      ]
+    }
+  }
+}

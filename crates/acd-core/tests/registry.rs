@@ -1,0 +1,275 @@
+use acd_core::*;
+use acd_protocol::*;
+
+fn agent(id: &str) -> AgentObs {
+    AgentObs {
+        id: id.into(), source: Source::Herdr, kind: AgentKind::Claude, title: "sp1".into(),
+        cwd: Some("/src/app".into()), project: Some("app".into()), state: AgentState::Working,
+        failed: false, last_message: None, can_send: true,
+    }
+}
+
+fn perm(agent_id: &str, key: &str, detail: &str) -> RequestObs {
+    RequestObs {
+        agent_id: agent_id.into(), key: CorrelationKey(key.into()), upgrade_from: None,
+        kind: RequestKind::Permission, answer_path: AnswerPath::Hook, title: "Bash".into(),
+        detail: detail.into(),
+        options: vec![
+            RequestOption { id: "allow".into(), label: "Yes".into(), description: None, effect: Effect::Allow },
+            RequestOption { id: "deny".into(), label: "No".into(), description: None, effect: Effect::Deny },
+        ],
+        questions: None, free_text: false, raw_screen: None, ready: true, reusable_key: true,
+    }
+}
+
+fn opened(changes: &[Change]) -> Vec<Request> {
+    changes.iter().filter_map(|c| match c { Change::RequestOpened(r) => Some(r.clone()), _ => None }).collect()
+}
+
+fn resolved(changes: &[Change]) -> Vec<(String, ResolvedBy, Option<String>)> {
+    changes.iter().filter_map(|c| match c {
+        Change::RequestResolved { request_id, by, option_id, .. } => Some((request_id.clone(), *by, option_id.clone())),
+        _ => None,
+    }).collect()
+}
+
+fn reg_with_agent() -> Registry {
+    let mut r = Registry::new("m1".into());
+    r.apply(Observation::AgentUpsert(agent("a1")));
+    r
+}
+
+#[test]
+fn identical_agent_upsert_emits_nothing() {
+    let mut r = Registry::new("m1".into());
+    assert_eq!(r.apply(Observation::AgentUpsert(agent("a1"))).len(), 1);
+    assert!(r.apply(Observation::AgentUpsert(agent("a1"))).is_empty());
+    assert_eq!(r.agent("a1").unwrap().machine_id, "m1");
+}
+
+#[test]
+fn observations_for_unknown_agents_are_ignored() {
+    let mut r = Registry::new("m1".into());
+    assert!(r.apply(Observation::RequestSeen(perm("ghost", "k", "ls"))).is_empty());
+    assert!(r.apply(Observation::AgentGone { agent_id: "ghost".into() }).is_empty());
+    assert!(r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("k".into()), by: ResolvedBy::Terminal }).is_empty());
+    assert!(r.agents().is_empty());
+}
+
+#[test]
+fn opening_a_request_sets_pending_and_needs_you() {
+    let mut r = reg_with_agent();
+    let ch = r.apply(Observation::RequestSeen(perm("a1", "k1", "ls")));
+    let req = &opened(&ch)[0];
+    let a = r.agent("a1").unwrap();
+    assert_eq!(a.state, AgentState::NeedsYou);
+    assert_eq!(a.pending.as_ref().unwrap().id, req.id);
+    assert_eq!(req.status, RequestStatus::Open);
+}
+
+#[test]
+fn same_key_updates_in_place() {
+    let mut r = reg_with_agent();
+    let id = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))))[0].id.clone();
+    let ch = r.apply(Observation::RequestSeen(perm("a1", "k1", "ls -la")));
+    assert!(opened(&ch).is_empty());
+    assert_eq!(r.agent("a1").unwrap().pending.as_ref().unwrap().id, id);
+    assert_eq!(r.request(&id).unwrap().detail, "ls -la");
+}
+
+#[test]
+fn different_key_supersedes() {
+    let mut r = reg_with_agent();
+    let first = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))))[0].id.clone();
+    let ch = r.apply(Observation::RequestSeen(perm("a1", "k2", "rm x")));
+    assert_eq!(resolved(&ch), vec![(first, ResolvedBy::Superseded, None)]);
+    assert_eq!(opened(&ch).len(), 1);
+}
+
+#[test]
+fn replay_of_resolved_key_is_ignored_until_dialog_gone_then_new_occurrence() {
+    let mut r = reg_with_agent();
+    let first = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))))[0].id.clone();
+    r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("k1".into()), by: ResolvedBy::Uncertain });
+    assert!(r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))).is_empty(), "replay must not reopen");
+    r.apply(Observation::DialogGone { agent_id: "a1".into(), key: CorrelationKey("k1".into()) });
+    let second = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))));
+    assert_eq!(second.len(), 1);
+    assert_ne!(second[0].id, first);
+}
+
+#[test]
+fn terminal_end_confirms_gone_so_same_dialog_can_reopen() {
+    let mut r = reg_with_agent();
+    r.apply(Observation::RequestSeen(perm("a1", "k1", "ls")));
+    let ch = r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("k1".into()), by: ResolvedBy::Terminal });
+    assert_eq!(resolved(&ch)[0].1, ResolvedBy::Terminal);
+    assert_eq!(opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls")))).len(), 1);
+}
+
+#[test]
+fn upgrade_from_fallback_keeps_request_id() {
+    let mut r = reg_with_agent();
+    let fallback = RequestObs {
+        kind: RequestKind::BlockedUnparsed, answer_path: AnswerPath::None,
+        raw_screen: Some("Do you want to proceed?".into()), options: vec![], ..perm("a1", "fp:1", "")
+    };
+    let id = opened(&r.apply(Observation::RequestSeen(fallback)))[0].id.clone();
+    let structured = RequestObs { upgrade_from: Some(CorrelationKey("fp:1".into())), ..perm("a1", "prompt:9", "ls") };
+    let ch = r.apply(Observation::RequestSeen(structured));
+    assert!(opened(&ch).is_empty());
+    assert!(resolved(&ch).is_empty());
+    let req = r.request(&id).unwrap();
+    assert_eq!(req.kind, RequestKind::Permission);
+    assert_eq!(req.answer_path, AnswerPath::Hook);
+}
+
+#[test]
+fn agent_gone_resolves_pending_as_lost_and_removes_agent() {
+    let mut r = reg_with_agent();
+    let id = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))))[0].id.clone();
+    let ch = r.apply(Observation::AgentGone { agent_id: "a1".into() });
+    assert_eq!(resolved(&ch), vec![(id.clone(), ResolvedBy::Lost, None)]);
+    assert!(ch.contains(&Change::AgentRemoved("a1".into())));
+    assert!(r.request(&id).is_none());
+    assert!(r.agent("a1").is_none());
+}
+
+#[test]
+fn path_and_readiness_updates_apply_to_open_requests() {
+    let mut r = reg_with_agent();
+    let id = opened(&r.apply(Observation::RequestSeen(RequestObs { ready: false, ..perm("a1", "k1", "ls") })))[0].id.clone();
+    r.apply(Observation::RequestPath { agent_id: "a1".into(), key: CorrelationKey("k1".into()), answer_path: AnswerPath::Keys });
+    assert_eq!(r.request(&id).unwrap().answer_path, AnswerPath::Keys);
+    r.apply(Observation::RequestReady { agent_id: "a1".into(), key: CorrelationKey("k1".into()), ready: true });
+    assert!(r.is_ready(&id));
+}
+
+#[test]
+fn replay_of_superseded_key_is_ignored() {
+    let mut r = reg_with_agent();
+    r.apply(Observation::RequestSeen(perm("a1", "k1", "ls")));
+    let k2 = opened(&r.apply(Observation::RequestSeen(perm("a1", "k2", "rm x"))))[0].id.clone();
+    assert!(r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))).is_empty());
+    assert_eq!(r.agent("a1").unwrap().pending.as_ref().unwrap().id, k2);
+}
+
+#[test]
+fn upgrade_aliases_fallback_key_and_cleans_up() {
+    let mut r = reg_with_agent();
+    let fallback = RequestObs {
+        kind: RequestKind::BlockedUnparsed, answer_path: AnswerPath::None,
+        raw_screen: Some("Do you want to proceed?".into()), options: vec![], ..perm("a1", "fp:1", "")
+    };
+    let id = opened(&r.apply(Observation::RequestSeen(fallback.clone())))[0].id.clone();
+    r.apply(Observation::RequestSeen(RequestObs { upgrade_from: Some(CorrelationKey("fp:1".into())), ..perm("a1", "prompt:9", "ls") }));
+    assert!(r.apply(Observation::RequestSeen(fallback.clone())).is_empty());
+    assert_eq!(r.request(&id).unwrap().kind, RequestKind::Permission);
+    let ch = r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("prompt:9".into()), by: ResolvedBy::Terminal });
+    assert_eq!(resolved(&ch)[0].0, id);
+    assert!(r.request(&id).is_none());
+    r.apply(Observation::DialogGone { agent_id: "a1".into(), key: CorrelationKey("fp:1".into()) });
+    let again = opened(&r.apply(Observation::RequestSeen(fallback)));
+    assert_eq!(again.len(), 1);
+    assert_ne!(again[0].id, id);
+}
+
+#[test]
+fn same_key_from_another_agent_is_independent() {
+    let mut r = reg_with_agent();
+    r.apply(Observation::AgentUpsert(agent("a2")));
+    let a1req = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))))[0].id.clone();
+    let ch = r.apply(Observation::RequestSeen(perm("a2", "k1", "pwd")));
+    assert_eq!(opened(&ch).len(), 1);
+    assert!(resolved(&ch).is_empty());
+    assert_eq!(r.request(&a1req).unwrap().detail, "ls");
+    assert_eq!(r.agent("a1").unwrap().pending.as_ref().unwrap().id, a1req);
+}
+
+#[test]
+fn confirming_end_via_alias_key_resolves_upgraded_request() {
+    let mut r = reg_with_agent();
+    let fallback = RequestObs {
+        kind: RequestKind::BlockedUnparsed, answer_path: AnswerPath::None,
+        raw_screen: Some("Do you want to proceed?".into()), options: vec![], ..perm("a1", "fp:1", "")
+    };
+    let id = opened(&r.apply(Observation::RequestSeen(fallback.clone())))[0].id.clone();
+    r.apply(Observation::RequestSeen(RequestObs { upgrade_from: Some(CorrelationKey("fp:1".into())), ..perm("a1", "prompt:9", "ls") }));
+    let ch = r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("fp:1".into()), by: ResolvedBy::Terminal });
+    assert_eq!(resolved(&ch), vec![(id.clone(), ResolvedBy::Terminal, None)]);
+    assert!(r.request(&id).is_none());
+    r.apply(Observation::DialogGone { agent_id: "a1".into(), key: CorrelationKey("fp:1".into()) });
+    let again = opened(&r.apply(Observation::RequestSeen(fallback)));
+    assert_eq!(again.len(), 1);
+    assert_ne!(again[0].id, id);
+}
+
+#[test]
+fn unconfirmed_end_via_alias_key_is_skipped() {
+    let mut r = reg_with_agent();
+    let fallback = RequestObs {
+        kind: RequestKind::BlockedUnparsed, answer_path: AnswerPath::None, options: vec![], ..perm("a1", "fp:1", "")
+    };
+    let id = opened(&r.apply(Observation::RequestSeen(fallback)))[0].id.clone();
+    r.apply(Observation::RequestSeen(RequestObs { upgrade_from: Some(CorrelationKey("fp:1".into())), ..perm("a1", "prompt:9", "ls") }));
+    assert!(r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("fp:1".into()), by: ResolvedBy::Uncertain }).is_empty());
+    assert!(r.request(&id).is_some());
+}
+
+#[test]
+fn key_only_observations_are_scoped_to_their_agent() {
+    let mut r = reg_with_agent();
+    r.apply(Observation::AgentUpsert(agent("a2")));
+    let a1req = opened(&r.apply(Observation::RequestSeen(RequestObs { ready: false, ..perm("a1", "k1", "ls") })))[0].id.clone();
+    let a2req = opened(&r.apply(Observation::RequestSeen(RequestObs { ready: false, ..perm("a2", "k1", "pwd") })))[0].id.clone();
+
+    r.apply(Observation::RequestReady { agent_id: "a1".into(), key: CorrelationKey("k1".into()), ready: true });
+    assert!(r.is_ready(&a1req));
+    assert!(!r.is_ready(&a2req));
+
+    r.apply(Observation::RequestPath { agent_id: "a1".into(), key: CorrelationKey("k1".into()), answer_path: AnswerPath::Keys });
+    assert_eq!(r.request(&a1req).unwrap().answer_path, AnswerPath::Keys);
+    assert_eq!(r.request(&a2req).unwrap().answer_path, AnswerPath::Hook);
+
+    let ch = r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("k1".into()), by: ResolvedBy::Terminal });
+    assert_eq!(resolved(&ch), vec![(a1req.clone(), ResolvedBy::Terminal, None)]);
+    assert!(r.request(&a2req).is_some(), "a2's request with the same key stays open");
+    assert_eq!(r.agent("a2").unwrap().pending.as_ref().unwrap().id, a2req);
+}
+
+#[test]
+fn dialog_gone_is_scoped_to_its_agent() {
+    let mut r = reg_with_agent();
+    r.apply(Observation::AgentUpsert(agent("a2")));
+    for a in ["a1", "a2"] {
+        r.apply(Observation::RequestSeen(perm(a, "k1", "ls")));
+        r.apply(Observation::RequestEnded { agent_id: a.into(), key: CorrelationKey("k1".into()), by: ResolvedBy::Uncertain });
+    }
+    r.apply(Observation::DialogGone { agent_id: "a1".into(), key: CorrelationKey("k1".into()) });
+    assert_eq!(opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls")))).len(), 1);
+    assert!(r.apply(Observation::RequestSeen(perm("a2", "k1", "ls"))).is_empty(), "a2's dialog was never confirmed gone");
+}
+
+#[test]
+fn resolved_non_reusable_key_never_reopens() {
+    let mut r = reg_with_agent();
+    let once = |key: &str| RequestObs { reusable_key: false, ..perm("a1", key, "ls") };
+    r.apply(Observation::RequestSeen(once("K1")));
+    r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("K1".into()), by: ResolvedBy::Terminal });
+    let k2 = opened(&r.apply(Observation::RequestSeen(once("K2"))))[0].id.clone();
+    assert!(r.apply(Observation::RequestSeen(once("K1"))).is_empty(), "replay after a confirming end");
+    r.apply(Observation::DialogGone { agent_id: "a1".into(), key: CorrelationKey("K1".into()) });
+    assert!(r.apply(Observation::RequestSeen(once("K1"))).is_empty(), "replay after dialog gone");
+    assert_eq!(r.agent("a1").unwrap().pending.as_ref().unwrap().id, k2);
+    assert_eq!(r.request(&k2).unwrap().status, RequestStatus::Open);
+}
+
+#[test]
+fn reusable_key_reopens_after_confirmed_end() {
+    let mut r = reg_with_agent();
+    let first = opened(&r.apply(Observation::RequestSeen(perm("a1", "K1", "ls"))))[0].id.clone();
+    r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("K1".into()), by: ResolvedBy::Terminal });
+    let again = opened(&r.apply(Observation::RequestSeen(perm("a1", "K1", "ls"))));
+    assert_eq!(again.len(), 1);
+    assert_ne!(again[0].id, first);
+}
