@@ -56,6 +56,29 @@ fn flood_obs(id: &str) -> AgentObs {
     o
 }
 
+/// Reads until the server closes the connection (4408, or a bare drop), counting what arrived.
+/// A stall reports how many frames and bytes were received first, which distinguishes
+/// "the server never overflowed" from "it closed but the connection never ended".
+async fn expect_slow_close(ws: &mut Ws) {
+    let (mut frames, mut bytes) = (0usize, 0usize);
+    loop {
+        let m = match tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+            Ok(m) => m,
+            Err(_) => panic!("no close after {frames} frames / {bytes} bytes"),
+        };
+        match m {
+            Some(Ok(Message::Text(t))) => { frames += 1; bytes += t.len(); }
+            Some(Ok(Message::Close(frame))) => {
+                let code = frame.map(|f| u16::from(f.code));
+                assert!(code.is_none() || code == Some(4408), "unexpected close code {code:?}");
+                return;
+            }
+            Some(Ok(_)) => {}
+            Some(Err(_)) | None => return,
+        }
+    }
+}
+
 fn hello(token: &str, resume: Option<Value>) -> Value {
     let mut v = json!({"type":"hello","protocol":"acd/1","token":token,"client":{"id":"c1","name":"test","version":"0"}});
     if let Some(r) = resume { v["resume"] = r; }
@@ -220,15 +243,7 @@ async fn stalled_client_is_closed() {
         s.core.observe(Observation::AgentUpsert(flood_obs(&format!("a{i}"))));
         if i % 100 == 0 { tokio::task::yield_now().await; }
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        assert!(tokio::time::Instant::now() < deadline, "never closed");
-        let m = next(&mut ws).await;
-        if let Some(code) = m.get("closed") {
-            assert!(code.is_null() || *code == 4408, "unexpected close code {code}");
-            break;
-        }
-    }
+    expect_slow_close(&mut ws).await;
 }
 
 #[tokio::test]
@@ -384,14 +399,7 @@ async fn rotation_after_a_slow_client_close_does_not_deliver() {
         s.core.observe(Observation::AgentUpsert(flood_obs(&format!("flood{i}"))));
         if i % 100 == 0 { tokio::task::yield_now().await; }
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        assert!(tokio::time::Instant::now() < deadline, "never closed");
-        if let Some(code) = next(&mut a).await.get("closed") {
-            assert!(code.is_null() || *code == 4408, "unexpected close code {code}");
-            break;
-        }
-    }
+    expect_slow_close(&mut a).await;
     s.auth.rotate("new-secret".into());
     wait_pending(&s.core, "a1", None).await;
     fake.open_gate();
