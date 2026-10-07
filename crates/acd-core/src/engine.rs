@@ -91,6 +91,10 @@ impl Core {
     }
 
     pub async fn handle(&self, client_id: &str, msg: ClientMessage) -> CommandResult {
+        if let ClientMessage::Hello { .. } | ClientMessage::Ping { .. } = msg {
+            let id = msg.command_id().unwrap_or("");
+            return CommandResult::err(id, ErrorCode::BadRequest, "not a command");
+        }
         let Some(id) = msg.command_id().map(str::to_owned) else {
             return CommandResult::err("", ErrorCode::BadRequest, "not a command");
         };
@@ -108,8 +112,8 @@ impl Core {
             },
             Begin::Run => {}
         }
-        let mut guard = AbandonGuard { core: self, client_id, id: &id, claimed: Mutex::new(None), armed: true };
-        let result = self.execute(&id, msg, &guard.claimed).await;
+        let mut guard = AbandonGuard { core: self, client_id, id: &id, phase: Mutex::new(Phase::Start), armed: true };
+        let result = self.execute(&id, msg, &guard.phase).await;
         guard.armed = false;
         let cacheable = !matches!(
             result.error_code(),
@@ -119,7 +123,7 @@ impl Core {
         result
     }
 
-    async fn execute(&self, id: &str, msg: ClientMessage, claimed: &Mutex<Option<String>>) -> CommandResult {
+    async fn execute(&self, id: &str, msg: ClientMessage, phase: &Mutex<Phase>) -> CommandResult {
         match msg {
             ClientMessage::RequestAnswer { request_id, option_id, text, .. } => {
                 let answer = match (option_id, text) {
@@ -131,7 +135,7 @@ impl Core {
                     let mut st = self.inner.lock().unwrap();
                     match st.registry.claim(&request_id, answer.clone()) {
                         Ok((req, changes)) => {
-                            *claimed.lock().unwrap() = Some(request_id.clone());
+                            *phase.lock().unwrap() = Phase::Claimed(request_id.clone());
                             self.publish(&mut st, changes);
                             req
                         }
@@ -142,6 +146,7 @@ impl Core {
                     self.release(&request_id);
                     return CommandResult::err(id, ErrorCode::SourceUnavailable, ErrorCode::SourceUnavailable.describe());
                 };
+                *phase.lock().unwrap() = Phase::Delivering(Some(request_id.clone()));
                 match adapter.deliver(&request, &answer).await {
                     Ok(()) => CommandResult::delivered(id),
                     Err(DeliverError::NotDelivered(code)) => {
@@ -165,6 +170,7 @@ impl Core {
                 let Some(adapter) = self.adapter_for_source(agent.source) else {
                     return CommandResult::err(id, ErrorCode::SourceUnavailable, ErrorCode::SourceUnavailable.describe());
                 };
+                *phase.lock().unwrap() = Phase::Delivering(None);
                 match adapter.send(&agent, &text).await {
                     Ok(()) => CommandResult::delivered(id),
                     Err(DeliverError::NotDelivered(code)) => CommandResult::err(id, code, code.describe()),
@@ -214,26 +220,54 @@ impl Core {
     }
 }
 
+/// How far a command got. Decides what an abandoned command may do (spec §5.1:
+/// a request returns to open only if nothing reached the agent).
+enum Phase {
+    Start,
+    /// Claimed, adapter not yet called.
+    Claimed(String),
+    /// Adapter call in flight; the request id is set for `request.answer`.
+    Delivering(Option<String>),
+}
+
 /// Runs if `execute` never completes (panic, or the `handle` future dropped).
-/// Releases any claimed request and finishes the command as an uncached error,
-/// so waiters wake and the command id can be retried.
+/// Before delivery it releases the claim and finishes the id as an uncached
+/// error. During delivery something may have reached the agent, so it resolves
+/// the request `uncertain` and caches `delivered`, so a retry never re-sends.
 struct AbandonGuard<'a> {
     core: &'a Core,
     client_id: &'a str,
     id: &'a str,
-    claimed: Mutex<Option<String>>,
+    phase: Mutex<Phase>,
     armed: bool,
 }
 
 impl Drop for AbandonGuard<'_> {
     fn drop(&mut self) {
         if !self.armed { return; }
-        let claimed = self.claimed.get_mut().map(Option::take).unwrap_or_default();
-        if let Some(request_id) = claimed { self.core.release(&request_id); }
-        let result = CommandResult::err(self.id, ErrorCode::SourceUnavailable, "command abandoned");
-        // A poisoned lock cannot be recovered from here; waiters then see the sender drop.
-        if let Ok(mut st) = self.core.inner.lock() {
-            st.idem.finish(self.client_id, self.id, result, false, Instant::now());
-        }
+        let phase = match self.phase.get_mut() {
+            Ok(p) => std::mem::replace(p, Phase::Start),
+            Err(e) => std::mem::replace(e.into_inner(), Phase::Start),
+        };
+        let mut st = match self.core.inner.lock() {
+            Ok(st) => st,
+            Err(e) => e.into_inner(),
+        };
+        let (result, cacheable) = match phase {
+            Phase::Start => (CommandResult::err(self.id, ErrorCode::SourceUnavailable, "command abandoned"), false),
+            Phase::Claimed(rid) => {
+                let changes = st.registry.release(&rid);
+                self.core.publish(&mut st, changes);
+                (CommandResult::err(self.id, ErrorCode::SourceUnavailable, "command abandoned"), false)
+            }
+            Phase::Delivering(rid) => {
+                if let Some(rid) = rid {
+                    let changes = st.registry.resolve_request(&rid, ResolvedBy::Uncertain);
+                    self.core.publish(&mut st, changes);
+                }
+                (CommandResult::delivered(self.id), true)
+            }
+        };
+        st.idem.finish(self.client_id, self.id, result, cacheable, Instant::now());
     }
 }

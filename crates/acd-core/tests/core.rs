@@ -172,3 +172,50 @@ async fn panicking_adapter_releases_id_and_claim() {
     assert_eq!(retry, CommandResult::delivered("p"));
     assert_eq!(fake.delivered().len(), 1);
 }
+
+fn assert_no_pending(core: &Core) {
+    let (initial, _) = core.attach(None);
+    let ServerMessage::Snapshot { agents, .. } = &initial[0] else { panic!() };
+    assert!(agents[0].pending.is_none(), "request should be resolved");
+}
+
+#[tokio::test]
+async fn panic_after_delivery_resolves_uncertain_and_caches_delivered() {
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    let rid = open_request(&core);
+    fake.panic_after_deliver_next();
+    let c = core.clone();
+    let r = rid.clone();
+    assert!(tokio::spawn(async move { c.handle("cl", answer("p", &r)).await }).await.is_err());
+    let retry = tokio::time::timeout(Duration::from_secs(2), core.handle("cl", answer("p", &rid)))
+        .await
+        .expect("retry must not hang");
+    assert_eq!(retry, CommandResult::delivered("p"));
+    assert_eq!(fake.delivered().len(), 1);
+    assert_no_pending(&core);
+}
+
+#[tokio::test]
+async fn dropped_future_while_delivering_resolves_uncertain() {
+    let fake = FakeAdapter::gated();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    let rid = open_request(&core);
+    let timed = tokio::time::timeout(Duration::from_millis(50), core.handle("cl", answer("d", &rid))).await;
+    assert!(timed.is_err(), "handle should still be waiting on the gate");
+    assert_no_pending(&core);
+    let retry = tokio::time::timeout(Duration::from_secs(2), core.handle("cl", answer("d", &rid)))
+        .await
+        .expect("retry must not hang");
+    assert_eq!(retry, CommandResult::delivered("d"));
+    assert!(fake.delivered().is_empty(), "no second delivery");
+}
+
+#[tokio::test]
+async fn hello_and_ping_do_not_reserve_ids() {
+    let core = Core::new(test_machine(), vec![]);
+    let ping = core.handle("cl", ClientMessage::Ping { id: "x".into() }).await;
+    assert_eq!(ping.error_code(), Some(ErrorCode::BadRequest));
+    let seen = core.handle("cl", ClientMessage::AgentMarkSeen { id: "x".into(), agent_id: "nope".into() }).await;
+    assert_ne!(seen.error_code(), Some(ErrorCode::DuplicateMismatch));
+}

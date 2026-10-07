@@ -15,6 +15,7 @@ pub struct FakeAdapter {
     next_error: Mutex<Option<DeliverError>>,
     gate: Option<Arc<Notify>>,
     panic_next: AtomicBool,
+    panic_after_deliver: AtomicBool,
 }
 
 impl FakeAdapter {
@@ -22,12 +23,14 @@ impl FakeAdapter {
     /// `deliver` waits until `open_gate` is called.
     pub fn gated() -> Arc<Self> { Arc::new(Self::build(Some(Arc::new(Notify::new())))) }
     fn build(gate: Option<Arc<Notify>>) -> Self {
-        Self { delivered: Mutex::default(), sent: Mutex::default(), next_error: Mutex::default(), gate, panic_next: AtomicBool::new(false) }
+        Self { delivered: Mutex::default(), sent: Mutex::default(), next_error: Mutex::default(), gate, panic_next: AtomicBool::new(false), panic_after_deliver: AtomicBool::new(false) }
     }
     pub fn open_gate(&self) { if let Some(g) = &self.gate { g.notify_waiters(); g.notify_one(); } }
     pub fn fail_next(&self, e: DeliverError) { *self.next_error.lock().unwrap() = Some(e); }
-    /// The next `deliver` call panics.
+    /// The next routing lookup (`answer_paths`) panics, i.e. after the claim but before `deliver` starts.
     pub fn panic_next(&self) { self.panic_next.store(true, Ordering::SeqCst); }
+    /// The next `deliver` call records the delivery, then panics.
+    pub fn panic_after_deliver_next(&self) { self.panic_after_deliver.store(true, Ordering::SeqCst); }
     pub fn delivered(&self) -> Vec<(String, Answer)> { self.delivered.lock().unwrap().clone() }
     pub fn sent(&self) -> Vec<(String, String)> { self.sent.lock().unwrap().clone() }
 }
@@ -35,13 +38,16 @@ impl FakeAdapter {
 #[async_trait]
 impl Adapter for FakeAdapter {
     fn name(&self) -> &'static str { "fake" }
-    fn answer_paths(&self) -> &[AnswerPath] { &[AnswerPath::Hook, AnswerPath::Keys, AnswerPath::T3] }
+    fn answer_paths(&self) -> &[AnswerPath] {
+        if self.panic_next.swap(false, Ordering::SeqCst) { panic!("fake adapter panic before deliver"); }
+        &[AnswerPath::Hook, AnswerPath::Keys, AnswerPath::T3]
+    }
     fn sources(&self) -> &[Source] { &[Source::Herdr, Source::T3, Source::Hooks] }
     async fn deliver(&self, request: &Request, answer: &Answer) -> Result<(), DeliverError> {
-        if self.panic_next.swap(false, Ordering::SeqCst) { panic!("fake adapter panic"); }
         if let Some(g) = &self.gate { g.notified().await; }
         if let Some(e) = self.next_error.lock().unwrap().take() { return Err(e); }
         self.delivered.lock().unwrap().push((request.id.clone(), answer.clone()));
+        if self.panic_after_deliver.swap(false, Ordering::SeqCst) { panic!("fake adapter panic after deliver"); }
         Ok(())
     }
     async fn send(&self, agent: &Agent, text: &str) -> Result<(), DeliverError> {
