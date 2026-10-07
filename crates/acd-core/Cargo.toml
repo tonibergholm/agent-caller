@@ -1,0 +1,27 @@
+[package]
+name = "acd-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+testing = []
+
+[dependencies]
+acd-protocol.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+acd-core = { path = ".", features = ["testing"] }
+serde_json.workspace = true
+tokio-tungstenite.workspace = true
