@@ -336,6 +336,26 @@ findings):
 - records its entries in `~/.config/acd/hooks-installed.json`;
 - never edits or reorders entries it doesn't own.
 
+**Token storage.** Claude's hook entries carry the hook token as a literal
+header, so these rules apply:
+
+- Entries go only into the **user** settings file,
+  `~/.claude/settings.json`, never into project settings that could be
+  committed.
+- The installer refuses a symlinked settings file. It writes the file with
+  mode 0600. That is the one exception to "keep the file's mode": a file
+  holding a token is always 0600.
+- Backups go to `~/.config/acd/backups/` (directory 0700, files 0600), never
+  next to the settings file.
+- `acd token rotate hook`:
+  1. writes the new token;
+  2. rewrites every managed Claude header;
+  3. reports any file it could not update.
+
+  The hook endpoint accepts the previous token for 10 minutes after a
+  rotation, so a partial failure can be retried without hooks silently
+  failing open.
+
 Claude may rewrite `.claude/settings*.json` formatting when it persists a
 rule, so ownership is matched by marker, never by byte layout.
 `acd hooks uninstall` removes exactly the recorded entries, matched
@@ -357,15 +377,19 @@ the literal hook token. The installer enforces that.
 
 | Hook | Matcher | Hook `timeout` |
 |---|---|---|
-| `SessionStart` | — | 5 s |
-| `UserPromptSubmit` | — | 5 s |
+| `SessionStart` | — | 1 s |
+| `UserPromptSubmit` | — | 1 s |
 | `PermissionRequest` | — | `permission_hold` + 10 s (default 3600 s + 10 s) |
-| `PreToolUse` | `AskUserQuestion` | 5 s |
-| `PostToolUse` | — | 5 s |
-| `Stop` | — | 5 s |
-| `SessionEnd` | — | 5 s |
+| `PreToolUse` | `AskUserQuestion` | 1 s |
+| `PostToolUse` | — | 1 s |
+| `Stop` | — | 1 s |
+| `SessionEnd` | — | 1 s |
 
-acd always replies before the hook timeout.
+acd answers lifecycle hooks immediately, before doing any work: it records
+the event and replies, and processing happens afterwards. A stalled acd
+therefore delays a lifecycle hook by at most its 1 s timeout. The held
+`PermissionRequest` is exempt from that bound, because the terminal dialog
+stays usable while it waits (§4, invariant 1).
 
 **Session discovery** (P0 item 9). Every 30 s and at startup, acd scans
 `~/.claude/sessions/*.json` and never opens the `.key` files there.
@@ -374,6 +398,12 @@ acd always replies before the hook timeout.
 - A live entry creates or updates a hooks-only agent with its `sessionId`,
   `cwd`, `name` and `status`.
 - A hooks-only agent can therefore exist before its first hook.
+- Discovery is best-effort. An unreadable directory or an unparseable
+  entry is skipped and logged once. An unknown `status` value maps to
+  `unknown`. A missing or failed scan never removes an agent that hooks
+  keep alive.
+- Discovery applies the same ownership filter as hooks (below), so the
+  scan never creates a T3-owned session.
 
 **Binding.** The binding is reconciled on every hook and on every scan.
 
@@ -387,15 +417,24 @@ acd always replies before the hook timeout.
 - When a binding appears later, a hooks-only agent migrates into the herdr
   agent. Its open request moves too and keeps its id.
 
-**Filter** (P0 additional finding 2). `CLAUDE_CODE_ENTRYPOINT` is
+**Ownership** (P0 additional finding 2). `CLAUDE_CODE_ENTRYPOINT` is
 inherited from the launching shell, so the value alone is not proof that
-T3 owns the session.
+T3 owns the session. One rule decides ownership of a Claude `session_id`,
+for hook payloads and for discovery alike, applied in this order:
 
-- A payload is dropped as T3-owned only if both hold:
-  - its entrypoint is in the ignore list (default `["sdk-ts"]`);
-  - the session is **not** bound to a herdr pane and not listed in
-    `~/.claude/sessions` with an interactive (`cli`) entrypoint.
-- Payloads from subagents (`agent_id` present) are always dropped.
+1. **T3** owns it when the T3 adapter reports a thread whose provider
+   session id equals `session_id`. Claude-adapter state for that session is
+   dropped and the T3 thread is the only agent.
+2. **herdr** owns it when the session is bound to a herdr `claude` pane
+   (§6.2 Binding).
+3. **Hooks** own it when the entrypoint is not in the ignore list (default
+   `["sdk-ts"]`).
+4. Otherwise ownership is **unknown**: an ignore-listed entrypoint with no
+   binding. The session is not shown. If rule 1 or 2 later applies, it is
+   re-evaluated.
+
+Payloads from subagents (`agent_id` present) are always dropped. Whether
+T3 exposes the provider session id is gated by §11 item 3.
 
 **Permission requests** (`tool_name` ≠ `AskUserQuestion`):
 
@@ -423,9 +462,20 @@ T3 owns the session.
      - This writes to the user's project settings, so the client must show
        the exact rule before sending.
 
-   Once the reply is written and the connection completes, acd reports
-   `by: "inbox"` on the next `PostToolUse` or `Stop` for the session, or
-   when the fingerprint leaves the screen.
+   **Attribution.** Writing the reply does not prove Claude used it,
+   because another hook may already have decided (P0 items 6 and 8b).
+   acd correlates the outcome with this request's `tool_name` and
+   `tool_input`:
+   - **allow:** a `PostToolUse` with the same tool and input gives
+     `by: "inbox"`.
+   - **deny:** a `Stop`, or the next `UserPromptSubmit`, with no matching
+     `PostToolUse` gives `by: "inbox"`.
+   - **Contradicting outcome** (acd allowed but the tool never ran, or acd
+     denied but it ran): `by: "terminal"`, with no `option_id`.
+   - **No correlatable evidence within 30 s:** `by: "uncertain"`.
+
+   The fingerprint leaving the screen only says the dialog closed. It
+   yields `uncertain` unless the correlated evidence above arrives.
 4. **The connection closes before acd replies.** With `http` hooks this
    means the user answered in the terminal, Claude was interrupted, or the
    process died.
@@ -436,7 +486,9 @@ T3 owns the session.
 5. **`permission_hold` expires.** acd replies empty. A herdr-bound request
    switches to `keys`; otherwise it resolves `lost`.
 6. **Fingerprint.** Captured from herdr's detection snapshot within 2 s
-   after the request opens.
+   after the request opens. If no matching dialog is captured, the request
+   has no `keys` fallback. When the hold ends, it resolves as in step 4 for
+   hooks-only agents and never switches to `keys`.
    - It covers the option labels and the detail text.
    - Directory paths in the "always allow access to …" option are
      normalized.
@@ -462,10 +514,13 @@ T3 owns the session.
 **After a keystroke.** A key that arrives after the dialog has closed lands
 in the agent's input box (P0 item 8b).
 
-- The post-send check reads the prompt line.
-- If the sent character appears there, the request resolves
+- acd reads the prompt line just before sending, and again 300 ms and
+  1 s after.
+- If the prompt line gained the sent character, the request resolves
   `by: "uncertain"`, with the client message "a stray keystroke may be in
   the input box".
+- `esc` produces no character, so it gets no prompt check. For `esc`,
+  attribution relies on correlated evidence only.
 - acd never sends a corrective backspace.
 
 **Completion.**
@@ -493,13 +548,15 @@ hook environment can be stale. acd binds a Codex session to a herdr pane by,
 in order of preference:
 
 1. herdr reporting `agent_session` equal to the Codex `session_id`
-   (herdr's own Codex integration reports it);
-2. a single herdr `codex` pane with the same `cwd` whose detection snapshot
-   shows the request's dialog;
-3. the environment hint, but only when the pane's agent is `codex` and its
-   `cwd` matches.
+   (herdr's own Codex integration reports it; §11 item 4);
+2. exactly one herdr `codex` pane, in the same `cwd`, whose detection
+   snapshot shows the request's dialog.
 
-With no binding, the request is read-only.
+The environment hint is used only to order candidates for checking. It
+never selects among several candidates. If two or more panes could match
+(for example two Codex panes in one `cwd` showing the same dialog), the
+binding is ambiguous and the request stays read-only. With no binding, the
+request is read-only.
 
 **`PermissionRequest`.** It replies empty at once. The request opens with:
 
@@ -544,8 +601,14 @@ Agent ids include a hash of the socket path.
    known pane. Add per-pane subscriptions as panes appear.
 2. Build the initial state from `agent.list`, on a separate connection.
 3. Treat every stream event as a hint. On an event, call `agent.get` for
-   that pane and replace its state with the result. The order between the
-   stream and the list therefore doesn't matter.
+   that pane. Every `agent.list` and `agent.get` call happens on a single
+   per-socket reconciler task. Each pane result is applied only if its
+   `revision`/`state_change_seq` is not older than the last one applied for
+   that pane. Results that tie or have no revision are applied in the order
+   the calls were issued. A stale list can therefore never roll back a
+   newer per-pane result.
+3a. Install a `pane.agent_status_changed` subscription for every pane
+   found by any means: event, initial list or periodic list.
 4. Reconcile with `agent.list`:
    - on reconnect;
    - every 5 s while any agent is `blocked`;
@@ -924,32 +987,41 @@ docs/                      research, specs, plans
 
 P0 (`docs/research/2026-10-07-p0-checks.md`, fixtures in `tests/fixtures/`)
 settled items 2–9 of revision 3. Their results are folded into §5.1 and §6.
-The items below are still open. Each is a bounded check that must be done
-before the work that depends on it.
+The gates below are still open. Each one blocks the plan named beside it
+until it has been checked and the spec updated.
 
 1. **Deferred past v1:** free text in Claude `AskUserQuestion` on the
    `keys` path.
-2. **Claude `http` hooks, live (blocks P3).** Confirm these behaviours of
-   http hooks on Claude Code 2.1.292 or later:
+2. **Claude `http` hooks, live (blocks P3).** On Claude Code 2.1.292 or
+   later, confirm:
    - header env interpolation with `allowedEnvVars`;
    - the held connection closing on a terminal answer;
-   - a lingering held hook when another hook decides first.
-
-   The spike observed the close only with an http PermissionRequest hook.
-3. **T3, live (blocks P4).** Confirm against a live server:
-   - whether a direct `Authorization: Bearer` header works on the upgrade;
+   - a held hook left open while another hook decides;
+   - an acd reply written after another hook decided is ignored, with the
+     correlated evidence of §6.2 telling the two outcomes apart;
+   - a stalled endpoint bounded by the 1 s lifecycle timeout.
+3. **T3, live (blocks P4):**
+   - ticket issuance with `POST /api/auth/websocket-ticket`, then connect;
    - the effect/rpc envelope;
-   - replay retention for `afterSequence`;
+   - resume with `afterSequence`, including an expired-resume or
+     not-resumable recovery path;
    - per-RPC scopes;
-   - how `prompt` is filled for commands.
-
-   Record fixtures from a throwaway T3 project.
-4. **Codex stale environment (P3).** Reproduce the stale `HERDR_*` values
-   with a freshly restarted `codex app-server`, and confirm that herdr's
-   Codex integration reports `agent_session`.
-5. **herdr `done` → `idle`.** Check whether anything other than focus marks
-   a pane seen (informational).
-6. **Upstream ask, not blocking.** Propose a conditional-input method to
+   - how `prompt` is filled;
+   - **whether a thread exposes the provider (Claude/Codex) session id**,
+     which §6.2 ownership rule 1 needs. Without it, ownership falls back to
+     rules 2–4, and a live T3-plus-herdr test must show no duplicate agent.
+4. **Codex binding (blocks P3):**
+   - herdr's Codex integration reports `agent_session`;
+   - the stale `HERDR_*` reproduction with a fresh `codex app-server`;
+   - two Codex panes in one cwd stay read-only.
+5. **Claude session registry (blocks P3):** observed `status` values, and
+   the behaviour when entries are unreadable.
+6. **herdr ordering (blocks P2):** whether `agent.list` and `agent.get`
+   expose a per-pane `revision`. Without one, issue-order application on
+   the single reconciler is the rule.
+7. **Hook token rotation (blocks P3):** rotate while Claude sessions run,
+   and confirm the old-token grace window and the failure report.
+8. **Upstream ask, not blocking.** Propose a conditional-input method to
    herdr, so the `keys` path becomes atomic.
 
 ## 12. Error handling
@@ -1028,8 +1100,12 @@ isolated herdr session, covering:
 5. **Follow-ups.** A free-text follow-up reaches an idle herdr agent and a
    T3 thread exactly once, even if the client retries after a dropped
    connection in the same epoch.
-6. **acd stopped.** With acd stopped, prompts behave as they do without
-   agent-caller, and hooks add at most 1 s of delay.
+6. **acd stopped or stalled.**
+   - With acd stopped (connection refused), prompts behave as they do
+     without agent-caller, and hooks add no noticeable delay.
+   - With acd stalled (accepting connections but not replying), each
+     lifecycle hook adds at most 1 s.
+   - A held `PermissionRequest` never blocks the terminal dialog.
 7. **Undo.** `Esc` within 2 s sends nothing.
 8. **acd restart.** Restarting acd while requests are open leaves no agent
    stuck. Requests still on screen reappear.
@@ -1093,3 +1169,20 @@ The main design changes:
 - The T3 filter keeps sessions bound to a herdr pane.
 - herdr sync treats events as hints and reconciles periodically.
 - The T3 connection uses a WebSocket ticket.
+
+**Round 4, Sol (revision 4), 2026-10-07.** It found 6 blocking items, 3
+non-blocking items and 1 question. All were accepted and fixed in place:
+
+- Codex binding ambiguity now leaves the request read-only, and the
+  environment hint can no longer select a pane.
+- Inbox attribution for held Claude hooks is correlated with the tool and
+  input.
+- Hook tokens live only in user settings, at mode 0600, with private
+  backups, and rotation has a grace window.
+- One Claude ownership rule now covers both discovery and hooks.
+- herdr reconciliation runs on a single task and is revision-ordered.
+- The lifecycle hook timeout is 1 s and acceptance criterion 14.6 is split
+  by case.
+- Discovery degrades gracefully, the stray-keystroke check compares the
+  prompt line before and after, and §11 gates now name the plan each one
+  blocks.
