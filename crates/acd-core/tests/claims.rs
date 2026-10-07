@@ -100,3 +100,52 @@ fn mark_seen_moves_done_to_idle_only() {
     assert!(r.mark_seen("a1").unwrap().is_empty());
     assert_eq!(r.mark_seen("ghost").unwrap_err(), ErrorCode::AgentGone);
 }
+
+#[test]
+fn seen_marker_persists_until_a_new_completion() {
+    let mut r = Registry::new("m".into());
+    r.apply(Observation::AgentUpsert(agent("a1", true)));
+    r.mark_seen("a1").unwrap();
+    assert!(r.apply(Observation::AgentUpsert(agent("a1", true))).is_empty());
+    assert_eq!(r.agent("a1").unwrap().state, AgentState::Idle);
+    r.apply(Observation::AgentUpsert(AgentObs { state: AgentState::Working, ..agent("a1", true) }));
+    r.apply(Observation::AgentUpsert(agent("a1", true)));
+    assert_eq!(r.agent("a1").unwrap().state, AgentState::Done);
+}
+
+#[test]
+fn request_content_is_frozen_while_answering() {
+    let (mut r, id) = setup(perm("k"));
+    r.claim(&id, Answer::Option("allow".into())).unwrap();
+    let evil = RequestObs {
+        detail: "rm -rf /".into(),
+        options: vec![RequestOption { id: "other".into(), label: "x".into(), description: None, effect: Effect::Allow }],
+        ..perm("k")
+    };
+    assert!(r.apply(Observation::RequestSeen(evil.clone())).is_empty());
+    let q = r.request(&id).unwrap();
+    assert_eq!(q.detail, "ls");
+    assert_eq!(q.status, RequestStatus::Answering);
+    assert_eq!(q.options[0].id, "allow");
+    r.release(&id);
+    assert!(!r.apply(Observation::RequestSeen(evil)).is_empty());
+    assert_eq!(r.request(&id).unwrap().detail, "rm -rf /");
+}
+
+#[test]
+fn claim_of_resolved_request_is_gone() {
+    let (mut r, id) = setup(perm("k"));
+    r.apply(Observation::RequestEnded { key: CorrelationKey("k".into()), by: ResolvedBy::Terminal });
+    assert_eq!(r.claim(&id, Answer::Option("allow".into())).unwrap_err(), ErrorCode::RequestGone);
+}
+
+#[test]
+fn release_clears_the_claim() {
+    let (mut r, id) = setup(perm("k"));
+    r.claim(&id, Answer::Option("allow".into())).unwrap();
+    r.release(&id);
+    let ch = r.apply(Observation::RequestEnded { key: CorrelationKey("k".into()), by: ResolvedBy::Terminal });
+    assert!(ch.contains(&Change::RequestResolved {
+        request_id: id, agent_id: "a1".into(), by: ResolvedBy::Terminal, option_id: None,
+    }));
+}

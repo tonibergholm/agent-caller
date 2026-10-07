@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use acd_protocol::*;
 use chrono::Utc;
@@ -82,12 +82,14 @@ pub struct Registry {
     agents: BTreeMap<String, Agent>,
     requests: HashMap<String, ReqEntry>,
     keys: HashMap<(String, CorrelationKey), KeyState>,
+    /// Agents whose current `done` was marked seen; cleared when the agent leaves `done`.
+    seen: HashSet<String>,
     next_id: u64,
 }
 
 impl Registry {
     pub fn new(machine_id: String) -> Self {
-        Self { machine_id, agents: BTreeMap::new(), requests: HashMap::new(), keys: HashMap::new(), next_id: 0 }
+        Self { machine_id, agents: BTreeMap::new(), requests: HashMap::new(), keys: HashMap::new(), seen: HashSet::new(), next_id: 0 }
     }
 
     pub fn agents(&self) -> Vec<Agent> { self.agents.values().cloned().collect() }
@@ -188,8 +190,13 @@ impl Registry {
             .collect()
     }
 
-    fn upsert_agent(&mut self, o: AgentObs) -> Vec<Change> {
+    fn upsert_agent(&mut self, mut o: AgentObs) -> Vec<Change> {
         let now = Utc::now();
+        if o.state != AgentState::Done {
+            self.seen.remove(&o.id);
+        } else if self.seen.contains(&o.id) {
+            o.state = AgentState::Idle;
+        }
         let (pending, state_since) = match self.agents.get(&o.id) {
             Some(a) => (a.pending.clone(), if a.state == o.state { a.state_since } else { now }),
             None => (None, now),
@@ -213,6 +220,7 @@ impl Registry {
         }
         self.agents.remove(agent_id);
         self.keys.retain(|_, k| k.agent_id != agent_id);
+        self.seen.remove(agent_id);
         out.push(Change::AgentRemoved(agent_id.to_string()));
         out
     }
@@ -280,6 +288,12 @@ impl Registry {
 
     fn update_request(&mut self, rid: &str, o: &RequestObs) -> Vec<Change> {
         let Some(e) = self.requests.get_mut(rid) else { return vec![] };
+        // Content is frozen while a claimed answer is in flight, so what the
+        // user approved cannot change before delivery.
+        if e.req.status == RequestStatus::Answering {
+            e.ready = o.ready;
+            return vec![];
+        }
         let before = e.req.clone();
         e.req.kind = o.kind;
         if e.req.status == RequestStatus::Open { e.req.answer_path = o.answer_path; }
@@ -356,6 +370,7 @@ impl Registry {
         if a.state != AgentState::Done { return Ok(vec![]); }
         a.state = AgentState::Idle;
         a.state_since = Utc::now();
+        self.seen.insert(agent_id.to_string());
         Ok(vec![Change::AgentUpdated(a.clone())])
     }
 }
