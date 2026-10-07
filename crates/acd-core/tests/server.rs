@@ -293,3 +293,27 @@ async fn disconnect_mid_delivery_then_retry_gets_cached_result() {
     assert_eq!((r["ok"].clone(), r["outcome"].clone()), (json!(true), json!("delivered")));
     assert_eq!(s.fake.delivered().len(), 1);
 }
+
+#[tokio::test]
+async fn rotation_aborts_in_flight_commands() {
+    let fake = FakeAdapter::gated();
+    let s = start(fake.clone()).await;
+    s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
+    s.core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    let (mut a, _, snap) = authed(&s.url).await;
+    let rid = snap["agents"][0]["pending"]["id"].as_str().unwrap().to_string();
+    send(&mut a, json!({"type":"request.answer","id":"r","request_id":rid,"option_id":"allow"})).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    s.auth.rotate("new-secret".into());
+    let code = loop { let m = next(&mut a).await; if let Some(c) = m.get("closed") { break c.clone(); } };
+    assert_eq!(code, 4401);
+    fake.open_gate();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(s.fake.delivered().len(), 0);
+    let mut fresh = connect(&s.url).await;
+    send(&mut fresh, hello("new-secret", None)).await;
+    next(&mut fresh).await;
+    let snap = next(&mut fresh).await;
+    let status = snap["agents"][0]["pending"]["status"].clone();
+    assert_ne!(status, json!("answering"), "snapshot: {snap}");
+}

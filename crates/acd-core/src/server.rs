@@ -111,6 +111,7 @@ async fn preauth_send(socket: &mut WebSocket, m: Message) {
 
 /// Why a session ends; the code and reason go out in the final close frame.
 type Closing = (u16, &'static str);
+const ROTATED: Closing = (CLOSE_UNAUTHORIZED, "token rotated");
 
 /// Queue a reply, giving up if the client does not drain its queue.
 async fn reply(out: &mpsc::Sender<Message>, msg: &ServerMessage) -> Result<(), Closing> {
@@ -166,8 +167,13 @@ async fn session(st: AppState, mut socket: WebSocket, permit: OwnedSemaphorePerm
     let mut tasks: JoinSet<()> = JoinSet::new();
     let closing = run(&st, &client.id, resume, generation, &mut gen_rx, &mut stream, &out, &inflight, &mut tasks).await;
 
-    // Detach, not abort: an in-flight delivery must finish so a retry sees its cached result.
-    tasks.detach_all();
+    if closing == Err(ROTATED) {
+        // Revoked: nothing this session started may take effect.
+        tasks.abort_all();
+    } else {
+        // Detach, not abort: an in-flight delivery must finish so a retry sees its cached result.
+        tasks.detach_all();
+    }
     drop(out);
     if let Err(closing) = closing {
         let _ = close_tx.send(closing);
@@ -189,7 +195,6 @@ async fn run(
     inflight: &Arc<Semaphore>,
     tasks: &mut JoinSet<()>,
 ) -> Result<(), Closing> {
-    const ROTATED: Closing = (CLOSE_UNAUTHORIZED, "token rotated");
     if *gen_rx.borrow_and_update() != generation {
         return Err(ROTATED);
     }
