@@ -81,7 +81,7 @@ pub struct Registry {
     machine_id: String,
     agents: BTreeMap<String, Agent>,
     requests: HashMap<String, ReqEntry>,
-    keys: HashMap<CorrelationKey, KeyState>,
+    keys: HashMap<(String, CorrelationKey), KeyState>,
     next_id: u64,
 }
 
@@ -101,29 +101,37 @@ impl Registry {
             Observation::AgentGone { agent_id } => self.agent_gone(&agent_id),
             Observation::RequestSeen(o) => self.request_seen(o),
             Observation::RequestReady { key, ready } => {
-                if let Some(rid) = self.open_request_for(&key) {
+                for rid in self.primary_requests_for(&key) {
                     if let Some(e) = self.requests.get_mut(&rid) { e.ready = ready; }
                 }
                 vec![]
             }
             Observation::RequestPath { key, answer_path } => {
-                let Some(rid) = self.open_request_for(&key) else { return vec![] };
-                let Some(e) = self.requests.get_mut(&rid) else { return vec![] };
-                if e.req.status != RequestStatus::Open || e.req.answer_path == answer_path { return vec![]; }
-                e.req.answer_path = answer_path;
-                self.sync_pending(&rid).into_iter().collect()
+                let mut out = Vec::new();
+                for rid in self.primary_requests_for(&key) {
+                    let Some(e) = self.requests.get_mut(&rid) else { continue };
+                    if e.req.status != RequestStatus::Open || e.req.answer_path == answer_path { continue; }
+                    e.req.answer_path = answer_path;
+                    out.extend(self.sync_pending(&rid));
+                }
+                out
             }
             Observation::RequestEnded { key, by } => {
                 if matches!(by, ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent) {
-                    if let Some(k) = self.keys.get_mut(&key) { k.confirmed_gone = true; }
+                    for ((_, k), st) in self.keys.iter_mut() {
+                        if *k == key { st.confirmed_gone = true; }
+                    }
                 }
-                match self.open_request_for(&key) {
-                    Some(rid) => self.resolve_request(&rid, by),
-                    None => vec![],
+                let mut out = Vec::new();
+                for rid in self.primary_requests_for(&key) {
+                    out.extend(self.resolve_request(&rid, by));
                 }
+                out
             }
             Observation::DialogGone { key } => {
-                if let Some(k) = self.keys.get_mut(&key) { k.confirmed_gone = true; }
+                for ((_, k), st) in self.keys.iter_mut() {
+                    if *k == key { st.confirmed_gone = true; }
+                }
                 vec![]
             }
         }
@@ -138,9 +146,8 @@ impl Registry {
             (ResolvedBy::Inbox, Some(Answer::Option(o))) => Some(o.clone()),
             _ => None,
         };
-        if let Some(k) = self.keys.get_mut(&e.key) {
+        for k in self.keys.values_mut() {
             if k.open_request.as_deref() == Some(request_id) { k.open_request = None; }
-            if by == ResolvedBy::Superseded { k.confirmed_gone = true; }
         }
         let mut out = vec![Change::RequestResolved {
             request_id: request_id.to_string(), agent_id: e.req.agent_id.clone(), by, option_id,
@@ -154,8 +161,18 @@ impl Registry {
         out
     }
 
-    fn open_request_for(&self, key: &CorrelationKey) -> Option<String> {
-        self.keys.get(key).and_then(|k| k.open_request.clone())
+    fn open_request_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String> {
+        self.keys.get(&(agent_id.to_string(), key.clone())).and_then(|k| k.open_request.clone())
+    }
+
+    /// Open requests whose primary key is `key`, across agents. Aliases
+    /// left behind by an upgrade are skipped.
+    fn primary_requests_for(&self, key: &CorrelationKey) -> Vec<String> {
+        self.keys.iter()
+            .filter(|((_, k), _)| k == key)
+            .filter_map(|(_, st)| st.open_request.clone())
+            .filter(|rid| self.requests.get(rid).is_some_and(|e| e.key == *key))
+            .collect()
     }
 
     fn upsert_agent(&mut self, o: AgentObs) -> Vec<Change> {
@@ -192,18 +209,22 @@ impl Registry {
         let pending = agent.pending.clone();
 
         // 1. Same key with an open request: update it in place.
-        if let Some(rid) = self.open_request_for(&o.key) {
+        if let Some(rid) = self.open_request_for(&o.agent_id, &o.key) {
+            // An alias left by an upgrade must not overwrite structured content.
+            if self.requests.get(&rid).is_some_and(|e| e.key != o.key) { return vec![]; }
             return self.update_request(&rid, &o);
         }
         // 2. Replay of a resolved occurrence whose dialog was never confirmed gone.
-        if let Some(k) = self.keys.get(&o.key) {
+        if let Some(k) = self.keys.get(&(o.agent_id.clone(), o.key.clone())) {
             if k.generation > 0 && !k.confirmed_gone { return vec![]; }
         }
         // 3. Upgrade a fallback request in place.
         if let (Some(p), Some(from)) = (&pending, &o.upgrade_from) {
-            if self.open_request_for(from).as_deref() == Some(p.id.as_str()) {
+            if p.status == RequestStatus::Open
+                && self.open_request_for(&o.agent_id, from).as_deref() == Some(p.id.as_str())
+            {
                 let rid = p.id.clone();
-                if let Some(k) = self.keys.get_mut(from) { k.open_request = None; k.confirmed_gone = true; }
+                // Keep `from` aliased to the request so replays of it are ignored.
                 self.claim_key(&o.key, &o.agent_id, &rid);
                 if let Some(e) = self.requests.get_mut(&rid) { e.key = o.key.clone(); }
                 return self.update_request(&rid, &o);
@@ -237,7 +258,7 @@ impl Registry {
     }
 
     fn claim_key(&mut self, key: &CorrelationKey, agent_id: &str, rid: &str) {
-        let k = self.keys.entry(key.clone()).or_default();
+        let k = self.keys.entry((agent_id.to_string(), key.clone())).or_default();
         k.agent_id = agent_id.to_string();
         k.generation += 1;
         k.open_request = Some(rid.to_string());

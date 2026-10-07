@@ -144,3 +144,44 @@ fn path_and_readiness_updates_apply_to_open_requests() {
     r.apply(Observation::RequestReady { key: CorrelationKey("k1".into()), ready: true });
     assert!(r.is_ready(&id));
 }
+
+#[test]
+fn replay_of_superseded_key_is_ignored() {
+    let mut r = reg_with_agent();
+    r.apply(Observation::RequestSeen(perm("a1", "k1", "ls")));
+    let k2 = opened(&r.apply(Observation::RequestSeen(perm("a1", "k2", "rm x"))))[0].id.clone();
+    assert!(r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))).is_empty());
+    assert_eq!(r.agent("a1").unwrap().pending.as_ref().unwrap().id, k2);
+}
+
+#[test]
+fn upgrade_aliases_fallback_key_and_cleans_up() {
+    let mut r = reg_with_agent();
+    let fallback = RequestObs {
+        kind: RequestKind::BlockedUnparsed, answer_path: AnswerPath::None,
+        raw_screen: Some("Do you want to proceed?".into()), options: vec![], ..perm("a1", "fp:1", "")
+    };
+    let id = opened(&r.apply(Observation::RequestSeen(fallback.clone())))[0].id.clone();
+    r.apply(Observation::RequestSeen(RequestObs { upgrade_from: Some(CorrelationKey("fp:1".into())), ..perm("a1", "prompt:9", "ls") }));
+    assert!(r.apply(Observation::RequestSeen(fallback.clone())).is_empty());
+    assert_eq!(r.request(&id).unwrap().kind, RequestKind::Permission);
+    let ch = r.apply(Observation::RequestEnded { key: CorrelationKey("prompt:9".into()), by: ResolvedBy::Terminal });
+    assert_eq!(resolved(&ch)[0].0, id);
+    assert!(r.request(&id).is_none());
+    r.apply(Observation::DialogGone { key: CorrelationKey("fp:1".into()) });
+    let again = opened(&r.apply(Observation::RequestSeen(fallback)));
+    assert_eq!(again.len(), 1);
+    assert_ne!(again[0].id, id);
+}
+
+#[test]
+fn same_key_from_another_agent_is_independent() {
+    let mut r = reg_with_agent();
+    r.apply(Observation::AgentUpsert(agent("a2")));
+    let a1req = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))))[0].id.clone();
+    let ch = r.apply(Observation::RequestSeen(perm("a2", "k1", "pwd")));
+    assert_eq!(opened(&ch).len(), 1);
+    assert!(resolved(&ch).is_empty());
+    assert_eq!(r.request(&a1req).unwrap().detail, "ls");
+    assert_eq!(r.agent("a1").unwrap().pending.as_ref().unwrap().id, a1req);
+}
