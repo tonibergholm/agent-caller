@@ -422,3 +422,28 @@ async fn oversized_client_id_is_refused() {
     assert_eq!(next(&mut ws).await["code"], "bad_request");
     assert_eq!(next(&mut ws).await["closed"], 4401);
 }
+
+#[tokio::test]
+async fn waiting_retries_count_against_the_daemon_wide_cap() {
+    let fake = FakeAdapter::gated();
+    let opts = ServerOptions { hello_timeout: Duration::from_millis(300), max_inflight_total: 2, ..Default::default() };
+    let s = start_with(fake.clone(), opts).await;
+    for i in 0..2 {
+        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+        s.core.observe(Observation::RequestSeen(permission_obs(&format!("a{i}"), "k")));
+    }
+    let (mut a, _, snap) = authed(&s.url).await;
+    let ids: Vec<String> = snap["agents"].as_array().unwrap().iter().map(|a| a["pending"]["id"].as_str().unwrap().to_string()).collect();
+    send(&mut a, answer_cmd("x", &ids[0])).await;
+    wait_pending(&s.core, "a0", Some(RequestStatus::Answering)).await;
+    let (mut b, _, _) = authed(&s.url).await; // same client.id: the retry waits on the first run
+    send(&mut b, answer_cmd("x", &ids[0])).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    send(&mut b, answer_cmd("y", &ids[1])).await;
+    let r = loop { let m = next(&mut b).await; if m["type"] == "result" { break m; } };
+    assert_eq!((r["id"].clone(), r["error"]["message"].clone()), (json!("y"), json!("too many in-flight commands")));
+    fake.open_gate();
+    let r = loop { let m = next(&mut b).await; if m["type"] == "result" { break m; } };
+    assert_eq!((r["id"].clone(), r["outcome"].clone()), (json!("x"), json!("delivered")));
+    assert_eq!(fake.delivered().len(), 1);
+}

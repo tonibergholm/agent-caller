@@ -14,6 +14,8 @@ pub enum Begin {
     Done(CommandResult),
     /// The id was reused with a different payload.
     Mismatch,
+    /// The table is full; nothing was reserved.
+    Full,
 }
 
 enum State {
@@ -26,13 +28,23 @@ struct Entry {
     state: State,
 }
 
+/// Default bound on reservations plus cached results.
+pub const IDEM_CAPACITY: usize = 16 * 1024;
+
 pub struct IdemCache {
     ttl: Duration,
+    capacity: usize,
     entries: HashMap<(String, String), Entry>,
 }
 
 impl IdemCache {
-    pub fn new(ttl: Duration) -> Self { Self { ttl, entries: HashMap::new() } }
+    pub fn new(ttl: Duration) -> Self { Self::with_capacity(ttl, IDEM_CAPACITY) }
+
+    /// A cache holding at most `capacity` entries. When it is full, new ids
+    /// are refused rather than evicting results a retry may still need.
+    pub fn with_capacity(ttl: Duration, capacity: usize) -> Self {
+        Self { ttl, capacity, entries: HashMap::new() }
+    }
 
     pub fn begin(&mut self, client: &str, id: &str, hash: [u8; 32], now: Instant) -> Begin {
         let ttl = self.ttl;
@@ -48,6 +60,7 @@ impl IdemCache {
                 State::Done { result, .. } => Begin::Done(result.clone()),
             };
         }
+        if self.entries.len() >= self.capacity { return Begin::Full; }
         let (tx, _rx) = watch::channel(None);
         self.entries.insert(key, Entry { hash, state: State::Pending(tx) });
         Begin::Run

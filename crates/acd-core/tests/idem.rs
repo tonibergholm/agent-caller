@@ -60,3 +60,18 @@ fn pending_entries_survive_ttl_pruning() {
     assert!(matches!(c.begin("cl", "1", H1, t), Begin::Run));
     assert!(matches!(c.begin("cl", "1", H1, t + Duration::from_secs(901)), Begin::Wait(_)));
 }
+
+#[test]
+fn full_table_rejects_new_reservations_until_entries_expire() {
+    let mut c = IdemCache::with_capacity(Duration::from_secs(900), 2);
+    let t = Instant::now();
+    assert!(matches!(c.begin("cl", "1", H1, t), Begin::Run));
+    c.finish("cl", "1", CommandResult::ok("1"), true, t);
+    assert!(matches!(c.begin("cl", "2", H1, t), Begin::Run)); // still pending
+    assert!(matches!(c.begin("cl", "3", H1, t), Begin::Full));
+    assert!(matches!(c.begin("other", "3", H1, t), Begin::Full));
+    // Existing entries still answer while the table is full.
+    assert!(matches!(c.begin("cl", "1", H1, t), Begin::Done(_)));
+    assert!(matches!(c.begin("cl", "2", H1, t), Begin::Wait(_)));
+    assert!(matches!(c.begin("cl", "3", H1, t + Duration::from_secs(901)), Begin::Run), "expired entry freed a slot");
+}

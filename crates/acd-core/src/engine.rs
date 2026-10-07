@@ -112,6 +112,7 @@ impl Core {
         match begin {
             Begin::Done(result) => return result,
             Begin::Mismatch => return CommandResult::err(&id, ErrorCode::DuplicateMismatch, ErrorCode::DuplicateMismatch.describe()),
+            Begin::Full => return CommandResult::err(&id, ErrorCode::BadRequest, "too many recent commands; retry later"),
             Begin::Wait(mut rx) => loop {
                 if let Some(result) = rx.borrow().clone() { return result; }
                 if rx.changed().await.is_err() {
