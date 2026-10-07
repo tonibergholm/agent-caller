@@ -272,3 +272,16 @@ fn run_fails_when_a_listen_address_cannot_be_bound() {
     assert!(!status.success());
     assert!(err.contains("cannot bind"), "{err}");
 }
+
+#[test]
+fn second_daemon_on_another_port_leaves_the_live_socket_alone() {
+    let (_tmp, dir, _) = init_loopback("first");
+    let _daemon = Daemon(acd(&dir).arg("run").spawn().unwrap());
+    status_when_ready(&dir, None);
+    std::fs::write(dir.join("config.toml"), format!("machine_name = \"second\"\nport = {}\nlisten = [\"loopback\"]\n", free_port())).unwrap();
+    let (status, err) = run_expecting_exit(&dir);
+    assert!(!status.success());
+    assert!(err.contains("another acd is running"), "{err}");
+    let out = String::from_utf8_lossy(&acd(&dir).arg("status").output().unwrap().stdout).into_owned();
+    assert!(out.contains("machine: first"), "{out}");
+}

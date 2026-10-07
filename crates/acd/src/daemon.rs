@@ -132,12 +132,17 @@ pub async fn run(dir: &Path) -> Result<()> {
 }
 
 /// Binds `path` with mode 0600, replacing a socket left by an earlier run.
-/// Called only after every TCP listener is bound: a second `acd run` fails on
-/// the port first, so it never removes a live daemon's socket.
+/// Called only after every TCP listener is bound, and refuses a socket that
+/// still accepts connections, so a second `acd run` never takes over a live
+/// daemon's socket.
 fn bind_local_socket(path: &Path) -> Result<tokio::net::UnixListener> {
     match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_socket() => std::fs::remove_file(path)
-            .with_context(|| format!("removing stale {}", path.display()))?,
+        Ok(m) if m.file_type().is_socket() => {
+            if std::os::unix::net::UnixStream::connect(path).is_ok() {
+                bail!("another acd is running on {}", path.display());
+            }
+            std::fs::remove_file(path).with_context(|| format!("removing stale {}", path.display()))?
+        }
         Ok(_) => bail!("{} exists and is not a socket; remove it", path.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
