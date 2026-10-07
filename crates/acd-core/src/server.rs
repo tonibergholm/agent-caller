@@ -288,21 +288,37 @@ async fn on_frame(
             let core = st.core.clone();
             let out = out.clone();
             let client = client_id.to_owned();
-            let mut gen_rx = st.auth.subscribe();
-            tasks.spawn(async move {
-                // A rotation revokes every command authorized under an older
-                // token, detached ones included. Dropping `handle` runs the
-                // core's abandon guard: an undelivered claim is released and a
-                // delivery in flight resolves `uncertain`. Nothing is re-sent.
-                tokio::select! {
-                    result = core.handle(&client, command) => {
-                        drop(permits);
-                        let _ = reply(&out, &ServerMessage::Result(result)).await;
-                    }
-                    () = revoked(&mut gen_rx, generation) => {}
-                }
-            });
+            let gen_rx = st.auth.subscribe();
+            tasks.spawn(run_command(core, client, command, generation, gen_rx, out, permits));
             Ok(())
+        }
+    }
+}
+
+/// Runs one command and replies with its result, unless the token is rotated
+/// away from `generation` first. A rotation revokes every command authorized
+/// under an older token, detached ones included. Dropping `handle` runs the
+/// core's abandon guard: an undelivered claim is released and a delivery in
+/// flight resolves `uncertain`. Nothing is re-sent.
+async fn run_command<P: Send>(
+    core: Arc<Core>,
+    client: String,
+    command: ClientMessage,
+    generation: u64,
+    mut gen_rx: watch::Receiver<u64>,
+    out: mpsc::Sender<Message>,
+    permits: P,
+) {
+    // Revoked before it ever ran: do not touch the core at all.
+    if *gen_rx.borrow_and_update() != generation { return; }
+    tokio::select! {
+        // Revocation wins whenever both are ready, so a delivery that becomes
+        // ready in the same instant as a rotation is dropped, not completed.
+        biased;
+        () = revoked(&mut gen_rx, generation) => {}
+        result = core.handle(&client, command) => {
+            drop(permits);
+            let _ = reply(&out, &ServerMessage::Result(result)).await;
         }
     }
 }
@@ -329,5 +345,73 @@ mod auth_tests {
         assert!(auth.check("").is_none());
         auth.rotate(String::new());
         assert!(auth.check("").is_none());
+    }
+}
+
+#[cfg(test)]
+mod revocation_tests {
+    use super::*;
+    use crate::registry::Observation;
+    use crate::testing::*;
+
+    /// A core with one open request, plus a command answering it.
+    fn setup(fake: Arc<FakeAdapter>) -> (Arc<Core>, ClientMessage) {
+        let core = Core::new(test_machine(), vec![fake]);
+        core.observe(Observation::AgentUpsert(agent_obs("a1")));
+        core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+        let rid = core.attach(None).0.iter().find_map(|m| match m {
+            ServerMessage::Snapshot { agents, .. } => agents[0].pending.as_ref().map(|p| p.id.clone()),
+            _ => None,
+        }).unwrap();
+        let cmd = ClientMessage::RequestAnswer { id: "c".into(), request_id: rid, option_id: Some("allow".into()), text: None };
+        (core, cmd)
+    }
+
+    fn pending(core: &Core) -> Option<RequestStatus> {
+        let (initial, _) = core.attach(None);
+        let ServerMessage::Snapshot { agents, .. } = &initial[0] else { panic!("expected snapshot") };
+        agents[0].pending.as_ref().map(|p| p.status)
+    }
+
+    // tokio::select! picks a random branch when several are ready, so each
+    // case runs many times; one delivery after revocation fails the test.
+    const ROUNDS: usize = 64;
+
+    #[tokio::test]
+    async fn rotation_before_the_first_poll_never_delivers() {
+        for _ in 0..ROUNDS {
+            let fake = FakeAdapter::new();
+            let (core, cmd) = setup(fake.clone());
+            let auth = Auth::new("old".into());
+            let generation = auth.generation();
+            let gen_rx = auth.subscribe();
+            let (out, mut out_rx) = mpsc::channel(8);
+            let task = run_command(core.clone(), "cl".into(), cmd, generation, gen_rx, out, ());
+            auth.rotate("new".into()); // spawned but not yet polled
+            task.await;
+            assert!(fake.delivered().is_empty(), "delivered after revocation");
+            assert!(out_rx.try_recv().is_err(), "no result for a revoked command");
+            assert_eq!(pending(&core), Some(RequestStatus::Open), "never claimed");
+        }
+    }
+
+    #[tokio::test]
+    async fn rotation_together_with_delivery_never_delivers() {
+        for _ in 0..ROUNDS {
+            let fake = FakeAdapter::gated();
+            let (core, cmd) = setup(fake.clone());
+            let auth = Arc::new(Auth::new("old".into()));
+            let generation = auth.generation();
+            let gen_rx = auth.subscribe();
+            let (out, _out_rx) = mpsc::channel(8);
+            let task = tokio::spawn(run_command(core.clone(), "cl".into(), cmd, generation, gen_rx, out, ()));
+            while pending(&core) != Some(RequestStatus::Answering) { tokio::task::yield_now().await; }
+            // Both wake-ups land before the task runs again (current-thread runtime).
+            fake.open_gate();
+            auth.rotate("new".into());
+            task.await.unwrap();
+            assert!(fake.delivered().is_empty(), "delivered after revocation");
+            assert_eq!(pending(&core), None, "resolved uncertain by the abandon guard");
+        }
     }
 }
