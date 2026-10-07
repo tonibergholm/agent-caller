@@ -21,6 +21,22 @@ pub async fn tailscale_reported() -> Option<Vec<IpAddr>> {
     Some(String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect())
 }
 
+/// Consecutive failed probes after which acd exits if it has a Tailscale
+/// address bound (about 5 minutes at the 30 s probe interval).
+pub const MAX_FAILED_PROBES: u32 = 10;
+
+/// Next consecutive-failure count: a successful probe resets the streak.
+pub fn next_failure_count(prev: u32, probe_ok: bool) -> u32 {
+    if probe_ok { 0 } else { prev.saturating_add(1) }
+}
+
+/// Failure-streak rule for the address watcher. `failures` is the streak
+/// including the current failed probe. Exits only when a Tailscale address is
+/// bound and the streak reaches `MAX_FAILED_PROBES`.
+pub fn should_exit_on_probe_failures(failures: u32, bound: &[IpAddr]) -> bool {
+    failures >= MAX_FAILED_PROBES && bound.iter().any(in_tailscale_range)
+}
+
 /// Debounce for the address watcher. Returns `(exit_now, pending)`. The
 /// watcher exits only when the same changed set is seen on two consecutive
 /// probes; a probe matching the bound set clears the pending change.
@@ -101,6 +117,23 @@ mod tests {
         assert_eq!(should_exit(Some(&changed), &changed, &bound), (true, Some(changed.clone())));
         assert_eq!(should_exit(Some(&changed), &other, &bound), (false, Some(other.clone())));
         assert_eq!(should_exit(Some(&changed), &bound, &bound), (false, None));
+    }
+
+    #[test]
+    fn probe_failure_streak_exits_only_with_tailscale_bound() {
+        let ts = vec![ip("127.0.0.1"), ip("100.100.1.1")];
+        let lo = vec![ip("127.0.0.1")];
+        assert!(!should_exit_on_probe_failures(9, &ts));
+        assert!(should_exit_on_probe_failures(10, &ts));
+        assert!(!should_exit_on_probe_failures(1000, &lo));
+        // A success breaks the streak.
+        let mut n = 0;
+        for _ in 0..9 { n = next_failure_count(n, false); }
+        assert!(!should_exit_on_probe_failures(n, &ts));
+        n = next_failure_count(n, true);
+        assert_eq!(n, 0);
+        n = next_failure_count(n, false);
+        assert!(!should_exit_on_probe_failures(n, &ts));
     }
 
     #[test]

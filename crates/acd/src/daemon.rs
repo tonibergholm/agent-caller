@@ -30,13 +30,15 @@ pub async fn run(dir: &Path) -> Result<()> {
     let app = router(core, auth.clone(), ServerOptions { allowed_origins: cfg.allowed_origins.clone(), ..Default::default() });
 
     let probe = bind::tailscale_reported().await;
-    if probe.is_none() && cfg.listen.iter().any(|e| e == "tailscale") {
-        tracing::warn!("`tailscale ip` failed or timed out; Tailscale addresses unavailable");
-    }
-    let reported = probe.unwrap_or_default();
+    let ips_wanted_tailscale = cfg.listen.iter().any(|e| e == "tailscale");
+    let reported = probe.clone().unwrap_or_default();
     let ips = bind::resolve_listen(&cfg.listen, &reported)?;
-    if cfg.listen.iter().any(|e| e == "tailscale") && !reported.iter().any(bind::in_tailscale_range) {
-        tracing::warn!("listen contains \"tailscale\" but no Tailscale addresses are reported");
+    if ips_wanted_tailscale {
+        if probe.is_none() {
+            tracing::warn!("`tailscale ip` failed or timed out; Tailscale addresses unavailable");
+        } else if !reported.iter().any(bind::in_tailscale_range) {
+            tracing::warn!("listen contains \"tailscale\" but no Tailscale addresses are reported");
+        }
     }
     // Bind everything before serving; any failure is fatal except ::1 being
     // unavailable (IPv6 disabled).
@@ -84,10 +86,19 @@ pub async fn run(dir: &Path) -> Result<()> {
     let listen = cfg.listen.clone();
     let watch = tokio::spawn(async move {
         let mut pending: Option<Vec<IpAddr>> = None;
+        let mut failures = 0u32;
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
             // A failed probe says nothing about the addresses; ignore it.
-            let Some(reported) = bind::tailscale_reported().await else { continue };
+            let Some(reported) = bind::tailscale_reported().await else {
+                failures = bind::next_failure_count(failures, false);
+                if bind::should_exit_on_probe_failures(failures, &ips) {
+                    tracing::error!(failures, "`tailscale ip` keeps failing while bound to Tailscale addresses; exiting for restart");
+                    return;
+                }
+                continue;
+            };
+            failures = bind::next_failure_count(failures, true);
             let now = bind::resolve_listen(&listen, &reported).unwrap_or_default();
             let (exit, next) = bind::should_exit(pending.as_ref(), &now, &ips);
             if exit { tracing::warn!(?now, "listen addresses changed; exiting for restart"); return; }

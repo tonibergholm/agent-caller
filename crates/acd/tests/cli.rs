@@ -94,6 +94,26 @@ fn init_repairs_partial_dir_and_force_keeps_machine_id() {
     assert_eq!(id, std::fs::read_to_string(dir.join("machine-id")).unwrap());
 }
 
+/// Runs `acd run` and expects it to exit on its own within 10 s; otherwise
+/// kills it and fails, so a regression cannot hang the suite.
+fn run_expecting_exit(dir: &std::path::Path) -> (std::process::ExitStatus, String) {
+    use std::io::Read;
+    let mut child = acd(dir).arg("run").stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(st) = child.try_wait().unwrap() { break st; }
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            child.wait().ok();
+            panic!("`acd run` did not exit within 10 s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let mut err = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut err).unwrap();
+    (status, err)
+}
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
@@ -130,9 +150,8 @@ fn run_refuses_empty_or_short_client_token() {
         let port = free_port();
         std::fs::write(dir.join("config.toml"), format!("port = {port}\nlisten = [\"loopback\"]\n")).unwrap();
         std::fs::write(dir.join("client.token"), bad).unwrap();
-        let out = acd(&dir).arg("run").output().unwrap();
-        assert!(!out.status.success(), "run accepted token {bad:?}");
-        let err = String::from_utf8_lossy(&out.stderr);
+        let (status, err) = run_expecting_exit(&dir);
+        assert!(!status.success(), "run accepted token {bad:?}");
         assert!(err.contains("client.token is invalid"), "{err}");
         assert!(err.contains("acd token rotate client"), "{err}");
     }
@@ -146,7 +165,7 @@ fn run_fails_when_a_listen_address_cannot_be_bound() {
     let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = blocker.local_addr().unwrap().port();
     std::fs::write(dir.join("config.toml"), format!("port = {port}\nlisten = [\"loopback\"]\n")).unwrap();
-    let out = acd(&dir).arg("run").output().unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot bind"));
+    let (status, err) = run_expecting_exit(&dir);
+    assert!(!status.success());
+    assert!(err.contains("cannot bind"), "{err}");
 }
