@@ -35,13 +35,25 @@ async fn send(ws: &mut Ws, v: Value) { ws.send(Message::text(v.to_string())).awa
 /// The next JSON frame, or the close code as `{"closed": code}`.
 async fn next(ws: &mut Ws) -> Value {
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), ws.next()).await.expect("timed out") {
+        match tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("timed out after 2s waiting for the next websocket frame or close")
+        {
             Some(Ok(Message::Text(t))) => return serde_json::from_str(t.as_str()).unwrap(),
             Some(Ok(Message::Close(frame))) => return json!({"closed": frame.map(|f| u16::from(f.code))}),
             Some(Ok(_)) => continue,
             Some(Err(_)) | None => return json!({"closed": null}),
         }
     }
+}
+
+/// An upsert whose frame is ~60 KiB. Flood tests need the server's outbound queue to overflow
+/// regardless of OS: small frames fit entirely in Linux's autotuned loopback socket buffers, so
+/// the writer never blocks. 3000 of these (~180 MB) dwarf any socket buffer.
+fn flood_obs(id: &str) -> AgentObs {
+    let mut o = agent_obs(id);
+    o.title = "x".repeat(60 * 1024);
+    o
 }
 
 fn hello(token: &str, resume: Option<Value>) -> Value {
@@ -205,7 +217,7 @@ async fn stalled_client_is_closed() {
     let s = start(FakeAdapter::new()).await;
     let (mut ws, _, _) = authed(&s.url).await;
     for i in 0..3000 { // > RING_CAPACITY
-        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+        s.core.observe(Observation::AgentUpsert(flood_obs(&format!("a{i}"))));
         if i % 100 == 0 { tokio::task::yield_now().await; }
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -369,7 +381,7 @@ async fn rotation_after_a_slow_client_close_does_not_deliver() {
     send(&mut a, answer_cmd("x", &rid)).await;
     wait_pending(&s.core, "a1", Some(RequestStatus::Answering)).await;
     for i in 0..3000 {
-        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("flood{i}"))));
+        s.core.observe(Observation::AgentUpsert(flood_obs(&format!("flood{i}"))));
         if i % 100 == 0 { tokio::task::yield_now().await; }
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
