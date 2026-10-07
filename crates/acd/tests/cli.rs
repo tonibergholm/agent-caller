@@ -120,3 +120,33 @@ fn run_serves_loopback_and_status_reports_machine() {
     assert!(out.contains("machine: e2e-box"), "{out}");
     assert!(out.contains("agents: 0"), "{out}");
 }
+
+#[test]
+fn run_refuses_empty_or_short_client_token() {
+    for bad in ["", "short"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("acd");
+        assert!(acd(&dir).arg("init").status().unwrap().success());
+        let port = free_port();
+        std::fs::write(dir.join("config.toml"), format!("port = {port}\nlisten = [\"loopback\"]\n")).unwrap();
+        std::fs::write(dir.join("client.token"), bad).unwrap();
+        let out = acd(&dir).arg("run").output().unwrap();
+        assert!(!out.status.success(), "run accepted token {bad:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("client.token is invalid"), "{err}");
+        assert!(err.contains("acd token rotate client"), "{err}");
+    }
+}
+
+#[test]
+fn run_fails_when_a_listen_address_cannot_be_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("acd");
+    assert!(acd(&dir).arg("init").status().unwrap().success());
+    let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = blocker.local_addr().unwrap().port();
+    std::fs::write(dir.join("config.toml"), format!("port = {port}\nlisten = [\"loopback\"]\n")).unwrap();
+    let out = acd(&dir).arg("run").output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot bind"));
+}

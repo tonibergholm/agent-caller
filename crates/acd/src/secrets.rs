@@ -14,6 +14,16 @@ pub fn new_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Accepts only a well-formed token: 43 base64url characters that decode to
+/// 32 bytes.
+pub fn parse_token(s: &str) -> Result<String> {
+    let s = s.trim();
+    if s.len() != 43 { bail!("token must be 43 base64url characters"); }
+    let bytes = URL_SAFE_NO_PAD.decode(s).map_err(|_| anyhow::anyhow!("token is not valid base64url"))?;
+    if bytes.len() != 32 { bail!("token must decode to 32 bytes"); }
+    Ok(s.to_string())
+}
+
 pub fn ensure_private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
@@ -59,6 +69,16 @@ mod tests {
         let (a, b) = (new_token(), new_token());
         assert_ne!(a, b);
         assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn parse_token_accepts_only_well_formed_tokens() {
+        let t = new_token();
+        assert_eq!(parse_token(&t).unwrap(), t);
+        assert!(parse_token("").is_err());
+        assert!(parse_token("short").is_err());
+        assert!(parse_token(&format!("{t}A")).is_err());
+        assert!(parse_token(&"!".repeat(43)).is_err());
     }
 
     #[test]

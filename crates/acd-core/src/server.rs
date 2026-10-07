@@ -39,6 +39,8 @@ impl Auth {
     fn subscribe(&self) -> watch::Receiver<u64> { self.generation.subscribe() }
     fn check(&self, presented: &str) -> Option<u64> {
         let g = self.token.read().unwrap();
+        // An empty stored token must never authenticate (ct_eq("", "") is true).
+        if g.is_empty() { return None; }
         bool::from(g.as_bytes().ct_eq(presented.as_bytes())).then(|| self.generation())
     }
 }
@@ -280,5 +282,22 @@ async fn on_frame(
             });
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    #[test]
+    fn empty_stored_token_never_authenticates() {
+        let auth = Auth::new(String::new());
+        assert!(auth.check("").is_none());
+        assert!(auth.check("anything").is_none());
+        auth.rotate("secret".into());
+        assert!(auth.check("secret").is_some());
+        assert!(auth.check("").is_none());
+        auth.rotate(String::new());
+        assert!(auth.check("").is_none());
     }
 }

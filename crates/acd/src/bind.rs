@@ -10,12 +10,28 @@ pub fn in_tailscale_range(ip: &IpAddr) -> bool {
     }
 }
 
-/// The addresses the local Tailscale daemon reports. Empty if Tailscale is
-/// unavailable.
-pub fn tailscale_reported() -> Vec<IpAddr> {
-    let Ok(out) = std::process::Command::new("tailscale").arg("ip").output() else { return vec![] };
-    if !out.status.success() { return vec![]; }
-    String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect()
+/// The addresses the local Tailscale daemon reports. `None` means the probe
+/// failed or timed out (Tailscale missing, daemon down, hung); callers must not
+/// treat that as "no addresses".
+pub async fn tailscale_reported() -> Option<Vec<IpAddr>> {
+    let mut cmd = tokio::process::Command::new("tailscale");
+    cmd.arg("ip").kill_on_drop(true).stdin(std::process::Stdio::null());
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output()).await.ok()?.ok()?;
+    if !out.status.success() { return None; }
+    Some(String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect())
+}
+
+/// Debounce for the address watcher. Returns `(exit_now, pending)`. The
+/// watcher exits only when the same changed set is seen on two consecutive
+/// probes; a probe matching the bound set clears the pending change.
+pub fn should_exit(
+    prev_pending: Option<&Vec<IpAddr>>,
+    current: &Vec<IpAddr>,
+    bound: &Vec<IpAddr>,
+) -> (bool, Option<Vec<IpAddr>>) {
+    if current == bound { return (false, None); }
+    if prev_pending == Some(current) { return (true, Some(current.clone())); }
+    (false, Some(current.clone()))
 }
 
 /// Expands `listen` entries into addresses allowed by spec §7.1.
@@ -73,6 +89,18 @@ mod tests {
         assert!(unreported.contains("refusing to listen on 100.100.100.100"));
         assert!(resolve_listen(&["0.0.0.0".into()], &reported).is_err());
         assert!(resolve_listen(&["192.168.1.10".into()], &reported).is_err());
+    }
+
+    #[test]
+    fn address_change_must_be_seen_twice_to_exit() {
+        let bound = vec![ip("127.0.0.1"), ip("100.1.1.1")];
+        let changed = vec![ip("127.0.0.1")];
+        let other = vec![ip("127.0.0.1"), ip("100.2.2.2")];
+        assert_eq!(should_exit(None, &bound, &bound), (false, None));
+        assert_eq!(should_exit(None, &changed, &bound), (false, Some(changed.clone())));
+        assert_eq!(should_exit(Some(&changed), &changed, &bound), (true, Some(changed.clone())));
+        assert_eq!(should_exit(Some(&changed), &other, &bound), (false, Some(other.clone())));
+        assert_eq!(should_exit(Some(&changed), &bound, &bound), (false, None));
     }
 
     #[test]
