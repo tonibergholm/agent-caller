@@ -123,12 +123,13 @@ Request {
   kind: "permission" | "question" | "blocked_unparsed"
   title: string            // e.g. "Bash", or the question's header
   detail: string           // the command or path, or the question text
-  options: Option[]
+  options: RequestOption[]
   free_text: bool          // whether a typed answer is accepted
+  answerable: bool         // false when the inbox can only display it ("answer in terminal")
   raw_screen: string | null   // only for blocked_unparsed
   opened_at: timestamp
 }
-Option {
+RequestOption {
   id: string               // stable within the request
   label: string
   description: string | null
@@ -262,8 +263,7 @@ present, the agent becomes a hooks-only agent with id
    The remaining questions show as `blocked_unparsed` after the first is
    answered.
 5. Without a herdr pane, questions are shown read-only:
-   `capabilities.answer = false` for that request, displayed as "answer in
-   terminal".
+   `answerable: false`, displayed as "answer in terminal".
 
 **Completion.**
 
@@ -295,7 +295,7 @@ the terminal. The adapter opens a `permission` request with:
 dialog appears after the hook returns, so the adapter waits up to 3 s for
 the dialog to show in the detection snapshot before sending keys.
 
-**Without a herdr pane**, the request is read-only (`answer = false`).
+**Without a herdr pane**, the request is read-only (`answerable: false`).
 
 **Completion.** `Stop` sets the state to `done`, with `last_message` taken
 from `last_assistant_message`.
