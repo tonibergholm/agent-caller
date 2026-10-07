@@ -1,0 +1,15 @@
+{
+ "session_id": "4e3885ee-7454-410d-a2e2-86f4dc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885ee-7454-410d-a2e2-86f4dc2533c0.jsonl",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "e7cf77ea-660e-4ab0-84c5-6314e83ae50a",
+ "hook_event_name": "Notification",
+ "message": "Claude needs your permission",
+ "notification_type": "permission_prompt",
+ "_env": {
+  "HERDR_PANE_ID": "w1:p2",
+  "HERDR_SOCKET_PATH": "/Users/user/.config/herdr/sessions/p0/herdr.sock",
+  "HERDR_ENV": "1",
+  "CLAUDE_CODE_ENTRYPOINT": "sdk-ts"
+ }
+}

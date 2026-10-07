@@ -1,0 +1,38 @@
+{
+ "session_id": "4e3885ee-7454-410d-a2e2-86f4dc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885ee-7454-410d-a2e2-86f4dc2533c0.jsonl",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PreToolUse",
+ "tool_name": "AskUserQuestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "description": "Choose blue"
+     }
+    ],
+    "multiSelect": false
+   }
+  ]
+ },
+ "tool_use_id": "toolu_01D53MaipDAB8FfnAJ9w4Joj",
+ "_env": {
+  "HERDR_PANE_ID": "w1:p2",
+  "HERDR_SOCKET_PATH": "/Users/user/.config/herdr/sessions/p0/herdr.sock",
+  "HERDR_ENV": "1",
+  "CLAUDE_CODE_ENTRYPOINT": "sdk-ts"
+ }
+}

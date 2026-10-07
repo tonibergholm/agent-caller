@@ -1,0 +1,18 @@
+{
+ "hookSpecificOutput": {
+  "hookEventName": "PermissionRequest",
+  "decision": {
+   "behavior": "allow",
+   "updatedPermissions": [
+    {
+     "type": "allow",
+     "rules": [
+      "Bash(npm run *)"
+     ],
+     "behavior": "auto",
+     "destination": "project_settings"
+    }
+   ]
+  }
+ }
+}

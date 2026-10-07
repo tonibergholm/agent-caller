@@ -1,0 +1,22 @@
+› Run exactly this shell command and nothing else: touch ~/acp0_test_t5_1.txt
+
+
+• I’ll run that exact command.
+
+• Running touch ~/acp0_test_t5_1.txt
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow the exact requested command to create ~/acp0_test_t5_1.txt outside the writable workspace?
+
+  $ touch ~/acp0_test_t5_1.txt
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `touch ~/acp0_test_t5_1.txt` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

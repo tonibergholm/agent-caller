@@ -1,0 +1,2 @@
+  [… 8 lines] ctrl+a view all
+› 1. Yes, proceed (y)
