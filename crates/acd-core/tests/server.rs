@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use acd_core::testing::*;
 use acd_core::*;
+use acd_protocol::*;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
@@ -316,4 +317,108 @@ async fn rotation_aborts_in_flight_commands() {
     let snap = next(&mut fresh).await;
     let status = snap["agents"][0]["pending"]["status"].clone();
     assert_ne!(status, json!("answering"), "snapshot: {snap}");
+}
+
+fn pending_status(core: &Core, agent: &str) -> Option<RequestStatus> {
+    let (initial, _) = core.attach(None);
+    let ServerMessage::Snapshot { agents, .. } = &initial[0] else { panic!("expected snapshot") };
+    agents.iter().find(|a| a.id == agent).and_then(|a| a.pending.as_ref()).map(|p| p.status)
+}
+
+/// Polls until the agent's pending request has the given status (`None`:
+/// resolved), failing after 2 s.
+async fn wait_pending(core: &Core, agent: &str, want: Option<RequestStatus>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while pending_status(core, agent) != want {
+        assert!(tokio::time::Instant::now() < deadline, "{agent}: pending is {:?}, want {want:?}", pending_status(core, agent));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn answer_cmd(id: &str, rid: &str) -> Value {
+    json!({"type":"request.answer","id":id,"request_id":rid,"option_id":"allow"})
+}
+
+#[tokio::test]
+async fn rotation_cancels_commands_detached_by_an_earlier_disconnect() {
+    let fake = FakeAdapter::gated();
+    let s = start(fake.clone()).await;
+    s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
+    s.core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    let (mut a, _, snap) = authed(&s.url).await;
+    let rid = snap["agents"][0]["pending"]["id"].as_str().unwrap().to_string();
+    send(&mut a, answer_cmd("x", &rid)).await;
+    wait_pending(&s.core, "a1", Some(RequestStatus::Answering)).await;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    s.auth.rotate("new-secret".into());
+    wait_pending(&s.core, "a1", None).await; // resolved uncertain by the abandon guard
+    fake.open_gate();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.delivered().len(), 0);
+}
+
+#[tokio::test]
+async fn rotation_after_a_slow_client_close_does_not_deliver() {
+    let fake = FakeAdapter::gated();
+    let s = start(fake.clone()).await;
+    s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
+    s.core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    let (mut a, _, snap) = authed(&s.url).await;
+    let rid = snap["agents"][0]["pending"]["id"].as_str().unwrap().to_string();
+    send(&mut a, answer_cmd("x", &rid)).await;
+    wait_pending(&s.core, "a1", Some(RequestStatus::Answering)).await;
+    for i in 0..3000 {
+        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("flood{i}"))));
+        if i % 100 == 0 { tokio::task::yield_now().await; }
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(tokio::time::Instant::now() < deadline, "never closed");
+        if let Some(code) = next(&mut a).await.get("closed") {
+            assert!(code.is_null() || *code == 4408, "unexpected close code {code}");
+            break;
+        }
+    }
+    s.auth.rotate("new-secret".into());
+    wait_pending(&s.core, "a1", None).await;
+    fake.open_gate();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.delivered().len(), 0);
+}
+
+#[tokio::test]
+async fn daemon_wide_cap_counts_detached_commands() {
+    let fake = FakeAdapter::gated();
+    let opts = ServerOptions { hello_timeout: Duration::from_millis(300), max_inflight_total: 2, ..Default::default() };
+    let s = start_with(fake.clone(), opts).await;
+    for i in 0..3 {
+        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+        s.core.observe(Observation::RequestSeen(permission_obs(&format!("a{i}"), "k")));
+    }
+    let (mut a, _, snap) = authed(&s.url).await;
+    let ids: Vec<String> = snap["agents"].as_array().unwrap().iter().map(|a| a["pending"]["id"].as_str().unwrap().to_string()).collect();
+    send(&mut a, answer_cmd("c0", &ids[0])).await;
+    send(&mut a, answer_cmd("c1", &ids[1])).await;
+    wait_pending(&s.core, "a0", Some(RequestStatus::Answering)).await;
+    wait_pending(&s.core, "a1", Some(RequestStatus::Answering)).await;
+    drop(a);
+    let (mut b, _, _) = authed(&s.url).await;
+    send(&mut b, answer_cmd("c2", &ids[2])).await;
+    let r = loop { let m = next(&mut b).await; if m["type"] == "result" { break m; } };
+    assert_eq!((r["id"].clone(), r["error"]["code"].clone(), r["error"]["message"].clone()),
+        (json!("c2"), json!("bad_request"), json!("too many in-flight commands")));
+    assert_eq!(pending_status(&s.core, "a2"), Some(RequestStatus::Open), "rejected before any claim");
+    fake.open_gate();
+}
+
+#[tokio::test]
+async fn oversized_client_id_is_refused() {
+    let s = start(FakeAdapter::new()).await;
+    let mut ws = connect(&s.url).await;
+    let mut h = hello("secret", None);
+    h["client"]["id"] = json!("c".repeat(MAX_ID_BYTES + 1));
+    send(&mut ws, h).await;
+    assert_eq!(next(&mut ws).await["code"], "bad_request");
+    assert_eq!(next(&mut ws).await["closed"], 4401);
 }

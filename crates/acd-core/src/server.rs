@@ -13,7 +13,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
-use crate::engine::{Core, RING_CAPACITY};
+use crate::engine::{Core, MAX_ID_BYTES, RING_CAPACITY};
 
 pub const CLOSE_BAD_PROTOCOL: u16 = 4400;
 pub const CLOSE_UNAUTHORIZED: u16 = 4401;
@@ -51,6 +51,10 @@ pub struct ServerOptions {
     pub hello_timeout: Duration,
     pub max_frame: usize,
     pub max_preauth: usize,
+    /// Commands in flight per session.
+    pub max_inflight: usize,
+    /// Commands in flight across all sessions, including detached ones.
+    pub max_inflight_total: usize,
 }
 
 impl Default for ServerOptions {
@@ -60,6 +64,8 @@ impl Default for ServerOptions {
             hello_timeout: Duration::from_secs(5),
             max_frame: 1 << 20,
             max_preauth: 8,
+            max_inflight: 32,
+            max_inflight_total: 256,
         }
     }
 }
@@ -70,11 +76,16 @@ struct AppState {
     auth: Arc<Auth>,
     opts: ServerOptions,
     preauth: Arc<Semaphore>,
+    /// Daemon-wide in-flight commands; shared by every clone of the router.
+    inflight_total: Arc<Semaphore>,
 }
 
+/// The acd/1 WebSocket server. Serve clones of one router on every listener
+/// so the limits apply daemon-wide.
 pub fn router(core: Arc<Core>, auth: Arc<Auth>, opts: ServerOptions) -> Router {
     let preauth = Arc::new(Semaphore::new(opts.max_preauth));
-    Router::new().route("/", get(upgrade)).with_state(AppState { core, auth, opts, preauth })
+    let inflight_total = Arc::new(Semaphore::new(opts.max_inflight_total));
+    Router::new().route("/", get(upgrade)).with_state(AppState { core, auth, opts, preauth, inflight_total })
 }
 
 async fn upgrade(State(st): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -105,7 +116,6 @@ const PREAUTH_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITER_GRACE: Duration = Duration::from_secs(1);
-const MAX_INFLIGHT: usize = 32;
 
 async fn preauth_send(socket: &mut WebSocket, m: Message) {
     let _ = tokio::time::timeout(PREAUTH_SEND_TIMEOUT, socket.send(m)).await;
@@ -148,6 +158,11 @@ async fn session(st: AppState, mut socket: WebSocket, permit: OwnedSemaphorePerm
         preauth_send(&mut socket, close_msg(CLOSE_UNAUTHORIZED, "unauthorized")).await;
         return;
     };
+    if client.id.len() > MAX_ID_BYTES {
+        preauth_send(&mut socket, text(&error(ErrorCode::BadRequest, "client.id longer than 128 bytes"))).await;
+        preauth_send(&mut socket, close_msg(CLOSE_UNAUTHORIZED, "invalid hello")).await;
+        return;
+    }
     drop(permit);
 
     let (mut sink, mut stream) = socket.split();
@@ -165,17 +180,13 @@ async fn session(st: AppState, mut socket: WebSocket, permit: OwnedSemaphorePerm
         }
     });
 
-    let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT));
+    let inflight = Arc::new(Semaphore::new(st.opts.max_inflight));
     let mut tasks: JoinSet<()> = JoinSet::new();
     let closing = run(&st, &client.id, resume, generation, &mut gen_rx, &mut stream, &out, &inflight, &mut tasks).await;
 
-    if closing == Err(ROTATED) {
-        // Revoked: nothing this session started may take effect.
-        tasks.abort_all();
-    } else {
-        // Detach, not abort: an in-flight delivery must finish so a retry sees its cached result.
-        tasks.detach_all();
-    }
+    // Detach, not abort: an in-flight delivery must finish so a retry sees its
+    // cached result. Each task cancels itself if the token is rotated.
+    tasks.detach_all();
     drop(out);
     if let Err(closing) = closing {
         let _ = close_tx.send(closing);
@@ -211,7 +222,7 @@ async fn run(
                 if *gen_rx.borrow() != generation { return Err(ROTATED); }
                 let handled = async {
                     match frame {
-                        Some(Ok(Message::Text(t))) => on_frame(st, client_id, t.as_str(), out, inflight, tasks).await.map(|()| true),
+                        Some(Ok(Message::Text(t))) => on_frame(st, client_id, generation, t.as_str(), out, inflight, tasks).await.map(|()| true),
                         Some(Ok(Message::Binary(_))) => reply(out, &error(ErrorCode::BadRequest, "binary frames are not supported")).await.map(|()| true),
                         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => Ok(false),
                         Some(Ok(_)) => Ok(true),
@@ -240,6 +251,7 @@ async fn run(
 async fn on_frame(
     st: &AppState,
     client_id: &str,
+    generation: u64,
     raw: &str,
     out: &mpsc::Sender<Message>,
     inflight: &Arc<Semaphore>,
@@ -264,10 +276,11 @@ async fn on_frame(
         ClientMessage::Ping { id } => reply(out, &ServerMessage::Pong { id }).await,
         ClientMessage::Hello { .. } => reply(out, &error(ErrorCode::BadRequest, "already authenticated")).await,
         command => {
-            let id = command.command_id().map(str::to_owned);
-            let Ok(permit) = inflight.clone().try_acquire_owned() else {
-                let r = match id {
-                    Some(id) => ServerMessage::Result(CommandResult::err(&id, ErrorCode::BadRequest, "too many in-flight commands")),
+            let permits = inflight.clone().try_acquire_owned()
+                .and_then(|session| st.inflight_total.clone().try_acquire_owned().map(|total| (session, total)));
+            let Ok(permits) = permits else {
+                let r = match command.command_id() {
+                    Some(id) => ServerMessage::Result(CommandResult::err(id, ErrorCode::BadRequest, "too many in-flight commands")),
                     None => error(ErrorCode::BadRequest, "too many in-flight commands"),
                 };
                 return reply(out, &r).await;
@@ -275,13 +288,30 @@ async fn on_frame(
             let core = st.core.clone();
             let out = out.clone();
             let client = client_id.to_owned();
+            let mut gen_rx = st.auth.subscribe();
             tasks.spawn(async move {
-                let result = core.handle(&client, command).await;
-                drop(permit);
-                let _ = reply(&out, &ServerMessage::Result(result)).await;
+                // A rotation revokes every command authorized under an older
+                // token, detached ones included. Dropping `handle` runs the
+                // core's abandon guard: an undelivered claim is released and a
+                // delivery in flight resolves `uncertain`. Nothing is re-sent.
+                tokio::select! {
+                    result = core.handle(&client, command) => {
+                        drop(permits);
+                        let _ = reply(&out, &ServerMessage::Result(result)).await;
+                    }
+                    () = revoked(&mut gen_rx, generation) => {}
+                }
             });
             Ok(())
         }
+    }
+}
+
+/// Completes once the token generation moves away from `generation`. Never
+/// completes if the `Auth` is gone, since nothing can rotate it then.
+async fn revoked(gen_rx: &mut watch::Receiver<u64>, generation: u64) {
+    if gen_rx.wait_for(|g| *g != generation).await.is_err() {
+        std::future::pending::<()>().await;
     }
 }
 
