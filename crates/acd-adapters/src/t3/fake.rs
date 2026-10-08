@@ -3,7 +3,7 @@
 //! T3: the upgrade checks, one Chunk item at a time with an Ack before the
 //! next, resume from `afterSequence`, one global sequence, receipts for a
 //! reused `commandId`, and the recorded failure shapes.
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -118,6 +118,31 @@ pub fn approval_projection(thread_id: &str, request_id: &str, native: Option<&st
     )
 }
 
+/// `projection` with exactly one provider thread, `provider_thread_id`, whose
+/// native id is `native`, and `thread.activeProviderThreadId` set to it.
+pub fn with_provider(
+    mut projection: Value,
+    provider_thread_id: &str,
+    native: Option<&str>,
+) -> Value {
+    let mut pt = projection["providerThreads"]
+        .as_array()
+        .and_then(|a| a.first())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    pt["id"] = json!(provider_thread_id);
+    pt["nativeThreadRef"] =
+        json!({"driver": pt["driver"].clone(), "nativeId": native, "strength": "strong"});
+    pt["status"] = json!(if native.is_some() {
+        "active"
+    } else {
+        "not_loaded"
+    });
+    projection["providerThreads"] = json!([pt]);
+    projection["thread"]["activeProviderThreadId"] = json!(provider_thread_id);
+    projection
+}
+
 /// The recorded Claude question projection, re-keyed the same way.
 pub fn question_projection(thread_id: &str, request_id: &str) -> Value {
     rekey_projection(
@@ -197,6 +222,10 @@ struct State {
     gate_next: Option<oneshot::Receiver<()>>,
     deny_operate: bool,
     muted: bool,
+    /// A shell resume below this sequence gets a full snapshot.
+    compacted_at: u64,
+    /// Thread ids whose streams never get `synchronized`.
+    withheld: HashSet<String>,
 }
 
 struct Shared {
@@ -206,6 +235,7 @@ struct Shared {
     unacked_peak: AtomicUsize,
     chunks_sent: AtomicUsize,
     acks_received: AtomicUsize,
+    thread_stream_peak: AtomicUsize,
 }
 
 fn exit_frame(id: &str, exit: &Value) -> String {
@@ -355,7 +385,15 @@ impl State {
         }
     }
 
-    fn open_stream(&mut self, conn: u64, id: &str, target: Target, items: VecDeque<Vec<Value>>) {
+    /// Returns the number of thread streams now open on `conn`.
+    fn open_stream(
+        &mut self,
+        conn: u64,
+        id: &str,
+        target: Target,
+        items: VecDeque<Vec<Value>>,
+    ) -> usize {
+        let mut threads = 0;
         if let Some(c) = self.conns.get_mut(&conn) {
             c.streams.insert(
                 id.to_owned(),
@@ -365,8 +403,14 @@ impl State {
                     outstanding: 0,
                 },
             );
+            threads = c
+                .streams
+                .values()
+                .filter(|s| matches!(s.target, Target::Thread(_)))
+                .count();
         }
         self.wake_all();
+        threads
     }
 
     /// `Some(exit)` when the subscription is refused.
@@ -377,7 +421,7 @@ impl State {
         };
         let mut items = VecDeque::new();
         match after {
-            Some(n) if n < self.head => {
+            Some(n) if n < self.head && n >= self.compacted_at => {
                 items.push_back(vec![self.project_only_snapshot()]);
                 items.extend(
                     self.shell_log
@@ -398,16 +442,14 @@ impl State {
         None
     }
 
-    fn subscribe_thread(&mut self, conn: u64, id: &str, payload: &Value) -> Option<Value> {
+    /// `Ok(n)`: the stream opened and `conn` now has `n` thread streams.
+    fn subscribe_thread(&mut self, conn: u64, id: &str, payload: &Value) -> Result<usize, Value> {
         let thread_id = payload["threadId"].as_str().unwrap_or("").to_owned();
-        let after = match self.after(payload) {
-            Ok(a) => a,
-            Err(exit) => return Some(exit),
-        };
+        let after = self.after(payload)?;
         let Some(projection) = self.projections.get(&thread_id) else {
             let mut exit = exit_of("thread_subscribe_unknown_thread_exit.json");
             exit = replace_text(&exit, &[("nope", &thread_id)]);
-            return Some(exit);
+            return Err(exit);
         };
         let mut items = VecDeque::new();
         match after {
@@ -424,11 +466,10 @@ impl State {
                 "projection": projection}),
             ]),
         }
-        if payload["requestCompletionMarker"] == true {
+        if payload["requestCompletionMarker"] == true && !self.withheld.contains(&thread_id) {
             items.push_back(vec![json!({"kind": "synchronized"})]);
         }
-        self.open_stream(conn, id, Target::Thread(thread_id), items);
-        None
+        Ok(self.open_stream(conn, id, Target::Thread(thread_id), items))
     }
 
     fn dispatch(&mut self, payload: &Value) -> Outcome {
@@ -614,7 +655,13 @@ impl Shared {
                 let refused = if tag == SUBSCRIBE_SHELL {
                     st.subscribe_shell(conn, &id, payload)
                 } else {
-                    st.subscribe_thread(conn, &id, payload)
+                    match st.subscribe_thread(conn, &id, payload) {
+                        Ok(open) => {
+                            self.thread_stream_peak.fetch_max(open, Ordering::SeqCst);
+                            None
+                        }
+                        Err(exit) => Some(exit),
+                    }
                 };
                 refused
                     .map(|exit| exit_frame(&id, &exit))
@@ -742,16 +789,23 @@ async fn serve(shared: Arc<Shared>, socket: WebSocket) {
     shared.lock().conns.remove(&conn);
 }
 
+/// A handle; clones share one server, which stops when the last one drops.
+#[derive(Clone)]
 pub struct FakeT3 {
     shared: Arc<Shared>,
     addr: SocketAddr,
-    server: JoinHandle<()>,
+    _server: Arc<Server>,
 }
 
-impl Drop for FakeT3 {
+struct Server {
+    shared: Arc<Shared>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for Server {
     fn drop(&mut self) {
         self.shared.shutdown.send_replace(true);
-        self.server.abort();
+        self.task.abort();
     }
 }
 
@@ -782,12 +836,15 @@ impl FakeT3 {
                 gate_next: None,
                 deny_operate: false,
                 muted: false,
+                compacted_at: 0,
+                withheld: HashSet::new(),
             }),
             stop_reading: watch::channel(false).0,
             shutdown: watch::channel(false).0,
             unacked_peak: AtomicUsize::new(0),
             chunks_sent: AtomicUsize::new(0),
             acks_received: AtomicUsize::new(0),
+            thread_stream_peak: AtomicUsize::new(0),
         });
         let app = Router::new()
             .route("/ws", get(ws_handler))
@@ -796,9 +853,12 @@ impl FakeT3 {
             let _ = axum::serve(listener, app).await;
         });
         FakeT3 {
+            _server: Arc::new(Server {
+                shared: shared.clone(),
+                task: server,
+            }),
             shared,
             addr,
-            server,
         }
     }
 
@@ -992,5 +1052,23 @@ impl FakeT3 {
 
     pub fn head(&self) -> u64 {
         self.shared.lock().head
+    }
+
+    /// Like T3's fallback for a gap over 1000: any later shell resume below
+    /// the current head gets a full snapshot instead of the log.
+    pub fn compact(&self) {
+        let mut st = self.shared.lock();
+        st.compacted_at = st.head;
+    }
+
+    /// Most thread streams open at once on one connection.
+    pub fn thread_stream_peak(&self) -> usize {
+        self.shared.thread_stream_peak.load(Ordering::SeqCst)
+    }
+
+    /// That thread's streams get their snapshot and events but never
+    /// `synchronized`; everything else is served normally.
+    pub fn withhold_sync(&self, thread_id: &str) {
+        self.shared.lock().withheld.insert(thread_id.to_owned());
     }
 }

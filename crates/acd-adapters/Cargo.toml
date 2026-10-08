@@ -11,6 +11,7 @@ testing = ["dep:tempfile", "dep:axum"]
 acd-core.workspace = true
 acd-protocol.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 futures-util.workspace = true
 regex.workspace = true
 serde.workspace = true
