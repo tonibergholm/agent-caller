@@ -6,6 +6,7 @@ use acd_protocol::{AgentKind, AgentState, Source};
 use sha2::{Digest, Sha256};
 
 use super::wire;
+use crate::text::{TITLE_CHARS, clean_display};
 
 /// 12 lowercase hex chars of `sha256(path)`; namespaces agent ids per herdr socket.
 pub fn socket_hash(path: &Path) -> String {
@@ -43,20 +44,25 @@ pub fn agent_obs(socket_hash: &str, info: &wire::AgentInfo) -> Option<AgentObs> 
     let title = [&info.name, &info.title, &info.terminal_title_stripped]
         .into_iter()
         .flatten()
+        .map(|s| clean_display(s, TITLE_CHARS))
         .find(|s| !s.is_empty())
-        .cloned()
-        .unwrap_or_else(|| info.pane_id.clone());
-    let project = info
+        .unwrap_or_else(|| clean_display(&info.pane_id, TITLE_CHARS));
+    let cwd = info
         .cwd
         .as_deref()
+        .map(|c| clean_display(c, usize::MAX))
+        .filter(|c| !c.is_empty());
+    let project = cwd
+        .as_deref()
         .and_then(|c| Path::new(c).file_name())
-        .map(|n| n.to_string_lossy().into_owned());
+        .map(|n| clean_display(&n.to_string_lossy(), TITLE_CHARS))
+        .filter(|p| !p.is_empty());
     Some(AgentObs {
         id: agent_id(socket_hash, &info.pane_id),
         source: Source::Herdr,
         kind,
         title,
-        cwd: info.cwd.clone(),
+        cwd,
         project,
         state: state(info.agent_status),
         failed: false,
@@ -66,21 +72,29 @@ pub fn agent_obs(socket_hash: &str, info: &wire::AgentInfo) -> Option<AgentObs> 
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acd_protocol::{AgentKind, AgentState, Source};
-    use std::path::Path;
 
-    fn info(v: serde_json::Value) -> wire::AgentInfo { serde_json::from_value(v).unwrap() }
+    fn info(v: serde_json::Value) -> wire::AgentInfo {
+        serde_json::from_value(v).unwrap()
+    }
 
     #[test]
     fn ids_are_namespaced_and_never_parsed() {
         let h = socket_hash(Path::new("/Users/user/.config/herdr/herdr.sock"));
         assert_eq!(h.len(), 12);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-        assert_ne!(h, socket_hash(Path::new("/Users/user/.config/herdr/sessions/p0/herdr.sock")));
+        assert_eq!(h, "15f4d901f9d1");
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+        assert_ne!(
+            h,
+            socket_hash(Path::new(
+                "/Users/user/.config/herdr/sessions/p0/herdr.sock"
+            ))
+        );
         assert_eq!(agent_id(&h, "w1:p7"), format!("herdr:{h}:w1:p7"));
     }
 
@@ -93,24 +107,64 @@ mod tests {
         });
         let o = agent_obs("abc", &info(base.clone())).unwrap();
         assert_eq!(o.id, "herdr:abc:w1:p2");
-        assert_eq!((o.kind, o.state, o.source), (AgentKind::Claude, AgentState::NeedsYou, Source::Herdr));
+        assert_eq!(
+            (o.kind, o.state, o.source),
+            (AgentKind::Claude, AgentState::NeedsYou, Source::Herdr)
+        );
         assert_eq!(o.project.as_deref(), Some("app"));
         assert_eq!(o.title, "fix tests");
         assert!(o.can_send);
 
-        let mut v = base.clone(); v["agent"] = "aider".into(); v["agent_status"] = "done".into();
+        let mut v = base.clone();
+        v["agent"] = "aider".into();
+        v["agent_status"] = "done".into();
         let o = agent_obs("abc", &info(v)).unwrap();
         assert_eq!((o.kind, o.state), (AgentKind::Other, AgentState::Done));
 
-        let mut v = base.clone(); v["agent"] = serde_json::Value::Null;
-        assert!(agent_obs("abc", &info(v)).is_none(), "a plain shell pane is not an agent");
+        let mut v = base.clone();
+        v["agent"] = serde_json::Value::Null;
+        assert!(
+            agent_obs("abc", &info(v)).is_none(),
+            "a plain shell pane is not an agent"
+        );
 
-        let mut v = base.clone(); v["agent_status"] = "hibernating".into();
-        assert_eq!(agent_obs("abc", &info(v)).unwrap().state, AgentState::Unknown);
+        let mut v = base.clone();
+        v["agent_status"] = "hibernating".into();
+        assert_eq!(
+            agent_obs("abc", &info(v)).unwrap().state,
+            AgentState::Unknown
+        );
 
-        let mut v = base; v["title"] = serde_json::Value::Null; v["cwd"] = serde_json::Value::Null;
+        let mut v = base;
+        v["title"] = serde_json::Value::Null;
+        v["cwd"] = serde_json::Value::Null;
         let o = agent_obs("abc", &info(v)).unwrap();
         assert_eq!(o.title, "w1:p2");
         assert_eq!((o.cwd, o.project), (None, None));
+    }
+
+    #[test]
+    fn titles_are_sanitized() {
+        let v = serde_json::json!({
+            "pane_id": "w1:p2", "agent": "codex", "name": "\u{1b}\u{7}\u{202E}",
+            "title": "ok\u{1b}[0m", "cwd": "/a/b\u{7}c"
+        });
+        let o = agent_obs("abc", &info(v)).unwrap();
+        assert_eq!(
+            o.title, "ok[0m",
+            "a name empty after cleaning falls through"
+        );
+        assert_eq!(
+            (o.cwd.as_deref(), o.project.as_deref()),
+            (Some("/a/bc"), Some("bc"))
+        );
+        let v =
+            serde_json::json!({ "pane_id": "w1:p2", "agent": "codex", "title": "t".repeat(300) });
+        assert_eq!(
+            agent_obs("abc", &info(v)).unwrap().title.chars().count(),
+            200
+        );
+        let v = serde_json::json!({ "pane_id": "w1:p2", "agent": "codex", "name": "\u{7}" });
+        assert_eq!(agent_obs("abc", &info(v)).unwrap().title, "w1:p2");
     }
 }

@@ -99,11 +99,17 @@ impl Herdr {
 
     /// `CALL_TIMEOUT` is one absolute deadline for connect, write and reply.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, CallError> {
-        self.call_until(method, params, Instant::now() + CALL_TIMEOUT).await
+        self.call_until(method, params, Instant::now() + CALL_TIMEOUT)
+            .await
     }
 
     /// Like `call`, but with the caller's absolute deadline when that is earlier.
-    pub async fn call_until(&self, method: &str, params: Value, deadline: Instant) -> Result<Value, CallError> {
+    pub async fn call_until(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Instant,
+    ) -> Result<Value, CallError> {
         let connected = self.connect_until(deadline).await?;
         connected.write(method, params).await?.reply().await
     }
@@ -113,16 +119,25 @@ impl Herdr {
     pub async fn connect_until(&self, deadline: Instant) -> Result<Connected, CallError> {
         let now = Instant::now();
         if now >= deadline {
-            return Err(CallError::Connect(io::Error::new(io::ErrorKind::TimedOut, "deadline already passed")));
+            return Err(CallError::Connect(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "deadline already passed",
+            )));
         }
         let deadline = deadline.min(now + CALL_TIMEOUT);
         let connect_by = deadline.min(now + CONNECT_TIMEOUT);
         let stream = timeout_at(connect_by, UnixStream::connect(&self.path))
             .await
-            .map_err(|_| CallError::Connect(io::Error::new(io::ErrorKind::TimedOut, "connect timed out")))?
+            .map_err(|_| {
+                CallError::Connect(io::Error::new(io::ErrorKind::TimedOut, "connect timed out"))
+            })?
             .map_err(CallError::Connect)?;
         let (r, w) = stream.into_split();
-        Ok(Connected { r: BufReader::new(r), w, deadline })
+        Ok(Connected {
+            r: BufReader::new(r),
+            w,
+            deadline,
+        })
     }
 
     pub async fn ping(&self) -> Result<Pong, CallError> {
@@ -134,7 +149,8 @@ impl Herdr {
     pub async fn list(&self) -> Result<Vec<AgentInfo>, CallError> {
         let v = self.call("agent.list", json!({})).await?;
         expect_type(&v, "agent_list")?;
-        serde_json::from_value(v["agents"].clone()).map_err(|e| CallError::NoReply(format!("bad agent list: {e}")))
+        serde_json::from_value(v["agents"].clone())
+            .map_err(|e| CallError::NoReply(format!("bad agent list: {e}")))
     }
 
     /// `Ok(None)` on `agent_not_found`.
@@ -152,7 +168,12 @@ impl Herdr {
     }
 
     /// `agent.read` with `strip_ansi: true`; returns `read.text`.
-    pub async fn read(&self, pane_id: &str, source: &str, lines: Option<u32>) -> Result<String, CallError> {
+    pub async fn read(
+        &self,
+        pane_id: &str,
+        source: &str,
+        lines: Option<u32>,
+    ) -> Result<String, CallError> {
         let mut params = json!({"target": pane_id, "source": source, "strip_ansi": true});
         if let Some(n) = lines {
             params["lines"] = json!(n);
@@ -166,14 +187,18 @@ impl Herdr {
 
     pub async fn prompt(&self, pane_id: &str, text: &str) -> Result<(), CallError> {
         tracing::debug!(pane_id, len = text.len(), "herdr agent.prompt");
-        let v = self.call("agent.prompt", json!({"target": pane_id, "text": text})).await?;
+        let v = self
+            .call("agent.prompt", json!({"target": pane_id, "text": text}))
+            .await?;
         expect_type(&v, "agent_prompted")
     }
 
     /// Only the keys engine (Task 9) may call this.
     pub async fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<(), CallError> {
         tracing::debug!(pane_id, count = keys.len(), "herdr agent.send_keys");
-        let v = self.call("agent.send_keys", json!({"target": pane_id, "keys": keys})).await?;
+        let v = self
+            .call("agent.send_keys", json!({"target": pane_id, "keys": keys}))
+            .await?;
         expect_type(&v, "ok")
     }
 
@@ -186,12 +211,24 @@ impl Herdr {
             json!({"type": "pane.agent_detected"}),
             json!({"type": "pane.updated"}),
         ];
-        subs.extend(panes.iter().map(|p| json!({"type": "pane.agent_status_changed", "pane_id": p})));
+        subs.extend(
+            panes
+                .iter()
+                .map(|p| json!({"type": "pane.agent_status_changed", "pane_id": p})),
+        );
         let deadline = Instant::now() + CALL_TIMEOUT;
-        let mut written = self.connect_until(deadline).await?.write("events.subscribe", json!({"subscriptions": subs})).await?;
+        let mut written = self
+            .connect_until(deadline)
+            .await?
+            .write("events.subscribe", json!({"subscriptions": subs}))
+            .await?;
         let v = written.read_reply().await?;
         expect_type(&v, "subscription_started")?;
-        Ok(Subscription { r: written.r, _w: written._w, buf: Vec::new() })
+        Ok(Subscription {
+            r: written.r,
+            _w: written._w,
+            buf: Vec::new(),
+        })
     }
 }
 
@@ -199,7 +236,9 @@ fn expect_type(v: &Value, want: &str) -> Result<(), CallError> {
     if v["type"].as_str() == Some(want) {
         Ok(())
     } else {
-        Err(CallError::NoReply(format!("unexpected result type, wanted {want}")))
+        Err(CallError::NoReply(format!(
+            "unexpected result type, wanted {want}"
+        )))
     }
 }
 
@@ -209,10 +248,14 @@ impl Connected {
     /// partial line is never dispatched.
     pub async fn write(mut self, method: &str, params: Value) -> Result<Written, CallError> {
         if Instant::now() >= self.deadline {
-            return Err(CallError::Write(io::Error::new(io::ErrorKind::TimedOut, "deadline already passed")));
+            return Err(CallError::Write(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "deadline already passed",
+            )));
         }
         let id = next_request_id();
-        let mut line = serde_json::to_vec(&json!({"id": id, "method": method, "params": params})).expect("json");
+        let mut line = serde_json::to_vec(&json!({"id": id, "method": method, "params": params}))
+            .expect("json");
         line.push(b'\n');
         timeout_at(self.deadline, async {
             self.w.write_all(&line).await?;
@@ -221,7 +264,13 @@ impl Connected {
         .await
         .map_err(|_| CallError::Write(io::Error::new(io::ErrorKind::TimedOut, "write timed out")))?
         .map_err(CallError::Write)?;
-        Ok(Written { r: self.r, _w: self.w, id, deadline: self.deadline, at: Instant::now() })
+        Ok(Written {
+            r: self.r,
+            _w: self.w,
+            id,
+            deadline: self.deadline,
+            at: Instant::now(),
+        })
     }
 }
 
@@ -245,7 +294,8 @@ impl Written {
         if n == 0 {
             return Err(CallError::NoReply("connection closed".into()));
         }
-        let v: Value = serde_json::from_str(&reply).map_err(|e| CallError::NoReply(format!("bad reply: {e}")))?;
+        let v: Value = serde_json::from_str(&reply)
+            .map_err(|e| CallError::NoReply(format!("bad reply: {e}")))?;
         if v["id"].as_str() != Some(self.id.as_str()) {
             return Err(CallError::NoReply("reply id does not match".into()));
         }
@@ -255,7 +305,9 @@ impl Written {
                 message: err["message"].as_str().unwrap_or("").into(),
             });
         }
-        v.get("result").cloned().ok_or_else(|| CallError::NoReply("reply has no result".into()))
+        v.get("result")
+            .cloned()
+            .ok_or_else(|| CallError::NoReply("reply has no result".into()))
     }
 }
 

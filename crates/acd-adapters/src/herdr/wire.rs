@@ -52,12 +52,25 @@ pub struct Pong {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    Created { pane_id: String },
-    Closed { pane_id: String },
-    AgentDetected { pane_id: String },
-    AgentReleased { pane_id: String },
-    Updated { pane_id: String },
-    StatusChanged { pane_id: String, status: AgentStatus },
+    Created {
+        pane_id: String,
+    },
+    Closed {
+        pane_id: String,
+    },
+    AgentDetected {
+        pane_id: String,
+    },
+    AgentReleased {
+        pane_id: String,
+    },
+    Updated {
+        pane_id: String,
+    },
+    StatusChanged {
+        pane_id: String,
+        status: AgentStatus,
+    },
     Other,
 }
 
@@ -71,7 +84,9 @@ pub fn parse_event(line: &str) -> Event {
     let data = &v["data"];
     let pane = |v: &Value| v.as_str().map(str::to_owned);
     match v["event"].as_str() {
-        Some("pane_created") => pane(&data["pane"]["pane_id"]).map(|pane_id| Event::Created { pane_id }),
+        Some("pane_created") => {
+            pane(&data["pane"]["pane_id"]).map(|pane_id| Event::Created { pane_id })
+        }
         Some("pane_closed") => pane(&data["pane_id"]).map(|pane_id| Event::Closed { pane_id }),
         Some("pane_agent_detected") => pane(&data["pane_id"]).map(|pane_id| {
             if data["released"].as_bool() == Some(true) {
@@ -80,11 +95,16 @@ pub fn parse_event(line: &str) -> Event {
                 Event::AgentDetected { pane_id }
             }
         }),
-        Some("pane_updated") => pane(&data["pane"]["pane_id"]).map(|pane_id| Event::Updated { pane_id }),
-        Some("pane.agent_status_changed") => pane(&data["pane_id"]).map(|pane_id| Event::StatusChanged {
-            pane_id,
-            status: serde_json::from_value(data["agent_status"].clone()).unwrap_or(AgentStatus::Unknown),
-        }),
+        Some("pane_updated") => {
+            pane(&data["pane"]["pane_id"]).map(|pane_id| Event::Updated { pane_id })
+        }
+        Some("pane.agent_status_changed") => {
+            pane(&data["pane_id"]).map(|pane_id| Event::StatusChanged {
+                pane_id,
+                status: serde_json::from_value(data["agent_status"].clone())
+                    .unwrap_or(AgentStatus::Unknown),
+            })
+        }
         _ => None,
     }
     .unwrap_or(Event::Other)

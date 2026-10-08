@@ -88,7 +88,10 @@ impl FakeHerdr {
 
     pub async fn start_with_version(version: &str, protocol: u32) -> FakeHerdr {
         // macOS limits Unix socket paths to 104 bytes; its temp dir is long.
-        let dir = tempfile::Builder::new().prefix("acd").tempdir_in("/tmp").expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .prefix("acd")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         let path = dir.path().join("h.sock");
         let listener = UnixListener::bind(&path).expect("bind fake herdr socket");
         let shared = Arc::new(Shared {
@@ -98,7 +101,10 @@ impl FakeHerdr {
             state: Mutex::new(State::default()),
         });
         let task = tokio::spawn(accept_loop(listener, shared.clone()));
-        FakeHerdr { shared, owner: Some(Arc::new(Owner { _dir: dir, task })) }
+        FakeHerdr {
+            shared,
+            owner: Some(Arc::new(Owner { _dir: dir, task })),
+        }
     }
 
     fn st(&self) -> MutexGuard<'_, State> {
@@ -132,7 +138,9 @@ impl FakeHerdr {
 
     /// `source` is `"detection"` or `"visible"` (any string works).
     pub fn set_screen(&self, pane_id: &str, source: &str, text: &str) {
-        self.st().screens.insert((pane_id.to_owned(), source.to_owned()), text.to_owned());
+        self.st()
+            .screens
+            .insert((pane_id.to_owned(), source.to_owned()), text.to_owned());
     }
 
     /// Runs on `agent.send_keys` (after recording), outside the state lock.
@@ -142,12 +150,20 @@ impl FakeHerdr {
 
     /// The next `method` request is applied and recorded, but never answered.
     pub fn hang_next(&self, method: &str) {
-        self.st().hooks.entry(method.to_owned()).or_default().push_back(Hook::Hang);
+        self.st()
+            .hooks
+            .entry(method.to_owned())
+            .or_default()
+            .push_back(Hook::Hang);
     }
 
     /// The next `method` request gets `{"error":{"code":code,...}}` and has no effect.
     pub fn fail_next(&self, method: &str, code: &str) {
-        self.st().hooks.entry(method.to_owned()).or_default().push_back(Hook::Fail(code.to_owned()));
+        self.st()
+            .hooks
+            .entry(method.to_owned())
+            .or_default()
+            .push_back(Hook::Fail(code.to_owned()));
     }
 
     pub fn push_event(&self, frame: Value) {
@@ -202,7 +218,9 @@ impl FakeHerdr {
 }
 
 fn set_status_locked(st: &mut State, pane_id: &str, status: &str) {
-    let Some(agent) = st.agents.iter_mut().find(|a| a["pane_id"] == pane_id) else { return };
+    let Some(agent) = st.agents.iter_mut().find(|a| a["pane_id"] == pane_id) else {
+        return;
+    };
     agent["agent_status"] = json!(status);
     let seq = agent["state_change_seq"].as_u64().unwrap_or(0) + 1;
     agent["state_change_seq"] = json!(seq);
@@ -225,7 +243,9 @@ fn set_status_locked(st: &mut State, pane_id: &str, status: &str) {
 async fn accept_loop(listener: UnixListener, shared: Arc<Shared>) {
     let mut conns = JoinSet::new();
     loop {
-        let Ok((stream, _)) = listener.accept().await else { return };
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
         while conns.try_join_next().is_some() {}
         conns.spawn(serve(stream, shared.clone()));
     }
@@ -277,7 +297,10 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
 
     let (frame, stream_rx) = match outcome {
         Outcome::Reply(result) => (json!({"id": id, "result": result}), None),
-        Outcome::Error(code, message) => (json!({"id": id, "error": {"code": code, "message": message}}), None),
+        Outcome::Error(code, message) => (
+            json!({"id": id, "error": {"code": code, "message": message}}),
+            None,
+        ),
         Outcome::Subscribed(result, rx) => (json!({"id": id, "result": result}), Some(rx)),
     };
     let mut bytes = frame.to_string().into_bytes();
@@ -299,7 +322,8 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
     // One request per connection: close, and count a second line.
     let _ = w.shutdown().await;
     line.clear();
-    if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(200), r.read_line(&mut line)).await
+    if let Ok(Ok(n)) =
+        tokio::time::timeout(Duration::from_millis(200), r.read_line(&mut line)).await
         && n > 0
     {
         shared.state.lock().expect("fake state").reused += 1;
@@ -321,7 +345,9 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
             })),
             "agent.list" => Outcome::Reply(json!({"type": "agent_list", "agents": st.agents})),
             "agent.get" | "agent.read" | "agent.prompt" | "agent.send_keys" | "agent.focus" => {
-                let Some(t) = target else { return err("invalid_request", "missing field `target`") };
+                let Some(t) = target else {
+                    return err("invalid_request", "missing field `target`");
+                };
                 let Some(agent) = find(&st, t) else {
                     return err("agent_not_found", &format!("agent target {t} not found"));
                 };
@@ -331,7 +357,11 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
                         let Some(source) = params["source"].as_str() else {
                             return err("invalid_request", "missing field `source`");
                         };
-                        let text = st.screens.get(&(t.to_owned(), source.to_owned())).cloned().unwrap_or_default();
+                        let text = st
+                            .screens
+                            .get(&(t.to_owned(), source.to_owned()))
+                            .cloned()
+                            .unwrap_or_default();
                         Outcome::Reply(json!({"type": "pane_read", "read": {
                             "pane_id": t, "workspace_id": "w1", "tab_id": "w1:t1", "source": source,
                             "format": "text", "text": text, "revision": 0, "truncated": false,
@@ -342,7 +372,10 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
                             return err("invalid_request", "missing field `text`");
                         };
                         if agent["agent_status"] == "blocked" {
-                            return err("agent_blocked", &format!("agent {t} is blocked and requires interactive input"));
+                            return err(
+                                "agent_blocked",
+                                &format!("agent {t} is blocked and requires interactive input"),
+                            );
                         }
                         st.prompts.push((t.to_owned(), text.to_owned()));
                         set_status_locked(&mut st, t, "working");
@@ -353,7 +386,10 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
                         let Some(keys) = params["keys"].as_array() else {
                             return err("invalid_request", "missing field `keys`");
                         };
-                        let keys: Vec<String> = keys.iter().filter_map(|k| k.as_str().map(str::to_owned)).collect();
+                        let keys: Vec<String> = keys
+                            .iter()
+                            .filter_map(|k| k.as_str().map(str::to_owned))
+                            .collect();
                         st.keys_sent.push((t.to_owned(), keys.clone()));
                         if let Some(f) = st.on_keys.clone() {
                             keys_call = Some((f, t.to_owned(), keys));
@@ -386,11 +422,17 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
                 st.subscribers.push(Subscriber { panes, tx });
                 Outcome::Subscribed(json!({"type": "subscription_started"}), rx)
             }
-            other => err("invalid_request", &format!("invalid request: unknown variant `{other}`")),
+            other => err(
+                "invalid_request",
+                &format!("invalid request: unknown variant `{other}`"),
+            ),
         }
     };
     if let Some((f, pane, keys)) = keys_call {
-        let view = FakeHerdr { shared: shared.clone(), owner: None };
+        let view = FakeHerdr {
+            shared: shared.clone(),
+            owner: None,
+        };
         f(&view, &pane, &keys);
     }
     outcome
