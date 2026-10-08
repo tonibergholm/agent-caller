@@ -90,6 +90,7 @@ pub struct MachineHandle {
     state: watch::Receiver<MachineState>,
     events: broadcast::Sender<(u64, MachineEvent)>,
     ctl: mpsc::Sender<Control>,
+    cancel: watch::Sender<bool>,
 }
 
 impl MachineHandle {
@@ -104,6 +105,9 @@ impl MachineHandle {
     }
     pub fn retry_now(&self) {
         let _ = self.ctl.try_send(Control::RetryNow);
+    }
+    pub fn cancel(&self) {
+        self.cancel.send_replace(true);
     }
     pub async fn submit(&self, cmd: Command, expect_generation: Option<u64>) -> Outcome {
         let (tx, rx) = oneshot::channel();
@@ -338,6 +342,7 @@ async fn serve(
     backoff: &mut Backoff,
     commands: &mut Commands,
     cred: [u8; 32],
+    cancel: &mut watch::Receiver<bool>,
 ) -> End {
     let mut last_frame = tokio::time::Instant::now();
     let mut ping_deadline: Option<tokio::time::Instant> = None;
@@ -349,6 +354,7 @@ async fn serve(
             .unwrap_or_else(|| Instant::now() + Duration::from_secs(86400));
         tokio::select! {
             biased;
+            _ = cancel.changed() => return End::Stopped,
             control = ctl.recv() => match control {
                 Some(Control::DropConnection) => return End::Offline("dropped by request".into()),
                 Some(Control::Submit(command, expect_gen, reply)) => {
@@ -428,6 +434,7 @@ fn publish(
 async fn run(
     cfg: MachineConfig,
     mut ctl: mpsc::Receiver<Control>,
+    mut cancel: watch::Receiver<bool>,
     state: watch::Sender<MachineState>,
     events: broadcast::Sender<(u64, MachineEvent)>,
 ) {
@@ -438,6 +445,9 @@ async fn run(
     let mut offline_since = None;
     let mut generation = 0;
     loop {
+        if *cancel.borrow() {
+            return;
+        }
         if retryable_status(&state.borrow().status) {
             publish(
                 &state,
@@ -459,7 +469,8 @@ async fn run(
         {
             commands.revoke_other_creds(cred);
         }
-        let end = match open(&cfg, deadline).await {
+        let opened = tokio::select! { _ = cancel.changed() => return, result = open(&cfg, deadline) => result };
+        let end = match opened {
             Err(e) => e,
             Ok((mut ws, token)) => {
                 let cred = credential_hash(&token);
@@ -522,6 +533,7 @@ async fn run(
                                 &mut backoff,
                                 &mut commands,
                                 cred,
+                                &mut cancel,
                             )
                             .await
                         };
@@ -587,7 +599,7 @@ async fn run(
                     generation,
                 );
                 if matches!(cfg.credential, Credential::Token(_)) {
-                    if !wait_retry(&mut ctl).await {
+                    if !wait_retry(&mut ctl, &mut cancel).await {
                         return;
                     }
                     continue;
@@ -614,7 +626,7 @@ async fn run(
                     &session,
                     generation,
                 );
-                if !wait_retry(&mut ctl).await {
+                if !wait_retry(&mut ctl, &mut cancel).await {
                     return;
                 }
                 continue;
@@ -630,7 +642,7 @@ async fn run(
                 backoff.next_delay()
             }
         };
-        match wait_delay(&mut ctl, delay).await {
+        match wait_delay(&mut ctl, delay, &mut cancel).await {
             Wait::Retry => continue,
             Wait::Elapsed => {}
             Wait::Stopped => return,
@@ -638,9 +650,9 @@ async fn run(
     }
 }
 
-async fn wait_retry(ctl: &mut mpsc::Receiver<Control>) -> bool {
+async fn wait_retry(ctl: &mut mpsc::Receiver<Control>, cancel: &mut watch::Receiver<bool>) -> bool {
     loop {
-        match ctl.recv().await {
+        tokio::select! { _ = cancel.changed() => return false, control = ctl.recv() => match control {
             Some(Control::RetryNow) => return true,
             Some(Control::Submit(command, expect_gen, reply)) => {
                 let _ = (command.capability(), expect_gen);
@@ -648,7 +660,7 @@ async fn wait_retry(ctl: &mut mpsc::Receiver<Control>) -> bool {
             }
             Some(Control::DropConnection) => {}
             None => return false,
-        }
+        }}
     }
 }
 enum Wait {
@@ -656,10 +668,15 @@ enum Wait {
     Retry,
     Stopped,
 }
-async fn wait_delay(ctl: &mut mpsc::Receiver<Control>, delay: Duration) -> Wait {
+async fn wait_delay(
+    ctl: &mut mpsc::Receiver<Control>,
+    delay: Duration,
+    cancel: &mut watch::Receiver<bool>,
+) -> Wait {
     let deadline = tokio::time::Instant::now() + delay;
     loop {
         tokio::select! {
+            _ = cancel.changed() => return Wait::Stopped,
             _ = tokio::time::sleep_until(deadline) => return Wait::Elapsed,
             control = ctl.recv() => match control {
                 Some(Control::RetryNow) => return Wait::Retry,
@@ -681,12 +698,25 @@ pub fn spawn_machine(cfg: MachineConfig) -> MachineHandle {
     let (state_tx, state) = watch::channel(initial);
     let (events, _) = broadcast::channel(256);
     let (ctl, ctl_rx) = mpsc::channel(64);
+    let (cancel, cancel_rx) = watch::channel(false);
     let task_events = events.clone();
     let task_state = state_tx.clone();
     tokio::spawn(async move {
-        run(cfg, ctl_rx, task_state.clone(), task_events.clone()).await;
+        run(
+            cfg,
+            ctl_rx,
+            cancel_rx,
+            task_state.clone(),
+            task_events.clone(),
+        )
+        .await;
         drop(task_state);
         drop(task_events);
     });
-    MachineHandle { state, events, ctl }
+    MachineHandle {
+        state,
+        events,
+        ctl,
+        cancel,
+    }
 }

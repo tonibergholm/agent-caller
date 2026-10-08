@@ -12,7 +12,6 @@ use crate::{
 };
 use acd_protocol::{Effect, pairing::Pairing};
 use std::sync::Mutex;
-use std::time::Instant;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -21,6 +20,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+use std::{net::IpAddr, time::Instant};
 use tokio::sync::{Notify, broadcast, watch};
 
 #[derive(Clone)]
@@ -50,6 +50,28 @@ pub enum PickError {
 struct Machine {
     entry: MachineEntry,
     handle: Option<MachineHandle>,
+}
+fn default_machine_name(host: &str) -> String {
+    if host.parse::<IpAddr>().is_ok() {
+        return host.to_owned();
+    }
+    host.split('.')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(host)
+        .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_machine_name;
+
+    #[test]
+    fn default_names_preserve_ip_addresses_and_use_dns_first_label() {
+        assert_eq!(default_machine_name("127.0.0.1"), "127.0.0.1");
+        assert_eq!(default_machine_name("2001:db8::1"), "2001:db8::1");
+        assert_eq!(default_machine_name("box.example.org"), "box");
+    }
 }
 struct Inner {
     settings: Settings,
@@ -160,35 +182,43 @@ impl Inbox {
         let pairing = Pairing::parse(line).map_err(|_| "That is not an acd pairing line. Run `acd pair` on the machine and copy its output.".to_owned())?;
         let mut inner = self.inner.lock().unwrap();
         let key_match = inner.settings.machines.iter().find(|m| matches!(&m.endpoint, EndpointConfig::Tcp { host, port } if host == &pairing.host && *port == pairing.port)).cloned();
-        let entry = key_match.unwrap_or_else(|| MachineEntry {
+        let entry = key_match.clone().unwrap_or_else(|| MachineEntry {
             key: uuid::Uuid::new_v4().to_string(),
-            name: pairing
-                .host
-                .split('.')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&pairing.host)
-                .to_owned(),
+            name: default_machine_name(&pairing.host),
             endpoint: EndpointConfig::Tcp {
                 host: pairing.host.clone(),
                 port: pairing.port,
             },
         });
-        self.secrets
-            .set(
-                &entry.key,
-                &MachineSecret {
-                    token: pairing.token,
-                    pin: pairing.pin,
-                }
-                .to_json(),
-            )
-            .map_err(|e| e.to_string())?;
-        inner.settings.machines.retain(|m| m.key != entry.key);
-        inner.settings.machines.push(entry.clone());
-        if let Some(path) = &self.opts.settings_path {
-            inner.settings.save(path).map_err(|e| e.to_string())?;
+        let secret_json = MachineSecret {
+            token: pairing.token,
+            pin: pairing.pin,
         }
+        .to_json();
+        let previous_secret = self
+            .secrets
+            .get(&entry.key)
+            .map_err(|_| "Could not read machine credentials".to_owned())?;
+        self.secrets
+            .set(&entry.key, &secret_json)
+            .map_err(|_| "Could not save machine credentials".to_owned())?;
+        let mut candidate = inner.settings.clone();
+        candidate.machines.retain(|m| m.key != entry.key);
+        candidate.machines.push(entry.clone());
+        if let Some(path) = &self.opts.settings_path
+            && let Err(error) = candidate.save(path)
+        {
+            match previous_secret {
+                Some(value) => {
+                    let _ = self.secrets.set(&entry.key, &value);
+                }
+                None => {
+                    let _ = self.secrets.delete(&entry.key);
+                }
+            }
+            return Err(error.to_string());
+        }
+        inner.settings = candidate;
         if let Some(old) = inner.machines.iter().position(|m| m.entry.key == entry.key) {
             for action in inner.actions.end_machine(&entry.key) {
                 inner.notices.insert(
@@ -199,7 +229,10 @@ impl Inbox {
                     ),
                 );
             }
-            inner.machines.remove(old); // dropping the handle aborts its task; pending submits become Uncertain.
+            if let Some(handle) = inner.machines[old].handle.take() {
+                handle.cancel();
+            }
+            inner.machines.remove(old);
         }
         let instance = self.next_instance.fetch_add(1, Ordering::Relaxed);
         let client_id = inner.settings.client_id.clone();
@@ -217,8 +250,8 @@ impl Inbox {
     }
     pub fn rename_machine(&self, key: &str, name: &str) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap();
-        let mut candidate = inner
-            .settings
+        let mut candidate_settings = inner.settings.clone();
+        let mut candidate = candidate_settings
             .machines
             .iter()
             .find(|m| m.key == key)
@@ -226,16 +259,16 @@ impl Inbox {
             .ok_or("Unknown machine")?;
         candidate.name = name.to_owned();
         candidate.validate().map_err(|e| e.to_string())?;
-        inner
-            .settings
+        candidate_settings
             .machines
             .iter_mut()
             .find(|m| m.key == key)
             .unwrap()
             .name = name.to_owned();
         if let Some(path) = &self.opts.settings_path {
-            inner.settings.save(path).map_err(|e| e.to_string())?;
+            candidate_settings.save(path).map_err(|e| e.to_string())?;
         }
+        inner.settings = candidate_settings;
         if let Some(machine) = inner.machines.iter_mut().find(|m| m.entry.key == key) {
             machine.entry.name = name.to_owned();
         }
@@ -251,10 +284,26 @@ impl Inbox {
             .iter()
             .position(|m| m.key == key)
             .ok_or("Unknown machine")?;
-        self.secrets.delete(key).map_err(|e| e.to_string())?;
-        inner.settings.machines.remove(pos);
+        self.secrets
+            .get(key)
+            .map_err(|_| "Could not read machine credentials".to_owned())?;
+        let old_settings = inner.settings.clone();
+        let mut candidate = old_settings.clone();
+        candidate.machines.remove(pos);
         if let Some(path) = &self.opts.settings_path {
-            inner.settings.save(path).map_err(|e| e.to_string())?;
+            candidate.save(path).map_err(|e| e.to_string())?;
+        }
+        if let Err(error) = self.secrets.delete(key) {
+            if let Some(path) = &self.opts.settings_path {
+                let _ = old_settings.save(path);
+            }
+            return Err(error.to_string());
+        }
+        inner.settings = candidate;
+        for machine in inner.machines.iter().filter(|m| m.entry.key == key) {
+            if let Some(handle) = &machine.handle {
+                handle.cancel();
+            }
         }
         inner.machines.retain(|m| m.entry.key != key);
         for action in inner.actions.end_machine(key) {
@@ -291,10 +340,12 @@ impl Inbox {
             return Err("Hotkey cannot be empty".into());
         }
         let mut inner = self.inner.lock().unwrap();
-        inner.settings.hotkey = hotkey.to_owned();
+        let mut candidate = inner.settings.clone();
+        candidate.hotkey = hotkey.to_owned();
         if let Some(path) = &self.opts.settings_path {
-            inner.settings.save(path).map_err(|e| e.to_string())?;
+            candidate.save(path).map_err(|e| e.to_string())?;
         }
+        inner.settings = candidate;
         Ok(())
     }
     #[cfg(feature = "testing")]
@@ -319,40 +370,30 @@ impl Inbox {
         if self.started.swap(true, Ordering::AcqRel) {
             return;
         }
+        let handles = {
+            let mut inner = self.inner.lock().unwrap();
+            let client_id = inner.settings.client_id.clone();
+            for machine in &mut inner.machines {
+                let instance = self.next_instance.fetch_add(1, Ordering::Relaxed);
+                machine.handle = spawn_for(
+                    &machine.entry,
+                    &self.secrets,
+                    &self.opts,
+                    instance,
+                    &client_id,
+                );
+            }
+            inner
+                .machines
+                .iter()
+                .filter_map(|m| m.handle.clone().map(|h| (m.entry.key.clone(), h)))
+                .collect::<Vec<_>>()
+        };
+        for (key, handle) in handles {
+            self.watch_machine(key, handle);
+        }
         let this = self.clone();
         tokio::spawn(async move {
-            {
-                let mut inner = this.inner.lock().unwrap();
-                let client_id = inner.settings.client_id.clone();
-                for machine in &mut inner.machines {
-                    let instance = this.next_instance.fetch_add(1, Ordering::Relaxed);
-                    machine.handle = spawn_for(
-                        &machine.entry,
-                        &this.secrets,
-                        &this.opts,
-                        instance,
-                        &client_id,
-                    );
-                }
-            }
-            let handles = {
-                let inner = this.inner.lock().unwrap();
-                inner
-                    .machines
-                    .iter()
-                    .filter_map(|m| m.handle.clone().map(|h| (m.entry.key.clone(), h)))
-                    .collect::<Vec<_>>()
-            };
-            for (key, handle) in handles {
-                let ib = this.clone();
-                let mut state = handle.state();
-                let mut events = handle.events();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::select! {r=state.changed()=>{if r.is_err(){break} ib.wake.notify_one();}, e=events.recv()=>match e {Ok((instance,event))=>ib.on_machine_event(&key,instance,event).await,Err(broadcast::error::RecvError::Lagged(_))=>{let instance = state.borrow().instance; ib.end_machine(&key, instance).await;},Err(_)=>break}}
-                    }
-                });
-            }
             loop {
                 this.fire_due().await;
                 this.rebuild().await;

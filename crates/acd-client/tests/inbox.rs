@@ -268,14 +268,8 @@ async fn import_pairing_stores_the_secret_and_never_reports_it() {
         "no secret or pin in anything the webview gets"
     );
     let c = f.next_connection().await;
-    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[]}))
-        .await;
-    if f.connections() > 1 {
-        f.next_connection()
-            .await
-            .send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[]}))
-            .await;
-    }
+    let snapshot = serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[]});
+    c.send(snapshot).await;
     view_until(&ib, "online", |v| {
         v.machines
             .iter()
@@ -287,6 +281,13 @@ async fn import_pairing_stores_the_secret_and_never_reports_it() {
         again.key, e.key,
         "re-pairing the same host:port updates the entry"
     );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.connections() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement connection should reach the fake server");
 }
 
 #[tokio::test]
@@ -436,4 +437,246 @@ async fn removing_a_machine_cancels_its_countdowns() {
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(answers(&f), 0);
     assert!(ib.view().borrow().actions.is_empty());
+}
+
+struct EchoFailSecrets;
+impl SecretStore for EchoFailSecrets {
+    fn get(&self, _: &str) -> Result<Option<String>, SecretError> {
+        Ok(None)
+    }
+    fn set(&self, _: &str, value: &str) -> Result<(), SecretError> {
+        Err(SecretError(value.into()))
+    }
+    fn delete(&self, _: &str) -> Result<(), SecretError> {
+        Ok(())
+    }
+}
+
+fn empty_inbox(
+    secrets: Arc<dyn SecretStore>,
+    settings_path: Option<std::path::PathBuf>,
+) -> Arc<Inbox> {
+    Inbox::new(
+        Settings {
+            machines: vec![],
+            ..Settings::fresh()
+        },
+        secrets,
+        InboxOptions {
+            timing: common::fast(),
+            settings_path,
+            client_name: "t".into(),
+            client_version: "0".into(),
+        },
+    )
+}
+
+#[tokio::test]
+async fn secret_backend_errors_never_echo_pairing_credentials() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let ib = empty_inbox(Arc::new(EchoFailSecrets), None);
+    let line = format!(
+        "acd://127.0.0.1:{}?pin={}#{}",
+        f.port(),
+        f.pin(),
+        common::TOKEN
+    );
+    let error = ib.import_pairing(&line).unwrap_err();
+    assert!(!error.contains(common::TOKEN));
+    assert!(!error.contains(&f.pin()));
+    assert_eq!(error, "Could not save machine credentials");
+}
+
+#[tokio::test]
+async fn pairing_import_uses_full_ip_as_default_machine_name() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let ib = empty_inbox(Arc::new(MemorySecrets::default()), None);
+    let line = format!(
+        "acd://127.0.0.1:{}?pin={}#{}",
+        f.port(),
+        f.pin(),
+        common::TOKEN
+    );
+    assert_eq!(ib.import_pairing(&line).unwrap().name, "127.0.0.1");
+}
+
+#[tokio::test]
+async fn save_failure_preserves_import_rename_remove_and_hotkey_state() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let d = tempfile::tempdir().unwrap();
+    let blocker = d.path().join("not-a-directory");
+    std::fs::write(&blocker, "file").unwrap();
+    let settings_path = blocker.join("settings.json");
+    let secrets = Arc::new(MemorySecrets::default());
+    let ib = Inbox::new(
+        Settings {
+            machines: vec![MachineEntry {
+                key: "m1".into(),
+                name: "Old".into(),
+                endpoint: EndpointConfig::Tcp {
+                    host: "127.0.0.1".into(),
+                    port: f.port(),
+                },
+            }],
+            ..Settings::fresh()
+        },
+        secrets.clone(),
+        InboxOptions {
+            timing: common::fast(),
+            settings_path: Some(settings_path),
+            client_name: "t".into(),
+            client_version: "0".into(),
+        },
+    );
+    secrets
+        .set(
+            "m1",
+            &MachineSecret {
+                token: common::TOKEN.into(),
+                pin: f.pin(),
+            }
+            .to_json(),
+        )
+        .unwrap();
+    let before = ib.settings();
+    assert!(ib.rename_machine("m1", "New").is_err());
+    assert_eq!(ib.settings(), before);
+    assert!(ib.set_hotkey("Ctrl+X").is_err());
+    assert_eq!(ib.settings(), before);
+    assert!(ib.remove_machine("m1").is_err());
+    assert_eq!(ib.settings(), before);
+    assert!(secrets.get("m1").unwrap().is_some());
+    let line = format!(
+        "acd://127.0.0.1:{}?pin={}#{}",
+        f.port(),
+        f.pin(),
+        common::TOKEN
+    );
+    assert!(ib.import_pairing(&line).is_err());
+    assert_eq!(ib.settings(), before);
+    assert!(secrets.get("m1").unwrap().is_some());
+}
+
+#[tokio::test]
+async fn unreadable_pairing_state_is_reported() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let secrets = Arc::new(MemorySecrets::default());
+    secrets.set("m1", "not-json").unwrap();
+    let ib = Inbox::new(
+        Settings {
+            machines: vec![MachineEntry {
+                key: "m1".into(),
+                name: "Box".into(),
+                endpoint: EndpointConfig::Tcp {
+                    host: "127.0.0.1".into(),
+                    port: f.port(),
+                },
+            }],
+            ..Settings::fresh()
+        },
+        secrets,
+        InboxOptions {
+            timing: common::fast(),
+            settings_path: None,
+            client_name: "t".into(),
+            client_version: "0".into(),
+        },
+    );
+    assert_eq!(ib.machines()[0].pairing, PairingState::Unreadable);
+}
+
+#[tokio::test]
+async fn rename_and_hotkey_are_persisted() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("settings.json");
+    let ib = Inbox::new(
+        Settings::fresh(),
+        Arc::new(MemorySecrets::default()),
+        InboxOptions {
+            timing: common::fast(),
+            settings_path: Some(path.clone()),
+            client_name: "t".into(),
+            client_version: "0".into(),
+        },
+    );
+    ib.rename_machine("local", "Work Mac").unwrap();
+    ib.set_hotkey("Ctrl+Space").unwrap();
+    let saved = Settings::load_or_init(&path).unwrap();
+    assert_eq!(saved.machines[0].name, "Work Mac");
+    assert_eq!(saved.hotkey, "Ctrl+Space");
+}
+
+#[tokio::test]
+async fn resolution_event_sets_terminal_notice() {
+    let (_f, c, ib) = setup().await;
+    c.send(serde_json::json!({"type":"request.resolved","epoch":"e1","seq":2,"request_id":ANSWER_REQ,"agent_id":"a1","by":"terminal","option_id":null})).await;
+    view_until(&ib, "resolution notice", |v| {
+        v.cards
+            .first()
+            .and_then(|c| c.notice.as_ref())
+            .is_some_and(|n| n.text == "Answered in the terminal")
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn replacement_cancels_machine_with_pending_submit_clone() {
+    let (f, old_conn, ib) = setup().await;
+    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while answers(&f) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let line = format!(
+        "acd://127.0.0.1:{}?pin={}#{}",
+        f.port(),
+        f.pin(),
+        common::TOKEN
+    );
+    ib.import_pairing(&line).unwrap();
+    old_conn.close(1001).await;
+    let replacement = f.next_connection().await;
+    replacement
+        .send(
+            serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]}),
+        )
+        .await;
+    view_until(&ib, "replacement ready after pending submit", |v| {
+        v.machines
+            .iter()
+            .any(|m| m.key == "m1" && m.status == acd_client::conn::MachineStatus::Online)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        answers(&f),
+        1,
+        "old submit must not retry after replacement"
+    );
+    assert_eq!(f.connections(), 2, "cancelled machine must not reconnect");
+}
+
+#[tokio::test]
+async fn removal_cancels_machine_with_pending_submit_clone() {
+    let (f, old_conn, ib) = setup().await;
+    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while answers(&f) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    ib.remove_machine("m1").unwrap();
+    old_conn.close(1001).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        answers(&f),
+        1,
+        "removed machine must not retry its pending submit"
+    );
+    assert_eq!(f.connections(), 1, "removed machine must not reconnect");
 }
