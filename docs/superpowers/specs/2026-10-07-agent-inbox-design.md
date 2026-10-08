@@ -727,9 +727,11 @@ Evidence: gate 3, a live check on T3 `v0.0.46-nightly.20261008.2801`
 - Thread streams come in three classes. **Request streams** are
   mandatory and uncapped: every thread with a pending request, or one acd
   still shows. **Working streams** cover working threads, at most 32.
-  **One discovery stream** at a time learns session ids, first for working
-  threads over the cap, then for recently active ones. Releasing a stream
-  drops that thread's detail.
+  **One discovery stream** at a time learns session ids, for working
+  threads over the cap and for recently active ones, taking turns, with a
+  null id retried at most every 60 s. A stream that does not synchronize
+  within 15 s is dropped and retried later. Releasing a stream drops that
+  thread's detail.
 - Resume uses `afterSequence`. Shell and thread events share one global
   sequence. Resume never fails: past T3's replay limits, the server sends a
   snapshot instead.
@@ -783,6 +785,8 @@ an answer. Otherwise:
   `answers: {<question id>: option.value ?? option.label}`.
 - T3 accepts one answer per request. A second respond fails with
   "Runtime request … is resolved." (or "is cancelled.", "was not found.").
+  Only a failure with that single cause counts; a failure with several
+  causes is `uncertain`.
   acd reports that as `request_gone` and resolves the request `terminal`
   (or `lost`).
 - T3 does **not** compare payloads when a `commandId` is reused: it returns
@@ -806,7 +810,9 @@ rules.
 
 **Ownership.** The provider session id is
 `providerThreads[].nativeThreadRef.nativeId` of the provider thread whose
-id equals `thread.activeProviderThreadId`. It equals the Claude Code
+id equals `thread.activeProviderThreadId`. acd publishes it only while
+the shell and the thread detail name the same active provider thread. It
+equals the Claude Code
 session id and the Codex rollout id, is stable across runs, and is `null`
 until the first turn. The adapter publishes a map from session id to T3
 agent for §6.2 rule 1. T3's Claude sessions report the entrypoint
@@ -1343,4 +1349,7 @@ approval options. acd authenticates with a Bearer header on the upgrade
 instead of a ticket, and an acknowledged T3 answer resolves `inbox`
 (§5.1). Sol reviewed the P4 plan (7 blocking findings, all accepted). §6.5
 now defines the three thread-stream classes, the at-most-one dispatch
-guarantee, and the concurrent-respond gate.
+guarantee, and the concurrent-respond gate. Round 2 (4 blocking findings,
+all accepted) added the agreement rule for session ownership, fair
+discovery, a synchronization deadline for thread streams, and
+conservative handling of multi-cause T3 failures.
