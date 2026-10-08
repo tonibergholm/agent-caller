@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-testing = []
+testing = ["dep:acd-core"]
 ts = ["dep:ts-rs", "acd-protocol/ts"]
 
 [dependencies]
@@ -27,10 +27,11 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 ts-rs = { workspace = true, optional = true }
 uuid.workspace = true
+acd-core = { workspace = true, optional = true, features = ["testing"] }
 
 [dev-dependencies]
 acd-client = { path = ".", features = ["testing", "ts"] }
-acd-core = { workspace = true, features = ["testing"] }
+tokio-rustls.workspace = true
 axum.workspace = true
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
