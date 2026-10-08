@@ -108,3 +108,74 @@ async fn subscription_streams_pushed_events_and_ends_on_close() {
     fake.drop_subscribers();
     assert_eq!(sub.next().await, None);
 }
+
+#[tokio::test]
+async fn subscription_next_is_cancel_safe() {
+    let fake = FakeHerdr::start().await;
+    let h = Herdr::new(fake.path().to_path_buf());
+    let mut sub = h.subscribe(&[]).await.unwrap();
+    fake.push_chunk(r#"{"event":"pane_closed","data":{"pane_id":"w1"#);
+    let t = std::time::Duration::from_millis(100);
+    assert!(tokio::time::timeout(t, sub.next()).await.is_err(), "half a line is not an event");
+    fake.push_chunk("\",\"type\":\"pane_closed\"}}\n");
+    assert_eq!(sub.next().await, Some(Event::Closed { pane_id: "w1".into() }));
+}
+
+#[tokio::test]
+async fn expired_deadline_sends_nothing() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p2", "claude", "idle"));
+    let h = Herdr::new(fake.path().to_path_buf());
+    let past = tokio::time::Instant::now() - std::time::Duration::from_millis(10);
+    let err = h.call_until("agent.prompt", serde_json::json!({"target": "w1:p2", "text": "hi"}), past).await.unwrap_err();
+    assert!(!err.reached_agent(), "{err:?}");
+    assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn caller_deadline_bounds_the_reply_wait() {
+    let fake = FakeHerdr::start().await;
+    fake.hang_next("agent.list");
+    let h = Herdr::new(fake.path().to_path_buf());
+    let t = std::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+    let err = h.call_until("agent.list", serde_json::json!({}), deadline).await.unwrap_err();
+    assert!(matches!(err, CallError::NoReply(_)), "{err:?}");
+    let e = t.elapsed();
+    assert!(e >= std::time::Duration::from_millis(400) && e < std::time::Duration::from_millis(1500), "{e:?}");
+}
+
+#[tokio::test]
+async fn wrong_result_type_is_no_reply() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    tokio::spawn(async move {
+        for _ in 0..3 {
+            let (s, _) = listener.accept().await.unwrap();
+            let (r, mut w) = s.into_split();
+            let mut line = String::new();
+            BufReader::new(r).read_line(&mut line).await.unwrap();
+            let id = serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"].clone();
+            let reply = serde_json::json!({"id": id, "result": {"type": "something_else", "agents": [], "agent": {"pane_id": "p"}}});
+            w.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+        }
+    });
+    let h = Herdr::new(path);
+    assert!(matches!(h.ping().await, Err(CallError::NoReply(_))));
+    assert!(matches!(h.list().await, Err(CallError::NoReply(_))));
+    assert!(matches!(h.get("p").await, Err(CallError::NoReply(_))));
+}
+
+#[tokio::test]
+async fn read_omits_lines_when_none() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p2", "claude", "idle"));
+    fake.set_screen("w1:p2", "detection", "hello");
+    let h = Herdr::new(fake.path().to_path_buf());
+    assert_eq!(h.read("w1:p2", "detection", None).await.unwrap(), "hello");
+    assert!(fake.calls().last().unwrap().1.get("lines").is_none());
+    h.read("w1:p2", "detection", Some(5)).await.unwrap();
+    assert_eq!(fake.calls().last().unwrap().1["lines"], 5);
+}

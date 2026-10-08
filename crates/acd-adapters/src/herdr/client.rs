@@ -112,6 +112,9 @@ impl Herdr {
     /// `min(CONNECT_TIMEOUT, remaining)`.
     pub async fn connect_until(&self, deadline: Instant) -> Result<Connected, CallError> {
         let now = Instant::now();
+        if now >= deadline {
+            return Err(CallError::Connect(io::Error::new(io::ErrorKind::TimedOut, "deadline already passed")));
+        }
         let deadline = deadline.min(now + CALL_TIMEOUT);
         let connect_by = deadline.min(now + CONNECT_TIMEOUT);
         let stream = timeout_at(connect_by, UnixStream::connect(&self.path))
@@ -124,20 +127,25 @@ impl Herdr {
 
     pub async fn ping(&self) -> Result<Pong, CallError> {
         let v = self.call("ping", json!({})).await?;
+        expect_type(&v, "pong")?;
         serde_json::from_value(v).map_err(|e| CallError::NoReply(format!("bad pong: {e}")))
     }
 
     pub async fn list(&self) -> Result<Vec<AgentInfo>, CallError> {
         let v = self.call("agent.list", json!({})).await?;
+        expect_type(&v, "agent_list")?;
         serde_json::from_value(v["agents"].clone()).map_err(|e| CallError::NoReply(format!("bad agent list: {e}")))
     }
 
     /// `Ok(None)` on `agent_not_found`.
     pub async fn get(&self, pane_id: &str) -> Result<Option<AgentInfo>, CallError> {
         match self.call("agent.get", json!({"target": pane_id})).await {
-            Ok(v) => serde_json::from_value(v["agent"].clone())
-                .map(Some)
-                .map_err(|e| CallError::NoReply(format!("bad agent: {e}"))),
+            Ok(v) => {
+                expect_type(&v, "agent_info")?;
+                serde_json::from_value(v["agent"].clone())
+                    .map(Some)
+                    .map_err(|e| CallError::NoReply(format!("bad agent: {e}")))
+            }
             Err(CallError::Server { code, .. }) if code == "agent_not_found" => Ok(None),
             Err(e) => Err(e),
         }
@@ -145,7 +153,10 @@ impl Herdr {
 
     /// `agent.read` with `strip_ansi: true`; returns `read.text`.
     pub async fn read(&self, pane_id: &str, source: &str, lines: Option<u32>) -> Result<String, CallError> {
-        let params = json!({"target": pane_id, "source": source, "lines": lines, "strip_ansi": true});
+        let mut params = json!({"target": pane_id, "source": source, "strip_ansi": true});
+        if let Some(n) = lines {
+            params["lines"] = json!(n);
+        }
         let v = self.call("agent.read", params).await?;
         v["read"]["text"]
             .as_str()
@@ -180,7 +191,7 @@ impl Herdr {
         let mut written = self.connect_until(deadline).await?.write("events.subscribe", json!({"subscriptions": subs})).await?;
         let v = written.read_reply().await?;
         expect_type(&v, "subscription_started")?;
-        Ok(Subscription { r: written.r, _w: written._w, buf: String::new() })
+        Ok(Subscription { r: written.r, _w: written._w, buf: Vec::new() })
     }
 }
 
@@ -197,6 +208,9 @@ impl Connected {
     /// flushed. A failure is `Write`: herdr frames requests by newline, so a
     /// partial line is never dispatched.
     pub async fn write(mut self, method: &str, params: Value) -> Result<Written, CallError> {
+        if Instant::now() >= self.deadline {
+            return Err(CallError::Write(io::Error::new(io::ErrorKind::TimedOut, "deadline already passed")));
+        }
         let id = next_request_id();
         let mut line = serde_json::to_vec(&json!({"id": id, "method": method, "params": params})).expect("json");
         line.push(b'\n');
@@ -250,17 +264,19 @@ pub struct Subscription {
     r: BufReader<OwnedReadHalf>,
     _w: OwnedWriteHalf,
     // Kept across calls so a cancelled `next` loses no partial line.
-    buf: String,
+    buf: Vec<u8>,
 }
 
 impl Subscription {
+    /// Cancel safe: `read_until` keeps what it read in `buf`, and `buf` is
+    /// cleared only once a whole line has been consumed.
     pub async fn next(&mut self) -> Option<Event> {
         loop {
-            match self.r.read_line(&mut self.buf).await {
+            match self.r.read_until(b'\n', &mut self.buf).await {
                 Ok(0) | Err(_) => return None,
-                Ok(_) if !self.buf.ends_with('\n') => continue,
+                Ok(_) if self.buf.last() != Some(&b'\n') => continue,
                 Ok(_) => {
-                    let event = parse_event(self.buf.trim_end());
+                    let event = parse_event(String::from_utf8_lossy(&self.buf).trim_end());
                     self.buf.clear();
                     return Some(event);
                 }

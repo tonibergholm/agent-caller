@@ -155,8 +155,13 @@ impl FakeHerdr {
     }
 
     pub fn push_raw(&self, line: &str) {
+        self.push_chunk(&format!("{line}\n"));
+    }
+
+    /// Pushes bytes as given, with no newline added (for split-line tests).
+    pub fn push_chunk(&self, chunk: &str) {
         for s in &self.st().subscribers {
-            let _ = s.tx.send(line.to_owned());
+            let _ = s.tx.send(chunk.to_owned());
         }
     }
 
@@ -210,7 +215,8 @@ fn set_status_locked(st: &mut State, pane_id: &str, status: &str) {
         },
         "event": "pane.agent_status_changed",
     })
-    .to_string();
+    .to_string()
+        + "\n";
     for s in st.subscribers.iter().filter(|s| s.panes.contains(pane_id)) {
         let _ = s.tx.send(frame.clone());
     }
@@ -282,7 +288,7 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
 
     if let Some(mut rx) = stream_rx {
         while let Some(frame) = rx.recv().await {
-            if w.write_all(frame.as_bytes()).await.is_err() || w.write_all(b"\n").await.is_err() {
+            if w.write_all(frame.as_bytes()).await.is_err() {
                 return;
             }
         }
