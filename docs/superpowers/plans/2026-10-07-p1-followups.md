@@ -39,6 +39,13 @@ its name.
 
 ## P3: hooks and service
 
+- Answer revisions (docs/superpowers/plans/2026-10-08-p5-answer-revision.md):
+  a herdr keys target must stay immutable for the life of an occurrence,
+  or be bound to the revision or digest that was claimed. Today the
+  target is fetched after the claim from a replaceable map
+  (crates/acd-adapters/src/herdr/keys.rs), so the revision check alone
+  does not cover it.
+
 - P3 ownership rule 1: read `T3Adapter::sessions()` (`SessionMap`). For each
   Claude session, if `SessionMap::owner(session_id)` is `Some`, drop the
   hook-side and discovery state for that session. Re-evaluate sessions whose
