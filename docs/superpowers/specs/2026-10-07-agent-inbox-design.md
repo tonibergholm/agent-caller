@@ -724,9 +724,12 @@ Evidence: gate 3, a live check on T3 `v0.0.46-nightly.20261008.2801`
 - The shell stream lists threads with their status and
   `pendingRuntimeRequest {id, kind}`. Request detail and the provider
   session id exist only in a thread stream.
-- acd subscribes to a thread while it has a pending request or acd shows
-  one for it, while it is working (at most 32 such streams), and, one at a
-  time, to learn the session id of a recently active thread.
+- Thread streams come in three classes. **Request streams** are
+  mandatory and uncapped: every thread with a pending request, or one acd
+  still shows. **Working streams** cover working threads, at most 32.
+  **One discovery stream** at a time learns session ids, first for working
+  threads over the cap, then for recently active ones. Releasing a stream
+  drops that thread's detail.
 - Resume uses `afterSequence`. Shell and thread events share one global
   sequence. Resume never fails: past T3's replay limits, the server sends a
   snapshot instead.
@@ -787,9 +790,13 @@ an answer. Otherwise:
   dispatch, never derived from a client command id, and relies on its own
   idempotency cache (§7.4) for retries and `duplicate_mismatch`.
 - The `Success` acknowledgement of acd's respond is the outcome evidence:
-  the request resolves `by: "inbox"`.
-- A reply lost after the frame was written is `uncertain`. acd never
-  resends.
+  the request resolves `by: "inbox"`. This rests on T3 accepting exactly
+  one of two *concurrent* responds, which P4 must verify live before merge
+  (gate 3 only showed the sequential case).
+- A reply lost after the frame was written, or a send error once the
+  write has started, is `uncertain`. acd never resends, so each acd
+  command makes at most one dispatch attempt within the idempotency
+  window (§7.4).
 
 **Follow-ups.** `message.dispatch` with `createdBy: "user"`,
 `creationSource: "web"`, a new `messageId`, `attachments: []`,
@@ -1334,4 +1341,6 @@ more fields; the provider session id is in thread detail; Claude's command
 comes from the sibling `command_execution` item; and neither provider sends
 approval options. acd authenticates with a Bearer header on the upgrade
 instead of a ticket, and an acknowledged T3 answer resolves `inbox`
-(§5.1).
+(§5.1). Sol reviewed the P4 plan (7 blocking findings, all accepted). §6.5
+now defines the three thread-stream classes, the at-most-one dispatch
+guarantee, and the concurrent-respond gate.
