@@ -9,8 +9,9 @@ pub mod testing;
 
 pub use adapter::{Adapter, DeliverError};
 pub use engine::{Core, IDEM_TTL, MAX_ID_BYTES, MAX_TEXT_BYTES, RING_CAPACITY};
-pub use idem::{Begin, IdemCache, IDEM_CAPACITY};
+pub use idem::{Begin, IDEM_CAPACITY, IdemCache};
 pub use log::EventLog;
 pub use registry::*;
 pub mod server;
-pub use server::{router, Auth, ServerOptions};
+pub mod tls;
+pub use server::{Auth, ServerOptions, router};

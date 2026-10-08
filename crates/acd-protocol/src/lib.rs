@@ -1,6 +1,7 @@
 //! Wire types for the acd/1 protocol. See PROTOCOL.md.
 mod messages;
 mod model;
+pub mod pairing;
 pub mod schema;
 
 pub use messages::*;
