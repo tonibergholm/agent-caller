@@ -1,0 +1,21 @@
+{
+ "id": "1",
+ "result": {
+  "type": "agent_info",
+  "agent": {
+   "terminal_id": "term_65d4be8194b791",
+   "agent": "codex",
+   "terminal_title": "cd /tmp/acp2/proj; clear; codex",
+   "terminal_title_stripped": "cd /tmp/acp2/proj; clear; codex",
+   "agent_status": "blocked",
+   "workspace_id": "w1",
+   "tab_id": "w1:t1",
+   "pane_id": "w1:p1",
+   "focused": true,
+   "state_change_seq": 8,
+   "cwd": "/tmp",
+   "foreground_cwd": "/private/tmp/acp2/proj",
+   "revision": 8
+  }
+ }
+}
