@@ -5,6 +5,7 @@ mod panel;
 use tauri::{RunEvent, WebviewWindow};
 use tauri_plugin_notification::NotificationExt;
 
+// GATE (Task 13): remove in Task 16
 #[tauri::command]
 fn gate_notify(window: WebviewWindow) -> Result<(), String> {
     window
@@ -16,12 +17,14 @@ fn gate_notify(window: WebviewWindow) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+// GATE (Task 13): remove in Task 16
 #[tauri::command]
 fn gate_keychain_roundtrip() -> Result<(), String> {
     keychain::gate_roundtrip().map_err(|error| error.to_string())
 }
 
 fn main() {
+    // GATE (Task 13): remove in Task 16
     // Gate diagnostics: `open` discards stdout, so log to a file as well.
     let log_dir = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
@@ -47,10 +50,12 @@ fn main() {
         .plugin(tauri_nspanel::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(hotkey::plugin())
+        // GATE (Task 13): remove in Task 16
         .invoke_handler(tauri::generate_handler![gate_notify, gate_keychain_roundtrip])
         .setup(|app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             panel::create(app.handle())?;
+            // GATE (Task 13): remove in Task 16
             let registered = hotkey::apply(app.handle(), "Control+Alt+Space");
             tracing::info!(?registered, "gate hotkey Control+Alt+Space");
             registered.map_err(std::io::Error::other)?;

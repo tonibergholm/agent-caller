@@ -37,9 +37,7 @@ pub fn gate_roundtrip() -> Result<(), SecretError> {
 
     match (check, cleanup) {
         (Ok(Some(actual)), Ok(())) if actual == value => Ok(()),
-        (Ok(actual), Ok(())) => Err(SecretError(format!(
-            "Keychain readback mismatch: expected throwaway value, got {actual:?}"
-        ))),
+        (Ok(_), Ok(())) => Err(SecretError("Keychain readback mismatch".into())),
         (Err(error), Ok(())) => Err(error),
         (_, Err(error)) => Err(SecretError(format!("Keychain cleanup failed: {error}"))),
     }

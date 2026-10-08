@@ -22,7 +22,8 @@ tauri_panel! {
     })
 }
 
-/// Call from `setup`, which runs on the main thread.
+/// Creates the panel directly because Tauri `setup` runs on the main thread.
+/// This must only be called from `setup`.
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let panel = PanelBuilder::<_, InboxPanel>::new(app, "panel")
         .url(WebviewUrl::App("index.html".into()))
@@ -61,38 +62,46 @@ pub fn is_visible() -> bool {
 }
 
 pub fn toggle(app: &AppHandle) {
-    if is_visible() {
-        hide(app);
-    } else {
-        show(app);
-    }
-}
-
-pub fn show(app: &AppHandle) {
     let handle = app.clone();
-    let queued = app.run_on_main_thread(move || {
-        tracing::info!("show: on main thread");
-        let found = handle.get_webview_panel("panel");
-        if found.is_err() {
-            tracing::warn!(windows = ?handle.webview_windows().keys().collect::<Vec<_>>(), "show: panel not found");
-        }
-        if let Ok(panel) = found {
-            panel.show_and_make_key();
-            VISIBLE.store(true, Ordering::SeqCst);
-            tracing::info!("panel shown");
-            let _ = handle.emit("panel://shown", ());
+    let _ = app.run_on_main_thread(move || {
+        if is_visible() {
+            hide_on_main_thread(&handle);
+        } else {
+            show_on_main_thread(&handle);
         }
     });
-    tracing::info!(?queued, "show: queued");
+}
+
+#[allow(dead_code)] // Public thread-safe operation; toggle uses its main-thread implementation.
+pub fn show(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || show_on_main_thread(&handle));
 }
 
 pub fn hide(app: &AppHandle) {
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let Ok(panel) = handle.get_webview_panel("panel") {
-            panel.hide();
-            VISIBLE.store(false, Ordering::SeqCst);
-            tracing::info!("panel hidden");
-        }
-    });
+    let _ = app.run_on_main_thread(move || hide_on_main_thread(&handle));
+}
+
+fn show_on_main_thread(handle: &AppHandle) {
+    // GATE (Task 13): remove in Task 16
+    let found = handle.get_webview_panel("panel");
+    if found.is_err() {
+        // GATE (Task 13): remove in Task 16
+        tracing::warn!(windows = ?handle.webview_windows().keys().collect::<Vec<_>>(), "show: panel not found");
+    }
+    if let Ok(panel) = found {
+        panel.show_and_make_key();
+        VISIBLE.store(true, Ordering::SeqCst);
+        tracing::info!("panel shown");
+        let _ = handle.emit("panel://shown", ());
+    }
+}
+
+fn hide_on_main_thread(handle: &AppHandle) {
+    if let Ok(panel) = handle.get_webview_panel("panel") {
+        panel.hide();
+        VISIBLE.store(false, Ordering::SeqCst);
+        tracing::info!("panel hidden");
+    }
 }

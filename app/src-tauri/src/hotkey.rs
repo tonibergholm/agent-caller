@@ -1,5 +1,8 @@
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use std::sync::Mutex;
+
+static CURRENT_SHORTCUT: Mutex<Option<Shortcut>> = Mutex::new(None);
 
 pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_global_shortcut::Builder::new()
@@ -13,14 +16,42 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 }
 
 pub fn apply(app: &AppHandle, hotkey: &str) -> Result<(), String> {
-    let shortcut: Shortcut = hotkey
-        .parse()
-        .map_err(|error| format!("Not a valid shortcut: {error}"))?;
+    let shortcut = parse_shortcut(hotkey)?;
     let shortcuts = app.global_shortcut();
-    shortcuts
-        .unregister_all()
-        .map_err(|error| error.to_string())?;
+    let mut current = CURRENT_SHORTCUT
+        .lock()
+        .map_err(|_| "Hotkey state lock poisoned".to_string())?;
+    if current.as_ref() == Some(&shortcut) {
+        return Ok(());
+    }
     shortcuts
         .register(shortcut)
-        .map_err(|error| format!("Could not register {hotkey}: {error}"))
+        .map_err(|error| format!("Could not register {hotkey}: {error}"))?;
+    if let Some(old) = current.as_ref() {
+        shortcuts
+            .unregister(*old)
+            .map_err(|error| error.to_string())?;
+    }
+    *current = Some(shortcut);
+    Ok(())
+}
+
+fn parse_shortcut(hotkey: &str) -> Result<Shortcut, String> {
+    hotkey
+        .parse()
+        .map_err(|error| format!("Not a valid shortcut: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_shortcut;
+
+    #[test]
+    fn parses_new_shortcut_before_any_registration_change() {
+        let parsed = parse_shortcut("Control+Alt+Space");
+        assert!(parsed.is_ok());
+
+        let invalid = parse_shortcut("not a shortcut");
+        assert!(invalid.is_err());
+    }
 }
