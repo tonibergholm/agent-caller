@@ -726,7 +726,7 @@ impl Reconciler {
                 {
                     self.upsert_project_threads(id);
                 } else {
-                    tracing::debug!(kind = %redact_log(&v["kind"].to_string()), "T3 shell item ignored");
+                    tracing::debug!(kind = %redact_log(&wire::safe_tag(&v["kind"]).to_string()), "T3 shell item ignored");
                 }
             }
             Err(_) => self.decode_error("shell item", v, v["thread"]["id"].as_str()),
@@ -1036,7 +1036,7 @@ impl Reconciler {
                 finish_discovery = t.class == Some(Class::Discovery);
             }
             Ok(ThreadItem::Other) => {
-                tracing::debug!(kind = %redact_log(&v["kind"].to_string()), "T3 thread item ignored");
+                tracing::debug!(kind = %redact_log(&wire::safe_tag(&v["kind"]).to_string()), "T3 thread item ignored");
             }
             Err(_) => skipped = 1,
         }
@@ -1469,4 +1469,44 @@ fn unknown_obs(thread_id: &str, last: Option<&AgentObs>) -> AgentObs {
     obs.state = AgentState::Unknown;
     obs.failed = false;
     obs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<StdMutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn unreadable_log_omits_item_text() {
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let item = json!({"kind": "token=abc def", "message": "token=abc def"});
+        let expected = wire::value_fingerprint(&item).to_string();
+
+        log_unreadable("item", &item);
+
+        let output = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        assert!(!output.contains("token=abc def"), "{output}");
+        assert!(output.contains(&expected), "{output}");
+    }
 }

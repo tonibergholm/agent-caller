@@ -118,12 +118,26 @@ pub(crate) fn string_fingerprint(text: &str) -> Value {
     json!({"bytes": text.len(), "sha256": hash})
 }
 
+/// Returns a protocol tag only when it is a bounded ASCII identifier.
+pub(crate) fn safe_tag(value: &Value) -> Value {
+    if let Some(tag) = value.as_str()
+        && tag.len() <= 64
+        && tag.bytes().enumerate().all(|(index, byte)| match index {
+            0 => byte.is_ascii_alphabetic(),
+            _ => byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'),
+        })
+    {
+        return Value::String(tag.to_owned());
+    }
+    string_fingerprint(&value.to_string())
+}
+
 /// A server value represented without its contents for debug diagnostics.
 pub(crate) fn value_fingerprint(value: &Value) -> Value {
     let mut summary = serde_json::Map::new();
     for key in ["_tag", "kind"] {
-        if let Some(tag) = value.get(key).and_then(Value::as_str) {
-            summary.insert(key.into(), Value::String(tag.into()));
+        if let Some(tag) = value.get(key) {
+            summary.insert(key.into(), safe_tag(tag));
         }
     }
     let mut strings = vec![];
@@ -150,7 +164,7 @@ pub(crate) fn failure_json(f: &Failure) -> Value {
     let cause = |c: &Cause| match c {
         Cause::Fail { error } => json!({
             "_tag": "Fail",
-            "error_tag": error.get("_tag").and_then(Value::as_str).unwrap_or(""),
+            "error_tag": safe_tag(error.get("_tag").unwrap_or(&Value::Null)),
             "detail": value_fingerprint(error),
         }),
         Cause::Die { defect } => json!({"_tag": "Die", "detail": value_fingerprint(defect)}),
@@ -159,7 +173,7 @@ pub(crate) fn failure_json(f: &Failure) -> Value {
     };
     match f {
         Failure::Fail { tag, message } => json!({
-            "_tag": "Fail", "error_tag": tag, "message": string_fingerprint(message),
+            "_tag": "Fail", "error_tag": safe_tag(&Value::String(tag.clone())), "message": string_fingerprint(message),
         }),
         Failure::Die(d) => json!({"_tag": "Die", "defect": string_fingerprint(d)}),
         Failure::Interrupted => json!({"_tag": "Interrupt"}),
@@ -431,4 +445,36 @@ pub enum TurnItem {
 
 pub fn turn_item(v: &Value) -> Result<TurnItem, serde_json::Error> {
     TurnItem::deserialize(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_tag_preserves_protocol_tags_and_fingerprints_other_values() {
+        assert_eq!(
+            safe_tag(&json!("approval_request")),
+            json!("approval_request")
+        );
+        assert_eq!(
+            safe_tag(&json!("orchestration.subscribeShell")),
+            json!("orchestration.subscribeShell")
+        );
+
+        for value in [json!("token=abc def"), json!({"secret": "token=abc def"})] {
+            let tag = safe_tag(&value);
+            assert!(tag.get("bytes").is_some(), "{tag}");
+            assert!(tag.get("sha256").is_some(), "{tag}");
+            assert!(!tag.to_string().contains("token=abc def"), "{tag}");
+        }
+    }
+
+    #[test]
+    fn fingerprints_only_safe_tag_fields() {
+        let detail = value_fingerprint(&json!({"kind": "token=abc def", "_tag": {"x": 1}}));
+        assert!(!detail.to_string().contains("token=abc def"), "{detail}");
+        assert!(detail["kind"].get("sha256").is_some(), "{detail}");
+        assert!(detail["_tag"].get("sha256").is_some(), "{detail}");
+    }
 }

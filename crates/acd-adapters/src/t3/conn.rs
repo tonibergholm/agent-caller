@@ -715,6 +715,21 @@ impl Conn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<StdMutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn unreadable_frame_fingerprint_omits_frame_text() {
@@ -724,6 +739,39 @@ mod tests {
         assert!(!detail.contains("top-secret"), "{detail}");
         assert!(detail.contains("\"bytes\""), "{detail}");
         assert!(detail.contains("\"sha256\""), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn unreadable_frame_log_omits_frame_text() {
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let frame = "not json: token=abc def";
+        let expected = string_fingerprint(frame).to_string();
+        let fake = super::super::fake::FakeT3::start().await;
+        tokio::task::yield_now().await;
+        let url = ws_url(&fake.url()).expect("fake URL");
+        let connected = connect(&url, super::super::fake::FAKE_TOKEN, &ConnTiming::default()).await;
+        assert!(
+            connected.is_ok(),
+            "connect failed: {}; {}",
+            connected.as_ref().err().unwrap(),
+            String::from_utf8_lossy(&buffer.0.lock().unwrap())
+        );
+        let (conn, _) = connected.unwrap();
+
+        fake.send_raw(frame);
+        tokio::time::timeout(Duration::from_secs(1), conn.closed())
+            .await
+            .expect("connection did not close");
+        let output = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        assert!(!output.contains(frame), "{output}");
+        assert!(output.contains(&expected), "{output}");
     }
 
     #[tokio::test]

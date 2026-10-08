@@ -8,6 +8,8 @@ use std::sync::RwLock;
 
 use tokio::sync::watch;
 
+use super::wire::string_fingerprint;
+
 #[derive(Default)]
 struct Claims {
     /// Agent id -> the session id it claims.
@@ -71,7 +73,7 @@ impl SessionMap {
                     let c = by_session.entry(s.to_owned()).or_default();
                     if let Some(first) = c.first() {
                         tracing::debug!(
-                            owner = %first, claimant = %agent_id,
+                            owner = %string_fingerprint(first), claimant = %string_fingerprint(agent_id),
                             "T3 session id claimed by two threads; the first keeps it"
                         );
                     }
