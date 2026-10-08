@@ -23,6 +23,10 @@ pub enum DeliverError {
 /// future when the client token is rotated, and then treats a `deliver` in
 /// flight as possibly delivered (the request resolves `uncertain`). Dropping
 /// the future must never leave a half-sent answer that completes later.
+/// A request that was fully written to the source before the future was
+/// dropped may still take effect. That is why the core resolves a dropped
+/// delivery `uncertain` and caches `delivered`. What must never happen is
+/// a send that *starts* after the drop.
 /// Lifecycle (non-held) hook-style work must reply within 1 s.
 ///
 /// **Errors.** Return `NotDelivered` only when nothing reached the agent.

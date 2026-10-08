@@ -49,6 +49,14 @@ pub enum Observation {
     RequestPath { agent_id: String, key: CorrelationKey, answer_path: AnswerPath },
     RequestEnded { agent_id: String, key: CorrelationKey, by: ResolvedBy },
     DialogGone { agent_id: String, key: CorrelationKey },
+    /// Ends exactly this request if it is still unresolved; otherwise a no-op.
+    RequestEndedById { request_id: String, by: ResolvedBy },
+    /// Marks every key of this occurrence confirmed gone, resolved or not.
+    DialogGoneById { request_id: String },
+    /// Like `RequestSeen`, but a no-op while a structured request is pending.
+    FallbackSeen(RequestObs),
+    /// Ends a fallback request and confirms only the fallback key gone.
+    FallbackEnded { agent_id: String, key: CorrelationKey, request_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -79,6 +87,9 @@ struct KeyState {
     generation: u64,
     open_request: Option<String>,
     confirmed_gone: bool,
+    /// The last request this key claimed; kept after the request resolves so
+    /// late observations can be matched to their occurrence.
+    last_request: Option<String>,
     /// A non-reusable key is tombstoned once its request resolves.
     reusable: bool,
 }
@@ -109,12 +120,12 @@ impl Registry {
             Observation::AgentGone { agent_id } => self.agent_gone(&agent_id),
             Observation::RequestSeen(o) => self.request_seen(o),
             Observation::RequestReady { agent_id, key, ready } => {
-                if let Some(rid) = self.primary_request_for(&agent_id, &key)
+                if let Some(rid) = self.request_id_for(&agent_id, &key)
                     && let Some(e) = self.requests.get_mut(&rid) { e.ready = ready; }
                 vec![]
             }
             Observation::RequestPath { agent_id, key, answer_path } => {
-                let Some(rid) = self.primary_request_for(&agent_id, &key) else { return vec![] };
+                let Some(rid) = self.request_id_for(&agent_id, &key) else { return vec![] };
                 let Some(e) = self.requests.get_mut(&rid) else { return vec![] };
                 if e.req.status != RequestStatus::Open || e.req.answer_path == answer_path { return vec![]; }
                 e.req.answer_path = answer_path;
@@ -125,12 +136,33 @@ impl Registry {
                 if confirming && let Some(st) = self.keys.get_mut(&(agent_id.clone(), key.clone())) {
                     st.confirmed_gone = true;
                 }
-                let rid = if confirming { self.open_request_for(&agent_id, &key) } else { self.primary_request_for(&agent_id, &key) };
+                let rid = if confirming { self.open_request_for(&agent_id, &key) } else { self.request_id_for(&agent_id, &key) };
                 rid.map(|rid| self.resolve_request(&rid, by)).unwrap_or_default()
             }
             Observation::DialogGone { agent_id, key } => {
                 if let Some(st) = self.keys.get_mut(&(agent_id, key)) { st.confirmed_gone = true; }
                 vec![]
+            }
+            Observation::RequestEndedById { request_id, by } => {
+                if !self.requests.contains_key(&request_id) { return vec![]; }
+                if matches!(by, ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent) {
+                    self.mark_gone_by_id(&request_id);
+                }
+                self.resolve_request(&request_id, by)
+            }
+            Observation::DialogGoneById { request_id } => { self.mark_gone_by_id(&request_id); vec![] }
+            Observation::FallbackSeen(o) => {
+                let structured = self.agents.get(&o.agent_id)
+                    .and_then(|a| a.pending.as_ref())
+                    .is_some_and(|p| p.kind != RequestKind::BlockedUnparsed);
+                if structured { vec![] } else { self.request_seen(o) }
+            }
+            Observation::FallbackEnded { agent_id, key, request_id } => {
+                let still_fallback = self.requests.get(&request_id)
+                    .is_some_and(|e| e.req.kind == RequestKind::BlockedUnparsed && e.req.answer_path == AnswerPath::None);
+                if let Some(k) = self.keys.get_mut(&(agent_id, key))
+                    && k.last_request.as_deref() == Some(request_id.as_str()) { k.confirmed_gone = true; }
+                if still_fallback { self.resolve_request(&request_id, ResolvedBy::Terminal) } else { vec![] }
             }
         }
     }
@@ -158,13 +190,19 @@ impl Registry {
         out
     }
 
+    fn mark_gone_by_id(&mut self, request_id: &str) {
+        for k in self.keys.values_mut() {
+            if k.last_request.as_deref() == Some(request_id) { k.confirmed_gone = true; }
+        }
+    }
+
     fn open_request_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String> {
         self.keys.get(&(agent_id.to_string(), key.clone())).and_then(|k| k.open_request.clone())
     }
 
     /// The agent's open request whose primary key is `key`. An alias left
     /// behind by an upgrade is skipped.
-    fn primary_request_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String> {
+    pub fn request_id_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String> {
         self.open_request_for(agent_id, key).filter(|rid| self.requests.get(rid).is_some_and(|e| e.key == *key))
     }
 
@@ -263,6 +301,7 @@ impl Registry {
         k.reusable = reusable;
         k.generation += 1;
         k.open_request = Some(rid.to_string());
+        k.last_request = Some(rid.to_string());
         k.confirmed_gone = false;
     }
 

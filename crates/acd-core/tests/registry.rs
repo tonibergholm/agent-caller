@@ -273,3 +273,102 @@ fn reusable_key_reopens_after_confirmed_end() {
     assert_eq!(again.len(), 1);
     assert_ne!(again[0].id, first);
 }
+
+#[test]
+fn replayed_lost_end_is_a_no_op() {
+    let mut r = reg_with_agent();
+    r.apply(Observation::RequestSeen(perm("a1", "k", "ls")));
+    let first = r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("k".into()), by: ResolvedBy::Lost });
+    assert_eq!(resolved(&first).len(), 1);
+    let again = r.apply(Observation::RequestEnded { agent_id: "a1".into(), key: CorrelationKey("k".into()), by: ResolvedBy::Lost });
+    assert!(again.is_empty(), "a replayed Lost must not emit anything: {again:?}");
+}
+
+#[test]
+fn request_path_is_ignored_unless_open() {
+    let mut r = reg_with_agent();
+    let rid = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0].id.clone();
+    r.claim(&rid, Answer::Option("allow".into())).unwrap();
+    let changes = r.apply(Observation::RequestPath { agent_id: "a1".into(), key: CorrelationKey("k".into()), answer_path: AnswerPath::Keys });
+    assert!(changes.is_empty());
+    assert_eq!(r.request(&rid).unwrap().answer_path, AnswerPath::Hook);
+}
+
+#[test]
+fn removed_then_readded_agent_starts_clean() {
+    let mut r = reg_with_agent();
+    let rid = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0].id.clone();
+    r.apply(Observation::AgentGone { agent_id: "a1".into() });
+    assert!(r.request(&rid).is_none());
+    r.apply(Observation::AgentUpsert(agent("a1")));
+    assert!(r.agent("a1").unwrap().pending.is_none());
+    let again = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))));
+    assert_eq!(again.len(), 1);
+    assert_ne!(again[0].id, rid);
+}
+
+#[test]
+fn end_by_id_touches_only_that_occurrence() {
+    let mut r = reg_with_agent();
+    let k = CorrelationKey("k".into());
+    let first = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0].id.clone();
+    assert_eq!(r.request_id_for("a1", &k), Some(first.clone()));
+    let ended = r.apply(Observation::RequestEndedById { request_id: first.clone(), by: ResolvedBy::Terminal });
+    assert_eq!(resolved(&ended), vec![(first.clone(), ResolvedBy::Terminal, None)]);
+    // Confirmed gone, so the reusable key opens a second occurrence.
+    let second = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0].id.clone();
+    assert_ne!(second, first);
+    // A late end for the first occurrence must not resolve the second.
+    assert!(r.apply(Observation::RequestEndedById { request_id: first, by: ResolvedBy::Terminal }).is_empty());
+    assert_eq!(r.request(&second).unwrap().status, RequestStatus::Open);
+}
+
+#[test]
+fn late_dialog_gone_does_not_touch_a_newer_occurrence() {
+    let mut r = reg_with_agent();
+    let a = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0].id.clone();
+    r.apply(Observation::RequestEndedById { request_id: a.clone(), by: ResolvedBy::Terminal });
+    let b = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0].id.clone();
+    r.apply(Observation::RequestEndedById { request_id: b.clone(), by: ResolvedBy::Uncertain }); // B not confirmed gone
+    r.apply(Observation::DialogGoneById { request_id: a }); // late, for A
+    assert!(opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls")))).is_empty(),
+        "B's key must stay unconfirmed, so a replay of B's dialog is not a new occurrence");
+    r.apply(Observation::DialogGoneById { request_id: b });
+    assert_eq!(opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls")))).len(), 1);
+}
+
+#[test]
+fn fallback_never_supersedes_and_never_ends_an_upgraded_request() {
+    let mut r = reg_with_agent();
+    let mut fb = perm("a1", "fb", "");
+    fb.kind = RequestKind::BlockedUnparsed; fb.answer_path = AnswerPath::None; fb.options = vec![];
+    // A structured request is pending: FallbackSeen is a no-op.
+    let hook = opened(&r.apply(Observation::RequestSeen(perm("a1", "hook", "ls"))))[0].id.clone();
+    assert!(r.apply(Observation::FallbackSeen(fb.clone())).is_empty());
+    assert_eq!(r.agent("a1").unwrap().pending.as_ref().unwrap().id, hook);
+    r.apply(Observation::RequestEndedById { request_id: hook, by: ResolvedBy::Terminal });
+    // Nothing pending: FallbackSeen opens; P3 upgrades it in place.
+    let rid = opened(&r.apply(Observation::FallbackSeen(fb)))[0].id.clone();
+    let mut up = perm("a1", "hook2", "ls");
+    up.upgrade_from = Some(CorrelationKey("fb".into()));
+    r.apply(Observation::RequestSeen(up));
+    assert!(resolved(&r.apply(Observation::FallbackEnded { agent_id: "a1".into(), key: CorrelationKey("fb".into()), request_id: rid.clone() })).is_empty());
+    assert_eq!(r.request(&rid).unwrap().kind, RequestKind::Permission);
+    // The structured dialog is still up. If its request resolves uncertain, a replay
+    // of it must NOT open a new occurrence: only the fallback key was confirmed gone.
+    r.apply(Observation::RequestEndedById { request_id: rid, by: ResolvedBy::Uncertain });
+    assert!(opened(&r.apply(Observation::RequestSeen(perm("a1", "hook2", "ls")))).is_empty());
+}
+
+#[test]
+fn end_by_id_after_upgrade_uses_the_upgraded_request() {
+    let mut r = reg_with_agent();
+    let mut fb = perm("a1", "fb", "");
+    fb.kind = RequestKind::BlockedUnparsed; fb.answer_path = AnswerPath::None; fb.options = vec![];
+    let rid = opened(&r.apply(Observation::RequestSeen(fb)))[0].id.clone();
+    let mut up = perm("a1", "hook", "ls");
+    up.upgrade_from = Some(CorrelationKey("fb".into()));
+    r.apply(Observation::RequestSeen(up));
+    assert_eq!(r.request(&rid).unwrap().kind, RequestKind::Permission, "upgraded in place, same id");
+    assert_eq!(r.request_id_for("a1", &CorrelationKey("fb".into())), None, "the alias is not a primary key");
+}
