@@ -55,6 +55,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "acd-client"
+version = "0.1.0"
+dependencies = [
+ "acd-client",
+ "acd-core",
+ "acd-protocol",
+ "acd-securefs",
+ "axum",
+ "base64 0.23.1",
+ "futures-util",
+ "libc",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "ts-rs",
+ "uuid",
+ "x509-parser",
+]
+
+[[package]]
 name = "acd-core"
 version = "0.1.0"
 dependencies = [
