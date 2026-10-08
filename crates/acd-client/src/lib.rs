@@ -2,12 +2,14 @@
 //! here, so Linux CI tests all of it.
 use std::time::Duration;
 
+pub mod actions;
 pub mod backoff;
 pub mod commands;
 pub mod conn;
 pub mod endpoint;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
+pub mod inbox;
 pub mod local;
 pub mod session;
 pub mod settings;
