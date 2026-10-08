@@ -69,7 +69,11 @@ its name.
   `blocked_unparsed` fallback, upgrade it in place (`upgrade_from` =
   `herdr::fallback::key(..)`), never supersede it; otherwise the pane can
   show no request until the screen changes. After an upgrade, the fallback
-  only emits `DialogGone` and never resolves the request.
+  only emits `DialogGone` and never resolves the request. Use the key the
+  fallback recorded when it opened, not one recomputed from a later screen:
+  the fallback keeps its open-time key across redraws.
+- A malformed `agent.get` reply still drops the herdr connection (agents go
+  `unknown`, then reconnect). Decode it leniently, as `agent.list` now is.
 - If a dialog with the same identity reappears within about 2 polls after a
   terminal answer, the old occurrence stays open (answers get
   `screen_mismatch`). Re-register with `from_screen` when the hook reports a
