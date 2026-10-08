@@ -5,6 +5,7 @@ use std::time::Duration;
 pub mod backoff;
 pub mod endpoint;
 pub mod local;
+pub mod session;
 pub mod settings;
 
 /// Every timing rule in one place; tests shrink these.
