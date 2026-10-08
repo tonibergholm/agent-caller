@@ -511,7 +511,7 @@ async fn save_failure_preserves_import_rename_remove_and_hotkey_state() {
     let ib = Inbox::new(
         Settings {
             machines: vec![MachineEntry {
-                key: "m1".into(),
+                key: "11111111-1111-4111-8111-111111111111".into(),
                 name: "Old".into(),
                 endpoint: EndpointConfig::Tcp {
                     host: "127.0.0.1".into(),
@@ -530,7 +530,7 @@ async fn save_failure_preserves_import_rename_remove_and_hotkey_state() {
     );
     secrets
         .set(
-            "m1",
+            "11111111-1111-4111-8111-111111111111",
             &MachineSecret {
                 token: common::TOKEN.into(),
                 pin: f.pin(),
@@ -539,13 +539,24 @@ async fn save_failure_preserves_import_rename_remove_and_hotkey_state() {
         )
         .unwrap();
     let before = ib.settings();
-    assert!(ib.rename_machine("m1", "New").is_err());
+    assert!(
+        ib.rename_machine("11111111-1111-4111-8111-111111111111", "New")
+            .is_err()
+    );
     assert_eq!(ib.settings(), before);
     assert!(ib.set_hotkey("Ctrl+X").is_err());
     assert_eq!(ib.settings(), before);
-    assert!(ib.remove_machine("m1").is_err());
+    assert!(
+        ib.remove_machine("11111111-1111-4111-8111-111111111111")
+            .is_err()
+    );
     assert_eq!(ib.settings(), before);
-    assert!(secrets.get("m1").unwrap().is_some());
+    assert!(
+        secrets
+            .get("11111111-1111-4111-8111-111111111111")
+            .unwrap()
+            .is_some()
+    );
     let line = format!(
         "acd://127.0.0.1:{}?pin={}#{}",
         f.port(),
@@ -554,7 +565,124 @@ async fn save_failure_preserves_import_rename_remove_and_hotkey_state() {
     );
     assert!(ib.import_pairing(&line).is_err());
     assert_eq!(ib.settings(), before);
-    assert!(secrets.get("m1").unwrap().is_some());
+    assert_eq!(
+        secrets
+            .get("11111111-1111-4111-8111-111111111111")
+            .unwrap()
+            .unwrap(),
+        MachineSecret {
+            token: common::TOKEN.into(),
+            pin: f.pin()
+        }
+        .to_json()
+    );
+}
+
+#[tokio::test]
+async fn import_reports_failed_credential_recovery_without_leaking_details() {
+    use std::sync::Mutex;
+    struct FailingRecovery(Mutex<(usize, Option<String>)>);
+    impl SecretStore for FailingRecovery {
+        fn get(&self, _: &str) -> Result<Option<String>, SecretError> {
+            Ok(self.0.lock().unwrap().1.clone())
+        }
+        fn set(&self, _: &str, value: &str) -> Result<(), SecretError> {
+            let mut state = self.0.lock().unwrap();
+            state.0 += 1;
+            if state.0 == 2 {
+                return Err(SecretError("private secret detail".into()));
+            }
+            state.1 = Some(value.into());
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<(), SecretError> {
+            self.0.lock().unwrap().1 = None;
+            Ok(())
+        }
+    }
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let d = tempfile::tempdir().unwrap();
+    let blocker = d.path().join("file");
+    std::fs::write(&blocker, "block").unwrap();
+    let key = "11111111-1111-4111-8111-111111111111";
+    let secrets = Arc::new(FailingRecovery(Mutex::new((
+        0,
+        Some("previous secret".into()),
+    ))));
+    let ib = Inbox::new(
+        Settings {
+            machines: vec![MachineEntry {
+                key: key.into(),
+                name: "Box".into(),
+                endpoint: EndpointConfig::Tcp {
+                    host: "127.0.0.1".into(),
+                    port: f.port(),
+                },
+            }],
+            ..Settings::fresh()
+        },
+        secrets,
+        InboxOptions {
+            timing: common::fast(),
+            settings_path: Some(blocker.join("settings.json")),
+            client_name: "t".into(),
+            client_version: "0".into(),
+        },
+    );
+    let line = format!(
+        "acd://127.0.0.1:{}?pin={}#{}",
+        f.port(),
+        f.pin(),
+        common::TOKEN
+    );
+    assert_eq!(
+        ib.import_pairing(&line).unwrap_err(),
+        "Machine pairing recovery failed"
+    );
+}
+
+#[tokio::test]
+async fn remove_reports_failed_settings_recovery_without_leaking_details() {
+    struct BreakSettingsOnDelete(std::path::PathBuf);
+    impl SecretStore for BreakSettingsOnDelete {
+        fn get(&self, _: &str) -> Result<Option<String>, SecretError> {
+            Ok(Some("old credentials".into()))
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), SecretError> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<(), SecretError> {
+            std::fs::remove_file(&self.0).unwrap();
+            std::fs::create_dir(&self.0).unwrap();
+            Err(SecretError("private secret detail".into()))
+        }
+    }
+    let d = tempfile::tempdir().unwrap();
+    let settings_path = d.path().join("settings.json");
+    let key = "11111111-1111-4111-8111-111111111111";
+    let ib = Inbox::new(
+        Settings {
+            machines: vec![MachineEntry {
+                key: key.into(),
+                name: "Box".into(),
+                endpoint: EndpointConfig::Tcp {
+                    host: "127.0.0.1".into(),
+                    port: 1234,
+                },
+            }],
+            ..Settings::fresh()
+        },
+        Arc::new(BreakSettingsOnDelete(settings_path.clone())),
+        InboxOptions {
+            timing: common::fast(),
+            settings_path: Some(settings_path),
+            client_name: "t".into(),
+            client_version: "0".into(),
+        },
+    );
+    let error = ib.remove_machine(key).unwrap_err();
+    assert_eq!(error, "Machine removal recovery failed");
+    assert!(!error.contains("private secret detail"));
 }
 
 #[tokio::test]

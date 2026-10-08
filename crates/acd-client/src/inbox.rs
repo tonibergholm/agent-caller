@@ -208,13 +208,18 @@ impl Inbox {
         if let Some(path) = &self.opts.settings_path
             && let Err(error) = candidate.save(path)
         {
-            match previous_secret {
-                Some(value) => {
-                    let _ = self.secrets.set(&entry.key, &value);
+            let recovery = match previous_secret {
+                Some(value) => self.secrets.set(&entry.key, &value),
+                None => self.secrets.delete(&entry.key),
+            };
+            if recovery.is_err() {
+                if let Some(machine) = inner.machines.iter_mut().find(|m| m.entry.key == entry.key)
+                    && let Some(handle) = machine.handle.take()
+                {
+                    handle.cancel();
                 }
-                None => {
-                    let _ = self.secrets.delete(&entry.key);
-                }
+                eprintln!("machine pairing recovery failed");
+                return Err("Machine pairing recovery failed".to_owned());
             }
             return Err(error.to_string());
         }
@@ -294,8 +299,16 @@ impl Inbox {
             candidate.save(path).map_err(|e| e.to_string())?;
         }
         if let Err(error) = self.secrets.delete(key) {
-            if let Some(path) = &self.opts.settings_path {
-                let _ = old_settings.save(path);
+            if let Some(path) = &self.opts.settings_path
+                && old_settings.save(path).is_err()
+            {
+                if let Some(machine) = inner.machines.iter_mut().find(|m| m.entry.key == key)
+                    && let Some(handle) = machine.handle.take()
+                {
+                    handle.cancel();
+                }
+                eprintln!("machine removal recovery failed");
+                return Err("Machine removal recovery failed".to_owned());
             }
             return Err(error.to_string());
         }

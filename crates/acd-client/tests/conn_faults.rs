@@ -449,6 +449,46 @@ async fn retry_result_lost_is_resent_and_recovers() {
 }
 
 #[tokio::test]
+async fn cancelling_during_welcome_handshake_does_not_resend_pending_commands() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let h = spawn_machine(cfg_for(&f, common::TOKEN, common::fast()));
+    let c = online(&f, &h).await;
+    let h = std::sync::Arc::new(h);
+    let submit = {
+        let h = h.clone();
+        tokio::spawn(async move {
+            h.submit(
+                acd_client::commands::Command::Answer {
+                    request_id: "r1".into(),
+                    revision: 1,
+                    option_id: "allow".into(),
+                },
+                None,
+            )
+            .await
+        })
+    };
+    let first = until("first answer", || answers(&f).first().cloned()).await;
+    c.send(serde_json::json!({"type":"result","id":first["id"],"ok":false,"error":{"code":"request_not_ready","message":"m"}})).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    f.set_welcome_delay(Duration::from_millis(300));
+    c.close(1001).await;
+    let _reconnecting = f.next_connection().await;
+    until("reconnect hello", || (f.hellos().len() >= 2).then_some(())).await;
+    h.cancel();
+    assert_eq!(
+        submit.await.unwrap(),
+        acd_client::commands::Outcome::Uncertain
+    );
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(
+        answers(&f).len(),
+        1,
+        "no command is resent after cancellation"
+    );
+}
+
+#[tokio::test]
 async fn rotation_while_disconnected_revokes_undelivered() {
     let (dir, f, h, c) = recording_server().await;
     let task = submit_answer(&h).await;

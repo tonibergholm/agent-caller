@@ -478,9 +478,16 @@ async fn run(
                     commands.revoke_other_creds(cred);
                 }
                 previous_cred = Some(cred);
-                match handshake(&mut ws, &token, &cfg.client, session.resume(), deadline).await {
+                let handshake_result = tokio::select! {
+                    _ = cancel.changed() => return,
+                    result = handshake(&mut ws, &token, &cfg.client, session.resume(), deadline) => result,
+                };
+                match handshake_result {
                     Err(e) => e,
                     Ok((machine, caps, epoch, wseq)) => {
+                        if *cancel.borrow() {
+                            return;
+                        }
                         generation += 1;
                         let change = session.welcome(machine, caps, &epoch, wseq);
                         let resend = commands.on_welcome(

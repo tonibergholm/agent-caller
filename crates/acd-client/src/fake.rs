@@ -35,6 +35,7 @@ struct State {
     handshake_error: Option<(Option<Value>, Option<u16>)>,
     answer_pings: bool,
     accept_delay: Duration,
+    welcome_delay: Duration,
     tls_accepts: usize,
     hellos: Vec<Value>,
     received: Vec<Value>,
@@ -134,6 +135,7 @@ impl FakeServer {
             handshake_error: None,
             answer_pings: true,
             accept_delay: Duration::ZERO,
+            welcome_delay: Duration::ZERO,
             tls_accepts: 0,
             hellos: Vec::new(),
             received: Vec::new(),
@@ -176,6 +178,9 @@ impl FakeServer {
     }
     pub fn set_accept_delay(&self, d: Duration) {
         self.shared.0.lock().unwrap().accept_delay = d;
+    }
+    pub fn set_welcome_delay(&self, d: Duration) {
+        self.shared.0.lock().unwrap().welcome_delay = d;
     }
     pub async fn next_connection(&self) -> FakeConn {
         timeout(Duration::from_secs(5), self.ready_rx.lock().await.recv())
@@ -265,10 +270,11 @@ async fn serve_ws<S>(
             s.welcome_seq,
             s.caps.clone(),
             s.handshake_error.clone(),
+            s.welcome_delay,
         )
     };
     let (tx, mut out) = mpsc::unbounded_channel();
-    let (token, epoch, seq, caps, failure) = state_snapshot;
+    let (token, epoch, seq, caps, failure, welcome_delay) = state_snapshot;
     let response = if let Some((frame, close)) = failure {
         if let Some(frame) = frame {
             let _ = ws.send(Message::Text(frame.to_string().into())).await;
@@ -283,6 +289,7 @@ async fn serve_ws<S>(
     } else {
         json!({"type":"error","code":"unauthorized","message":"unauthorized"})
     };
+    tokio::time::sleep(welcome_delay).await;
     let _ = ws.send(Message::Text(response.to_string().into())).await;
     let _ = ready.send(FakeConn { tx });
     let unauthorized = hello["token"] != token;
