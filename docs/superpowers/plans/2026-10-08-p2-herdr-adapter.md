@@ -257,13 +257,17 @@ P2 owns these `acd-core` edits. P4 runs in parallel and must not touch
     - It behaves exactly like `RequestSeen` **only if** the agent has no
       pending request, or its pending request is `BlockedUnparsed`.
     - Otherwise it is a no-op. It never supersedes a structured request.
-  - `Observation::FallbackEnded { request_id: String }`: atomic.
+  - `Observation::FallbackEnded { agent_id: String, key: CorrelationKey, request_id: String }`: atomic.
     - If the request is still unresolved with
       `kind == BlockedUnparsed && answer_path == None`, it resolves it
       `Terminal`.
-    - It always applies `DialogGoneById { request_id }`.
-    - A request that P3 upgraded in place (same id, structured kind) is
-      left alone, apart from the dialog-gone mark.
+    - It marks `confirmed_gone` **only** on the fallback key
+      `(agent_id, key)`, and only if that key's `last_request` is
+      `request_id`.
+    - If P3 upgraded the request in place, the upgraded primary key shares
+      the request id but is a different key. It is never marked: the
+      fallback's dialog disappearing says nothing about the structured
+      dialog.
   - `Registry::request_id_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String>`:
     the public form of `primary_request_for`.
   - `Core::agent(&self, agent_id: &str) -> Option<Agent>`
@@ -364,8 +368,12 @@ fn fallback_never_supersedes_and_never_ends_an_upgraded_request() {
     let mut up = perm("a1", "hook2", "ls");
     up.upgrade_from = Some(CorrelationKey("fb".into()));
     r.apply(Observation::RequestSeen(up));
-    assert!(resolved(&r.apply(Observation::FallbackEnded { request_id: rid.clone() })).is_empty());
+    assert!(resolved(&r.apply(Observation::FallbackEnded { agent_id: "a1".into(), key: CorrelationKey("fb".into()), request_id: rid.clone() })).is_empty());
     assert_eq!(r.request(&rid).unwrap().kind, RequestKind::Permission);
+    // The structured dialog is still up. If its request resolves uncertain, a replay
+    // of it must NOT open a new occurrence: only the fallback key was confirmed gone.
+    r.apply(Observation::RequestEndedById { request_id: rid, by: ResolvedBy::Uncertain });
+    assert!(opened(&r.apply(Observation::RequestSeen(perm("a1", "hook2", "ls")))).is_empty());
 }
 
 #[test]
@@ -434,10 +442,11 @@ fails because the current code claims first and then releases.
                     .is_some_and(|p| p.kind != RequestKind::BlockedUnparsed);
                 if structured { vec![] } else { self.request_seen(o) }
             }
-            Observation::FallbackEnded { request_id } => {
+            Observation::FallbackEnded { agent_id, key, request_id } => {
                 let still_fallback = self.requests.get(&request_id)
                     .is_some_and(|e| e.req.kind == RequestKind::BlockedUnparsed && e.req.answer_path == AnswerPath::None);
-                self.mark_gone_by_id(&request_id);
+                if let Some(k) = self.keys.get_mut(&(agent_id, key))
+                    && k.last_request.as_deref() == Some(request_id.as_str()) { k.confirmed_gone = true; }
                 if still_fallback { self.resolve_request(&request_id, ResolvedBy::Terminal) } else { vec![] }
             }
 ```
@@ -502,6 +511,14 @@ that followed the claim.
 - `claim`'s own errors still take precedence, so a resolved request still
   gets `request_gone`.
 - `source_unavailable` is never cached (existing rule).
+
+Clarify the cancellation paragraph of the `Adapter` doc comment
+(`adapter.rs`) by adding:
+
+> A request that was fully written to the source before the future was
+> dropped may still take effect. That is why the core resolves a dropped
+> delivery `uncertain` and caches `delivered`. What must never happen is
+> a send that *starts* after the drop.
 
 Replace the dead
 `ClientMessage::Hello { .. } | ClientMessage::Ping { .. }` arm at the end of
@@ -1378,8 +1395,11 @@ git commit -m "acd-adapters: herdr dialog parsing, fingerprints and prompt line"
        re-queued at the back after its read.
    - When every class is empty, the loop waits on the select (control,
      hint channel, list timer, poll timer).
-   - Draining the hint channel into the dirty queue happens at the start of
-     every turn and costs no herdr call.
+   - At the start of every turn, drain **at most 64** messages from the
+     hint channel into the dirty queue. This costs no herdr call.
+   - The dirty queue holds at most 1024 distinct panes. On overflow, clear
+     it and set the sticky resync flag: one `agent.list` covers every
+     pane.
    - Every due pane and every overdue list is therefore serviced within
      three turns of reaching the front of its queue, however busy the
      event stream is.
@@ -1411,6 +1431,7 @@ Add to `fake.rs`, keeping the rest of the Task 2 API:
     pub async fn start_at(path: &Path) -> FakeHerdr;  // reuse a socket path (herdr restart)
     pub fn max_in_flight(&self) -> usize;               // max concurrent agent.list/get/read connections seen
     pub fn clone_handle(&self) -> FakeHerdr;            // a second handle to the same server state, for helper tasks
+    pub fn calls_timed(&self) -> Vec<(tokio::time::Instant, String, Value)>; // like calls(), with arrival times
 ```
 
 - [ ] **Step 2: Write the failing tests**
@@ -1749,11 +1770,11 @@ git commit -m "acd-adapters: herdr reconciler with serial state calls and resync
     fingerprint. If that is `None`, `FallbackSeen` was a no-op because a
     structured request won the race. Do not record an open fallback in that
     case.
-  - `End` becomes `Observation::FallbackEnded { request_id }`. It resolves
+  - `End` becomes `Observation::FallbackEnded { agent_id, key, request_id }`, where `key` is the fallback key. It resolves
     `terminal` atomically, and only while the request is still an
     unanswered `blocked_unparsed`. Such a request never has an acd
-    delivery, so §5.1 says `terminal`. In every case it marks this
-    occurrence's dialog gone.
+    delivery, so §5.1 says `terminal`. In every case it marks the
+    fallback key, and only that key, as confirmed gone.
   - If P3 upgraded the request in place (same id, structured kind), the
     fallback must **not** resolve it. The upgraded request's owner
     attributes it (Task 9 or P3). This prevents the alias rule in
@@ -2336,7 +2357,7 @@ pub struct KeysTiming {
 - `HerdrAdapter::set_evidence(&self, e: Arc<dyn Evidence>)`: replaces `NoEvidence`.
 - `answer_paths()` is now `&[AnswerPath::Keys]`.
 - `FakeHerdr::delay_next(&self, method: &str, d: Duration)`: the next call to `method` replies only after `d`. The side effect, such as recording keys, happens at once.
-- `FakeHerdr::block_next(&self, method: &str) -> fake::Gate`: the next call to `method` is held after its request line is read, before any side effect.
+- `FakeHerdr::block_next(&self, method: &str) -> fake::Gate`: the next call to `method` is held after its request line is read, before any side effect and before the reply. A `fail_next` for the same method still applies when the gate is released.
   - `Gate::arrived(&self).await` resolves once the call is held.
   - `Gate::release(self)` lets it proceed.
   - Dropping the client connection while it is held makes the fake discard the call.
@@ -2386,13 +2407,20 @@ uses `call_until(deadline)` with `deadline = start + deliver_budget`.
    - Spawn the confirmation task from `t_send` **now**, before awaiting the
      reply, so the 300 ms check is never missed. The task only reads and
      never sends, so spawning it is safe.
+   - Give it a `oneshot::Receiver<Delivery>`, where
+     `enum Delivery { Accepted, Refused, Uncertain }`. It gathers reads
+     and evidence, but **publishes nothing until that verdict arrives**.
+   - If the sender is dropped (the `deliver` future was cancelled), the
+     task treats it as `Uncertain`.
+   - The reply wait is bounded by
+     `min(deliver deadline, write time + CALL_TIMEOUT)`.
 7. **Reply**, `written.reply()`, bounded by the deadline:
 
    | Result | Action |
    |---|---|
-   | `type == "ok"` | `Ok(())` |
-   | `Server` code in `KNOWN_REFUSALS` | Abort the confirmation task, then `NotDelivered(SourceUnavailable)`. herdr refused before acting; the target stays and the request reopens. |
-   | Anything else (`NoReply`, unknown code, wrong type) | Abort the confirmation task, then `Uncertain`. The core resolves the request `uncertain`, and the target watch keeps monitoring the dialog (below). |
+   | `type == "ok"` | Send `Delivery::Accepted`, then `Ok(())`. |
+   | `Server` code in `KNOWN_REFUSALS` | Send `Delivery::Refused`, then `NotDelivered(SourceUnavailable)`. herdr refused before acting; the target stays and the request reopens. |
+   | Anything else (`NoReply`, unknown code, wrong type) | Send `Delivery::Uncertain`, then `Uncertain`. The core resolves the request `uncertain`, and the target watch keeps monitoring the dialog (below). |
 
 **Confirmation task.** Every time is absolute, measured from `t_send`, the
 write completion. It runs concurrently with the wait for herdr's reply.
@@ -2416,7 +2444,14 @@ write completion. It runs concurrently with the wait for herdr's reply.
    - The prompt checks and the detection polls share the task. Schedule
      both from one timeline, and give prompt checks priority when they
      coincide.
-3. **Verdict.**
+3. **Wait for the delivery verdict**, the `oneshot` from step 6.
+   - `Refused`: publish nothing and leave the target in place. The request
+     is back to `open`, and the target watch handles it.
+   - `Uncertain`: emit no `RequestEndedById`, because the core resolves
+     the request itself. If the dialog closed, still emit
+     `DialogGoneById`. Otherwise leave the target to the watch.
+   - `Accepted`: continue with the result below.
+4. **Verdict** (only after `Accepted`).
    - A stray or an unavailable check gives `Uncertain`.
    - Otherwise, a dialog that is not closed gives `Uncertain`.
    - Otherwise, take
@@ -2424,7 +2459,7 @@ write completion. It runs concurrently with the wait for herdr's reply.
      - `Consistent` gives `Inbox`;
      - `Contradicts` gives `Terminal`;
      - `NoEvidence` or a timeout gives `Uncertain`.
-4. **Report.**
+5. **Report.**
    - Emit `Observation::RequestEndedById { request_id, by }`. It is a no-op
      if the request was already resolved.
    - If the dialog closed, emit `Observation::DialogGoneById { request_id }`
@@ -2434,7 +2469,7 @@ write completion. It runs concurrently with the wait for herdr's reply.
    - Then send `Hint::Pane(pane)` so the reconciler re-applies herdr's
      state (adapter contract: an upsert after a resolution).
    - **Never** send another key.
-5. **Lifetime.** Hold the core through the `Weak<Core>` from Task 8. Exit
+6. **Lifetime.** Hold the core through the `Weak<Core>` from Task 8. Exit
    quietly if it is gone.
 
 **Target watch (§5.1).** Registered targets are the occurrences that
@@ -2607,8 +2642,11 @@ async fn superseded_during_the_guard_read_sends_nothing() {
 async fn cancelled_during_the_guard_read_never_sends_later() {
     let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await; // no watch: the gate must catch the guard read
     let gate = r.fake.block_next("agent.read");
-    let fut = r.core.handle("c", ClientMessage::RequestAnswer { id: "a1".into(), request_id: rid.clone(), option_id: Some("allow".into()), text: None });
-    let _ = tokio::time::timeout(Duration::from_millis(300), fut).await; // dropped mid-guard
+    let task = tokio::spawn({ let core = r.core.clone(); let rid = rid.clone();
+        async move { core.handle("c", ClientMessage::RequestAnswer { id: "a1".into(), request_id: rid, option_id: Some("allow".into()), text: None }).await } });
+    gate.arrived().await; // the guard read is in flight: delivery has begun
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
     gate.release();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(r.fake.keys_sent().is_empty(), "a dropped delivery must never complete a send");
@@ -2661,6 +2699,30 @@ async fn transient_stray_is_caught_even_when_the_ack_is_late() {
     let (_, mut rx) = r.core.attach(None);
     answer(&r, "a1", &rid, "allow").await;
     assert_eq!(resolution(&mut rx).await.0, ResolvedBy::Uncertain, "the 300 ms check runs from the write, not the ack");
+    // Prove the digit was actually observed, not that a check was merely unavailable:
+    // a visible read happened while the stray was on screen (< 600 ms after the keys arrived).
+    let calls = r.fake.calls_timed();
+    let keys_at = calls.iter().find(|(_, m, _)| m == "agent.send_keys").unwrap().0;
+    assert!(calls.iter().any(|(t, m, p)| m == "agent.read" && p["source"] == "visible" && *t > keys_at && *t < keys_at + Duration::from_millis(600)));
+}
+
+#[tokio::test]
+async fn late_refusal_publishes_nothing_even_if_the_dialog_closed() {
+    // The terminal closes the dialog on its own while herdr's refusal of our key is delayed.
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
+    r.fake.fail_next("agent.send_keys", "invalid_key");
+    let gate = r.fake.block_next("agent.send_keys"); // the write has arrived; the reply is held
+    let task = tokio::spawn({ let core = r.core.clone(); let rid = rid.clone();
+        async move { core.handle("c", ClientMessage::RequestAnswer { id: "a1".into(), request_id: rid, option_id: Some("allow".into()), text: None }).await } });
+    gate.arrived().await;
+    r.fake.set_screen("w1:p1", "detection", &screen("claude-idle-detection.txt")); // closed at the terminal
+    tokio::time::sleep(Duration::from_millis(600)).await; // confirmation sees two absent reads
+    gate.release();
+    let res = task.await.unwrap();
+    assert_eq!(res.error_code(), Some(ErrorCode::SourceUnavailable));
+    tokio::time::sleep(Duration::from_millis(3500)).await; // past the confirmation window
+    assert_eq!(r.core.request(&rid).map(|q| q.status), Some(RequestStatus::Open), "never inbox without an acd delivery");
 }
 
 #[tokio::test]
@@ -2846,6 +2908,10 @@ Add these new items under "P3":
     and its write, P3 must hold off until `deliver` returns. Use a
     per-agent async mutex shared with the herdr adapter.
   - Otherwise P3 records why the window cannot occur.
+- **Stray-keystroke reason** (spec §6.2). Before any keys request goes
+  live, add an optional `reason` to `request.resolved` (for example
+  `"stray_keystroke"`). Today it reports only `by: uncertain`. This
+  touches `acd-protocol` and its schema, so coordinate it with P5.
 - Bind Codex sessions with `agent_session.value`, which `AgentInfo` now
   carries.
 - Upgrade `blocked_unparsed` in place with `upgrade_from` set to the
@@ -2905,3 +2971,17 @@ resolved in the text. It raised 8 blocking items, 2 non-blocking items and
 | NB9 | Result validation | `send_keys` requires `type: "ok"` (gate 6). The reason each `KNOWN_REFUSALS` code is pre-action is documented, and the smoke tests check it (Task 2). |
 | Q10 | Cancellation and framing | Inline sending plus newline framing. The Task 9 smoke test verifies that a partial line is never dispatched. A dropped `deliver` is already `uncertain` in the core (`AbandonGuard`, `Phase::Delivering`). |
 | NB11 | Test determinism | Gates instead of sleeps, timers disabled in causal tests, short socket roots everywhere, and a 5 s margin in Task 10. |
+
+**Round 3, Sol, 2026-10-08.** Sol confirmed that the round-2 fixes are in
+the task text. It agreed that round-2 B1 does not block P2, provided the
+per-agent lease stays a mandatory P3 requirement (Task 10). It raised 2
+blocking items, 3 non-blocking items and 1 question.
+
+| # | Finding | Resolution |
+|---|---|---|
+| B1 | `FallbackEnded` also confirmed the upgraded structured key gone | It now marks only the fallback key, and only for that occurrence. The test covers upgrade, then fallback gone, then structured `uncertain`, then a replay that stays suppressed (Task 1). |
+| B2 | Confirmation could publish before herdr's reply was classified | The confirmation task waits for a `Delivery` verdict over a oneshot. `Refused` publishes nothing, `Uncertain` publishes only `DialogGoneById`, and a dropped sender counts as `Uncertain`. Test `late_refusal_publishes_nothing_even_if_the_dialog_closed` (Task 9). |
+| Q3 | A complete frame can run after cancellation | Accepted as the contract. A fully written request may take effect, which is why the core resolves a dropped delivery `uncertain`. Only a send that *starts* after the drop is forbidden. The `Adapter` doc is amended in Task 1. |
+| NB4 | Hint ingestion was unbounded | At most 64 messages drained per turn, and at most 1024 queued panes. Overflow becomes one resync (Task 5). |
+| NB5 | Test determinism | The cancellation test aborts after the gate arrives. The transient-stray test proves the visible read happened while the digit was on screen (`calls_timed`). |
+| NB6 | The stray-keystroke message has no wire field | **Deferred.** P2 has no production keys producer, so no client can see it yet. Recorded for P3/P5: add an optional resolution `reason` to `request.resolved` before keys requests go live. |
