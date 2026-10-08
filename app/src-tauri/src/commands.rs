@@ -21,10 +21,11 @@ pub fn pick_option(
     card_key: String,
     request_id: String,
     option_id: String,
+    revision: u64,
 ) -> Result<String, String> {
     state
         .inbox
-        .pick(&card_key, &request_id, &option_id)
+        .pick(&card_key, &request_id, &option_id, revision)
         .map_err(|e| e.to_string())
 }
 

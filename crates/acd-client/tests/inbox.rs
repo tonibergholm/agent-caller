@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 const ANSWER_REQ: &str = "r1";
 fn pending_agent() -> Value {
-    serde_json::json!({"id":"a1","machine_id":"m","source":"herdr","kind":"claude","title":"agent","cwd":null,"project":null,"state":"needs_you","state_since":"2026-10-08T00:00:00.000Z","failed":false,"last_message":null,"can_send":true,"pending":{"id":ANSWER_REQ,"agent_id":"a1","kind":"permission","status":"open","answer_path":"hook","title":"Bash","detail":"npm test","options":[{"id":"allow","label":"Yes","description":null,"effect":"allow"},{"id":"deny","label":"No","description":null,"effect":"deny"},{"id":"always","label":"Yes, always","description":"Bash(npm test:*)","effect":"allow_always"}],"questions":null,"free_text":false,"raw_screen":null,"opened_at":"2026-10-08T00:00:00.000Z"}})
+    serde_json::json!({"id":"a1","machine_id":"m","source":"herdr","kind":"claude","title":"agent","cwd":null,"project":null,"state":"needs_you","state_since":"2026-10-08T00:00:00.000Z","failed":false,"last_message":null,"can_send":true,"pending":{"id":ANSWER_REQ,"revision":1,"agent_id":"a1","kind":"permission","status":"open","answer_path":"hook","title":"Bash","detail":"npm test","options":[{"id":"allow","label":"Yes","description":null,"effect":"allow"},{"id":"deny","label":"No","description":null,"effect":"deny"},{"id":"always","label":"Yes, always","description":"Bash(npm test:*)","effect":"allow_always"}],"questions":null,"free_text":false,"raw_screen":null,"opened_at":"2026-10-08T00:00:00.000Z"}})
 }
 async fn setup() -> (FakeServer, FakeConn, Arc<Inbox>) {
     let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
@@ -81,7 +81,7 @@ fn answers(f: &FakeServer) -> usize {
 #[tokio::test]
 async fn pick_waits_for_the_undo_then_sends_once() {
     let (f, _, ib) = setup().await;
-    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(answers(&f), 0);
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -90,7 +90,7 @@ async fn pick_waits_for_the_undo_then_sends_once() {
 #[tokio::test]
 async fn escape_right_after_pick_cancels_and_sends_nothing() {
     let (f, _, ib) = setup().await;
-    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     assert!(ib.escape());
     assert!(!ib.escape());
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -99,7 +99,7 @@ async fn escape_right_after_pick_cancels_and_sends_nothing() {
 #[tokio::test]
 async fn countdown_cancels_when_request_resolves() {
     let (f, c, ib) = setup().await;
-    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     c.send(serde_json::json!({"type":"request.resolved","epoch":"e1","seq":2,"request_id":ANSWER_REQ,"agent_id":"a1","by":"terminal","option_id":null})).await;
     let mut resolved_agent = pending_agent();
     resolved_agent["pending"] = Value::Null;
@@ -124,7 +124,7 @@ async fn countdown_cancels_when_request_resolves() {
 #[tokio::test]
 async fn countdown_cancels_when_option_semantics_change() {
     let (f, c, ib) = setup().await;
-    ib.pick("m1/a1", ANSWER_REQ, "always").unwrap();
+    ib.pick("m1/a1", ANSWER_REQ, "always", 1).unwrap();
     let mut agent = pending_agent();
     agent["pending"]["options"][2]["description"] = Value::String("Bash(rm:*)".into());
     c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":agent}))
@@ -140,11 +140,50 @@ async fn countdown_cancels_when_option_semantics_change() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(answers(&f), 0);
 }
+
+#[tokio::test]
+async fn stale_view_revision_is_rejected_without_action_or_frame() {
+    let (f, c, ib) = setup().await;
+    let shown = ib
+        .view()
+        .borrow()
+        .cards
+        .iter()
+        .find(|card| card.key == "m1/a1")
+        .unwrap()
+        .agent
+        .pending
+        .as_ref()
+        .map(|pending| pending.revision);
+    assert_eq!(shown, Some(1));
+    let mut agent = pending_agent();
+    agent["pending"]["revision"] = Value::from(2);
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":agent}))
+        .await;
+    view_until(&ib, "revision 2", |v| {
+        v.cards.iter().any(|card| {
+            card.key == "m1/a1"
+                && card
+                    .agent
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.revision == 2)
+        })
+    })
+    .await;
+    assert_eq!(
+        ib.pick("m1/a1", ANSWER_REQ, "allow", shown.unwrap()),
+        Err(PickError::StaleRequest)
+    );
+    assert!(ib.view().borrow().actions.is_empty());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(answers(&f), 0, "stale revision must not send a frame");
+}
 #[tokio::test]
 async fn reconnect_within_undo_window_cancels() {
     for how in ["4408", "resync"] {
         let (f, c, ib) = setup().await;
-        ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+        ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
         if how == "4408" {
             c.close(4408).await
         } else {
@@ -170,9 +209,9 @@ async fn reconnect_within_undo_window_cancels() {
 #[tokio::test]
 async fn second_pick_on_the_same_card_is_ignored() {
     let (_, _, ib) = setup().await;
-    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     assert_eq!(
-        ib.pick("m1/a1", ANSWER_REQ, "deny"),
+        ib.pick("m1/a1", ANSWER_REQ, "deny", 1),
         Err(PickError::AlreadyCounting)
     );
 }
@@ -190,7 +229,7 @@ async fn unknown_effect_option_cannot_be_picked() {
     })
     .await;
     assert_eq!(
-        ib.pick("m1/a1", ANSWER_REQ, "allow"),
+        ib.pick("m1/a1", ANSWER_REQ, "allow", 1),
         Err(PickError::UnknownOption)
     );
 }
@@ -288,6 +327,47 @@ async fn import_pairing_stores_the_secret_and_never_reports_it() {
     })
     .await
     .expect("replacement connection should reach the fake server");
+}
+
+#[tokio::test]
+async fn start_after_import_keeps_the_imported_connection_handle() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let ib = Inbox::new(
+        Settings {
+            machines: vec![],
+            ..Settings::fresh()
+        },
+        Arc::new(MemorySecrets::default()),
+        InboxOptions {
+            timing: common::fast(),
+            settings_path: None,
+            client_name: "t".into(),
+            client_version: "0".into(),
+        },
+    );
+    let line = format!(
+        "acd://127.0.0.1:{}?pin={}#{}",
+        f.port(),
+        f.pin(),
+        common::TOKEN
+    );
+    let entry = ib.import_pairing(&line).unwrap();
+    let conn = f.next_connection().await;
+    ib.start();
+    let snapshot = serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[]});
+    conn.send(snapshot).await;
+    view_until(&ib, "imported machine online", |v| {
+        v.machines
+            .iter()
+            .any(|m| m.key == entry.key && m.status == acd_client::conn::MachineStatus::Online)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        f.connections(),
+        1,
+        "start must retain the running imported handle"
+    );
 }
 
 #[tokio::test]
@@ -392,7 +472,7 @@ async fn duplicate_machine_is_hidden() {
 #[tokio::test]
 async fn repairing_inside_the_undo_window_sends_nothing() {
     let (f, _, ib) = setup().await;
-    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     let line = format!(
         "acd://127.0.0.1:{}?pin={}#{}",
         f.port(),
@@ -424,7 +504,7 @@ async fn repairing_inside_the_undo_window_sends_nothing() {
             .and_then(|c| c.notice.as_ref())
             .is_some_and(|n| n.text == "Offline. Nothing was sent.")
     );
-    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(answers(&f), 1);
 }
@@ -432,7 +512,7 @@ async fn repairing_inside_the_undo_window_sends_nothing() {
 #[tokio::test]
 async fn removing_a_machine_cancels_its_countdowns() {
     let (f, _, ib) = setup().await;
-    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     ib.remove_machine("m1").unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(answers(&f), 0);
@@ -750,7 +830,7 @@ async fn resolution_event_sets_terminal_notice() {
 #[tokio::test]
 async fn replacement_cancels_machine_with_pending_submit_clone() {
     let (f, old_conn, ib) = setup().await;
-    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         while answers(&f) == 0 {
             tokio::task::yield_now().await;
@@ -790,7 +870,7 @@ async fn replacement_cancels_machine_with_pending_submit_clone() {
 #[tokio::test]
 async fn removal_cancels_machine_with_pending_submit_clone() {
     let (f, old_conn, ib) = setup().await;
-    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         while answers(&f) == 0 {
             tokio::task::yield_now().await;

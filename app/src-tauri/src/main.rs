@@ -68,6 +68,9 @@ fn main() {
                     client_version: env!("CARGO_PKG_VERSION").into(),
                 },
             );
+            tauri::async_runtime::block_on(async {
+                inbox.start();
+            });
             app.manage(commands::AppState {
                 inbox: inbox.clone(),
             });
@@ -87,7 +90,6 @@ fn main() {
             let notification_handle = handle.clone();
             tauri::async_runtime::spawn(notify::run(notification_handle, notifications));
             tauri::async_runtime::spawn(async move {
-                inbox.start();
                 let mut rx = inbox.view();
                 loop {
                     let view = rx.borrow_and_update().clone();

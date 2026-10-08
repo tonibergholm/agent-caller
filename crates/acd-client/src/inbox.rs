@@ -36,7 +36,7 @@ pub enum PickError {
     UnknownCard,
     #[error("this request cannot be answered here")]
     NotAnswerable,
-    #[error("the request changed")]
+    #[error("The request changed. Review it again.")]
     StaleRequest,
     #[error("unknown or unselectable option")]
     UnknownOption,
@@ -380,13 +380,16 @@ impl Inbox {
         });
     }
     pub fn start(self: &Arc<Self>) {
-        if self.started.swap(true, Ordering::AcqRel) {
-            return;
-        }
         let handles = {
             let mut inner = self.inner.lock().unwrap();
+            if self.started.swap(true, Ordering::AcqRel) {
+                return;
+            }
             let client_id = inner.settings.client_id.clone();
             for machine in &mut inner.machines {
+                if machine.handle.is_some() {
+                    continue;
+                }
                 let instance = self.next_instance.fetch_add(1, Ordering::Relaxed);
                 machine.handle = spawn_for(
                     &machine.entry,
@@ -647,6 +650,7 @@ impl Inbox {
         card_key: &str,
         request_id: &str,
         option_id: &str,
+        revision: u64,
     ) -> Result<String, PickError> {
         let mut inner = self.inner.lock().unwrap();
         let (machine_key, handle, entry) = find_card(&inner, card_key)?;
@@ -673,7 +677,7 @@ impl Inbox {
             .get(agent_id)
             .ok_or(PickError::StaleRequest)?;
         let req = agent.pending.as_ref().ok_or(PickError::StaleRequest)?;
-        if req.id != request_id {
+        if req.id != request_id || req.revision != revision {
             return Err(PickError::StaleRequest);
         }
         if !req.is_answerable() || req.status != acd_protocol::RequestStatus::Open {

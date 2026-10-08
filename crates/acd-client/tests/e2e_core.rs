@@ -176,7 +176,7 @@ async fn answered_elsewhere_resolves_the_card() {
     })
     .await;
     assert!(matches!(
-        inbox.pick("m1/a1", &request_id, "allow"),
+        inbox.pick("m1/a1", &request_id, "allow", 1),
         Err(PickError::StaleRequest)
     ));
     assert!(card(&view, "m1/a1").unwrap().agent.pending.is_none());
@@ -196,7 +196,7 @@ async fn retry_after_drop_delivers_once_end_to_end() {
         card(v, "m1/a1").is_some_and(|c| c.answerable)
     })
     .await;
-    inbox.pick("m1/a1", &request_id, "allow").unwrap();
+    inbox.pick("m1/a1", &request_id, "allow", 1).unwrap();
     wait_view(&inbox, "delivery in progress", |v| {
         card(v, "m1/a1").is_some_and(|c| c.busy)
     })
@@ -280,7 +280,7 @@ async fn restart_into_new_epoch_refreshes_cards() {
     .await;
     assert!(view.cards.iter().all(|c| !c.busy));
     assert!(matches!(
-        inbox.pick("m1/a1", &a1_request, "allow"),
+        inbox.pick("m1/a1", &a1_request, "allow", 1),
         Err(PickError::UnknownCard)
     ));
     assert!(
@@ -304,7 +304,7 @@ async fn restart_mid_command_shows_check_the_terminal() {
         card(v, "m1/a1").is_some_and(|c| c.answerable)
     })
     .await;
-    inbox.pick("m1/a1", &request_id, "allow").unwrap();
+    inbox.pick("m1/a1", &request_id, "allow", 1).unwrap();
     wait_view(&inbox, "delivery in progress", |v| {
         card(v, "m1/a1").is_some_and(|c| c.busy)
     })

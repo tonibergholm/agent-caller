@@ -242,10 +242,11 @@ fn close_code(msg: &Message) -> Option<u16> {
         None
     }
 }
-async fn send_json(ws: &mut Ws, value: &impl Serialize) -> Result<(), End> {
+async fn send_json(ws: &mut Ws, value: &impl Serialize, deadline: Instant) -> Result<(), End> {
     let text = serde_json::to_string(value).map_err(|e| End::Offline(e.to_string()))?;
-    ws.send(Message::Text(text.into()))
+    timeout_at(deadline, ws.send(Message::Text(text.into())))
         .await
+        .map_err(|_| End::Offline("write timed out".into()))?
         .map_err(|e| End::Offline(e.to_string()))
 }
 async fn next_server(ws: &mut Ws, deadline: Instant) -> Result<acd_protocol::ServerMessage, End> {
@@ -299,6 +300,7 @@ async fn handshake(
                 client: client.clone(),
                 resume,
             },
+            deadline,
         )
         .await?;
         loop {
@@ -361,18 +363,19 @@ async fn serve(
                     let online = session.ready() && state.borrow().status == MachineStatus::Online;
             if !online || expect_gen.is_some_and(|g| g != generation) { let _ = reply.send(Outcome::NotSent(NotSent::Offline)); }
                     else if let Some(msg) = commands.begin(command, reply, &session.capabilities, cred, Instant::now())
-                        && let Err(e) = send_json(&mut ws, &msg).await { return e; }
+                        && let Err(e) = tokio::select! { biased; _ = cancel.changed() => Err(End::Stopped), r = send_json(&mut ws, &msg, Instant::now() + timing.write_timeout) => r } { return e; }
                 },
                 Some(Control::RetryNow) => {}, None => return End::Stopped,
             },
             _ = tokio::time::sleep_until(ping_at) => {
                 if ping_deadline.is_some() { return End::Offline("no reply to ping".into()); }
-                if let Err(e) = send_json(&mut ws, &ClientMessage::Ping { id: Uuid::new_v4().to_string() }).await { return e; }
+                let ping = ClientMessage::Ping { id: Uuid::new_v4().to_string() };
+                if let Err(e) = tokio::select! { biased; _ = cancel.changed() => Err(End::Stopped), r = send_json(&mut ws, &ping, Instant::now() + timing.write_timeout) => r } { return e; }
                 ping_deadline = Some(tokio::time::Instant::now() + timing.ping_timeout);
             }
             _ = tokio::time::sleep_until(due_at), if commands.next_due().is_some() => {
                 for msg in commands.due(Instant::now(), &session.capabilities, timing) {
-                    if let Err(e) = send_json(&mut ws, &msg).await { return e; }
+                    if let Err(e) = tokio::select! { biased; _ = cancel.changed() => Err(End::Stopped), r = send_json(&mut ws, &msg, Instant::now() + timing.write_timeout) => r } { return e; }
                 }
             }
             incoming = ws.next() => {
@@ -380,7 +383,7 @@ async fn serve(
                 let msg = match incoming { Ok(m) => m, Err(e) => return End::Offline(e.to_string()) };
                 if let Some(code) = close_code(&msg) { return end_for_close(code); }
                 last_frame = tokio::time::Instant::now(); ping_deadline = None;
-                let text = match msg { Message::Text(t) => t.to_string(), Message::Ping(v) => { if let Err(e) = ws.send(Message::Pong(v)).await { return End::Offline(e.to_string()); } continue; }, Message::Pong(_) => continue, Message::Close(_) => return End::Offline("closed".into()), _ => continue };
+                let text = match msg { Message::Text(t) => t.to_string(), Message::Ping(v) => { let send = tokio::select! { biased; _ = cancel.changed() => return End::Stopped, r = tokio::time::timeout(timing.write_timeout, ws.send(Message::Pong(v))) => r }; match send { Ok(Ok(())) => {}, Ok(Err(e)) => return End::Offline(e.to_string()), Err(_) => return End::Offline("write timed out".into()) } continue; }, Message::Pong(_) => continue, Message::Close(_) => return End::Offline("closed".into()), _ => continue };
                 let decoded = match acd_protocol::decode_server(&text) { Ok(Some(m)) => m, Ok(None) => continue, Err(_) => return End::Resync("undecodable frame") };
                 match decoded {
                     acd_protocol::ServerMessage::Result(result) => commands.on_result(&result, Instant::now(), timing),
@@ -498,7 +501,8 @@ async fn run(
                         );
                         let mut send_error = None;
                         for msg in resend {
-                            if let Err(error) = send_json(&mut ws, &msg).await {
+                            if let Err(error) = tokio::select! { biased; _ = cancel.changed() => Err(End::Stopped), r = send_json(&mut ws, &msg, Instant::now() + cfg.timing.write_timeout) => r }
+                            {
                                 send_error = Some(error);
                                 break;
                             }

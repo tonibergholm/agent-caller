@@ -493,6 +493,53 @@ async fn cancelling_during_welcome_handshake_does_not_resend_pending_commands() 
 }
 
 #[tokio::test]
+async fn cancellation_interrupts_backpressured_socket_writes() {
+    let (f, h) = start().await;
+    let _c = online(&f, &h).await;
+    f.set_reading(false);
+    let h = std::sync::Arc::new(h);
+    let mut submits = Vec::new();
+    for _ in 0..64 {
+        let h = h.clone();
+        submits.push(tokio::spawn(async move {
+            h.submit(
+                acd_client::commands::Command::Send {
+                    agent_id: "a".into(),
+                    text: "x".repeat(64 * 1024),
+                },
+                None,
+            )
+            .await
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.cancel();
+    for submit in submits {
+        let outcome = tokio::time::timeout(Duration::from_secs(1), submit)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            acd_client::commands::Outcome::Uncertain
+                | acd_client::commands::Outcome::NotSent(acd_client::commands::NotSent::Offline)
+        ));
+    }
+    let received_before_resume = f.received().len();
+    assert!(
+        received_before_resume < 64,
+        "server stopped reading, so the connection must not finish every write"
+    );
+    f.set_reading(true);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        f.received().len(),
+        received_before_resume,
+        "cancelled writes must never complete later"
+    );
+}
+
+#[tokio::test]
 async fn rotation_while_disconnected_revokes_undelivered() {
     let (dir, f, h, c) = recording_server().await;
     let task = submit_answer(&h).await;

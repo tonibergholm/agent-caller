@@ -160,7 +160,7 @@ impl Commands {
                     },
                 );
             } else if missing || missing_revision {
-                self.finish(&id, Outcome::NotSent(NotSent::NotAdvertised));
+                self.finish(&id, Outcome::Uncertain);
             } else {
                 let i = self.items.get_mut(&id).unwrap();
                 i.retry_at = None;
@@ -226,7 +226,7 @@ impl Commands {
                     || (frame_requires_revision(&item.msg)
                         && !caps.iter().any(|cap| cap == "answer.revision"))
                 {
-                    self.finish(&id, Outcome::NotSent(NotSent::NotAdvertised));
+                    self.finish(&id, Outcome::Uncertain);
                 } else {
                     let item = self.items.get_mut(&id).unwrap();
                     item.retry_at = None;
@@ -606,10 +606,7 @@ mod tests {
             )
             .is_empty()
         );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            Outcome::NotSent(NotSent::NotAdvertised)
-        );
+        assert_eq!(rx.try_recv().unwrap(), Outcome::Uncertain);
 
         let (tx, mut rx) = oneshot::channel();
         let msg = c.begin(answer(), tx, &revision_caps, C1, t0).unwrap();
@@ -618,10 +615,7 @@ mod tests {
             c.due(t0 + Duration::from_millis(250), &answer_only, &t())
                 .is_empty()
         );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            Outcome::NotSent(NotSent::NotAdvertised)
-        );
+        assert_eq!(rx.try_recv().unwrap(), Outcome::Uncertain);
     }
 
     #[test]

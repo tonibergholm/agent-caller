@@ -34,6 +34,7 @@ struct State {
     caps: Vec<String>,
     handshake_error: Option<(Option<Value>, Option<u16>)>,
     answer_pings: bool,
+    read_paused: bool,
     accept_delay: Duration,
     welcome_delay: Duration,
     tls_accepts: usize,
@@ -144,6 +145,7 @@ impl FakeServer {
                 .collect(),
             handshake_error: None,
             answer_pings: true,
+            read_paused: false,
             accept_delay: Duration::ZERO,
             welcome_delay: Duration::ZERO,
             tls_accepts: 0,
@@ -189,6 +191,9 @@ impl FakeServer {
     }
     pub fn set_answer_pings(&self, on: bool) {
         self.shared.0.lock().unwrap().answer_pings = on;
+    }
+    pub fn set_reading(&self, on: bool) {
+        self.shared.0.lock().unwrap().read_paused = !on;
     }
     pub fn set_accept_delay(&self, d: Duration) {
         self.shared.0.lock().unwrap().accept_delay = d;
@@ -350,12 +355,13 @@ async fn serve_ws<S>(
         return;
     }
     loop {
+        let read_paused = shared.0.lock().unwrap().read_paused;
         tokio::select! {
             Some(msg) = out.recv() => match msg {
                 Out::Text(s) => if ws.send(Message::Text(s.into())).await.is_err() { break; },
                 Out::Close(code) => { send_close(&mut ws, code).await; break; }
             },
-            incoming = ws.next() => match incoming {
+            incoming = ws.next(), if !read_paused => match incoming {
                 Some(Ok(Message::Text(text))) => {
                     let parsed = serde_json::from_str(&text).unwrap_or(Value::Null);
                     let (answer, tx) = { let mut s = shared.0.lock().unwrap(); s.received.push(parsed.clone()); (s.answer_pings, parsed["id"].clone()) };
