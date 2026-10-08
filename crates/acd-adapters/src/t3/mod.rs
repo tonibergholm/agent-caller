@@ -4,4 +4,5 @@ pub mod detail;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 pub mod map;
+pub mod outcome;
 pub mod wire;

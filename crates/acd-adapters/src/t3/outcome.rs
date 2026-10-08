@@ -1,0 +1,246 @@
+//! The one place that decides what a dispatch result means (Global
+//! Constraints). Server text never leaves this module except in a redacted
+//! debug log.
+use acd_protocol::{ErrorCode, ResolvedBy};
+use serde_json::{Value, json};
+
+use super::conn::CallError;
+use super::wire::{Cause, Failure};
+use crate::text::redact_log;
+
+pub const NO_REPLY: &str = "T3 did not confirm the command";
+pub const DEFECT: &str = "T3 reported an internal error";
+pub const INTERRUPTED: &str = "T3 interrupted the command";
+pub const REFUSED: &str = "T3 refused the command";
+pub const SCOPE: &str = "the T3 token lacks the orchestration:operate scope";
+pub const MIXED: &str = "T3 reported several failures";
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Outcome {
+    Delivered,
+    /// Nothing reached T3's orchestrator. `end` says how the request ended
+    /// at the source when T3 said so; `degrade` is a source status message.
+    NotDelivered {
+        code: ErrorCode,
+        end: Option<ResolvedBy>,
+        degrade: Option<&'static str>,
+    },
+    Uncertain(&'static str),
+}
+
+const DISPATCH_ERROR: &str = "OrchestrationV2DispatchCommandError";
+const SCOPE_ERROR: &str = "EnvironmentAuthorizationError";
+
+pub fn classify(res: &Result<Value, CallError>, t3_request_id: Option<&str>) -> Outcome {
+    if let Err(e) = res {
+        let raw = match e {
+            CallError::Failed(Failure::Mixed(causes)) => {
+                let causes: Vec<Value> = causes
+                    .iter()
+                    .map(|c| match c {
+                        Cause::Fail { error } => json!({"fail": error}),
+                        Cause::Die { defect } => json!({"die": defect}),
+                        Cause::Interrupt {} => json!("interrupt"),
+                        Cause::Other => json!("other"),
+                    })
+                    .collect();
+                Value::Array(causes).to_string()
+            }
+            CallError::Failed(Failure::Fail { tag, message }) => {
+                json!({"fail": {"tag": tag, "message": message}}).to_string()
+            }
+            CallError::Failed(Failure::Die(d)) => json!({"die": d}).to_string(),
+            other => json!({"error": other.to_string()}).to_string(),
+        };
+        tracing::debug!(error = %redact_log(&raw), "T3 dispatch failed");
+    }
+    let not = |code, end, degrade| Outcome::NotDelivered { code, end, degrade };
+    match res {
+        Ok(_) => Outcome::Delivered,
+        Err(CallError::NotConnected) | Err(CallError::NotWritten(_)) => {
+            not(ErrorCode::SourceUnavailable, None, None)
+        }
+        Err(CallError::Failed(Failure::Fail { tag, .. })) if tag == SCOPE_ERROR => {
+            not(ErrorCode::SourceUnavailable, None, Some(SCOPE))
+        }
+        Err(CallError::Failed(Failure::Fail { tag, message })) if tag == DISPATCH_ERROR => {
+            let Some(id) = t3_request_id else {
+                return Outcome::Uncertain(REFUSED);
+            };
+            if *message == format!("Runtime request {id} is resolved.") {
+                not(ErrorCode::RequestGone, Some(ResolvedBy::Terminal), None)
+            } else if *message == format!("Runtime request {id} is cancelled.")
+                || *message == format!("Runtime request {id} was not found.")
+            {
+                not(ErrorCode::RequestGone, Some(ResolvedBy::Lost), None)
+            } else {
+                Outcome::Uncertain(REFUSED)
+            }
+        }
+        Err(CallError::Failed(Failure::Fail { .. })) | Err(CallError::Failed(Failure::Unknown)) => {
+            Outcome::Uncertain(REFUSED)
+        }
+        // Several causes: never read as "nothing happened" (Sol round 2, finding 6).
+        Err(CallError::Failed(Failure::Mixed(_))) => Outcome::Uncertain(MIXED),
+        Err(CallError::Failed(Failure::Die(_))) => Outcome::Uncertain(DEFECT),
+        Err(CallError::Failed(Failure::Interrupted)) => Outcome::Uncertain(INTERRUPTED),
+        Err(CallError::NoReply(_)) => Outcome::Uncertain(NO_REPLY),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::t3::{conn::CallError, fake::fixture, wire::*};
+    use serde_json::json;
+
+    fn failed(name: &str) -> Result<Value, CallError> {
+        let f = fixture(name);
+        let cause: Vec<Cause> = serde_json::from_value(f["exit"]["cause"].clone()).unwrap();
+        Err(CallError::Failed(failure(&cause)))
+    }
+    fn id_in(name: &str) -> String {
+        let m = fixture(name)["exit"]["cause"][0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        m.strip_prefix("Runtime request ")
+            .unwrap()
+            .rsplit_once(' ')
+            .unwrap()
+            .0
+            .rsplit_once(' ')
+            .unwrap()
+            .0
+            .to_owned()
+    }
+
+    #[test]
+    fn known_refusals_are_not_delivered() {
+        let id = id_in("cmd_exit_respond_fail_already_resolved.json");
+        assert_eq!(
+            classify(
+                &failed("cmd_exit_respond_fail_already_resolved.json"),
+                Some(&id)
+            ),
+            Outcome::NotDelivered {
+                code: ErrorCode::RequestGone,
+                end: Some(ResolvedBy::Terminal),
+                degrade: None
+            }
+        );
+        let id = id_in("cmd_exit_respond_fail_cancelled_after_restart.json");
+        assert!(matches!(
+            classify(
+                &failed("cmd_exit_respond_fail_cancelled_after_restart.json"),
+                Some(&id)
+            ),
+            Outcome::NotDelivered {
+                code: ErrorCode::RequestGone,
+                end: Some(ResolvedBy::Lost),
+                ..
+            }
+        ));
+        assert_eq!(
+            classify(&failed("rpc_exit_fail_missing_scope_operate.json"), None),
+            Outcome::NotDelivered {
+                code: ErrorCode::SourceUnavailable,
+                end: None,
+                degrade: Some(SCOPE)
+            }
+        );
+        assert!(matches!(
+            classify(&Err(CallError::NotConnected), None),
+            Outcome::NotDelivered { .. }
+        ));
+        assert!(matches!(
+            classify(&Err(CallError::NotWritten("x")), None),
+            Outcome::NotDelivered { .. }
+        ));
+    }
+
+    #[test]
+    fn everything_else_after_a_write_is_uncertain() {
+        // "is resolved" about a different request id is not ours to interpret.
+        assert_eq!(
+            classify(
+                &failed("cmd_exit_respond_fail_already_resolved.json"),
+                Some("runtime-request:other")
+            ),
+            Outcome::Uncertain(REFUSED)
+        );
+        assert_eq!(
+            classify(&failed("rpc_exit_die_bad_decision_literal.json"), None),
+            Outcome::Uncertain(DEFECT)
+        );
+        assert_eq!(
+            classify(&failed("rpc_exit_interrupted_stream.json"), None),
+            Outcome::Uncertain(INTERRUPTED)
+        );
+        assert_eq!(
+            classify(
+                &failed("cmd_exit_respond_fail_previously_rejected.json"),
+                None
+            ),
+            Outcome::Uncertain(REFUSED)
+        );
+        assert_eq!(
+            classify(&Err(CallError::NoReply("x")), None),
+            Outcome::Uncertain(NO_REPLY)
+        );
+        assert_eq!(
+            classify(&Ok(json!({"sequence": 3})), None),
+            Outcome::Delivered
+        );
+    }
+
+    #[test]
+    fn multi_cause_failures_are_uncertain() {
+        let id = "rq-1";
+        let resolved = json!({"_tag": "Fail", "error": {"_tag": "OrchestrationV2DispatchCommandError",
+            "message": format!("Runtime request {id} is resolved.")}});
+        let scope = json!({"_tag": "Fail", "error": {"_tag": "EnvironmentAuthorizationError", "message": "m"}});
+        let die = json!({"_tag": "Die", "defect": "d"});
+        let int = json!({"_tag": "Interrupt", "fiberId": 1});
+        for set in [
+            vec![resolved.clone(), die.clone()],
+            vec![die.clone(), resolved.clone()],
+            vec![scope.clone(), die],
+            vec![resolved.clone(), scope.clone()],
+            vec![scope, int],
+        ] {
+            let causes: Vec<Cause> = serde_json::from_value(Value::Array(set.clone())).unwrap();
+            assert_eq!(
+                classify(&Err(CallError::Failed(failure(&causes))), Some(id)),
+                Outcome::Uncertain(MIXED),
+                "{set:?}"
+            );
+        }
+        let one: Vec<Cause> = serde_json::from_value(json!([resolved])).unwrap();
+        assert!(matches!(
+            classify(&Err(CallError::Failed(failure(&one))), Some(id)),
+            Outcome::NotDelivered { .. }
+        ));
+    }
+
+    #[test]
+    fn diagnostics_never_carry_server_text() {
+        let hostile = "sk-ant-api03-SECRETSECRET \u{1b}[31m rm -rf ~/work \u{202E}evil";
+        for res in [
+            Err(CallError::Failed(Failure::Die(hostile.into()))),
+            Err(CallError::Failed(Failure::Fail {
+                tag: "SomethingNew".into(),
+                message: hostile.into(),
+            })),
+            Err(CallError::Failed(Failure::Fail {
+                tag: "EnvironmentAuthorizationError".into(),
+                message: hostile.into(),
+            })),
+        ] {
+            let text = format!("{:?}", classify(&res, Some("rq-1")));
+            for bad in ["SECRET", "rm -rf", "\u{1b}", "\u{202E}"] {
+                assert!(!text.contains(bad), "{text}");
+            }
+        }
+    }
+}
