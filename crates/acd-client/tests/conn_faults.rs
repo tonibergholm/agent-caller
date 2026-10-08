@@ -497,6 +497,7 @@ async fn cancellation_interrupts_backpressured_socket_writes() {
     let (f, h) = start().await;
     let _c = online(&f, &h).await;
     f.set_reading(false);
+    let frames_before = f.received().len();
     let h = std::sync::Arc::new(h);
     let mut submits = Vec::new();
     for _ in 0..64 {
@@ -505,15 +506,29 @@ async fn cancellation_interrupts_backpressured_socket_writes() {
             h.submit(
                 acd_client::commands::Command::Send {
                     agent_id: "a".into(),
-                    text: "x".repeat(64 * 1024),
+                    text: "x".repeat(256 * 1024),
                 },
                 None,
             )
             .await
         }));
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Precondition: with the server not reading, the socket buffers fill
+    // and a client write stays pending.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        f.received().len(),
+        frames_before,
+        "server is paused, so it must not have read any frame"
+    );
+    let mut state = h.state();
     h.cancel();
+    // The machine task ends (its state sender is dropped) within a bound.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while state.changed().await.is_ok() {}
+    })
+    .await
+    .expect("cancellation ends the task although a write is blocked");
     for submit in submits {
         let outcome = tokio::time::timeout(Duration::from_secs(1), submit)
             .await
@@ -525,17 +540,20 @@ async fn cancellation_interrupts_backpressured_socket_writes() {
                 | acd_client::commands::Outcome::NotSent(acd_client::commands::NotSent::Offline)
         ));
     }
-    let received_before_resume = f.received().len();
-    assert!(
-        received_before_resume < 64,
-        "server stopped reading, so the connection must not finish every write"
-    );
     f.set_reading(true);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Frames already flushed into the kernel buffers before the stall may
+    // legitimately arrive; the blocked and queued ones must not.
+    let delivered = f.received().len() - frames_before;
+    assert!(
+        delivered < 64,
+        "cancelled writes must never be delivered after reads resume"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        f.received().len(),
-        received_before_resume,
-        "cancelled writes must never complete later"
+        f.received().len() - frames_before,
+        delivered,
+        "no frame arrives late once reads have restarted"
     );
 }
 

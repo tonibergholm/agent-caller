@@ -25,7 +25,7 @@ pub enum Identity {
 }
 
 #[derive(Clone)]
-struct Shared(Arc<Mutex<State>>);
+struct Shared(Arc<Mutex<State>>, Arc<tokio::sync::Notify>);
 
 struct State {
     token: String,
@@ -154,7 +154,10 @@ impl FakeServer {
             connections: 0,
         };
         FakeServer {
-            shared: Shared(Arc::new(Mutex::new(state))),
+            shared: Shared(
+                Arc::new(Mutex::new(state)),
+                Arc::new(tokio::sync::Notify::new()),
+            ),
             port,
             pin,
             ready_rx: tokio::sync::Mutex::new(rx),
@@ -194,6 +197,7 @@ impl FakeServer {
     }
     pub fn set_reading(&self, on: bool) {
         self.shared.0.lock().unwrap().read_paused = !on;
+        self.shared.1.notify_one();
     }
     pub fn set_accept_delay(&self, d: Duration) {
         self.shared.0.lock().unwrap().accept_delay = d;
@@ -357,6 +361,7 @@ async fn serve_ws<S>(
     loop {
         let read_paused = shared.0.lock().unwrap().read_paused;
         tokio::select! {
+            _ = shared.1.notified() => continue,
             Some(msg) = out.recv() => match msg {
                 Out::Text(s) => if ws.send(Message::Text(s.into())).await.is_err() { break; },
                 Out::Close(code) => { send_close(&mut ws, code).await; break; }
