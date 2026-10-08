@@ -52,6 +52,7 @@ async fn reconnects_after_drop_and_catches_up() {
         .await
         .conn_gen;
     let mut ev = h.events();
+    while ev.try_recv().is_ok() {}
     h.drop_connection();
     d.core.observe(Observation::AgentUpsert(agent_obs("late")));
     let st = wait_for(&mut rx, "late agent", |s| {
@@ -75,6 +76,33 @@ async fn reconnects_after_drop_and_catches_up() {
     .await
     .unwrap();
     assert_eq!(ended, first);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                if let Ok((_, MachineEvent::ConnectionEnded { generation })) = ev.recv().await {
+                    return generation;
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "one authenticated connection produces one end event"
+    );
+    drop(ev);
+    let mut ev = h.events();
+    h.drop_connection();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok((_, MachineEvent::ConnectionEnded { generation })) = ev.recv().await
+                && generation == st.conn_gen
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(h);
 }
 
 #[tokio::test]
@@ -224,13 +252,84 @@ async fn slow_tls_handshakes_do_not_block_others() {
     .await;
     for mut stream in silent {
         let mut b = [0u8; 1];
-        tokio::time::timeout(
+        let read = tokio::time::timeout(
             Duration::from_secs(1),
             tokio::io::AsyncReadExt::read(&mut stream, &mut b),
         )
         .await
         .unwrap()
         .unwrap();
+        assert_eq!(read, 0, "silent TLS socket must reach EOF");
     }
     drop(config_tx);
+}
+
+#[tokio::test]
+async fn dropping_all_handles_stops_reconnects() {
+    let d = daemon().await;
+    let h = spawn_machine(tcp(&d, TOKEN));
+    let mut rx = h.state();
+    wait_for(&mut rx, "online", |s| s.status == MachineStatus::Online).await;
+    let mut ev = h.events();
+    while ev.try_recv().is_ok() {}
+    drop(h);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Ok((_, MachineEvent::ConnectionEnded { .. })) = ev.recv().await {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(rx);
+}
+
+#[tokio::test]
+async fn offline_submission_does_not_shorten_retry_delay() {
+    let tcp_l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = tcp_l.local_addr().unwrap().port();
+    drop(tcp_l);
+    let files = tls::generate("t");
+    let pin = tls::pin_of_cert_pem(&files.cert_pem).unwrap();
+    let mut cfg = MachineConfig {
+        key: "m1".into(),
+        instance: 1,
+        endpoint: acd_client::endpoint::Endpoint::Tcp {
+            host: "127.0.0.1".into(),
+            port,
+            pin,
+        },
+        credential: Credential::Token(TOKEN.into()),
+        client: client(),
+        timing: fast(),
+    };
+    cfg.timing.backoff_base = Duration::from_millis(400);
+    cfg.timing.backoff_max = Duration::from_millis(400);
+    let h = spawn_machine(cfg);
+    let mut rx = h.state();
+    wait_for(&mut rx, "offline", |s| {
+        matches!(s.status, MachineStatus::Offline { .. })
+    })
+    .await;
+    let outcome = h
+        .submit(
+            acd_client::commands::Command::MarkSeen {
+                agent_id: "x".into(),
+            },
+            None,
+        )
+        .await;
+    assert!(matches!(outcome, acd_client::commands::Outcome::NotSent(_)));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let _d = serve_on(listener, port, FakeAdapter::new(), files).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_ne!(
+        rx.borrow().status,
+        MachineStatus::Online,
+        "submit must not bypass backoff"
+    );
 }

@@ -137,6 +137,7 @@ enum End {
     PinMismatch,
     Incompatible(String),
     Local(String),
+    Stopped,
 }
 
 async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), End> {
@@ -203,7 +204,11 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
                             continue;
                         }
                     };
-                    let url = format!("wss://{}:{}/", host.trim_matches(['[', ']']), port);
+                    let authority_host = match host.parse::<std::net::Ipv6Addr>() {
+                        Ok(ip) => format!("[{ip}]"),
+                        Err(_) => host.trim_matches(['[', ']']).to_string(),
+                    };
+                    let url = format!("wss://{authority_host}:{port}/");
                     match tokio_tungstenite::client_async(url, Box::new(stream) as Box<dyn Io>)
                         .await
                     {
@@ -274,39 +279,43 @@ async fn handshake(
     resume: Option<acd_protocol::Cursor>,
     deadline: Instant,
 ) -> Result<(Machine, Vec<String>, String, u64), End> {
-    send_json(
-        ws,
-        &ClientMessage::Hello {
-            protocol: PROTOCOL.into(),
-            token: token.into(),
-            client: client.clone(),
-            resume,
-        },
-    )
-    .await?;
-    loop {
-        match next_server(ws, deadline).await? {
-            acd_protocol::ServerMessage::Welcome {
-                machine,
-                capabilities,
-                epoch,
-                seq,
-            } => return Ok((machine, capabilities, epoch, seq)),
-            acd_protocol::ServerMessage::Error {
-                code: ErrorCode::UnsupportedProtocol,
-                message,
-                ..
-            } => return Err(End::Incompatible(message)),
-            acd_protocol::ServerMessage::Error {
-                code: ErrorCode::Unauthorized,
-                ..
-            } => return Err(End::Unauthorized),
-            acd_protocol::ServerMessage::Error { message, .. } => {
-                return Err(End::Offline(message));
+    timeout_at(deadline, async {
+        send_json(
+            ws,
+            &ClientMessage::Hello {
+                protocol: PROTOCOL.into(),
+                token: token.into(),
+                client: client.clone(),
+                resume,
+            },
+        )
+        .await?;
+        loop {
+            match next_server(ws, deadline).await? {
+                acd_protocol::ServerMessage::Welcome {
+                    machine,
+                    capabilities,
+                    epoch,
+                    seq,
+                } => return Ok((machine, capabilities, epoch, seq)),
+                acd_protocol::ServerMessage::Error {
+                    code: ErrorCode::UnsupportedProtocol,
+                    message,
+                    ..
+                } => return Err(End::Incompatible(message)),
+                acd_protocol::ServerMessage::Error {
+                    code: ErrorCode::Unauthorized,
+                    ..
+                } => return Err(End::Unauthorized),
+                acd_protocol::ServerMessage::Error { message, .. } => {
+                    return Err(End::Offline(message));
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
+    })
+    .await
+    .unwrap_or_else(|_| Err(End::Offline("handshake timed out".into())))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -331,7 +340,7 @@ async fn serve(
             control = ctl.recv() => match control {
                 Some(Control::DropConnection) => return End::Offline("dropped by request".into()),
                 Some(Control::Submit(command, expect_gen, reply)) => { let _ = (command.capability(), expect_gen); let _ = reply.send(Outcome::NotSent(NotSent::Offline)); },
-                Some(Control::RetryNow) => {}, None => return End::Offline("machine stopped".into()),
+                Some(Control::RetryNow) => {}, None => return End::Stopped,
             },
             _ = tokio::time::sleep_until(ping_at) => {
                 if ping_deadline.is_some() { return End::Offline("no reply to ping".into()); }
@@ -343,7 +352,7 @@ async fn serve(
                 let msg = match incoming { Ok(m) => m, Err(e) => return End::Offline(e.to_string()) };
                 if let Some(code) = close_code(&msg) { return end_for_close(code); }
                 last_frame = tokio::time::Instant::now(); ping_deadline = None;
-                let text = match msg { Message::Text(t) => t.to_string(), Message::Ping(v) => { let _ = ws.send(Message::Pong(v)).await; continue; }, Message::Pong(_) => continue, Message::Close(_) => return End::Offline("closed".into()), _ => continue };
+                let text = match msg { Message::Text(t) => t.to_string(), Message::Ping(v) => { if let Err(e) = ws.send(Message::Pong(v)).await { return End::Offline(e.to_string()); } continue; }, Message::Pong(_) => continue, Message::Close(_) => return End::Offline("closed".into()), _ => continue };
                 let decoded = match acd_protocol::decode_server(&text) { Ok(Some(m)) => m, Ok(None) => continue, Err(_) => return End::Resync("undecodable frame") };
                 match decoded {
                     acd_protocol::ServerMessage::Result(_) => {},
@@ -354,7 +363,7 @@ async fn serve(
                         match applied {
                             Applied::Resync(why) => return End::Resync(why),
                             Applied::Changed => { let status = if session.ready() { MachineStatus::Online } else { MachineStatus::Syncing }; state.send_replace(MachineState { instance, status, session: session.clone(), conn_gen: generation }); },
-                            Applied::Opened(req) => { let _ = events.send((instance, MachineEvent::Opened(req))); },
+                            Applied::Opened(req) => { state.send_replace(MachineState { instance, status: if session.ready() { MachineStatus::Online } else { MachineStatus::Syncing }, session: session.clone(), conn_gen: generation }); let _ = events.send((instance, MachineEvent::Opened(req))); },
                             Applied::Resolved { request_id, agent_id, by, option_id } => { let _ = events.send((instance, MachineEvent::Resolved { request_id, agent_id, by, option_id })); },
                             Applied::Ignored => {}
                         }
@@ -445,7 +454,7 @@ async fn run(
                                 generation,
                             );
                         }
-                        serve(
+                        let end = serve(
                             ws,
                             &mut session,
                             generation,
@@ -456,15 +465,16 @@ async fn run(
                             &mut ctl,
                             &mut backoff,
                         )
-                        .await
+                        .await;
+                        let _ = events
+                            .send((cfg.instance, MachineEvent::ConnectionEnded { generation }));
+                        end
                     }
                 }
             }
         };
-        if generation > 0 {
-            let _ = events.send((cfg.instance, MachineEvent::ConnectionEnded { generation }));
-        }
         let delay = match end {
+            End::Stopped => return,
             End::Offline(error) => {
                 let since = *offline_since.get_or_insert_with(now_ms);
                 publish(
@@ -517,7 +527,9 @@ async fn run(
                     generation,
                 );
                 if matches!(cfg.credential, Credential::Token(_)) {
-                    wait_retry(&mut ctl).await;
+                    if !wait_retry(&mut ctl).await {
+                        return;
+                    }
                     continue;
                 }
                 backoff.next_delay()
@@ -542,7 +554,9 @@ async fn run(
                     &session,
                     generation,
                 );
-                wait_retry(&mut ctl).await;
+                if !wait_retry(&mut ctl).await {
+                    return;
+                }
                 continue;
             }
             End::Local(message) => {
@@ -556,27 +570,45 @@ async fn run(
                 backoff.next_delay()
             }
         };
-        if wait_delay(&mut ctl, delay).await {
-            continue;
+        match wait_delay(&mut ctl, delay).await {
+            Wait::Retry => continue,
+            Wait::Elapsed => {}
+            Wait::Stopped => return,
         }
     }
 }
 
-async fn wait_retry(ctl: &mut mpsc::Receiver<Control>) {
+async fn wait_retry(ctl: &mut mpsc::Receiver<Control>) -> bool {
     loop {
         match ctl.recv().await {
-            Some(Control::RetryNow) => return,
+            Some(Control::RetryNow) => return true,
             Some(Control::Submit(command, expect_gen, reply)) => {
                 let _ = (command.capability(), expect_gen);
                 let _ = reply.send(Outcome::NotSent(NotSent::Offline));
             }
             Some(Control::DropConnection) => {}
-            None => return,
+            None => return false,
         }
     }
 }
-async fn wait_delay(ctl: &mut mpsc::Receiver<Control>, delay: Duration) -> bool {
-    tokio::select! { _ = tokio::time::sleep(delay) => false, control = ctl.recv() => match control { Some(Control::RetryNow) => true, Some(Control::Submit(command, expect_gen, reply)) => { let _ = (command.capability(), expect_gen); let _ = reply.send(Outcome::NotSent(NotSent::Offline)); false }, Some(Control::DropConnection) => false, None => true } }
+enum Wait {
+    Elapsed,
+    Retry,
+    Stopped,
+}
+async fn wait_delay(ctl: &mut mpsc::Receiver<Control>, delay: Duration) -> Wait {
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return Wait::Elapsed,
+            control = ctl.recv() => match control {
+                Some(Control::RetryNow) => return Wait::Retry,
+                Some(Control::Submit(command, expect_gen, reply)) => { let _ = (command.capability(), expect_gen); let _ = reply.send(Outcome::NotSent(NotSent::Offline)); },
+                Some(Control::DropConnection) => {},
+                None => return Wait::Stopped,
+            }
+        }
+    }
 }
 
 pub fn spawn_machine(cfg: MachineConfig) -> MachineHandle {
