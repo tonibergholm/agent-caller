@@ -112,6 +112,7 @@ async fn new_pane_is_subscribed_and_released_agent_removed() {
             .then_some(())
     })
     .await;
+    assert_eq!(*r.handle.health().borrow(), Health::Connected);
     r.fake.remove_agent("w1:p5");
     r.fake.push_event(serde_json::json!({"event":"pane_agent_detected","data":{"agent":"claude","final_status":"idle","pane_id":"w1:p5","released":true,"type":"pane_agent_detected","workspace_id":"w1"}}));
     until("p5 gone", || {
@@ -371,4 +372,88 @@ async fn shutdown_with_removal_emits_gone() {
     r.handle.shutdown(true).await;
     assert!(r.core.agent(&id).is_none());
     assert!(r.panes.read().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn status_change_before_resubscribe_is_caught_without_a_list() {
+    let fake = FakeHerdr::start().await;
+    let hour = Duration::from_secs(3600);
+    let r = rig_with(
+        fake,
+        Timing {
+            list_idle: hour,
+            list_blocked: hour,
+            ..fast()
+        },
+    )
+    .await;
+    until("connected", || {
+        (*r.handle.health().borrow() == Health::Connected).then_some(())
+    })
+    .await;
+    // Let the connect-time resync list finish so a later list would be a bug.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let lists = || {
+        r.fake
+            .calls()
+            .iter()
+            .filter(|(m, _)| m == "agent.list")
+            .count()
+    };
+    let lists_before = lists();
+    r.fake.set_agent(fake_agent("w1:p5", "claude", "working"));
+    r.fake.push_event(serde_json::json!({"event":"pane_agent_detected","data":{"agent":"claude","pane_id":"w1:p5","type":"pane_agent_detected","workspace_id":"w1"}}));
+    // Spin (no sleeping) until the first get is applied: the reconciler is
+    // then still opening the new subscription. Change status with no event.
+    for _ in 0..100_000 {
+        if r.state("w1:p5").is_some() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    r.fake.set_agent(fake_agent("w1:p5", "claude", "blocked"));
+    until("needs_you", || {
+        (r.state("w1:p5") == Some(AgentState::NeedsYou)).then_some(())
+    })
+    .await;
+    assert_eq!(lists(), lists_before, "found by agent.get, not a list");
+}
+
+#[tokio::test]
+async fn failed_connect_list_is_retried_promptly() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "working"));
+    let path = fake.path().to_path_buf();
+    let hour = Duration::from_secs(3600);
+    let r = rig_with(
+        fake,
+        Timing {
+            list_idle: hour,
+            list_blocked: hour,
+            ..fast()
+        },
+    )
+    .await;
+    until("agent", || r.state("w1:p1")).await;
+    let Rig {
+        fake,
+        core,
+        hash,
+        handle,
+        ..
+    } = r;
+    fake.stop().await;
+    let id = map::agent_id(&hash, "w1:p1");
+    until("unknown", || {
+        (core.agent(&id).map(|a| a.state) == Some(AgentState::Unknown)).then_some(())
+    })
+    .await;
+    let fake2 = FakeHerdr::start_at(&path).await;
+    fake2.set_agent(fake_agent("w1:p1", "claude", "blocked"));
+    fake2.fail_next("agent.list", "internal_error");
+    until("restored", || {
+        (core.agent(&id).map(|a| a.state) == Some(AgentState::NeedsYou)).then_some(())
+    })
+    .await;
+    assert_eq!(*handle.health().borrow(), Health::Connected);
 }

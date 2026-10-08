@@ -96,14 +96,43 @@ impl ReconcilerHandle {
     /// agent of this socket and drops them from the pane map.
     pub async fn shutdown(self, remove_agents: bool) {
         let _ = self.stop.send(());
-        let known = self.task.await.unwrap_or_default();
+        let known = match self.task.await {
+            Ok(known) => Some(known),
+            Err(e) => {
+                tracing::error!(error = %e, "herdr reconciler task failed");
+                None
+            }
+        };
         if !remove_agents {
             return;
         }
-        let mut panes = self.panes.write().expect("pane map");
-        for pane_id in known.keys() {
-            let agent_id = map::agent_id(&self.hash, pane_id);
-            panes.remove(&agent_id);
+        // Never hold the pane map across a core call.
+        let ids: Vec<String> = {
+            let mut panes = self.panes.write().expect("pane map");
+            match known {
+                Some(known) => known
+                    .keys()
+                    .map(|p| map::agent_id(&self.hash, p))
+                    .inspect(|id| {
+                        panes.remove(id);
+                    })
+                    .collect(),
+                None => {
+                    // The task is gone: fall back to this socket's id prefix.
+                    let prefix = format!("herdr:{}:", self.hash);
+                    let ids: Vec<String> = panes
+                        .keys()
+                        .filter(|id| id.starts_with(&prefix))
+                        .cloned()
+                        .collect();
+                    for id in &ids {
+                        panes.remove(id);
+                    }
+                    ids
+                }
+            }
+        };
+        for agent_id in ids {
             self.core.observe(Observation::AgentGone { agent_id });
         }
     }
@@ -135,6 +164,7 @@ pub fn spawn(
         known: HashMap::new(),
         blocked: HashSet::new(),
         sub: None,
+        subscribed: HashSet::new(),
         generation: 0,
         subs_changed: false,
         resync: Arc::new(AtomicBool::new(false)),
@@ -206,6 +236,8 @@ struct Reconciler {
     /// Known panes whose agent is `NeedsYou`.
     blocked: HashSet<String>,
     sub: Option<SubReader>,
+    /// Panes in the current subscription.
+    subscribed: HashSet<String>,
     generation: u64,
     subs_changed: bool,
     /// Sticky: set by a full hint channel, an overflowing dirty queue or
@@ -295,7 +327,7 @@ impl Reconciler {
         self.dirty.clear();
         self.dirty_set.clear();
         self.list_unit(false).await?;
-        self.resubscribe().await?;
+        self.resubscribe(true).await?;
         self.set_health(Health::Connected);
         Ok(())
     }
@@ -304,6 +336,7 @@ impl Reconciler {
     /// the next full resync restores it.
     fn lost(&mut self, reason: String) {
         self.sub = None;
+        self.subscribed.clear();
         self.dirty.clear();
         self.dirty_set.clear();
         self.resync.store(false, Ordering::Relaxed);
@@ -344,7 +377,7 @@ impl Reconciler {
                 None => self.wait().await,
             };
             let result = match result {
-                Ok(()) if self.subs_changed => self.resubscribe().await,
+                Ok(()) if self.subs_changed => self.resubscribe(false).await,
                 other => other,
             };
             if let Err(flow) = result {
@@ -488,6 +521,10 @@ impl Reconciler {
             }
             Err(e) if is_server(&e) => {
                 tracing::debug!(error = %e, "herdr agent.list failed");
+                if !periodic {
+                    // Connect-time: agents are still Unknown; retry promptly.
+                    self.resync.store(true, Ordering::Relaxed);
+                }
                 Ok(())
             }
             Err(e) => Err(Flow::Lost(e.to_string())),
@@ -557,7 +594,7 @@ impl Reconciler {
 
     /// Opens a subscription for every known pane, then drops the old one.
     /// Events in the overlap only cause extra `agent.get` calls.
-    async fn resubscribe(&mut self) -> Result<(), Flow> {
+    async fn resubscribe(&mut self, connect: bool) -> Result<(), Flow> {
         self.subs_changed = false;
         let panes: Vec<String> = self.known.keys().cloned().collect();
         let sub = self
@@ -565,6 +602,20 @@ impl Reconciler {
             .subscribe(&panes)
             .await
             .map_err(|e| Flow::Lost(e.to_string()))?;
+        let added: Vec<String> = panes
+            .iter()
+            .filter(|p| !self.subscribed.contains(*p))
+            .cloned()
+            .collect();
+        self.subscribed = panes.into_iter().collect();
+        if connect {
+            // Changes before the stream went live are only visible to a list.
+            self.resync.store(true, Ordering::Relaxed);
+        } else {
+            for pane_id in added {
+                self.mark_dirty(pane_id);
+            }
+        }
         self.generation += 1;
         let reader = tokio::spawn(read_events(
             sub,
