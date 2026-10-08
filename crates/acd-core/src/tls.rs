@@ -1,3 +1,4 @@
+use futures_util::task::AtomicWaker;
 use rustls_pki_types::pem::PemObject;
 
 use axum::{
@@ -65,8 +66,26 @@ impl KeyFiles {
                 if line == format!("-----END {label}-----") {
                     let block = format!("{}\n", current.join("\n"));
                     match label.as_str() {
-                        "PRIVATE KEY" | "RSA PRIVATE KEY" | "EC PRIVATE KEY" => keys.push(block),
-                        "CERTIFICATE" => certs.push(block),
+                        "PRIVATE KEY" => {
+                            rustls_pki_types::PrivatePkcs8KeyDer::from_pem_slice(block.as_bytes())
+                                .map_err(|e| TlsError::Pem(e.to_string()))?;
+                            keys.push(block)
+                        }
+                        "RSA PRIVATE KEY" => {
+                            rustls_pki_types::PrivatePkcs1KeyDer::from_pem_slice(block.as_bytes())
+                                .map_err(|e| TlsError::Pem(e.to_string()))?;
+                            keys.push(block)
+                        }
+                        "EC PRIVATE KEY" => {
+                            rustls_pki_types::PrivateSec1KeyDer::from_pem_slice(block.as_bytes())
+                                .map_err(|e| TlsError::Pem(e.to_string()))?;
+                            keys.push(block)
+                        }
+                        "CERTIFICATE" => {
+                            CertificateDer::from_pem_slice(block.as_bytes())
+                                .map_err(|e| TlsError::Pem(e.to_string()))?;
+                            certs.push(block)
+                        }
                         _ => return Err(TlsError::Pem("unexpected PEM block".into())),
                     }
                     current.clear();
@@ -104,34 +123,37 @@ pub fn generate(common_name: &str) -> KeyFiles {
     }
 }
 
-fn certificate_spki(cert_pem: &str) -> Result<(CertificateDer<'static>, Vec<u8>), TlsError> {
+fn certificate_spki(
+    cert_pem: &str,
+) -> Result<(CertificateDer<'static>, Vec<u8>, Vec<u8>), TlsError> {
     let cert_der = CertificateDer::from_pem_slice(cert_pem.as_bytes())
         .map_err(|e| TlsError::Pem(e.to_string()))?;
     let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref())
         .map_err(|e| TlsError::Cert(e.to_string()))?;
     {
-        let spki = cert
+        let raw_key = cert
             .tbs_certificate
             .subject_pki
             .subject_public_key
             .data
             .to_vec();
+        let spki = cert.tbs_certificate.subject_pki.raw.to_vec();
         drop(cert);
-        Ok((cert_der, spki))
+        Ok((cert_der, raw_key, spki))
     }
 }
 
 pub fn check_pair(f: &KeyFiles) -> Result<String, TlsError> {
     let key = rcgen::KeyPair::from_pem(&f.key_pem).map_err(|e| TlsError::Pem(e.to_string()))?;
-    let (_, spki) = certificate_spki(&f.cert_pem)?;
-    if key.public_key_raw() != spki {
+    let (_, raw_key, spki) = certificate_spki(&f.cert_pem)?;
+    if key.public_key_raw() != raw_key {
         return Err(TlsError::Cert("key does not match certificate".into()));
     }
     Ok(acd_protocol::pairing::spki_pin(&spki))
 }
 
 pub fn pin_of_cert_pem(cert_pem: &str) -> Result<String, TlsError> {
-    let (_, spki) = certificate_spki(cert_pem)?;
+    let (_, _, spki) = certificate_spki(cert_pem)?;
     Ok(acd_protocol::pairing::spki_pin(&spki))
 }
 
@@ -231,10 +253,12 @@ impl Admit {
 #[derive(Clone)]
 pub struct KillSwitch {
     tx: watch::Sender<bool>,
+    waker: Arc<AtomicWaker>,
 }
 impl KillSwitch {
     pub fn kill(&self) {
         self.tx.send_replace(true);
+        self.waker.wake();
     }
 }
 
@@ -244,6 +268,7 @@ pub struct TlsIo {
     deadline: Instant,
     sleep: Pin<Box<Sleep>>,
     killed: watch::Receiver<bool>,
+    kill_waker: Arc<AtomicWaker>,
 }
 impl TlsIo {
     fn new(
@@ -251,6 +276,7 @@ impl TlsIo {
         admit: Admit,
         deadline: Instant,
         killed: watch::Receiver<bool>,
+        kill_waker: Arc<AtomicWaker>,
     ) -> Self {
         Self {
             stream,
@@ -258,12 +284,14 @@ impl TlsIo {
             deadline,
             sleep: Box::pin(tokio::time::sleep_until(deadline)),
             killed,
+            kill_waker,
         }
     }
     pub fn admit(&self) -> Admit {
         self.admit.clone()
     }
     fn ended(&mut self, cx: &mut Context<'_>) -> bool {
+        self.kill_waker.register(cx.waker());
         if *self.killed.borrow()
             || (!self.admit.is_authenticated() && Instant::now() >= self.deadline)
         {
@@ -338,7 +366,11 @@ impl TlsListener {
         let local = tcp.local_addr().expect("bound TCP listener");
         let (tx, rx) = mpsc::channel(16);
         let (kill_tx, _) = watch::channel(false);
-        let kill = KillSwitch { tx: kill_tx };
+        let kill_waker = Arc::new(AtomicWaker::new());
+        let kill = KillSwitch {
+            tx: kill_tx,
+            waker: kill_waker.clone(),
+        };
         let kill_rx = kill.tx.subscribe();
         let task = tokio::spawn(async move {
             let mut handshakes = JoinSet::new();
@@ -348,6 +380,7 @@ impl TlsListener {
                 tokio::select! {
                     biased;
                     _ = tx.closed() => return,
+                    Some(_) = handshakes.join_next(), if !handshakes.is_empty() => {}
                     result = tcp.accept() => {
                         let Ok((stream, addr)) = result else { continue };
                         let accepted_at = Instant::now();
@@ -358,14 +391,14 @@ impl TlsListener {
                         let acceptor = TlsAcceptor::from(config.borrow_and_update().clone());
                         let tx = tx.clone();
                         let kill = kill_rx.clone();
+                        let kill_waker = kill_waker.clone();
                         let timeout = limits.handshake;
                         handshakes.spawn(async move {
                             let Ok(Ok(tls)) = tokio::time::timeout(timeout, acceptor.accept(stream)).await else { return };
-                            let io = TlsIo::new(tls, admit, deadline, kill);
+                            let io = TlsIo::new(tls, admit, deadline, kill, kill_waker);
                             let _ = tx.send((io, addr)).await;
                         });
                     }
-                    Some(_) = handshakes.join_next(), if !handshakes.is_empty() => {}
                 }
             }
         });

@@ -1,4 +1,6 @@
 use acd_core::{Auth, Core, ServerOptions, router, testing::*, tls};
+use axum::serve::Listener;
+use rustls::pki_types::pem::PemObject;
 use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -8,6 +10,7 @@ use tokio::{
 struct Served {
     port: u16,
     task: tokio::task::JoinHandle<()>,
+    kill: tls::KillSwitch,
     _tx: watch::Sender<Arc<rustls::ServerConfig>>,
 }
 
@@ -17,6 +20,7 @@ async fn serve(limits: tls::Limits, admission: tls::Admission) -> Served {
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = tcp.local_addr().unwrap().port();
     let listener = tls::TlsListener::new(tcp, rx, admission, limits);
+    let kill = listener.kill_switch();
     let core = Core::new(test_machine(), vec![FakeAdapter::new()]);
     let app = router(
         core,
@@ -34,6 +38,7 @@ async fn serve(limits: tls::Limits, admission: tls::Admission) -> Served {
     Served {
         port,
         task,
+        kill,
         _tx: tx,
     }
 }
@@ -67,6 +72,67 @@ fn generated_bundles_round_trip_and_mismatched_pairs_are_refused() {
         tls::KeyFiles::from_bundle(&a.key_pem).is_err(),
         "a bundle needs both blocks"
     );
+    let malformed_key = format!(
+        "-----BEGIN PRIVATE KEY-----\nnot base64!\n-----END PRIVATE KEY-----\n{}",
+        a.cert_pem
+    );
+    assert!(tls::KeyFiles::from_bundle(&malformed_key).is_err());
+    let malformed_cert = format!(
+        "{}-----BEGIN CERTIFICATE-----\nnot base64!\n-----END CERTIFICATE-----\n",
+        a.key_pem
+    );
+    assert!(tls::KeyFiles::from_bundle(&malformed_cert).is_err());
+
+    let cert_der =
+        rustls::pki_types::CertificateDer::from_pem_slice(a.cert_pem.as_bytes()).unwrap();
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert_der.as_ref()).unwrap();
+    let expected = acd_protocol::pairing::spki_pin(parsed.tbs_certificate.subject_pki.raw);
+    assert_eq!(
+        pin, expected,
+        "pin hashes the full DER SubjectPublicKeyInfo"
+    );
+}
+
+#[tokio::test]
+async fn killing_listener_wakes_an_authenticated_parked_read() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let s = serve(tls::Limits::default(), tls::Admission::new(32)).await;
+    let (mut ws, _) =
+        tokio_tungstenite::client_async("wss://localhost/", tls_connect(s.port).await)
+            .await
+            .unwrap();
+    let hello = acd_protocol::ClientMessage::Hello {
+        protocol: acd_protocol::PROTOCOL.into(),
+        token: "secret".into(),
+        client: acd_protocol::ClientInfo {
+            id: "test".into(),
+            name: "test".into(),
+            version: "test".into(),
+        },
+        resume: None,
+    };
+    ws.send(Message::Text(serde_json::to_string(&hello).unwrap().into()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(ws.next().await.unwrap().unwrap(), Message::Text(text) if matches!(acd_protocol::decode_server(text.as_str()).unwrap(), Some(acd_protocol::ServerMessage::Welcome { .. }))) { break; }
+        }
+    }).await.expect("welcome received");
+
+    let (mut sink, mut stream) = ws.split();
+    let read = tokio::spawn(async move { stream.next().await });
+    tokio::task::yield_now().await;
+    s.kill.kill();
+    let result = tokio::time::timeout(Duration::from_secs(1), read).await;
+    assert!(
+        result.is_ok(),
+        "parked read wakes when the TLS listener is killed"
+    );
+    let _ = sink.close().await;
+    s.task.abort();
 }
 
 #[tokio::test]
@@ -77,6 +143,35 @@ async fn plaintext_ws_is_refused() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn completed_handshake_frees_capacity_under_continuous_accepts() {
+    let files = tls::generate("t");
+    let (tx, rx) = watch::channel(tls::server_config(&files).unwrap());
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = tcp.local_addr().unwrap().port();
+    let mut limits = short();
+    limits.max_handshakes = 1;
+    let listener = tls::TlsListener::new(tcp, rx, tls::Admission::new(32), limits);
+    let kill = listener.kill_switch();
+    let task = tokio::spawn(async move {
+        let mut listener = listener;
+        let mut clients = Vec::new();
+        // Keep accepts ready while the first handshake is completing.
+        for _ in 0..40 {
+            clients.push(tokio::spawn(tls_connect(port)));
+            tokio::task::yield_now().await;
+        }
+        tokio::time::timeout(Duration::from_secs(3), listener.accept()).await
+    });
+    let accepted = task.await.unwrap();
+    assert!(
+        accepted.is_ok(),
+        "a completed handshake releases its bounded slot"
+    );
+    kill.kill();
+    drop(tx);
 }
 
 #[tokio::test]
@@ -243,16 +338,20 @@ async fn authenticate_ok(
     ws.send(Message::Text(serde_json::to_string(&hello).unwrap().into()))
         .await
         .unwrap();
-    loop {
-        let msg = ws.next().await.unwrap().unwrap();
-        if let Message::Text(text) = msg
-            && matches!(
-                acd_protocol::decode_server(text.as_str()).unwrap(),
-                Some(acd_protocol::ServerMessage::Welcome { .. })
-            )
-        {
-            break;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let msg = ws.next().await.unwrap().unwrap();
+            if let Message::Text(text) = msg
+                && matches!(
+                    acd_protocol::decode_server(text.as_str()).unwrap(),
+                    Some(acd_protocol::ServerMessage::Welcome { .. })
+                )
+            {
+                break;
+            }
         }
-    }
+    })
+    .await
+    .expect("server welcomes authenticated client");
     ws
 }
