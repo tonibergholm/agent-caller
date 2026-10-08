@@ -10,9 +10,27 @@
 use acd_protocol::AgentKind;
 use sha2::{Digest, Sha256};
 
-/// 16 lowercase hex chars of `sha256` over normalized screen text.
+/// 16 lowercase hex chars of `sha256` over normalized screen text: the
+/// first 8 bytes of a `GuardDigest`. For correlation keys and display; a
+/// keystroke guard compares the full digest.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Fingerprint(pub String);
+
+/// The full 32-byte `sha256` behind a dialog fingerprint. The keys guard and
+/// lease compare this, so two screens must collide in all 256 bits, not in a
+/// 64-bit prefix, to pass for each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GuardDigest(pub(crate) [u8; 32]);
+
+impl GuardDigest {
+    fn of(normalized: &str) -> GuardDigest {
+        GuardDigest(Sha256::digest(normalized.as_bytes()).into())
+    }
+
+    pub fn fingerprint(&self) -> Fingerprint {
+        Fingerprint(self.0.iter().take(8).map(|b| format!("{b:02x}")).collect())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DialogKind {
@@ -55,10 +73,12 @@ pub struct Dialog {
     /// region top and shorten it, so it must never be used to decide an
     /// approval. Use `fingerprint` to identify a dialog.
     pub text: String,
-    /// Hash of the whole screen through the footer (see `screen_fingerprint`).
+    /// Hash of the whole screen through the footer (see `screen_digest`).
     /// `None` for `CodexCollapsed`: the command text is hidden, so the
     /// dialog can never be matched (spec §6.3).
     pub fingerprint: Option<Fingerprint>,
+    /// The full digest `fingerprint` is cut from; `None` with it.
+    pub digest: Option<GuardDigest>,
 }
 
 const CLAUDE_FOOTER: &str = "Esc to cancel";
@@ -207,7 +227,7 @@ fn dialog_identity(kind: &DialogKind, region: &[&str], option_idx: &[usize]) -> 
 /// no located region top is trusted. Changing anything on screen above the
 /// dialog therefore changes the fingerprint; that is an accepted safe
 /// mismatch.
-fn screen_fingerprint(lines: &[&str], option_idx: &[usize]) -> Fingerprint {
+fn screen_digest(lines: &[&str], option_idx: &[usize]) -> GuardDigest {
     let out: Vec<String> = lines
         .iter()
         .enumerate()
@@ -220,12 +240,12 @@ fn screen_fingerprint(lines: &[&str], option_idx: &[usize]) -> Fingerprint {
             l.trim_end().to_string()
         })
         .collect();
-    fingerprint_of(&out.join("\n"))
+    GuardDigest::of(&out.join("\n"))
 }
 
 /// Tolerant normalization for the generic read-only fingerprint only: it keys
 /// read-only requests and must survive cursor moves, rotating tips and
-/// re-wraps. Kept separate from the dialog fingerprint (`screen_fingerprint`)
+/// re-wraps. Kept separate from the dialog fingerprint (`screen_digest`)
 /// so its tolerance cannot leak into the guard. Never use it for the keys
 /// guard.
 fn normalize_generic(lines: &[&str]) -> String {
@@ -249,8 +269,7 @@ fn generic_line(line: &str) -> Option<String> {
 }
 
 fn fingerprint_of(normalized: &str) -> Fingerprint {
-    let digest = Sha256::digest(normalized.as_bytes());
-    Fingerprint(digest.iter().take(8).map(|b| format!("{b:02x}")).collect())
+    GuardDigest::of(normalized).fingerprint()
 }
 
 /// Parses `[marker] N. rest`. Returns the number and the text after `N. `.
@@ -393,9 +412,9 @@ fn make_dialog(
     let option_idx: Vec<usize> = block.iter().map(|(i, _)| *i).collect();
     let text = normalize_text(&lines[start..=end], &option_idx);
     let identity = dialog_identity(&kind, &lines[start..=end], &option_idx);
-    let fingerprint = fingerprint.then(|| {
+    let digest = fingerprint.then(|| {
         let abs: Vec<usize> = option_idx.iter().map(|i| start + i).collect();
-        screen_fingerprint(&lines[..=end], &abs)
+        screen_digest(&lines[..=end], &abs)
     });
     let options = block.into_iter().map(|(_, o)| o).collect();
     Dialog {
@@ -403,7 +422,8 @@ fn make_dialog(
         options,
         identity,
         text,
-        fingerprint,
+        fingerprint: digest.map(|d| d.fingerprint()),
+        digest,
     }
 }
 
@@ -507,10 +527,15 @@ fn is_collapsed_marker(line: &str) -> bool {
     !count.is_empty() && count.chars().all(|c| c.is_ascii_digit())
 }
 
-/// The fingerprint a keystroke guard may trust: the dialog's own, or `None`.
-/// The keys guard must use this, never `fallback_fingerprint`.
+/// The 16-hex prefix of `guard_digest`, for keys and display.
 pub fn guard_fingerprint(text: &str) -> Option<Fingerprint> {
-    find_dialog(text).and_then(|d| d.fingerprint)
+    guard_digest(text).map(|d| d.fingerprint())
+}
+
+/// The digest a keystroke guard may trust: the dialog's own, or `None`.
+/// The keys guard must use this, never `fallback_fingerprint`.
+pub fn guard_digest(text: &str) -> Option<GuardDigest> {
+    find_dialog(text).and_then(|d| d.digest)
 }
 
 /// For the read-only fallback only: the dialog fingerprint when there is one,

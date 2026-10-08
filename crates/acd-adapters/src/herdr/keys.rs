@@ -1,10 +1,10 @@
 //! Keys delivery engine (spec §5.1, §6.2): answers a dialog with exactly one
-//! keystroke, guarded by the dialog's screen fingerprint, then gathers
+//! keystroke, guarded by the dialog's screen digest, then gathers
 //! evidence of the outcome. This is the only place in the crate that sends
 //! keys.
 //!
 //! P3 registers a `KeysTarget` for every keys-answerable occurrence and may
-//! provide `Evidence`. A key never reaches a screen whose dialog fingerprint
+//! provide `Evidence`. A key never reaches a screen whose dialog digest
 //! differs from the target's, and nothing is labelled `inbox` without
 //! evidence that matches this occurrence.
 use std::collections::HashMap;
@@ -18,10 +18,10 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
-use super::client::{CALL_TIMEOUT, CallError, Herdr, KNOWN_REFUSALS};
+use super::client::{CALL_TIMEOUT, CallError, Herdr, KNOWN_REFUSALS, ScreenRead};
 use super::reconciler::{Hint, PaneMap};
 pub use super::screen::DialogIdentity;
-use super::screen::{Fingerprint, find_dialog, guard_fingerprint, prompt_line};
+use super::screen::{Fingerprint, GuardDigest, find_dialog, guard_digest, prompt_line};
 
 /// Consecutive reads without the dialog before it counts as closed or gone.
 pub(crate) const ABSENT_READS: u8 = 2;
@@ -44,8 +44,10 @@ pub struct KeysTarget {
     pub(crate) request_id: String,
     pub(crate) agent_id: String,
     pub(crate) key: CorrelationKey,
-    /// `screen::guard_fingerprint` of the detection snapshot.
+    /// `screen::guard_fingerprint` of the detection snapshot, for display.
     pub(crate) fingerprint: Fingerprint,
+    /// `screen::guard_digest` of the same snapshot: what the guard compares.
+    pub(crate) digest: GuardDigest,
     /// The dialog's identity in that snapshot.
     pub(crate) identity: DialogIdentity,
     /// Option id -> herdr key name: `"1"`..`"9"` or `"esc"` only.
@@ -93,10 +95,7 @@ impl KeysTarget {
         option_keys: HashMap<String, String>,
     ) -> Result<KeysTarget, &'static str> {
         let dialog = find_dialog(screen_text).ok_or("no dialog on screen")?;
-        let fingerprint = dialog
-            .fingerprint
-            .clone()
-            .ok_or("the dialog cannot be fingerprinted")?;
+        let digest = dialog.digest.ok_or("the dialog cannot be fingerprinted")?;
         check_keys(&option_keys)?;
         let digit_ok = |k: &str| {
             k == "esc"
@@ -112,10 +111,25 @@ impl KeysTarget {
             request_id,
             agent_id,
             key,
-            fingerprint,
+            fingerprint: digest.fingerprint(),
+            digest,
             identity: dialog.identity,
             option_keys,
         })
+    }
+
+    /// The guard: a whole read whose dialog has exactly this target's digest,
+    /// all 32 bytes.
+    fn guard_passes(&self, read: &ScreenRead) -> bool {
+        !read.truncated && guard_digest(&read.text) == Some(self.digest)
+    }
+
+    /// Whether `self` is still the target the guard checked: same digest,
+    /// identity and key for `option_id`.
+    fn unchanged_since(&self, guarded: &KeysTarget, option_id: &str) -> bool {
+        self.digest == guarded.digest
+            && self.identity == guarded.identity
+            && self.option_keys.get(option_id) == guarded.option_keys.get(option_id)
     }
 
     /// Whether `text` still shows this target's dialog, possibly redrawn or
@@ -283,7 +297,7 @@ impl Engine {
 
     /// Whether `request_id` is still ours to answer with `key`: claimed for
     /// keys in the core, and its target unchanged since the guard (same
-    /// fingerprint, identity and key for the option).
+    /// digest, identity and key for the option).
     fn lease_held(&self, core: &Weak<Core>, target: &KeysTarget, option_id: &str) -> bool {
         let Some(core) = core.upgrade() else {
             return false;
@@ -292,11 +306,10 @@ impl Engine {
             r.status == RequestStatus::Answering && r.answer_path == AnswerPath::Keys
         });
         claimed
-            && self.targets.get(&target.request_id).is_some_and(|t| {
-                t.fingerprint == target.fingerprint
-                    && t.identity == target.identity
-                    && t.option_keys.get(option_id) == target.option_keys.get(option_id)
-            })
+            && self
+                .targets
+                .get(&target.request_id)
+                .is_some_and(|t| t.unchanged_since(target, option_id))
     }
 
     /// Runs inline: nothing is sent from a spawned task, so no send can start
@@ -337,7 +350,7 @@ impl Engine {
             .read_screen(&pane.pane_id, "detection", None, deadline)
             .await
             .map_err(|_| not_delivered(ErrorCode::SourceUnavailable))?;
-        if read.truncated || guard_fingerprint(&read.text).as_ref() != Some(&target.fingerprint) {
+        if !target.guard_passes(&read) {
             return Err(not_delivered(ErrorCode::ScreenMismatch));
         }
         let baseline = prompt_line(pane.kind, &read.text);
@@ -622,6 +635,55 @@ mod tests {
         let targets = KeysTargets::default();
         assert!(targets.set(t).is_err());
         assert!(targets.get("r1").is_none());
+    }
+
+    fn claude_target() -> (KeysTarget, String) {
+        let dialog = std::fs::read_to_string(format!(
+            "{}/../../tests/fixtures/herdr/claude-permission-bash.txt",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let t = KeysTarget::from_screen(
+            "r1".into(),
+            "a".into(),
+            CorrelationKey("k".into()),
+            &dialog,
+            [("allow".to_string(), "1".to_string())].into(),
+        )
+        .unwrap();
+        (t, dialog)
+    }
+
+    /// The same target with one digest byte past the 16-hex prefix flipped:
+    /// a screen that collides in the fingerprint but not in the digest.
+    fn prefix_collision(t: &KeysTarget) -> KeysTarget {
+        let mut other = t.clone();
+        other.digest.0[31] ^= 1;
+        assert_eq!(other.digest.fingerprint(), t.fingerprint);
+        other
+    }
+
+    #[test]
+    fn guard_compares_the_full_digest() {
+        let (t, dialog) = claude_target();
+        let read = ScreenRead {
+            text: dialog,
+            truncated: false,
+        };
+        assert!(t.guard_passes(&read));
+        assert!(!prefix_collision(&t).guard_passes(&read));
+        let truncated = ScreenRead {
+            truncated: true,
+            ..read
+        };
+        assert!(!t.guard_passes(&truncated));
+    }
+
+    #[test]
+    fn lease_compares_the_full_digest() {
+        let (t, _) = claude_target();
+        assert!(t.unchanged_since(&t, "allow"));
+        assert!(!prefix_collision(&t).unchanged_since(&t, "allow"));
     }
 
     #[test]
