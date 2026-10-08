@@ -32,7 +32,20 @@ its name.
 - The idle poll timer wakes every 1 s with nothing due.
 - `clean_display` joins words across stripped tabs and newlines.
 
+## P4: T3 adapter (done)
+
+- Closed the adapter contract for `t3`, including §5 caps and display
+  cleaning for T3 text, and added the `text::redact_log` helper.
+
 ## P3: hooks and service
+
+- `SessionMap` is the P3 input for ownership rule 1: first claim wins; publish
+  the owner when shell and detail agree and the native id is set; invalidate
+  only on identity evidence.
+- `project.removed` uses an inferred `projectId` field until confirmed live.
+- T3 decode-error degradation clears after 10 minutes without new errors.
+- Reuse `text::redact_log` for hook payload logging so secret patterns stay
+  consistent.
 
 - `acd service install`:
   - restart on exit code 75;
@@ -118,6 +131,9 @@ its name.
   carries.
 
 ## P5: Mac app
+
+- T3 requests use option ids `accept`, `acceptForSession`, `decline` and
+  `o1`…`oN`. Clients must treat option ids as opaque.
 
 - Add `serde(other)` to `Source`, `AgentKind`, `RequestStatus`,
   `ResolvedBy` and `SourceState`, if the Tauri backend reuses the Rust
