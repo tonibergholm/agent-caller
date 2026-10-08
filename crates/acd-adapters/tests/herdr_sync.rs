@@ -468,6 +468,49 @@ async fn stream_loss_during_a_resubscribe_still_resyncs_existing_panes() {
 }
 
 #[tokio::test]
+async fn an_undecodable_list_entry_drops_nothing_and_keeps_the_socket() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
+    fake.set_agent(fake_agent("w1:p2", "codex", "working"));
+    let mut bad = fake_agent("w1:p3", "claude", "idle");
+    bad["revision"] = serde_json::Value::Null;
+    fake.set_agent(bad);
+    let r = rig(fake).await;
+    until("good agents", || {
+        (r.state("w1:p1") == Some(AgentState::Idle)
+            && r.state("w1:p2") == Some(AgentState::Working))
+        .then_some(())
+    })
+    .await;
+    assert!(r.state("w1:p3").is_none());
+    // A known agent's entry goes bad; the periodic list must not drop it.
+    let mut bad = fake_agent("w1:p2", "codex", "working");
+    bad["revision"] = serde_json::Value::Null;
+    r.fake.set_agent(bad);
+    let lists = || {
+        r.fake
+            .calls()
+            .iter()
+            .filter(|(m, _)| m == "agent.list")
+            .count()
+    };
+    let before = lists();
+    until("two more lists", || (lists() >= before + 2).then_some(())).await;
+    assert_eq!(r.state("w1:p1"), Some(AgentState::Idle));
+    assert_eq!(
+        r.state("w1:p2"),
+        Some(AgentState::Working),
+        "kept as it was"
+    );
+    assert_eq!(*r.handle.health().borrow(), Health::Connected);
+    assert_eq!(
+        r.fake.calls().iter().filter(|(m, _)| m == "ping").count(),
+        1,
+        "never reconnected"
+    );
+}
+
+#[tokio::test]
 async fn failed_connect_list_is_retried_promptly() {
     let fake = FakeHerdr::start().await;
     fake.set_agent(fake_agent("w1:p1", "claude", "working"));

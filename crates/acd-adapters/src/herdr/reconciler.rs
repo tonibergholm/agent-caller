@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until};
 
-use super::client::{CALL_TIMEOUT, CallError, Herdr, ScreenRead, Subscription};
+use super::client::{AgentList, CALL_TIMEOUT, CallError, Herdr, ScreenRead, Subscription};
 use super::fallback::{self, Fallback, FbOut};
 use super::keys::{ABSENT_READS, KeysTargets};
 use super::map;
@@ -716,8 +716,8 @@ impl Reconciler {
         let result = self.herdr.list().await;
         self.last_list = Instant::now();
         match result {
-            Ok(infos) => {
-                self.apply_list(infos, periodic);
+            Ok(list) => {
+                self.apply_list(list, periodic);
                 Ok(())
             }
             Err(e) if is_server(&e) => {
@@ -732,9 +732,11 @@ impl Reconciler {
         }
     }
 
-    fn apply_list(&mut self, infos: Vec<AgentInfo>, periodic: bool) {
-        let mut seen = HashSet::new();
-        for info in infos {
+    /// Applies a full list. A pane whose entry did not decode keeps what is
+    /// known about it.
+    fn apply_list(&mut self, list: AgentList, periodic: bool) {
+        let mut seen: HashSet<String> = list.undecodable.into_iter().collect();
+        for info in list.agents {
             if periodic
                 && let Some(obs) = map::agent_obs(&self.hash, &info)
                 && self.core.agent(&obs.id).map(|a| a.state) != Some(obs.state)

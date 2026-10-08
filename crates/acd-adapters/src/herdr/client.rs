@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -78,6 +79,16 @@ pub struct ScreenRead {
     pub text: String,
     /// herdr cut the text short; it is not the whole screen.
     pub truncated: bool,
+}
+
+/// One `agent.list` reply. Entries are decoded one by one, so a malformed
+/// entry never fails the whole list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentList {
+    pub agents: Vec<AgentInfo>,
+    /// Pane ids of entries that did not decode. Their panes are still
+    /// listed, so whatever is known about them must be kept.
+    pub undecodable: Vec<String>,
 }
 
 /// An open connection; nothing has been sent yet.
@@ -154,11 +165,23 @@ impl Herdr {
         serde_json::from_value(v).map_err(|e| CallError::NoReply(format!("bad pong: {e}")))
     }
 
-    pub async fn list(&self) -> Result<Vec<AgentInfo>, CallError> {
+    pub async fn list(&self) -> Result<AgentList, CallError> {
         let v = self.call("agent.list", json!({})).await?;
         expect_type(&v, "agent_list")?;
-        serde_json::from_value(v["agents"].clone())
-            .map_err(|e| CallError::NoReply(format!("bad agent list: {e}")))
+        let entries: Vec<Value> = serde_json::from_value(v["agents"].clone())
+            .map_err(|e| CallError::NoReply(format!("bad agent list: {e}")))?;
+        let mut list = AgentList::default();
+        for entry in entries {
+            match AgentInfo::deserialize(&entry) {
+                Ok(info) => list.agents.push(info),
+                Err(e) => {
+                    let pane_id = entry["pane_id"].as_str();
+                    tracing::debug!(?pane_id, error = %e, "herdr agent.list entry skipped");
+                    list.undecodable.extend(pane_id.map(str::to_owned));
+                }
+            }
+        }
+        Ok(list)
     }
 
     /// `Ok(None)` on `agent_not_found`.

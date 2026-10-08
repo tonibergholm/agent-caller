@@ -87,7 +87,7 @@ async fn client_tolerates_unknown_fields_and_errors() {
     let pong = h.ping().await.unwrap();
     assert_eq!((pong.version.as_str(), pong.protocol), ("0.9.3", 22));
     let list = h.list().await.unwrap();
-    assert_eq!(list[0].agent_status, AgentStatus::Unknown);
+    assert_eq!(list.agents[0].agent_status, AgentStatus::Unknown);
     assert!(
         h.get("w9:p9").await.unwrap().is_none(),
         "agent_not_found is Ok(None)"
@@ -252,6 +252,24 @@ async fn caller_deadline_bounds_the_reply_wait() {
         e >= std::time::Duration::from_millis(400) && e < std::time::Duration::from_millis(1500),
         "{e:?}"
     );
+}
+
+#[tokio::test]
+async fn list_skips_entries_that_do_not_decode() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
+    let mut bad = fake_agent("w1:p2", "claude", "idle");
+    bad["revision"] = serde_json::Value::Null;
+    fake.set_agent(bad);
+    let list = Herdr::new(fake.path().to_path_buf()).list().await.unwrap();
+    assert_eq!(
+        list.agents
+            .iter()
+            .map(|a| a.pane_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["w1:p1"]
+    );
+    assert_eq!(list.undecodable, vec!["w1:p2".to_string()]);
 }
 
 #[tokio::test]
