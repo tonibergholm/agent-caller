@@ -69,14 +69,29 @@ pub fn cap_chars(text: &str, max: usize) -> String {
 
 pub const LOG_BYTES: usize = 4096;
 
+const SECRET_KEYS: &str = "ticket|token|wsTicket|authorization";
+
 static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     vec![
         (
             Regex::new(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+").unwrap(),
             "${1}[REDACTED]",
         ),
+        // Debug-escaped JSON: \"token\":\"value\"
         (
-            Regex::new(r#"("(?:ticket|token|wsTicket|authorization)"\s*:\s*")[^"]*"#).unwrap(),
+            Regex::new(&format!(
+                r#"(?i)(\\"(?:{SECRET_KEYS})\\"\s*:\s*(?:String\()?\\")(?:[^"\\]|\\[^"])*"#
+            ))
+            .unwrap(),
+            "${1}[REDACTED]",
+        ),
+        // Plain JSON ("token":"v", escaped quotes allowed) and the Debug
+        // rendering of a serde_json value ("token": String("v")).
+        (
+            Regex::new(&format!(
+                r#"(?i)("(?:{SECRET_KEYS})"\s*:\s*(?:String\()?")(?:[^"\\]|\\.)*"#
+            ))
+            .unwrap(),
             "${1}[REDACTED]",
         ),
         (Regex::new(r"(wsTicket=)[^&\s]+").unwrap(), "${1}[REDACTED]"),
@@ -88,7 +103,9 @@ static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     ]
 });
 
-/// Redacts secrets (spec §7.1, Logs) and caps the result at 4 KiB.
+/// Redacts secrets (spec §7.1, Logs) and caps the result at 4 KiB. Callers
+/// should log JSON via `serde_json::to_string` where possible; Debug and
+/// debug-escaped forms are covered too but are best effort.
 pub fn redact_log(s: &str) -> String {
     let mut out = s.to_string();
     for (re, rep) in SECRETS.iter() {
@@ -189,5 +206,27 @@ mod tests {
         let r = redact_log(&long);
         assert!(r.len() <= 4096 + '…'.len_utf8());
         assert!(r.ends_with('…'));
+    }
+
+    #[test]
+    fn redact_log_covers_json_forms() {
+        for (s, secret) in [
+            (r#"{"token": "s3cret"}"#, "s3cret"),
+            (r#"{"Token":"s3cret"}"#, "s3cret"),
+            (r#"{"WSTICKET":"s3cret"}"#, "s3cret"),
+            (r#""token": String("s3cret")"#, "s3cret"),
+            (r#"{\"token\":\"s3cret\"}"#, "s3cret"),
+            (r#"{"token":"ab\"cd"}"#, "cd"),
+            (r#"{"token":"ab\"cd","x":1}"#, "ab"),
+        ] {
+            let r = redact_log(s);
+            assert!(!r.contains(secret), "{s} leaked {secret}: {r}");
+            assert!(r.contains("[REDACTED]"), "{s}: {r}");
+        }
+        let r = redact_log(r#"{"token":"ab\"cd","x":1}"#);
+        assert!(
+            r.contains(r#""x":1"#),
+            "text after the secret survives: {r}"
+        );
     }
 }

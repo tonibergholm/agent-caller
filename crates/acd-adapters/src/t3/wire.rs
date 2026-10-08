@@ -39,6 +39,8 @@ pub enum ExitValue {
         #[serde(default)]
         cause: Vec<Cause>,
     },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -70,6 +72,9 @@ pub enum Failure {
     Interrupted,
     /// More than one cause of different kinds, or more than one `Fail`
     /// (Sol round 2, finding 6). The whole set is kept for the debug log.
+    ///
+    /// Callers should log this with `serde_json::to_string`, not `{:?}`,
+    /// so `redact_log` sees plain JSON.
     Mixed(Vec<Cause>),
     /// No causes, or only kinds this version does not know.
     Unknown,
@@ -102,11 +107,15 @@ pub fn failure(causes: &[Cause]) -> Failure {
 }
 
 /// One text frame holds an object or an array of objects. Elements that are
-/// client frames (`Request`, `Ack`, `Interrupt`) decode as `Other`.
+/// client frames (`Request`, `Ack`, `Interrupt`) decode as `Other`. Elements
+/// decode one by one: a malformed element becomes `Other` and never drops
+/// its neighbours (a lost `Chunk` would go unacked). Only text that is not
+/// JSON at all is an error.
 pub fn parse_frames(text: &str) -> Result<Vec<ServerFrame>, serde_json::Error> {
+    let decode = |v: Value| serde_json::from_value(v).unwrap_or(ServerFrame::Other);
     match serde_json::from_str::<Value>(text)? {
-        Value::Array(items) => items.into_iter().map(serde_json::from_value).collect(),
-        v => Ok(vec![serde_json::from_value(v)?]),
+        Value::Array(items) => Ok(items.into_iter().map(decode).collect()),
+        v => Ok(vec![decode(v)]),
     }
 }
 
@@ -174,8 +183,9 @@ pub struct ShellSnapshot {
     /// never fails the snapshot.
     #[serde(default)]
     pub threads: Vec<Value>,
+    /// Decoded one by one with `Project::decode`, like `threads`.
     #[serde(default)]
-    pub projects: Vec<Project>,
+    pub projects: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -186,6 +196,12 @@ pub struct Project {
     pub title: Option<String>,
     #[serde(default)]
     pub workspace_root: Option<String>,
+}
+
+impl Project {
+    pub fn decode(v: &Value) -> Result<Project, serde_json::Error> {
+        Project::deserialize(v)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

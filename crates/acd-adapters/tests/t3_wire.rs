@@ -38,15 +38,58 @@ fn every_fixture_frame_decodes() {
         // `*_frames.json` files are arrays of frames, including the client Request.
         let frames = parse_frames(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(!frames.is_empty(), "{name}");
-        for f in frames {
-            if let ServerFrame::Chunk { values, .. } = f {
-                for v in values {
-                    if name.starts_with("shell_") || name.starts_with("rpc_chunk") {
-                        ShellItem::decode(&v).unwrap_or_else(|e| panic!("{name}: {e}"));
-                    } else {
-                        ThreadItem::decode(&v).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let raw: Value = serde_json::from_str(&text).unwrap();
+        let raw = match raw {
+            Value::Array(a) => a,
+            v => vec![v],
+        };
+        for (r, f) in raw.iter().zip(frames) {
+            let tag = r["_tag"].as_str().unwrap();
+            if ["Chunk", "Exit", "Ping", "Pong"].contains(&tag) {
+                assert!(
+                    !matches!(f, ServerFrame::Other),
+                    "{name}: {tag} decoded as Other"
+                );
+            }
+            match f {
+                ServerFrame::Exit { exit, .. } => {
+                    assert!(
+                        !matches!(exit, ExitValue::Other),
+                        "{name}: exit decoded as Other"
+                    );
+                }
+                ServerFrame::Chunk { values, .. } => {
+                    for v in values {
+                        let shell = name.starts_with("shell_") || name.starts_with("rpc_chunk");
+                        let kind = v["kind"].as_str().unwrap_or("").to_owned();
+                        if shell {
+                            let item =
+                                ShellItem::decode(&v).unwrap_or_else(|e| panic!("{name}: {e}"));
+                            let known = [
+                                "snapshot",
+                                "synchronized",
+                                "thread.updated",
+                                "thread.removed",
+                                "project.updated",
+                            ];
+                            assert!(
+                                !known.contains(&kind.as_str())
+                                    || !matches!(item, ShellItem::Other),
+                                "{name}: {kind} decoded as Other"
+                            );
+                        } else {
+                            let item =
+                                ThreadItem::decode(&v).unwrap_or_else(|e| panic!("{name}: {e}"));
+                            let known = ["snapshot", "synchronized", "event"];
+                            assert!(
+                                !known.contains(&kind.as_str())
+                                    || !matches!(item, ThreadItem::Other),
+                                "{name}: {kind} decoded as Other"
+                            );
+                        }
                     }
                 }
+                _ => {}
             }
         }
     }
@@ -148,10 +191,8 @@ fn shell_items_and_the_project_only_marker() {
     let t = ShellThread::decode(&snapshot.threads[0]).unwrap();
     assert_eq!(t.status.as_deref(), Some("running"));
     assert_eq!(t.pending_runtime_request.as_ref().unwrap().kind, "command");
-    assert_eq!(
-        snapshot.projects[0].workspace_root.as_deref(),
-        Some("/tmp/acp4/proj")
-    );
+    let p = Project::decode(&snapshot.projects[0]).unwrap();
+    assert_eq!(p.workspace_root.as_deref(), Some("/tmp/acp4/proj"));
 
     let v = &chunk_values("shell_chunk_project_metadata_snapshot_threads_empty.json")[0];
     assert!(is_project_only(v));
@@ -240,4 +281,139 @@ fn client_frames_match_the_recording() {
         serde_json::from_str::<Value>(&interrupt_frame("1")).unwrap(),
         want
     );
+}
+
+#[test]
+fn a_bad_array_element_never_drops_a_chunk() {
+    let text = r#"[{"_tag":"Chunk","requestId":"1","values":[]},{"_tag":"Chunk","values":[]},"junk",{"_tag":"Exit","requestId":"1","exit":{"_tag":"Success"}}]"#;
+    let f = parse_frames(text).unwrap();
+    assert_eq!(f.len(), 4);
+    assert!(matches!(&f[0], ServerFrame::Chunk { request_id, .. } if request_id == "1"));
+    assert!(matches!(f[1], ServerFrame::Other));
+    assert!(matches!(f[2], ServerFrame::Other));
+    assert!(matches!(f[3], ServerFrame::Exit { .. }));
+    assert!(parse_frames("not json").is_err());
+}
+
+#[test]
+fn unknown_exit_tag_decodes_as_other() {
+    let f = parse_frames(r#"{"_tag":"Exit","requestId":"2","exit":{"_tag":"Timeout"}}"#).unwrap();
+    assert!(matches!(
+        f[0],
+        ServerFrame::Exit {
+            exit: ExitValue::Other,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn one_malformed_project_does_not_fail_the_snapshot() {
+    let v = serde_json::json!({"kind":"snapshot","snapshot":{"snapshotSequence":3,"threads":[],
+        "projects":[{"title":"no id"},{"id":"p2","workspaceRoot":"/w"}]}});
+    let ShellItem::Snapshot { snapshot } = ShellItem::decode(&v).unwrap() else {
+        panic!()
+    };
+    assert!(Project::decode(&snapshot.projects[0]).is_err());
+    assert_eq!(Project::decode(&snapshot.projects[1]).unwrap().id, "p2");
+}
+
+fn projection(name: &str) -> Value {
+    let v = &chunk_values(name)[0];
+    let ThreadItem::Snapshot { projection, .. } = ThreadItem::decode(v).unwrap() else {
+        panic!()
+    };
+    projection
+}
+
+#[test]
+fn approval_snapshot_is_pinned() {
+    let p = projection("thread_chunk_snapshot_waiting_approval_claude.json");
+    let items: Vec<TurnItem> = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| turn_item(i).unwrap())
+        .collect();
+    let TurnItem::ApprovalRequest {
+        id,
+        request_id,
+        request_kind,
+        prompt,
+        ..
+    } = items
+        .iter()
+        .find(|i| matches!(i, TurnItem::ApprovalRequest { .. }))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(id.starts_with("turn-item:runtime-request:"));
+    assert!(!request_id.is_empty());
+    assert_eq!(request_kind.as_deref(), Some("command"));
+    assert_eq!(prompt.as_deref(), Some("Create empty file x.txt"));
+    let TurnItem::CommandExecution {
+        status,
+        input,
+        native_item_ref,
+        ..
+    } = items
+        .iter()
+        .find(|i| matches!(i, TurnItem::CommandExecution { .. }))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(status.as_deref(), Some("running"));
+    assert_eq!(input.as_deref(), Some("touch /tmp/acp4/proj/x.txt"));
+    assert!(native_item_ref.as_ref().unwrap().native_id.is_some());
+
+    let rr: Vec<RuntimeRequest> = serde_json::from_value(p["runtimeRequests"].clone()).unwrap();
+    assert_eq!(
+        (rr[0].kind.as_str(), rr[0].status.as_str()),
+        ("command", "pending")
+    );
+    assert_eq!(rr[0].id, p["runtimeRequests"][0]["id"].as_str().unwrap());
+
+    let pt: Vec<ProviderThread> = serde_json::from_value(p["providerThreads"].clone()).unwrap();
+    assert_eq!(
+        pt[0]
+            .native_thread_ref
+            .as_ref()
+            .unwrap()
+            .native_id
+            .as_deref(),
+        Some("d67b7431-38fa-47ca-b40d-11d54f568263")
+    );
+}
+
+#[test]
+fn shell_project_updated_and_synchronized_are_pinned() {
+    let v = &chunk_values("shell_chunk_project_updated.json")[0];
+    let ShellItem::ProjectUpdated { sequence, project } = ShellItem::decode(v).unwrap() else {
+        panic!()
+    };
+    assert_eq!((sequence, project.title.as_deref()), (1, Some("acp4")));
+    assert_eq!(project.workspace_root.as_deref(), Some("/tmp/acp4/proj"));
+    let v = &chunk_values("rpc_chunk_synchronized.json")[0];
+    assert!(matches!(
+        ShellItem::decode(v).unwrap(),
+        ShellItem::Synchronized {}
+    ));
+    assert!(matches!(
+        ThreadItem::decode(v).unwrap(),
+        ThreadItem::Synchronized {}
+    ));
+}
+
+#[test]
+fn thread_events_are_pinned() {
+    let v = &chunk_values("thread_event_runtime_request_pending_command_claude.json")[0];
+    let ThreadItem::Event { sequence, event } = ThreadItem::decode(v).unwrap() else {
+        panic!()
+    };
+    assert_eq!(sequence, item_sequence(v).unwrap());
+    assert_eq!(event.kind, "node.updated");
+    assert_eq!(event.payload["kind"], "approval_request");
+    assert_eq!(event.payload["status"], "waiting");
 }
