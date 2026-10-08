@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use acd_core::CorrelationKey;
 
-use super::screen::{Fingerprint, fallback_fingerprint};
+use super::screen::{DialogIdentity, Fingerprint, find_dialog, generic_fingerprint};
 use crate::text::{RAW_SCREEN_LINES, cap_lines, clean_screen};
 
 /// Consecutive reads without the open dialog before it counts as gone.
@@ -29,8 +29,25 @@ pub fn key(socket_hash: &str, pane_id: &str, fp: &Fingerprint) -> CorrelationKey
 }
 
 struct Open {
+    /// `screen::fallback_fingerprint` at open: the correlation key.
     fingerprint: Fingerprint,
+    /// The dialog's identity at open, when one parsed.
+    identity: Option<DialogIdentity>,
+    /// `screen::generic_fingerprint` at open.
+    generic: Fingerprint,
     absent: u8,
+}
+
+impl Open {
+    /// Whether a read still shows what this fallback opened for. By dialog
+    /// identity when both reads parse a dialog, so a reflow or a redraw above
+    /// it is not a change; otherwise by the tolerant generic hash.
+    fn shown(&self, identity: Option<&DialogIdentity>, generic: &Fingerprint) -> bool {
+        match (identity, &self.identity) {
+            (Some(now), Some(then)) => now == then,
+            _ => *generic == self.generic,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -102,9 +119,11 @@ impl Fallback {
         };
         let long_enough = self.long_enough(p, now);
         let p = self.panes.get_mut(pane).expect("checked above");
-        let fp = fallback_fingerprint(text);
+        let dialog = find_dialog(text);
+        let generic = generic_fingerprint(text);
         let out = if let Some(open) = &mut p.open {
-            if p.blocked_since.is_some() && fp == open.fingerprint {
+            let identity = dialog.as_ref().map(|d| &d.identity);
+            if p.blocked_since.is_some() && open.shown(identity, &generic) {
                 open.absent = 0;
                 vec![]
             } else {
@@ -118,12 +137,22 @@ impl Fallback {
                 }
             }
         } else if long_enough && !other_pending {
+            // Same value as `screen::fallback_fingerprint(text)`.
+            let (fingerprint, identity) = match dialog {
+                Some(d) => (
+                    d.fingerprint.unwrap_or_else(|| generic.clone()),
+                    Some(d.identity),
+                ),
+                None => (generic.clone(), None),
+            };
             p.open = Some(Open {
-                fingerprint: fp.clone(),
+                fingerprint: fingerprint.clone(),
+                identity,
+                generic,
                 absent: 0,
             });
             vec![FbOut::Open {
-                fingerprint: fp,
+                fingerprint,
                 raw_screen: clean_screen(&cap_lines(text, RAW_SCREEN_LINES)),
             }]
         } else {

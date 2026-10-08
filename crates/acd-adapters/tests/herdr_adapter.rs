@@ -299,6 +299,40 @@ fn redrawn_dialog() -> String {
     r
 }
 
+/// The permission dialog as a narrower pane draws it: shorter rules, the
+/// transcript prompt wrapped, and either the command (`"command"`) or option
+/// 2's label (`"label"`) wrapped onto a continuation line. Same dialog,
+/// different whole-screen fingerprint.
+fn rewrapped_dialog(what: &str) -> String {
+    let narrow: String = screen("claude-permission-bash.txt")
+        .lines()
+        .map(|l| {
+            let t = l.trim();
+            let rule = t.chars().count() >= 10 && t.chars().all(|c| c == '─' || c == '╌');
+            let l = if rule {
+                t.chars().take(50).collect()
+            } else {
+                l.to_string()
+            };
+            l + "\n"
+        })
+        .collect();
+    let narrow = narrow.replace("nothing else: touch", "nothing else:\n  touch");
+    let out = match what {
+        "command" => narrow.replace(
+            "\n touch /tmp/acp0/t1.txt\n",
+            "\n touch\n /tmp/acp0/t1.txt\n",
+        ),
+        "label" => narrow.replace(
+            "   2. Yes, and always allow access to /tmp/acp0 from this project\n",
+            "   2. Yes, and always allow access to /tmp/acp0 from\n      this project\n",
+        ),
+        _ => unreachable!("{what}"),
+    };
+    assert_ne!(out, narrow, "{what}");
+    out
+}
+
 /// `agent.read` calls of `source` so far.
 fn reads(r: &Rig, source: &str) -> usize {
     r.fake
@@ -841,6 +875,47 @@ async fn redraw_after_an_accepted_key_is_not_a_close() {
         "the dialog is still up: never inbox"
     );
     assert!(r.adapter.keys_targets().get(&rid).is_some());
+}
+
+#[tokio::test]
+async fn rewrap_of_an_unclaimed_dialog_does_not_resolve_it() {
+    let (r, rid) = keys_rig_with("claude-idle-detection.txt", "claude-idle-prompt.txt", true).await;
+    for what in ["command", "label"] {
+        r.fake
+            .set_screen("w1:p1", "detection", &rewrapped_dialog(what));
+        let before = reads(&r, "detection");
+        until("several watch reads", || {
+            (reads(&r, "detection") >= before + 5).then_some(())
+        })
+        .await;
+        assert_eq!(
+            r.core.request(&rid).map(|q| q.status),
+            Some(RequestStatus::Open),
+            "{what}"
+        );
+        assert!(r.adapter.keys_targets().get(&rid).is_some(), "{what}");
+    }
+}
+
+#[tokio::test]
+async fn rewrap_after_an_accepted_key_is_not_a_close() {
+    for what in ["command", "label"] {
+        let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+        let after = rewrapped_dialog(what);
+        r.fake.on_keys(move |f, pane, _| {
+            f.set_screen(pane, "detection", &after);
+            f.set_screen(pane, "visible", &after);
+        });
+        r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
+        let (_, mut rx) = r.core.attach(None);
+        answer(&r, "a1", &rid, "allow").await;
+        assert_eq!(
+            resolution(&mut rx).await.0,
+            ResolvedBy::Uncertain,
+            "{what}: the dialog is still up: never inbox"
+        );
+        assert!(r.adapter.keys_targets().get(&rid).is_some(), "{what}");
+    }
 }
 
 #[tokio::test]

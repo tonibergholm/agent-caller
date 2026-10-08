@@ -507,6 +507,7 @@ async fn blocked_pane_gets_a_read_only_request_then_terminal() {
         .await;
     assert_eq!(res.error_code(), Some(ErrorCode::NotAnswerable));
     // Answered in the terminal.
+    let (_, mut rx) = r.core.attach(None);
     r.fake
         .set_screen("w1:p1", "detection", &screen("codex-idle-detection.txt"));
     r.fake.set_status("w1:p1", "idle");
@@ -517,6 +518,98 @@ async fn blocked_pane_gets_a_read_only_request_then_terminal() {
             .then_some(())
     })
     .await;
+    assert_eq!(resolution(&mut rx).await, (req.id, ResolvedBy::Terminal));
+}
+
+/// The first `request.resolved` on `rx`: `(request id, by)`.
+async fn resolution(
+    rx: &mut tokio::sync::broadcast::Receiver<ServerMessage>,
+) -> (String, ResolvedBy) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(ServerMessage::RequestResolved { request_id, by, .. }) => {
+                    return (request_id, by);
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("event stream ended: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("no request.resolved within 5 s")
+}
+
+/// The Claude permission dialog after a redraw of a transcript line above it.
+fn redrawn_dialog() -> String {
+    let s = screen("claude-permission-bash.txt");
+    let r = s.replace("⏺ Creating empty file", "⏺ Creating an empty file");
+    assert_ne!(s, r);
+    r
+}
+
+/// The Claude permission dialog as a narrower pane draws it: shorter rules,
+/// the transcript prompt wrapped, and either the command (`"command"`) or
+/// option 2's label (`"label"`) wrapped onto a continuation line.
+fn rewrapped_dialog(what: &str) -> String {
+    let narrow: String = screen("claude-permission-bash.txt")
+        .lines()
+        .map(|l| {
+            let t = l.trim();
+            let rule = t.chars().count() >= 10 && t.chars().all(|c| c == '─' || c == '╌');
+            let l = if rule {
+                t.chars().take(50).collect()
+            } else {
+                l.to_string()
+            };
+            l + "\n"
+        })
+        .collect();
+    let narrow = narrow.replace("nothing else: touch", "nothing else:\n  touch");
+    let out = match what {
+        "command" => narrow.replace(
+            "\n touch /tmp/acp0/t1.txt\n",
+            "\n touch\n /tmp/acp0/t1.txt\n",
+        ),
+        "label" => narrow.replace(
+            "   2. Yes, and always allow access to /tmp/acp0 from this project\n",
+            "   2. Yes, and always allow access to /tmp/acp0 from\n      this project\n",
+        ),
+        _ => unreachable!("{what}"),
+    };
+    assert_ne!(out, narrow, "{what}");
+    out
+}
+
+#[tokio::test]
+async fn rewrap_or_redraw_keeps_the_read_only_request_open() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "blocked"));
+    fake.set_screen("w1:p1", "detection", &screen("claude-permission-bash.txt"));
+    let r = rig(fake).await;
+    let req = until("fallback", || {
+        r.core.agent(&r.id("w1:p1")).and_then(|a| a.pending)
+    })
+    .await;
+    let reads = || {
+        r.fake
+            .calls()
+            .iter()
+            .filter(|(m, p)| m == "agent.read" && p["source"] == "detection")
+            .count()
+    };
+    for (what, text) in [
+        ("redraw", redrawn_dialog()),
+        ("command", rewrapped_dialog("command")),
+        ("label", rewrapped_dialog("label")),
+    ] {
+        r.fake.set_screen("w1:p1", "detection", &text);
+        let before = reads();
+        until("several reads", || (reads() >= before + 4).then_some(())).await;
+        let pending = r.core.agent(&r.id("w1:p1")).and_then(|a| a.pending);
+        assert_eq!(pending.map(|p| p.id), Some(req.id.clone()), "{what}");
+        assert!(r.core.request(&req.id).is_some(), "{what}: not resolved");
+    }
 }
 
 #[tokio::test]

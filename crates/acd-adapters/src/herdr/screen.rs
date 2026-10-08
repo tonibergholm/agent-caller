@@ -30,10 +30,26 @@ pub struct DialogOption {
     pub key_hint: Option<String>,
 }
 
+/// What makes a dialog the same dialog across redraws and reflows: its kind,
+/// its option labels in order and its region text, each with all whitespace
+/// (newlines included) folded to single spaces. A label includes its
+/// continuation lines. The fingerprint also covers the screen above the
+/// dialog and its exact line breaks, so a redraw or a resize changes it; the
+/// identity does not. The identity only decides whether a dialog is still on
+/// screen; only the exact fingerprint may let a key through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialogIdentity {
+    pub kind: DialogKind,
+    pub labels: Vec<String>,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dialog {
     pub kind: DialogKind,
     pub options: Vec<DialogOption>,
+    /// Reflow-tolerant identity, for presence checks only.
+    pub identity: DialogIdentity,
     /// Readable normalized region, for display and P3 hook matching only.
     /// Not security-relevant: forged rule lines in command text can move the
     /// region top and shorten it, so it must never be used to decide an
@@ -140,6 +156,47 @@ fn normalize_text(region: &[&str], option_idx: &[usize]) -> String {
         })
         .collect();
     path_normalized(&lines.join("\n"))
+}
+
+/// Whitespace-folded identity of the dialog in `region` (see
+/// `DialogIdentity`). Blank and rule lines are dropped, cursor markers are
+/// stripped from option lines and every run of whitespace, line breaks
+/// included, becomes one space. `Tip:` lines are kept: a long tip wraps in a
+/// narrow pane, and its continuation line could not be told apart from
+/// content, so dropping only the first line would make a resize a change.
+fn dialog_identity(kind: &DialogKind, region: &[&str], option_idx: &[usize]) -> DialogIdentity {
+    let line = |i: usize| {
+        let t = region[i].trim();
+        if option_idx.contains(&i) {
+            strip_cursor(t)
+        } else {
+            t
+        }
+    };
+    let kept = |i: &usize| {
+        let t = line(*i);
+        !t.is_empty() && !is_rule(t)
+    };
+    let fold = |range: std::ops::Range<usize>| {
+        range
+            .filter(kept)
+            .flat_map(|i| line(i).split_whitespace())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    // An option's continuation lines run to the next option. The parser
+    // allows none below the last option (only blank or rule lines before the
+    // footer), so its label is its own line.
+    let labels = option_idx
+        .iter()
+        .enumerate()
+        .map(|(j, &i)| fold(i..option_idx.get(j + 1).copied().unwrap_or(i + 1)))
+        .collect();
+    DialogIdentity {
+        kind: kind.clone(),
+        labels,
+        text: path_normalized(&fold(0..region.len())),
+    }
 }
 
 /// The dialog fingerprint: sha256 over every screen line from the first
@@ -335,6 +392,7 @@ fn make_dialog(
 ) -> Dialog {
     let option_idx: Vec<usize> = block.iter().map(|(i, _)| *i).collect();
     let text = normalize_text(&lines[start..=end], &option_idx);
+    let identity = dialog_identity(&kind, &lines[start..=end], &option_idx);
     let fingerprint = fingerprint.then(|| {
         let abs: Vec<usize> = option_idx.iter().map(|i| start + i).collect();
         screen_fingerprint(&lines[..=end], &abs)
@@ -343,6 +401,7 @@ fn make_dialog(
     Dialog {
         kind,
         options,
+        identity,
         text,
         fingerprint,
     }
@@ -458,9 +517,12 @@ pub fn guard_fingerprint(text: &str) -> Option<Fingerprint> {
 /// otherwise a tolerant generic fingerprint of the last 40 non-empty
 /// normalized lines. Not safe as a keystroke guard (see `guard_fingerprint`).
 pub fn fallback_fingerprint(text: &str) -> Fingerprint {
-    if let Some(fp) = guard_fingerprint(text) {
-        return fp;
-    }
+    guard_fingerprint(text).unwrap_or_else(|| generic_fingerprint(text))
+}
+
+/// The tolerant generic fingerprint of the last 40 non-empty normalized
+/// lines, for the read-only fallback only. Never a keystroke guard.
+pub fn generic_fingerprint(text: &str) -> Fingerprint {
     let kept: Vec<&str> = text.lines().filter(|l| generic_line(l).is_some()).collect();
     let tail = &kept[kept.len().saturating_sub(GENERIC_FINGERPRINT_LINES)..];
     fingerprint_of(&normalize_generic(tail))
@@ -911,6 +973,96 @@ mod tests {
             assert_eq!(o.options, d.options, "{name}");
             assert_eq!(o.fingerprint, d.fingerprint, "{name}");
         }
+    }
+
+    /// `s` as a narrower pane draws it: rules cut to 50 columns.
+    fn narrow(s: &str) -> String {
+        s.lines()
+            .map(|l| {
+                let l = if is_rule(l) {
+                    l.trim().chars().take(50).collect()
+                } else {
+                    l.to_string()
+                };
+                l + "\n"
+            })
+            .collect()
+    }
+
+    fn wrapped(s: &str, from: &str, to: &str) -> String {
+        let out = narrow(s).replace(from, to);
+        assert_ne!(out, narrow(s), "{from}");
+        out
+    }
+
+    #[test]
+    fn identity_survives_reflow_and_redraw_but_the_fingerprint_does_not() {
+        let s = fx("claude-permission-bash.txt");
+        let base = find_dialog(&s).unwrap();
+        for v in [
+            wrapped(
+                &s,
+                "\n touch /tmp/acp0/t1.txt\n",
+                "\n touch\n /tmp/acp0/t1.txt\n",
+            ),
+            wrapped(
+                &s,
+                "   2. Yes, and always allow access to /tmp/acp0 from this project\n",
+                "   2. Yes, and always allow access to /tmp/acp0 from\n      this project\n",
+            ),
+            wrapped(
+                &s,
+                " for you — choose \"switch",
+                " for you — choose\n \"switch",
+            ),
+            wrapped(&s, "nothing else: touch", "nothing else:\n  touch"),
+            s.replace("⏺ Creating empty file", "⏺ Creating an empty file"),
+        ] {
+            let d = find_dialog(&v).unwrap();
+            assert_eq!(d.identity, base.identity, "{v}");
+            assert_ne!(d.fingerprint, base.fingerprint, "{v}");
+        }
+        assert_eq!(
+            base.identity.labels[1],
+            "2. Yes, and always allow access to /tmp/acp0 from this project"
+        );
+        // Codex: a wrapped label keeps its key hint on the continuation line.
+        let c = fx("codex-permission-bash-detection.txt");
+        let v = c.replace(
+            "commands that start with `touch",
+            "commands that start with\n     `touch",
+        );
+        assert_ne!(v, c);
+        assert_eq!(
+            find_dialog(&v).unwrap().identity,
+            find_dialog(&c).unwrap().identity
+        );
+    }
+
+    #[test]
+    fn identity_still_tells_content_apart() {
+        let s = fx("claude-permission-bash.txt");
+        let id = |t: &str| find_dialog(t).unwrap().identity;
+        let base = id(&s);
+        for v in [
+            s.replace(CMD, "\n rm -rf /tmp/acp0\n"),
+            s.replace("4. No", "4. Nope"),
+            s.replace(
+                "Tip: auto mode handles these prompts for you",
+                "Tip: press ? for shortcuts",
+            ),
+            s.replace(" ❯ 1. Yes\n   2.", " ❯ 1. Yes\n      always\n   2."),
+        ] {
+            assert_ne!(id(&v), base, "{v}");
+        }
+        let cursor = s
+            .replace(" ❯ 1. Yes", "   1. Yes")
+            .replace("   4. No", " ❯ 4. No");
+        assert_eq!(id(&cursor), base, "cursor position is not content");
+        assert_ne!(
+            id(&fx("claude-askuserquestion-single.txt")),
+            id(&fx("claude-askuserquestion-multi.txt"))
+        );
     }
 
     #[test]

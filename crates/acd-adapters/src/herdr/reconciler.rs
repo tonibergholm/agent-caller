@@ -18,7 +18,7 @@ use tokio::time::{Instant, sleep, sleep_until};
 
 use super::client::{CALL_TIMEOUT, CallError, Herdr, ScreenRead, Subscription};
 use super::fallback::{self, Fallback, FbOut};
-use super::keys::{ABSENT_READS, DialogIdentity, KeysTargets};
+use super::keys::{ABSENT_READS, KeysTargets};
 use super::map;
 use super::screen::find_dialog;
 use super::wire::{AgentInfo, Event};
@@ -669,7 +669,7 @@ impl Reconciler {
         if targets.is_empty() {
             return;
         }
-        let shown = find_dialog(&read.text).map(|d| DialogIdentity::of(&d));
+        let shown = find_dialog(&read.text).map(|d| d.identity);
         for t in targets {
             let status = self.core.request(&t.request_id).map(|r| r.status);
             if status == Some(RequestStatus::Answering) {
@@ -681,7 +681,7 @@ impl Reconciler {
                 continue;
             }
             let absent = self.watch_absent.entry(t.request_id.clone()).or_default();
-            // By identity: a redraw around a visible dialog is not a close.
+            // By identity: a redraw or reflow of a visible dialog is not a close.
             if shown.as_ref() == Some(&t.identity) {
                 *absent = 0;
                 continue;

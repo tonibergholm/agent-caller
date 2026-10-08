@@ -20,7 +20,8 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
 use super::client::{CALL_TIMEOUT, CallError, Herdr, KNOWN_REFUSALS};
 use super::reconciler::{Hint, PaneMap};
-use super::screen::{Dialog, DialogKind, Fingerprint, find_dialog, guard_fingerprint, prompt_line};
+pub use super::screen::DialogIdentity;
+use super::screen::{Fingerprint, find_dialog, guard_fingerprint, prompt_line};
 
 /// Consecutive reads without the dialog before it counts as closed or gone.
 pub(crate) const ABSENT_READS: u8 = 2;
@@ -28,28 +29,6 @@ pub(crate) const ABSENT_READS: u8 = 2;
 const PROMPT_CHECK_GRACE: Duration = Duration::from_millis(250);
 /// How long a prompt check's read may take.
 const PROMPT_CHECK_READ: Duration = Duration::from_millis(500);
-
-/// What makes a dialog the same dialog across redraws: its kind, option
-/// labels in order and region text. The fingerprint also covers the screen
-/// above the dialog, so it changes on any redraw; the identity does not.
-/// The identity decides whether a dialog is still on screen; only the
-/// fingerprint may let a key through.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DialogIdentity {
-    pub kind: DialogKind,
-    pub labels: Vec<String>,
-    pub text: String,
-}
-
-impl DialogIdentity {
-    pub fn of(d: &Dialog) -> DialogIdentity {
-        DialogIdentity {
-            kind: d.kind.clone(),
-            labels: d.options.iter().map(|o| o.label.clone()).collect(),
-            text: d.text.clone(),
-        }
-    }
-}
 
 /// One keys-answerable dialog occurrence. P3 registers it right after
 /// opening the request: `request_id = core.request_id_for(agent_id, &key)`.
@@ -134,15 +113,15 @@ impl KeysTarget {
             agent_id,
             key,
             fingerprint,
-            identity: DialogIdentity::of(&dialog),
+            identity: dialog.identity,
             option_keys,
         })
     }
 
-    /// Whether `text` still shows this target's dialog, possibly redrawn.
-    /// No dialog, or a dialog with another identity, is absent.
+    /// Whether `text` still shows this target's dialog, possibly redrawn or
+    /// rewrapped. No dialog, or a dialog with another identity, is absent.
     pub(crate) fn shown_in(&self, text: &str) -> bool {
-        find_dialog(text).is_some_and(|d| DialogIdentity::of(&d) == self.identity)
+        find_dialog(text).is_some_and(|d| d.identity == self.identity)
     }
 }
 
