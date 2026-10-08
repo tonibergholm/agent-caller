@@ -2363,7 +2363,9 @@ pub struct KeysTiming {
   - Dropping the client connection while it is held makes the fake discard the call.
 
 **`deliver(request, answer)`** runs inline. Nothing is sent from a spawned
-task, so a dropped future can never complete a send later. Every herdr call
+task, so no send can *start* after the future is dropped. A request that
+was already fully written may still take effect, and the core then
+resolves the delivery `uncertain` (Task 1, adapter contract). Every herdr call
 uses `call_until(deadline)` with `deadline = start + deliver_budget`.
 
 1. `Answer::Text` gives `NotDelivered(NotSupported)`. Free text on `keys`
@@ -2985,3 +2987,7 @@ blocking items, 3 non-blocking items and 1 question.
 | NB4 | Hint ingestion was unbounded | At most 64 messages drained per turn, and at most 1024 queued panes. Overflow becomes one resync (Task 5). |
 | NB5 | Test determinism | The cancellation test aborts after the gate arrives. The transient-stray test proves the visible read happened while the digit was on screen (`calls_timed`). |
 | NB6 | The stray-keystroke message has no wire field | **Deferred.** P2 has no production keys producer, so no client can see it yet. Recorded for P3/P5: add an optional resolution `reason` to `request.resolved` before keys requests go live. |
+
+**Round 4, Sol, 2026-10-08 (narrow: round-3 B1, B2, NB4, NB5, Q3).
+APPROVED.** One non-blocking item: a Task 9 sentence contradicted the
+amended cancellation contract. It is now aligned.
