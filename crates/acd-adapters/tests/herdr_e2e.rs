@@ -24,7 +24,9 @@ struct Rig {
     _home: tempfile::TempDir,
 }
 
-async fn start(agents: &[(&str, &str, &str)]) -> Rig {
+/// Panes and detection screens are installed before the adapter starts, so nothing races the
+/// first scan.
+async fn start(agents: Vec<Value>, screens: &[(&str, &str)]) -> Rig {
     let home = tempfile::Builder::new()
         .prefix("acd")
         .tempdir_in("/tmp")
@@ -32,8 +34,11 @@ async fn start(agents: &[(&str, &str, &str)]) -> Rig {
     let sock = home.path().join(".config/herdr/herdr.sock");
     std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
     let fake = FakeHerdr::start_at(&sock).await;
-    for (p, a, s) in agents {
-        fake.set_agent(fake_agent(p, a, s));
+    for a in agents {
+        fake.set_agent(a);
+    }
+    for (pane, text) in screens {
+        fake.set_screen(pane, "detection", text);
     }
     let cfg = HerdrConfig {
         enabled: true,
@@ -165,10 +170,9 @@ fn assert_no_forbidden_calls(fake: &FakeHerdr) {
 
 #[tokio::test]
 async fn agent_appears_over_the_protocol() {
-    let r = start(&[("w1:p1", "claude", "idle")]).await;
     let mut shell = fake_agent("w1:p2", "x", "unknown");
     shell["agent"] = Value::Null; // a plain shell pane
-    r.fake.set_agent(shell);
+    let r = start(vec![fake_agent("w1:p1", "claude", "idle"), shell], &[]).await;
     let (mut ws, _, snap) = snapshot_with(&r.url, 1).await;
     let a = &snap["agents"][0];
     assert_eq!(a["source"], "herdr");
@@ -186,7 +190,7 @@ async fn agent_appears_over_the_protocol() {
 
 #[tokio::test]
 async fn follow_up_retry_sends_once() {
-    let r = start(&[("w1:p1", "claude", "idle")]).await;
+    let r = start(vec![fake_agent("w1:p1", "claude", "idle")], &[]).await;
     let (mut ws, welcome, snap) = snapshot_with(&r.url, 1).await;
     let agent_id = snap["agents"][0]["id"].clone();
     let resume = json!({"epoch": welcome["epoch"], "seq": snap["seq"]});
@@ -222,23 +226,36 @@ async fn follow_up_retry_sends_once() {
 
 #[tokio::test]
 async fn blocked_pane_is_read_only_over_the_protocol() {
-    let r = start(&[("w1:p1", "aider", "blocked")]).await;
-    let dialog = std::fs::read_to_string(format!(
+    let trust = std::fs::read_to_string(format!(
         "{}/../../tests/fixtures/herdr/codex-trust-dialog-detection.txt",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();
-    r.fake.set_screen("w1:p1", "detection", &dialog);
-    let (mut ws, _, _) = authed(&r.url).await;
-
-    let ev = next_matching(&mut ws, MARGIN, |v| {
-        v["type"] == "agent.updated" && v["agent"]["pending"].is_object()
-    })
+    // Pad past 40 lines so the raw_screen cap is exercised.
+    let transcript: String = (1..=60).map(|i| format!("transcript line {i}\n")).collect();
+    let dialog = format!("{transcript}{trust}");
+    let r = start(
+        vec![fake_agent("w1:p1", "aider", "blocked")],
+        &[("w1:p1", &dialog)],
+    )
     .await;
-    let req = &ev["agent"]["pending"];
+    let (mut ws, _, initial) = authed(&r.url).await;
+
+    // The request may already be in the initial snapshot, or arrive as an update.
+    let pending = if initial["agents"][0]["pending"].is_object() {
+        initial["agents"][0]["pending"].clone()
+    } else {
+        next_matching(&mut ws, MARGIN, |v| {
+            v["type"] == "agent.updated" && v["agent"]["pending"].is_object()
+        })
+        .await["agent"]["pending"]
+            .clone()
+    };
+    let req = &pending;
     assert_eq!(req["kind"], "blocked_unparsed");
     assert_eq!(req["answer_path"], "none");
-    assert!(req["raw_screen"].as_str().unwrap().lines().count() <= 40);
+    let lines = req["raw_screen"].as_str().unwrap().lines().count();
+    assert!((1..=40).contains(&lines), "raw_screen has {lines} lines");
 
     send(
         &mut ws,
