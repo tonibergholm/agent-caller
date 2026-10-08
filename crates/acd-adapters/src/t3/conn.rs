@@ -27,7 +27,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_conf
 
 use super::wire::{
     ExitValue, Failure, PING_FRAME, ServerFrame, ack_frame, failure, interrupt_frame, parse_frames,
-    request_frame,
+    request_frame, string_fingerprint,
 };
 use crate::text::redact_log;
 
@@ -291,7 +291,7 @@ pub async fn connect(
         return Err(ConnectError::Unauthorized);
     }
     let unreachable = |e: &dyn std::fmt::Display| {
-        tracing::debug!(error = %redact_log(&e.to_string()), "T3 connect failed");
+        tracing::debug!(error = %redact_log(&string_fingerprint(&e.to_string()).to_string()), "T3 connect failed");
         ConnectError::Unreachable
     };
     let mut request = ws_url.into_client_request().map_err(|e| unreachable(&e))?;
@@ -380,7 +380,7 @@ async fn reader(mut stream: SplitStream<Ws>, core: Arc<Core>, events: mpsc::Send
         let frames = match parse_frames(text.as_str()) {
             Ok(f) => f,
             Err(_) => {
-                tracing::debug!(frame = %redact_log(text.as_str()), "T3 frame cannot be read");
+                tracing::debug!(frame = %redact_log(&string_fingerprint(text.as_str()).to_string()), "T3 frame cannot be read");
                 core.close("T3 sent a frame acd cannot read");
                 break;
             }
@@ -518,7 +518,7 @@ async fn writer(
                 }
             }
             Ok(Err(e)) => {
-                tracing::debug!(error = %redact_log(&e.to_string()), "T3 write failed");
+                tracing::debug!(error = %redact_log(&string_fingerprint(&e.to_string()).to_string()), "T3 write failed");
                 fail_ticket(ticket);
                 core.close("connection to T3 lost");
                 break;
@@ -715,6 +715,16 @@ impl Conn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_frame_fingerprint_omits_frame_text() {
+        let frame = "not json: rm -rf /tmp/zz; token=top-secret";
+        let detail = string_fingerprint(frame).to_string();
+        assert!(!detail.contains("rm -rf /tmp/zz"), "{detail}");
+        assert!(!detail.contains("top-secret"), "{detail}");
+        assert!(detail.contains("\"bytes\""), "{detail}");
+        assert!(detail.contains("\"sha256\""), "{detail}");
+    }
 
     #[tokio::test]
     async fn server_json_ping_queues_client_pong() {

@@ -419,8 +419,12 @@ struct Reconciler {
     pending_ends: DeferredEnds,
 }
 
+fn unreadable_detail(v: &Value) -> Value {
+    wire::value_fingerprint(v)
+}
+
 fn log_unreadable(what: &str, v: &Value) {
-    tracing::debug!(item = %redact_log(&v.to_string()), "T3 {what} cannot be read");
+    tracing::debug!(item = %redact_log(&unreadable_detail(v).to_string()), "T3 {what} cannot be read");
 }
 
 impl Reconciler {
@@ -640,7 +644,7 @@ impl Reconciler {
 
     fn on_end(&mut self, conn: &Conn, stream: &str, failure: Option<Failure>) {
         if let Some(f) = &failure {
-            tracing::debug!(failure = %redact_log(&wire::failure_json(f).to_string()), "T3 stream ended");
+            tracing::debug!(failure = %crate::text::redact_log(&wire::failure_json(f).to_string()), "T3 stream ended");
         }
         if self.shell_stream.as_deref() == Some(stream) {
             // The shell must never end.

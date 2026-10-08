@@ -35,7 +35,9 @@ const SCOPE_ERROR: &str = "EnvironmentAuthorizationError";
 fn debug_detail(e: &CallError) -> String {
     let raw = match e {
         CallError::Failed(f) => failure_json(f),
-        other => json!({"error": other.to_string()}),
+        CallError::NotConnected => json!({"_tag": "NotConnected"}),
+        CallError::NotWritten(_) => json!({"_tag": "NotWritten"}),
+        CallError::NoReply(_) => json!({"_tag": "NoReply"}),
     };
     redact_log(&raw.to_string())
 }
@@ -228,23 +230,29 @@ mod tests {
     }
 
     #[test]
-    fn debug_detail_redacts_and_caps() {
+    fn debug_detail_fingerprints_server_text() {
         let secret = "sk-ant-api03-SECRETSECRET";
-        let bearer = "Authorization: Bearer abc.def-ghi";
+        let command = "rm -rf /tmp/zz";
         for e in [
-            CallError::Failed(Failure::Die(format!("boom {secret}"))),
+            CallError::Failed(Failure::Die(format!("{command} {secret}"))),
             CallError::Failed(Failure::Fail {
                 tag: "SomethingNew".into(),
-                message: format!("{bearer} {secret}"),
+                message: format!("{command} {secret}"),
             }),
         ] {
             let text = debug_detail(&e);
-            for bad in ["SECRETSECRET", "abc.def-ghi"] {
+            for bad in [command, secret, "SECRETSECRET"] {
                 assert!(!text.contains(bad), "{text}");
             }
+            let detail: Value = serde_json::from_str(&text).unwrap();
+            assert!(detail.get("_tag").is_some(), "{text}");
+            let fingerprint = detail
+                .get("defect")
+                .or_else(|| detail.get("message"))
+                .unwrap();
+            assert!(fingerprint["bytes"].as_u64().is_some(), "{text}");
+            assert_eq!(fingerprint["sha256"].as_str().unwrap().len(), 8, "{text}");
         }
-        let long = CallError::Failed(Failure::Die("x".repeat(10_000)));
-        assert!(debug_detail(&long).len() <= crate::text::LOG_BYTES + '…'.len_utf8());
         let formatted = debug_detail(&CallError::Failed(Failure::Fail {
             tag: "Other".into(),
             message: "TOKEN=\"first second\" WSTICKET=abc".into(),
@@ -254,39 +262,6 @@ mod tests {
         assert!(!formatted.contains("second"), "{formatted}");
         assert!(!formatted.contains("WSTICKET=abc"), "{formatted}");
 
-        for (input, words) in [
-            (r#"TOKEN=\"first \\\" second\""#, &["first", "second"][..]),
-            (r#"FOO='first'\"second\""#, &["first", "second"][..]),
-            (r#"FOO=\"first second"#, &["first", "second"][..]),
-            ("TOKEN: a b c", &["a", "b", "c"][..]),
-            (r#"{"token":"x y","next":1}"#, &["x", "y"][..]),
-            ("Authorization: Bearer abc def", &["abc", "def"][..]),
-            ("TO\u{200b}KEN: split secret", &["split", "secret"][..]),
-        ] {
-            let detail = debug_detail(&CallError::Failed(Failure::Die(input.into())));
-            for word in words {
-                assert!(
-                    !detail.contains(word),
-                    "{input:?} leaked {word:?}: {detail}"
-                );
-            }
-        }
-        let multiline = debug_detail(&CallError::Failed(Failure::Die(
-            "TOKEN=hidden\npublic text".into(),
-        )));
-        assert!(!multiline.contains("hidden"), "{multiline}");
-        let plain = debug_detail(&CallError::Failed(Failure::Die(
-            "plain text without secrets".into(),
-        )));
-        assert!(plain.contains("plain text without secrets"), "{plain}");
-
-        let invisible = CallError::Failed(Failure::Die("to\u{200b}ken=hidden".into()));
-        let text = debug_detail(&invisible);
-        assert!(!text.contains("hidden"), "{text}");
-        let control = CallError::Failed(Failure::Die("prefix\u{1b}[31m TOKEN=hidden".into()));
-        let text = debug_detail(&control);
-        assert!(text.contains(r"\u001b"), "{text}");
-        assert!(!text.contains('\u{1b}'), "{text}");
-        assert!(!text.contains("hidden"), "{text}");
+        assert!(formatted.contains("\"_tag\":\"Fail\""), "{formatted}");
     }
 }

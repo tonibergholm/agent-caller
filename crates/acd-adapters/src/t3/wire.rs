@@ -2,6 +2,7 @@
 //! ignored; unknown tags and kinds decode as `Other`.
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 pub const SUBSCRIBE_SHELL: &str = "orchestration.subscribeShell";
 pub const SUBSCRIBE_THREAD: &str = "orchestration.subscribeThread";
@@ -106,21 +107,66 @@ pub fn failure(causes: &[Cause]) -> Failure {
     }
 }
 
-/// A failure as plain JSON for the debug log, which callers pass through
-/// `redact_log`. Never log a `Failure` with `{:?}`.
+/// A server string represented without its contents for debug diagnostics.
+pub(crate) fn string_fingerprint(text: &str) -> Value {
+    let digest = Sha256::digest(text.as_bytes());
+    let hash: String = digest
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    json!({"bytes": text.len(), "sha256": hash})
+}
+
+/// A server value represented without its contents for debug diagnostics.
+pub(crate) fn value_fingerprint(value: &Value) -> Value {
+    let mut summary = serde_json::Map::new();
+    for key in ["_tag", "kind"] {
+        if let Some(tag) = value.get(key).and_then(Value::as_str) {
+            summary.insert(key.into(), Value::String(tag.into()));
+        }
+    }
+    let mut strings = vec![];
+    fn collect(value: &Value, strings: &mut Vec<Value>) {
+        match value {
+            Value::String(text) => strings.push(string_fingerprint(text)),
+            Value::Array(values) => values.iter().for_each(|value| collect(value, strings)),
+            Value::Object(values) => values
+                .iter()
+                .filter(|(key, _)| key.as_str() != "_tag" && key.as_str() != "kind")
+                .for_each(|(_, value)| collect(value, strings)),
+            _ => {}
+        }
+    }
+    collect(value, &mut strings);
+    summary.insert("strings".into(), Value::Array(strings));
+    Value::Object(summary)
+}
+
+/// A failure as safe JSON for the debug log. It contains only cause tags,
+/// typed error tags, and fingerprints of server text. Callers still pass it
+/// through `redact_log` as a final safeguard.
 pub(crate) fn failure_json(f: &Failure) -> Value {
     let cause = |c: &Cause| match c {
-        Cause::Fail { error } => json!({"fail": error}),
-        Cause::Die { defect } => json!({"die": defect}),
-        Cause::Interrupt {} => json!("interrupt"),
-        Cause::Other => json!("other"),
+        Cause::Fail { error } => json!({
+            "_tag": "Fail",
+            "error_tag": error.get("_tag").and_then(Value::as_str).unwrap_or(""),
+            "detail": value_fingerprint(error),
+        }),
+        Cause::Die { defect } => json!({"_tag": "Die", "detail": value_fingerprint(defect)}),
+        Cause::Interrupt {} => json!({"_tag": "Interrupt"}),
+        Cause::Other => json!({"_tag": "Other"}),
     };
     match f {
-        Failure::Fail { tag, message } => json!({"fail": {"tag": tag, "message": message}}),
-        Failure::Die(d) => json!({"die": d}),
-        Failure::Interrupted => json!("interrupted"),
-        Failure::Mixed(causes) => Value::Array(causes.iter().map(cause).collect()),
-        Failure::Unknown => json!("unknown"),
+        Failure::Fail { tag, message } => json!({
+            "_tag": "Fail", "error_tag": tag, "message": string_fingerprint(message),
+        }),
+        Failure::Die(d) => json!({"_tag": "Die", "defect": string_fingerprint(d)}),
+        Failure::Interrupted => json!({"_tag": "Interrupt"}),
+        Failure::Mixed(causes) => {
+            json!({"_tag": "Mixed", "causes": causes.iter().map(cause).collect::<Vec<_>>() })
+        }
+        Failure::Unknown => json!({"_tag": "Unknown"}),
     }
 }
 
