@@ -1,0 +1,25 @@
+{
+  "_tag": "Exit",
+  "requestId": "1",
+  "exit": {
+    "_tag": "Failure",
+    "cause": [
+      {
+        "_tag": "Fail",
+        "error": {
+          "_tag": "OrchestrationV2GetThreadProjectionError",
+          "threadId": "nope",
+          "message": "Failed to load orchestration V2 thread nope",
+          "cause": {
+            "name": "OrchestratorProjectionError",
+            "message": "Failed to load orchestration projection for thread nope.",
+            "cause": {
+              "name": "ProjectionStoreThreadNotFoundError",
+              "message": "No orchestration projection exists for thread nope."
+            }
+          }
+        }
+      }
+    ]
+  }
+}

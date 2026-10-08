@@ -1,0 +1,13 @@
+{
+  "_tag": "Exit",
+  "requestId": "1",
+  "exit": {
+    "_tag": "Failure",
+    "cause": [
+      {
+        "_tag": "Die",
+        "defect": "Expected \"accept\" | \"acceptForSession\" | \"acceptAlways\" | \"decline\" | \"cancel\"\n  at [\"decision\"]"
+      }
+    ]
+  }
+}

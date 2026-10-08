@@ -1,0 +1,24 @@
+{
+  "_tag": "Chunk",
+  "requestId": "1",
+  "values": [
+    {
+      "kind": "project.updated",
+      "sequence": 1,
+      "project": {
+        "id": "110931a3-89c5-4530-8364-00d766b00026",
+        "title": "acp4",
+        "workspaceRoot": "/tmp/acp4/proj",
+        "repositoryIdentity": null,
+        "defaultModelSelection": null,
+        "defaultThreadEnvMode": null,
+        "autoPull": false,
+        "faviconPath": null,
+        "projectIcon": null,
+        "scripts": [],
+        "createdAt": "2026-10-08T06:47:36.779Z",
+        "updatedAt": "2026-10-08T06:47:36.779Z"
+      }
+    }
+  ]
+}

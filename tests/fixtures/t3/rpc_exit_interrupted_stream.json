@@ -1,0 +1,25 @@
+{
+  "_tag": "Exit",
+  "requestId": "1",
+  "exit": {
+    "_tag": "Failure",
+    "cause": [
+      {
+        "_tag": "Interrupt",
+        "fiberId": 7729
+      },
+      {
+        "_tag": "Interrupt",
+        "fiberId": 7729
+      },
+      {
+        "_tag": "Interrupt",
+        "fiberId": 7729
+      },
+      {
+        "_tag": "Interrupt",
+        "fiberId": 7729
+      }
+    ]
+  }
+}

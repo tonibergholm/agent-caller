@@ -1,0 +1,127 @@
+{
+  "_tag": "Chunk",
+  "requestId": "1",
+  "values": [
+    {
+      "kind": "event",
+      "sequence": 61,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:provider-session:provider-session%3Aprovider-instance%3AclaudeAgent%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3A917978a1-c683-4d0f-a7c1-bfd6a97d1254:aca9473c-b328-4830-ae71-42dc762b9a93",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+        "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+        "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:50:55.661Z",
+        "type": "node.updated",
+        "payload": {
+          "id": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+          "parentNodeId": "node:provider:claudeAgent:native-item:toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+          "rootNodeId": "node:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A2:root",
+          "kind": "user_input_request",
+          "status": "waiting",
+          "countsForRun": false,
+          "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+          "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A2%3Aattempt%3A1",
+          "nativeItemRef": {
+            "driver": "claudeAgent",
+            "nativeId": "toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+            "strength": "strong"
+          },
+          "runtimeRequestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A2%253Aattempt%253A1:native-request:toolu_01WKd3F9dadc4Nwe1HuSTJYM:528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "checkpointScopeId": null,
+          "startedAt": "2026-10-08T06:50:55.660Z",
+          "completedAt": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 62,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:provider-session:provider-session%3Aprovider-instance%3AclaudeAgent%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3A917978a1-c683-4d0f-a7c1-bfd6a97d1254:452e6a75-7119-4b6f-abc3-17a4d89e9961",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+        "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+        "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:50:55.661Z",
+        "type": "runtime-request.updated",
+        "payload": {
+          "id": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A2%253Aattempt%253A1:native-request:toolu_01WKd3F9dadc4Nwe1HuSTJYM:528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A2%3Aattempt%3A1",
+          "nativeRequestRef": {
+            "driver": "claudeAgent",
+            "nativeId": "toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+            "strength": "strong"
+          },
+          "kind": "user_input",
+          "status": "pending",
+          "responseCapability": {
+            "type": "live",
+            "providerSessionId": "provider-session:provider-instance:claudeAgent:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:917978a1-c683-4d0f-a7c1-bfd6a97d1254"
+          },
+          "createdAt": "2026-10-08T06:50:55.660Z",
+          "resolvedAt": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 63,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:provider-session:provider-session%3Aprovider-instance%3AclaudeAgent%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3A917978a1-c683-4d0f-a7c1-bfd6a97d1254:3fdd5491-9d76-49fd-96a7-0b9cf96d50f2",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+        "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+        "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:50:55.662Z",
+        "type": "turn-item.updated",
+        "payload": {
+          "id": "turn-item:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+          "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+          "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A2%3Aattempt%3A1",
+          "nativeItemRef": {
+            "driver": "claudeAgent",
+            "nativeId": "toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+            "strength": "strong"
+          },
+          "parentItemId": null,
+          "ordinal": 2000003,
+          "status": "waiting",
+          "title": null,
+          "startedAt": "2026-10-08T06:50:55.660Z",
+          "completedAt": null,
+          "updatedAt": "2026-10-08T06:50:55.660Z",
+          "type": "user_input_request",
+          "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A2%253Aattempt%253A1:native-request:toolu_01WKd3F9dadc4Nwe1HuSTJYM:528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "questions": [
+            {
+              "id": "Which color do you prefer?",
+              "header": "Color",
+              "question": "Which color do you prefer?",
+              "options": [
+                {
+                  "label": "red",
+                  "description": "Choose red"
+                },
+                {
+                  "label": "blue",
+                  "description": "Choose blue"
+                }
+              ],
+              "multiSelect": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

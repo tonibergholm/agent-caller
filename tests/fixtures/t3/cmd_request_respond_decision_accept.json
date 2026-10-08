@@ -1,0 +1,13 @@
+{
+  "_tag": "Request",
+  "id": "1",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+    "type": "runtime-request.respond",
+    "commandId": "1013f6bd-42f8-4dd6-a038-d052cd8646e6",
+    "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+    "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01XhxRJmVZMrKVaQ2JNAXjks:717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+    "decision": "accept"
+  },
+  "headers": []
+}

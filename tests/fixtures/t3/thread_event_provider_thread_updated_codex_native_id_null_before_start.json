@@ -1,0 +1,265 @@
+{
+  "_tag": "Chunk",
+  "requestId": "1",
+  "values": [
+    {
+      "kind": "event",
+      "sequence": 84,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:command:3ca916c6-f044-4b0b-bbc0-b8d5f194b1a9:459c3775-d952-4030-b2aa-8304ecd7a95c",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.161Z",
+        "type": "thread.metadata-updated",
+        "payload": {
+          "createdBy": "user",
+          "creationSource": "web",
+          "id": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+          "projectId": "110931a3-89c5-4530-8364-00d766b00026",
+          "title": "Touch y.txt",
+          "providerInstanceId": "codex",
+          "modelSelection": {
+            "instanceId": "codex",
+            "model": "gpt-5.6-terra"
+          },
+          "runtimeMode": "approval-required",
+          "interactionMode": "default",
+          "branch": null,
+          "worktreePath": null,
+          "activeProviderThreadId": null,
+          "lineage": {
+            "parentThreadId": null,
+            "relationshipToParent": null,
+            "rootThreadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e"
+          },
+          "forkedFrom": null,
+          "createdAt": "2026-10-08T06:52:40.042Z",
+          "updatedAt": "2026-10-08T06:52:41.161Z",
+          "archivedAt": null,
+          "settledOverride": null,
+          "settledAt": null,
+          "snoozedUntil": null,
+          "snoozedAt": null,
+          "lastVisitedAt": null,
+          "titleRegeneration": {
+            "requestId": "3ca916c6-f044-4b0b-bbc0-b8d5f194b1a9",
+            "startedAt": "2026-10-08T06:52:41.161Z"
+          },
+          "deletedAt": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 85,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:command:3ca916c6-f044-4b0b-bbc0-b8d5f194b1a9:0a70c952-3dd9-4870-a6ad-6ced954e97a0",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "driver": "codex",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.162Z",
+        "type": "provider-thread.updated",
+        "payload": {
+          "id": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+          "driver": "codex",
+          "providerInstanceId": "codex",
+          "providerSessionId": "provider-session:provider-instance:codex:shared",
+          "appThreadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+          "ownerNodeId": null,
+          "nativeThreadRef": null,
+          "nativeConversationHeadRef": null,
+          "status": "not_loaded",
+          "firstRunOrdinal": 1,
+          "lastRunOrdinal": 1,
+          "handoffIds": [],
+          "forkedFrom": null,
+          "pendingBackgroundTasks": [],
+          "contextUsage": null,
+          "nativeMetadata": null,
+          "goal": null,
+          "createdAt": "2026-10-08T06:52:41.162Z",
+          "updatedAt": "2026-10-08T06:52:41.162Z"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 86,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:command:3ca916c6-f044-4b0b-bbc0-b8d5f194b1a9:99f9c0e5-6c58-4c29-9777-8a74ec649b77",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.162Z",
+        "type": "run.created",
+        "payload": {
+          "id": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+          "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+          "ordinal": 1,
+          "providerInstanceId": "codex",
+          "modelSelection": {
+            "instanceId": "codex",
+            "model": "gpt-5.6-terra"
+          },
+          "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+          "userMessageId": "4d9197d2-2c66-4fab-9060-922ff4ecda2a",
+          "rootNodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "activeAttemptId": "run-attempt:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:attempt:1",
+          "status": "starting",
+          "queuePosition": null,
+          "requestedAt": "2026-10-08T06:52:41.162Z",
+          "startedAt": null,
+          "completedAt": null,
+          "checkpointId": null,
+          "contextHandoffId": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 87,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:command:3ca916c6-f044-4b0b-bbc0-b8d5f194b1a9:3855b70d-2f27-45b3-a781-316013c6c25b",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.162Z",
+        "type": "run-attempt.created",
+        "payload": {
+          "id": "run-attempt:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:attempt:1",
+          "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+          "attemptOrdinal": 1,
+          "rootNodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "providerInstanceId": "codex",
+          "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+          "providerTurnId": null,
+          "reason": "initial",
+          "status": "pending",
+          "startedAt": null,
+          "completedAt": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 88,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:command:3ca916c6-f044-4b0b-bbc0-b8d5f194b1a9:3367a26a-6231-46cd-a3ec-60c91c372d82",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.162Z",
+        "type": "node.updated",
+        "payload": {
+          "id": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+          "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+          "parentNodeId": null,
+          "rootNodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "kind": "root_turn",
+          "status": "pending",
+          "countsForRun": true,
+          "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+          "providerTurnId": null,
+          "nativeItemRef": null,
+          "runtimeRequestId": null,
+          "checkpointScopeId": "checkpoint-scope:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:name:root",
+          "startedAt": null,
+          "completedAt": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 89,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:command:3ca916c6-f044-4b0b-bbc0-b8d5f194b1a9:d66142a4-560c-43f6-b0ad-9ef5e4f783d1",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.162Z",
+        "type": "checkpoint-scope.created",
+        "payload": {
+          "id": "checkpoint-scope:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:name:root",
+          "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+          "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+          "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "parentScopeId": null,
+          "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+          "kind": "root_run",
+          "ordinalWithinParent": 0,
+          "advancesAppRunCount": true,
+          "cwd": "/tmp/acp4/proj",
+          "createdAt": "2026-10-08T06:52:41.162Z"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 90,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:command:3ca916c6-f044-4b0b-bbc0-b8d5f194b1a9:9c6d6000-0560-4098-988f-73a680fd227d",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.162Z",
+        "type": "message.updated",
+        "payload": {
+          "createdBy": "user",
+          "creationSource": "web",
+          "id": "4d9197d2-2c66-4fab-9060-922ff4ecda2a",
+          "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+          "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+          "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "role": "user",
+          "text": "Run exactly this shell command and nothing else: touch /tmp/acp4/proj/y.txt",
+          "attachments": [],
+          "streaming": false,
+          "createdAt": "2026-10-08T06:52:41.162Z",
+          "updatedAt": "2026-10-08T06:52:41.162Z"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 91,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:command:3ca916c6-f044-4b0b-bbc0-b8d5f194b1a9:d8d5fd18-1e7b-4ecc-bd7c-118a118a192c",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.162Z",
+        "type": "turn-item.updated",
+        "payload": {
+          "id": "turn-item:message:4d9197d2-2c66-4fab-9060-922ff4ecda2a",
+          "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+          "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+          "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+          "providerTurnId": null,
+          "nativeItemRef": null,
+          "parentItemId": null,
+          "ordinal": 1000001,
+          "status": "completed",
+          "title": null,
+          "startedAt": "2026-10-08T06:52:41.162Z",
+          "completedAt": "2026-10-08T06:52:41.162Z",
+          "updatedAt": "2026-10-08T06:52:41.162Z",
+          "createdBy": "user",
+          "creationSource": "web",
+          "type": "user_message",
+          "messageId": "4d9197d2-2c66-4fab-9060-922ff4ecda2a",
+          "inputIntent": "turn_start",
+          "text": "Run exactly this shell command and nothing else: touch /tmp/acp4/proj/y.txt",
+          "attachments": []
+        }
+      }
+    }
+  ]
+}

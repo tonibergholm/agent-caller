@@ -1,0 +1,250 @@
+{
+  "_tag": "Chunk",
+  "requestId": "1",
+  "values": [
+    {
+      "kind": "event",
+      "sequence": 93,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:provider-session:provider-session%3Aprovider-instance%3Acodex%3Ashared:4f814079-b1a1-404e-9055-0ca3dd2ba9c8",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "driver": "codex",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.648Z",
+        "type": "provider-session.updated",
+        "payload": {
+          "id": "provider-session:provider-instance:codex:shared",
+          "driver": "codex",
+          "providerInstanceId": "codex",
+          "status": "ready",
+          "cwd": "/tmp/acp4/proj",
+          "model": "gpt-5.6-terra",
+          "capabilities": {
+            "sessions": {
+              "supportsMultipleProviderThreadsPerSession": true,
+              "supportsModelSwitchInSession": true,
+              "supportsProviderSwitchingViaHandoff": true,
+              "supportsRuntimeModeSwitchInSession": true,
+              "pendingRequestsSurviveRestart": false
+            },
+            "threads": {
+              "canCreateEmptyThread": true,
+              "canReadThreadSnapshot": true,
+              "canRollbackThread": true,
+              "canForkThread": true,
+              "canForkFromTurn": true,
+              "canForkFromSubagentThread": true,
+              "exposesNativeThreadId": true
+            },
+            "turns": {
+              "exposesNativeTurnId": true,
+              "emitsTurnStarted": true,
+              "emitsTurnCompleted": true,
+              "supportsInterrupt": true,
+              "supportsActiveSteering": true,
+              "supportsSteeringByInterruptRestart": true,
+              "supportsQueuedMessages": true,
+              "terminalStatusQuality": "strong"
+            },
+            "streaming": {
+              "streamsAssistantText": true,
+              "streamsReasoning": true,
+              "streamsToolOutput": true,
+              "streamsPlanText": true,
+              "emitsMessageCompleted": true
+            },
+            "tools": {
+              "exposesToolItemIds": true,
+              "emitsToolStarted": true,
+              "emitsToolCompleted": true,
+              "emitsToolOutput": true,
+              "supportsMcpTools": true,
+              "supportsDynamicToolCallbacks": true
+            },
+            "approvals": {
+              "supportsCommandApproval": true,
+              "supportsFileReadApproval": true,
+              "supportsFileChangeApproval": true,
+              "supportsApplyPatchApproval": true,
+              "approvalsHaveNativeRequestIds": true,
+              "approvalCallbacksAreLiveOnly": true,
+              "approvalsCanOriginateFromSubagents": true
+            },
+            "planning": {
+              "emitsPlanUpdated": true,
+              "emitsTodoList": true,
+              "emitsProposedPlan": true,
+              "supportsStructuredQuestions": true,
+              "planDeltasHaveItemIds": true
+            },
+            "subagents": {
+              "supportsSubagents": true,
+              "exposesSubagentThreadIds": true,
+              "emitsSubagentLifecycle": true,
+              "canWaitForSubagents": true,
+              "canCloseSubagents": true,
+              "canForkSubagentThread": true
+            },
+            "context": {
+              "acceptsSystemContext": true,
+              "acceptsDeveloperContext": true,
+              "acceptsSyntheticUserContext": true,
+              "canGenerateSummaries": true,
+              "canConsumeHandoffSummaries": true,
+              "supportsDeltaHandoff": true,
+              "supportsFullThreadHandoff": true,
+              "maxRecommendedHandoffChars": null
+            },
+            "checkpointing": {
+              "appCanCheckpointFilesystem": true,
+              "supportsNestedCheckpointScopes": true,
+              "providerCanRollbackConversation": true,
+              "providerRollbackReturnsSnapshot": true,
+              "providerCanReadConversationSnapshot": true
+            },
+            "identity": {
+              "nativeThreadIds": "strong",
+              "nativeTurnIds": "strong",
+              "nativeItemIds": "strong",
+              "nativeRequestIds": "strong"
+            },
+            "runtimePolicy": {
+              "enforcement": "native"
+            }
+          },
+          "createdAt": "2026-10-08T06:52:41.171Z",
+          "updatedAt": "2026-10-08T06:52:41.171Z",
+          "lastError": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 94,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:05e98873-b057-4339-8243-6e5ec3b58b72",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "driver": "codex",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.648Z",
+        "type": "provider-thread.updated",
+        "payload": {
+          "id": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+          "driver": "codex",
+          "providerInstanceId": "codex",
+          "providerSessionId": "provider-session:provider-instance:codex:shared",
+          "appThreadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+          "ownerNodeId": null,
+          "nativeThreadRef": {
+            "driver": "codex",
+            "nativeId": "01a11a49-1c70-7623-b34a-416e54300a87",
+            "strength": "strong"
+          },
+          "nativeConversationHeadRef": null,
+          "status": "active",
+          "firstRunOrdinal": 1,
+          "lastRunOrdinal": 1,
+          "handoffIds": [],
+          "forkedFrom": null,
+          "pendingBackgroundTasks": [],
+          "contextUsage": null,
+          "nativeMetadata": null,
+          "goal": null,
+          "createdAt": "2026-10-08T06:52:41.162Z",
+          "updatedAt": "2026-10-08T06:52:41.648Z"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 95,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:8ec1d5ca-c841-48d0-9502-b764330a01ed",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.648Z",
+        "type": "run.updated",
+        "payload": {
+          "id": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+          "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+          "ordinal": 1,
+          "providerInstanceId": "codex",
+          "modelSelection": {
+            "instanceId": "codex",
+            "model": "gpt-5.6-terra"
+          },
+          "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+          "userMessageId": "4d9197d2-2c66-4fab-9060-922ff4ecda2a",
+          "rootNodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "activeAttemptId": "run-attempt:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:attempt:1",
+          "status": "running",
+          "queuePosition": null,
+          "requestedAt": "2026-10-08T06:52:41.162Z",
+          "startedAt": "2026-10-08T06:52:41.648Z",
+          "completedAt": null,
+          "checkpointId": null,
+          "contextHandoffId": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 96,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:dd8dba0e-e4d9-44c8-9850-6d27630b39cb",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.648Z",
+        "type": "run-attempt.updated",
+        "payload": {
+          "id": "run-attempt:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:attempt:1",
+          "nativeThreadId": "01a11a49-1c70-7623-b34a-416e54300a87",
+          "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+          "attemptOrdinal": 1,
+          "rootNodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "providerInstanceId": "codex",
+          "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+          "providerTurnId": null,
+          "reason": "initial",
+          "status": "running",
+          "startedAt": "2026-10-08T06:52:41.648Z",
+          "completedAt": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 97,
+      "event": {
+        "id": "event:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:88e81759-5b64-47aa-8d70-b202f8ca6ff5",
+        "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+        "providerInstanceId": "codex",
+        "occurredAt": "2026-10-08T06:52:41.648Z",
+        "type": "node.updated",
+        "payload": {
+          "id": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+          "runId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+          "parentNodeId": null,
+          "rootNodeId": "node:run:run%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1:root",
+          "kind": "root_turn",
+          "status": "running",
+          "countsForRun": true,
+          "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+          "providerTurnId": null,
+          "nativeItemRef": null,
+          "runtimeRequestId": null,
+          "checkpointScopeId": "checkpoint-scope:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:name:root",
+          "startedAt": "2026-10-08T06:52:41.648Z",
+          "completedAt": null
+        }
+      }
+    }
+  ]
+}

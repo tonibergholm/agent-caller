@@ -1,0 +1,169 @@
+[
+  {
+    "_tag": "Request",
+    "id": "1",
+    "tag": "orchestration.subscribeThread",
+    "payload": {
+      "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+      "afterSequence": 20,
+      "requestCompletionMarker": true
+    },
+    "headers": []
+  },
+  {
+    "_tag": "Chunk",
+    "requestId": "1",
+    "values": [
+      {
+        "kind": "event",
+        "sequence": 21,
+        "event": {
+          "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:provider-session:provider-session%3Aprovider-instance%3AclaudeAgent%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3A917978a1-c683-4d0f-a7c1-bfd6a97d1254:e2d66b65-9c5e-490a-8d5f-fcd6dcba2a43",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+          "nodeId": "node:provider:claudeAgent:native-item:toolu_01XhxRJmVZMrKVaQ2JNAXjks",
+          "driver": "claudeAgent",
+          "providerInstanceId": "claudeAgent",
+          "occurredAt": "2026-10-08T06:48:32.956Z",
+          "type": "turn-item.updated",
+          "payload": {
+            "id": "turn-item:provider:claudeAgent:native-item:toolu_01XhxRJmVZMrKVaQ2JNAXjks",
+            "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+            "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+            "nodeId": "node:provider:claudeAgent:native-item:toolu_01XhxRJmVZMrKVaQ2JNAXjks",
+            "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+            "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A1%3Aattempt%3A1",
+            "nativeItemRef": {
+              "driver": "claudeAgent",
+              "nativeId": "toolu_01XhxRJmVZMrKVaQ2JNAXjks",
+              "strength": "strong"
+            },
+            "parentItemId": null,
+            "ordinal": 1000002,
+            "status": "running",
+            "title": null,
+            "startedAt": "2026-10-08T06:48:32.951Z",
+            "completedAt": null,
+            "updatedAt": "2026-10-08T06:48:32.951Z",
+            "type": "command_execution",
+            "input": "touch /tmp/acp4/proj/x.txt"
+          }
+        }
+      },
+      {
+        "kind": "event",
+        "sequence": 22,
+        "event": {
+          "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:provider-session:provider-session%3Aprovider-instance%3AclaudeAgent%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3A917978a1-c683-4d0f-a7c1-bfd6a97d1254:bc0d4903-1451-4cd7-8413-6e39e25fdcc5",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+          "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01XhxRJmVZMrKVaQ2JNAXjks%3A717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+          "driver": "claudeAgent",
+          "providerInstanceId": "claudeAgent",
+          "occurredAt": "2026-10-08T06:48:33.034Z",
+          "type": "node.updated",
+          "payload": {
+            "id": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01XhxRJmVZMrKVaQ2JNAXjks%3A717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+            "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+            "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+            "parentNodeId": "node:provider:claudeAgent:native-item:toolu_01XhxRJmVZMrKVaQ2JNAXjks",
+            "rootNodeId": "node:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1:root",
+            "kind": "approval_request",
+            "status": "waiting",
+            "countsForRun": false,
+            "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+            "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A1%3Aattempt%3A1",
+            "nativeItemRef": {
+              "driver": "claudeAgent",
+              "nativeId": "toolu_01XhxRJmVZMrKVaQ2JNAXjks",
+              "strength": "strong"
+            },
+            "runtimeRequestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01XhxRJmVZMrKVaQ2JNAXjks:717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+            "checkpointScopeId": null,
+            "startedAt": "2026-10-08T06:48:33.034Z",
+            "completedAt": null
+          }
+        }
+      },
+      {
+        "kind": "event",
+        "sequence": 23,
+        "event": {
+          "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:provider-session:provider-session%3Aprovider-instance%3AclaudeAgent%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3A917978a1-c683-4d0f-a7c1-bfd6a97d1254:9fd4a09b-6821-44d4-9143-6e27ea8b0f9f",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+          "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01XhxRJmVZMrKVaQ2JNAXjks%3A717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+          "driver": "claudeAgent",
+          "providerInstanceId": "claudeAgent",
+          "occurredAt": "2026-10-08T06:48:33.035Z",
+          "type": "runtime-request.updated",
+          "payload": {
+            "id": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01XhxRJmVZMrKVaQ2JNAXjks:717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+            "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01XhxRJmVZMrKVaQ2JNAXjks%3A717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+            "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A1%3Aattempt%3A1",
+            "nativeRequestRef": {
+              "driver": "claudeAgent",
+              "nativeId": "toolu_01XhxRJmVZMrKVaQ2JNAXjks",
+              "strength": "strong"
+            },
+            "kind": "command",
+            "status": "pending",
+            "responseCapability": {
+              "type": "live",
+              "providerSessionId": "provider-session:provider-instance:claudeAgent:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:917978a1-c683-4d0f-a7c1-bfd6a97d1254"
+            },
+            "createdAt": "2026-10-08T06:48:33.034Z",
+            "resolvedAt": null
+          }
+        }
+      },
+      {
+        "kind": "event",
+        "sequence": 24,
+        "event": {
+          "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:provider-session:provider-session%3Aprovider-instance%3AclaudeAgent%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3A917978a1-c683-4d0f-a7c1-bfd6a97d1254:730153eb-998d-420a-ad3d-412d27645129",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+          "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01XhxRJmVZMrKVaQ2JNAXjks%3A717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+          "driver": "claudeAgent",
+          "providerInstanceId": "claudeAgent",
+          "occurredAt": "2026-10-08T06:48:33.036Z",
+          "type": "turn-item.updated",
+          "payload": {
+            "id": "turn-item:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01XhxRJmVZMrKVaQ2JNAXjks%3A717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+            "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+            "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+            "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01XhxRJmVZMrKVaQ2JNAXjks%3A717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+            "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+            "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A1%3Aattempt%3A1",
+            "nativeItemRef": {
+              "driver": "claudeAgent",
+              "nativeId": "toolu_01XhxRJmVZMrKVaQ2JNAXjks",
+              "strength": "strong"
+            },
+            "parentItemId": null,
+            "ordinal": 1000003,
+            "status": "waiting",
+            "title": null,
+            "startedAt": "2026-10-08T06:48:33.034Z",
+            "completedAt": null,
+            "updatedAt": "2026-10-08T06:48:33.034Z",
+            "type": "approval_request",
+            "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01XhxRJmVZMrKVaQ2JNAXjks:717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+            "requestKind": "command",
+            "prompt": "Create empty file x.txt"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "_tag": "Chunk",
+    "requestId": "1",
+    "values": [
+      {
+        "kind": "synchronized"
+      }
+    ]
+  }
+]

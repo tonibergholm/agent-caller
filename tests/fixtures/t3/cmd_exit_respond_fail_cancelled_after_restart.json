@@ -1,0 +1,24 @@
+{
+  "_tag": "Exit",
+  "requestId": "1",
+  "exit": {
+    "_tag": "Failure",
+    "cause": [
+      {
+        "_tag": "Fail",
+        "error": {
+          "_tag": "OrchestrationV2DispatchCommandError",
+          "commandId": "2aae45c2-63f8-4b54-8905-3d55adb5600a",
+          "commandType": "runtime-request.respond",
+          "message": "Runtime request runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A3%253Aattempt%253A1:native-request:toolu_011G7CE17fEVFnLs7sAD2jWD:c84b90ac-6550-4196-a1f3-4c55fc5725f7 is cancelled.",
+          "detail": "Runtime request runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A3%253Aattempt%253A1:native-request:toolu_011G7CE17fEVFnLs7sAD2jWD:c84b90ac-6550-4196-a1f3-4c55fc5725f7 is cancelled.",
+          "cause": {
+            "name": "OrchestratorDispatchError",
+            "message": "Failed to dispatch orchestration command runtime-request.respond (2aae45c2-63f8-4b54-8905-3d55adb5600a).",
+            "cause": "Runtime request runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A3%253Aattempt%253A1:native-request:toolu_011G7CE17fEVFnLs7sAD2jWD:c84b90ac-6550-4196-a1f3-4c55fc5725f7 is cancelled."
+          }
+        }
+      }
+    ]
+  }
+}

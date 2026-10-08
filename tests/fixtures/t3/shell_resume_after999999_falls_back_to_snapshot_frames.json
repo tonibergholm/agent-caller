@@ -1,0 +1,147 @@
+[
+  {
+    "_tag": "Request",
+    "id": "1",
+    "tag": "orchestration.subscribeShell",
+    "payload": {
+      "afterSequence": 999999,
+      "requestCompletionMarker": true
+    },
+    "headers": []
+  },
+  {
+    "_tag": "Chunk",
+    "requestId": "1",
+    "values": [
+      {
+        "kind": "snapshot",
+        "snapshot": {
+          "schemaVersion": 2,
+          "snapshotSequence": 24,
+          "threads": [
+            {
+              "createdBy": "user",
+              "creationSource": "web",
+              "id": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+              "projectId": "110931a3-89c5-4530-8364-00d766b00026",
+              "title": "Create Empty File",
+              "providerInstanceId": "claudeAgent",
+              "modelSelection": {
+                "instanceId": "claudeAgent",
+                "model": "claude-sonnet-5-5"
+              },
+              "runtimeMode": "approval-required",
+              "interactionMode": "default",
+              "branch": null,
+              "worktreePath": null,
+              "pullRequests": [],
+              "lineage": {
+                "parentThreadId": null,
+                "relationshipToParent": null,
+                "rootThreadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0"
+              },
+              "forkedFrom": null,
+              "activeProviderThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+              "latestRunId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+              "latestRunRequestedAt": "2026-10-08T06:48:27.483Z",
+              "latestRunStartedAt": "2026-10-08T06:48:27.498Z",
+              "latestRunCompletedAt": null,
+              "activeRunId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+              "activityRunStartedAt": "2026-10-08T06:48:27.498Z",
+              "activityRunStatus": "running",
+              "status": "running",
+              "lastError": null,
+              "lastErrorClass": null,
+              "usageLimitResetAt": null,
+              "pendingRuntimeRequest": {
+                "id": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01XhxRJmVZMrKVaQ2JNAXjks:717457aa-868f-4bb7-b9d5-4f502d99e1a6",
+                "kind": "command",
+                "createdAt": "2026-10-08T06:48:33.034Z"
+              },
+              "latestVisibleMessage": null,
+              "latestUserMessageAt": "2026-10-08T06:48:27.483Z",
+              "latestUserAuthoredMessageAt": "2026-10-08T06:48:27.483Z",
+              "hasActionableProposedPlan": false,
+              "pendingBackgroundTasks": [],
+              "providerInstanceHistory": [
+                "claudeAgent"
+              ],
+              "goal": null,
+              "itemCount": 3,
+              "visibleItemCount": 3,
+              "createdAt": "2026-10-08T06:48:18.669Z",
+              "updatedAt": "2026-10-08T06:48:33.036Z",
+              "archivedAt": null,
+              "settledOverride": null,
+              "settledAt": null,
+              "unsettledAt": null,
+              "snoozedUntil": null,
+              "snoozedAt": null,
+              "limitRecovery": null,
+              "pinnedAt": null,
+              "autoSettleDisabledAt": null,
+              "pinOrderKey": null,
+              "lastVisitedAt": null,
+              "titleRegeneration": null,
+              "deletedAt": null
+            }
+          ],
+          "archivedThreads": [],
+          "projects": [
+            {
+              "id": "110931a3-89c5-4530-8364-00d766b00026",
+              "title": "acp4",
+              "workspaceRoot": "/tmp/acp4/proj",
+              "repositoryIdentity": null,
+              "defaultModelSelection": null,
+              "defaultThreadEnvMode": null,
+              "autoPull": false,
+              "faviconPath": null,
+              "projectIcon": null,
+              "scripts": [],
+              "createdAt": "2026-10-08T06:47:36.779Z",
+              "updatedAt": "2026-10-08T06:47:36.779Z"
+            }
+          ]
+        }
+      },
+      {
+        "kind": "snapshot",
+        "snapshot": {
+          "schemaVersion": 2,
+          "snapshotSequence": 24,
+          "threads": [],
+          "archivedThreads": [],
+          "projects": [
+            {
+              "id": "110931a3-89c5-4530-8364-00d766b00026",
+              "title": "acp4",
+              "workspaceRoot": "/tmp/acp4/proj",
+              "repositoryIdentity": null,
+              "defaultModelSelection": null,
+              "defaultThreadEnvMode": null,
+              "autoPull": false,
+              "faviconPath": null,
+              "projectIcon": null,
+              "scripts": [],
+              "createdAt": "2026-10-08T06:47:36.779Z",
+              "updatedAt": "2026-10-08T06:47:36.779Z"
+            }
+          ]
+        },
+        "resolvedRepositoryIdentityRoots": [
+          "/tmp/acp4/proj"
+        ]
+      }
+    ]
+  },
+  {
+    "_tag": "Chunk",
+    "requestId": "1",
+    "values": [
+      {
+        "kind": "synchronized"
+      }
+    ]
+  }
+]

@@ -1,0 +1,61 @@
+{
+  "_tag": "Chunk",
+  "requestId": "1",
+  "values": [
+    {
+      "kind": "event",
+      "sequence": 60,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:provider-session:provider-session%3Aprovider-instance%3AclaudeAgent%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3A917978a1-c683-4d0f-a7c1-bfd6a97d1254:4dd75a6d-8de2-41aa-8fc5-b25470b01d96",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+        "nodeId": "node:provider:claudeAgent:native-item:toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+        "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:50:55.593Z",
+        "type": "turn-item.updated",
+        "payload": {
+          "id": "turn-item:provider:claudeAgent:native-item:toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+          "nodeId": "node:provider:claudeAgent:native-item:toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+          "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+          "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A2%3Aattempt%3A1",
+          "nativeItemRef": {
+            "driver": "claudeAgent",
+            "nativeId": "toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+            "strength": "strong"
+          },
+          "parentItemId": null,
+          "ordinal": 2000002,
+          "status": "running",
+          "title": null,
+          "startedAt": "2026-10-08T06:50:55.585Z",
+          "completedAt": null,
+          "updatedAt": "2026-10-08T06:50:55.585Z",
+          "type": "dynamic_tool",
+          "toolName": "AskUserQuestion",
+          "input": {
+            "questions": [
+              {
+                "question": "Which color do you prefer?",
+                "header": "Color",
+                "multiSelect": false,
+                "options": [
+                  {
+                    "label": "red",
+                    "description": "Choose red"
+                  },
+                  {
+                    "label": "blue",
+                    "description": "Choose blue"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

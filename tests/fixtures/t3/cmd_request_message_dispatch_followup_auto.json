@@ -1,0 +1,20 @@
+{
+  "_tag": "Request",
+  "id": "1",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+    "type": "message.dispatch",
+    "createdBy": "user",
+    "creationSource": "web",
+    "commandId": "cbd42802-e7a4-4dad-9361-471a94fa2dec",
+    "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+    "messageId": "eaa5c35f-5850-4eec-a462-0d80916ede7a",
+    "text": "Use the AskUserQuestion tool to ask me exactly one single-select question: which color do I prefer, with the options red and blue. After I answer, reply with only the chosen color.",
+    "attachments": [],
+    "deliveryIntent": "auto",
+    "dispatchMode": {
+      "type": "start_immediately"
+    }
+  },
+  "headers": []
+}
