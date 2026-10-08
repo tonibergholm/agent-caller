@@ -251,6 +251,8 @@ mod tests {
         s.welcome(machine(), vec![], "e1", 0);
         s.apply(&snap("e1", 5, &[]));
         assert_eq!(s.apply(&upd("e1", 7, "a")), Applied::Resync("sequence gap"));
+        assert!(s.cursor().is_some_and(|c| c.seq == 5));
+        assert!(s.agents.is_empty());
         let mut s = Session::default();
         s.welcome(machine(), vec![], "e1", 0);
         s.apply(&snap("e1", 5, &[]));
@@ -258,12 +260,16 @@ mod tests {
             s.apply(&upd("e2", 6, "a")),
             Applied::Resync("event from another epoch")
         );
+        assert!(s.cursor().is_some_and(|c| c.epoch == "e1" && c.seq == 5));
+        assert!(s.agents.is_empty());
         let mut s = Session::default();
         s.welcome(machine(), vec![], "e1", 0);
         assert_eq!(
             s.apply(&snap("e0", 5, &[])),
             Applied::Resync("snapshot from another epoch")
         );
+        assert_eq!(s.resume(), None);
+        assert!(s.agents.is_empty());
     }
 
     #[test]

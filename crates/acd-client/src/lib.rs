@@ -3,10 +3,13 @@
 use std::time::Duration;
 
 pub mod backoff;
+pub mod commands;
+pub mod conn;
 pub mod endpoint;
 pub mod local;
 pub mod session;
 pub mod settings;
+pub mod tls;
 
 /// Every timing rule in one place; tests shrink these.
 #[derive(Clone, Debug)]

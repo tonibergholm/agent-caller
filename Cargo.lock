@@ -65,6 +65,8 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "rustls",
  "serde",

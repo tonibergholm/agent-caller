@@ -32,4 +32,6 @@ uuid.workspace = true
 acd-client = { path = ".", features = ["testing", "ts"] }
 acd-core = { workspace = true, features = ["testing"] }
 axum.workspace = true
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 tempfile.workspace = true
