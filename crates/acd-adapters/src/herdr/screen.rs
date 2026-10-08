@@ -1,6 +1,12 @@
 //! Screen parsing for herdr panes (spec §6.2, §6.3): dialog region,
 //! fingerprints and the input-box prompt line. Pure functions over text;
 //! the rules are derived from the recorded screens in tests/fixtures/herdr.
+//!
+//! Threat model: a dialog fingerprint guards a keystroke into an approval
+//! dialog, and the command/detail text inside a dialog is attacker-influenced
+//! (model output). Dialog normalization is therefore strict: it never merges
+//! distinct content, and anything ambiguous fails closed (no dialog, no
+//! fingerprint).
 use acd_protocol::AgentKind;
 use sha2::{Digest, Sha256};
 
@@ -52,35 +58,71 @@ fn is_solid_rule(line: &str) -> bool {
     is_rule(line) && !line.contains('╌')
 }
 
-/// Normalizes one line, or `None` when it should be dropped: strips a
-/// leading cursor marker, collapses whitespace, drops empty lines, rule
-/// lines and `Tip:` lines.
-fn normalize_line(line: &str) -> Option<String> {
-    let t = line.trim();
-    let t = t
-        .strip_prefix('❯')
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+fn strip_cursor(t: &str) -> &str {
+    t.strip_prefix('❯')
         .or_else(|| t.strip_prefix('›'))
-        .unwrap_or(t);
-    let collapsed = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        .map_or(t, str::trim_start)
+}
+
+fn path_normalized(s: &str) -> String {
+    s.replace("/private/tmp/", "/tmp/")
+        .replace("/private/var/", "/var/")
+}
+
+/// Dialog normalization (fingerprints and `Dialog::text`). Strict on purpose:
+/// - lines are trimmed at both ends only, internal whitespace is kept;
+/// - empty lines and rule lines are dropped;
+/// - a leading cursor marker is stripped only on option lines;
+/// - `Tip:` lines are dropped only in the header (lines before `header_end`);
+///   a `Tip:` line inside the command/detail counts as content;
+/// - lines are joined with `\n`, so a re-wrap changes the result (a safe
+///   mismatch);
+/// - directory paths are normalized (spec §6.2).
+fn normalize_dialog(region: &[&str], option_idx: &[usize], header_end: usize) -> String {
+    let mut out = Vec::new();
+    for (i, line) in region.iter().enumerate() {
+        let t = line.trim();
+        if t.is_empty() || is_rule(t) {
+            continue;
+        }
+        if i < header_end && t.starts_with("Tip:") {
+            continue;
+        }
+        out.push(if option_idx.contains(&i) {
+            strip_cursor(t)
+        } else {
+            t
+        });
+    }
+    path_normalized(&out.join("\n"))
+}
+
+/// Tolerant normalization for the generic read-only fingerprint only: it keys
+/// read-only requests and must survive cursor moves, rotating tips and
+/// re-wraps. Kept separate from `normalize_dialog` so the strict dialog rules
+/// cannot be loosened by accident. Never use it for the keys guard.
+fn normalize_generic(lines: &[&str]) -> String {
+    let joined = lines
+        .iter()
+        .filter_map(|l| generic_line(l))
+        .collect::<Vec<_>>()
+        .join(" ");
+    path_normalized(&joined)
+}
+
+fn generic_line(line: &str) -> Option<String> {
+    let collapsed = strip_cursor(line.trim())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if collapsed.is_empty() || is_rule(&collapsed) || collapsed.starts_with("Tip:") {
         return None;
     }
     Some(collapsed)
-}
-
-/// Shared by `Dialog::text` and the generic fingerprint so the rules cannot
-/// drift apart. Lines are joined with one space so a pane resize that
-/// re-wraps text keeps the same result; directory paths are normalized
-/// (spec §6.2).
-fn normalize_lines(lines: &[&str]) -> String {
-    let joined = lines
-        .iter()
-        .filter_map(|l| normalize_line(l))
-        .collect::<Vec<_>>()
-        .join(" ");
-    joined
-        .replace("/private/tmp/", "/tmp/")
-        .replace("/private/var/", "/var/")
 }
 
 fn fingerprint_of(normalized: &str) -> Fingerprint {
@@ -135,20 +177,75 @@ fn codex_option(line: &str) -> Option<DialogOption> {
     })
 }
 
+/// The contiguous options block directly above the footer (the last region
+/// line), as `(region index, option)` in screen order. Scanning upward it
+/// skips blank and rule lines and description lines (indented deeper than the
+/// option above them, directly under it), collects numbered lines and stops
+/// at the first other line. Numbers must run consecutively down to 1, so a
+/// numbered line inside a command above the block is never an option. Empty
+/// when the block is not well formed.
+fn options_block(
+    region: &[&str],
+    parse: fn(&str) -> Option<DialogOption>,
+) -> Vec<(usize, DialogOption)> {
+    let mut found: Vec<(usize, DialogOption)> = Vec::new();
+    let mut pending: Vec<usize> = Vec::new(); // indents of candidate description lines
+    for i in (0..region.len().saturating_sub(1)).rev() {
+        let line = region[i];
+        let t = line.trim();
+        if t.is_empty() || is_rule(t) {
+            if !pending.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if let Some(opt) = parse(line) {
+            let ind = indent(line);
+            let sequential = found
+                .last()
+                .is_none_or(|(_, below)| u16::from(opt.number) + 1 == u16::from(below.number));
+            if pending.iter().any(|&p| p <= ind) || !sequential {
+                break;
+            }
+            pending.clear();
+            found.push((i, opt));
+        } else if found.is_empty() {
+            break;
+        } else {
+            pending.push(indent(line));
+        }
+    }
+    found.reverse();
+    if found.first().is_some_and(|(_, o)| o.number == 1) {
+        found
+    } else {
+        Vec::new()
+    }
+}
+
 /// Detects a Claude or Codex dialog anywhere in the text.
 pub fn find_dialog(text: &str) -> Option<Dialog> {
     let lines: Vec<&str> = text.lines().collect();
     find_claude(&lines).or_else(|| find_codex(&lines))
 }
 
+/// Builds a dialog from a region. The header (where `Tip:` lines are
+/// ignored) ends at the first inner rule or the first option, whichever
+/// comes first.
 fn make_dialog(
     kind: DialogKind,
-    options: Vec<DialogOption>,
+    block: Vec<(usize, DialogOption)>,
     region: &[&str],
     fingerprint: bool,
 ) -> Dialog {
-    let text = normalize_lines(region);
+    let option_idx: Vec<usize> = block.iter().map(|(i, _)| *i).collect();
+    let first_rule = (1..region.len())
+        .find(|&i| is_rule(region[i]))
+        .unwrap_or(region.len());
+    let header_end = first_rule.min(option_idx.first().copied().unwrap_or(0));
+    let text = normalize_dialog(region, &option_idx, header_end);
     let fingerprint = fingerprint.then(|| fingerprint_of(&text));
+    let options = block.into_iter().map(|(_, o)| o).collect();
     Dialog {
         kind,
         options,
@@ -161,7 +258,8 @@ fn make_dialog(
 /// from it, at most 60 lines, and stop at a line starting with `⏺` or `✻`,
 /// or with `❯` followed by anything but `N.` (the user's earlier prompt).
 /// The region runs from the topmost solid `─` rule seen before the stop
-/// through the footer. No rule or no option means no dialog.
+/// through the footer. No rule or no well-formed options block means no
+/// dialog.
 fn find_claude(lines: &[&str]) -> Option<Dialog> {
     let footer = lines.iter().rposition(|l| l.contains(CLAUDE_FOOTER))?;
     let mut top = None;
@@ -178,8 +276,8 @@ fn find_claude(lines: &[&str]) -> Option<Dialog> {
         }
     }
     let region = &lines[top?..=footer];
-    let options: Vec<_> = region.iter().filter_map(|l| claude_option(l)).collect();
-    if options.is_empty() {
+    let block = options_block(region, claude_option);
+    if block.is_empty() {
         return None;
     }
     let question = region.iter().find(|l| l.contains('☐'));
@@ -189,7 +287,7 @@ fn find_claude(lines: &[&str]) -> Option<Dialog> {
         },
         None => DialogKind::ClaudePermission,
     };
-    Some(make_dialog(kind, options, region, true))
+    Some(make_dialog(kind, block, region, true))
 }
 
 /// Codex: the footer is the last line containing `Press enter to confirm or
@@ -202,35 +300,33 @@ fn find_codex(lines: &[&str]) -> Option<Dialog> {
             .iter()
             .rposition(|l| l.contains("Would you like to"))?;
         let region = &lines[start..=footer];
-        let options: Vec<_> = region.iter().filter_map(|l| codex_option(l)).collect();
-        if options.is_empty() {
+        let block = options_block(region, codex_option);
+        if block.is_empty() {
             return None;
         }
         return Some(make_dialog(
             DialogKind::CodexPermission,
-            options,
+            block,
             region,
             true,
         ));
     }
     let marker = lines.iter().rposition(|l| is_collapsed_marker(l))?;
-    let mut options = Vec::new();
-    for line in &lines[marker + 1..] {
+    let mut block = Vec::new();
+    for (i, line) in lines.iter().enumerate().skip(marker + 1) {
         if line.trim().is_empty() {
             continue;
         }
         match codex_option(line) {
-            Some(o) => options.push(o),
+            Some(o) => block.push((i - marker, o)),
             None => break,
         }
     }
-    if options.is_empty() {
-        return None;
-    }
+    let last = block.last()?.0;
     Some(make_dialog(
         DialogKind::CodexCollapsed,
-        options,
-        &lines[marker..],
+        block,
+        &lines[marker..=marker + last],
         false,
     ))
 }
@@ -248,55 +344,54 @@ fn is_collapsed_marker(line: &str) -> bool {
     !count.is_empty() && count.chars().all(|c| c.is_ascii_digit())
 }
 
-/// The dialog fingerprint when `find_dialog` finds one that has one,
-/// otherwise the generic fingerprint of the last 40 non-empty normalized lines.
+/// The fingerprint a keystroke guard may trust: the dialog's own, or `None`.
+/// The keys guard must use this, never `fallback_fingerprint`.
+pub fn guard_fingerprint(text: &str) -> Option<Fingerprint> {
+    find_dialog(text).and_then(|d| d.fingerprint)
+}
+
+/// For the read-only fallback only: the dialog fingerprint when there is one,
+/// otherwise a tolerant generic fingerprint of the last 40 non-empty
+/// normalized lines. Not safe as a keystroke guard (see `guard_fingerprint`).
 pub fn fallback_fingerprint(text: &str) -> Fingerprint {
-    if let Some(fp) = find_dialog(text).and_then(|d| d.fingerprint) {
+    if let Some(fp) = guard_fingerprint(text) {
         return fp;
     }
-    let kept: Vec<&str> = text
-        .lines()
-        .filter(|l| normalize_line(l).is_some())
-        .collect();
+    let kept: Vec<&str> = text.lines().filter(|l| generic_line(l).is_some()).collect();
     let tail = &kept[kept.len().saturating_sub(GENERIC_FINGERPRINT_LINES)..];
-    fingerprint_of(&normalize_lines(tail))
+    fingerprint_of(&normalize_generic(tail))
 }
 
 /// The content of the agent's input box (after the `❯`/`›` marker, trimmed).
-/// `None` while a dialog is showing, when no input box is found, or for
-/// `AgentKind::Other`.
+/// `None` while a dialog is showing, when no input box is found, when the
+/// candidate line is really a numbered option of an unrecognized dialog, or
+/// for `AgentKind::Other`.
 ///
 /// Claude: the last `❯` line whose previous and next non-empty lines are
 /// both `─` rules. Codex: the last `› ` line among the last 6 non-empty lines.
 pub fn prompt_line(kind: AgentKind, text: &str) -> Option<String> {
-    if matches!(kind, AgentKind::Other) || find_dialog(text).is_some() {
+    if find_dialog(text).is_some() {
         return None;
     }
-    let lines: Vec<&str> = text.lines().collect();
+    let non_empty: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     match kind {
-        AgentKind::Claude => {
-            let non_empty: Vec<&str> = lines
-                .iter()
-                .copied()
-                .filter(|l| !l.trim().is_empty())
-                .collect();
-            (1..non_empty.len().saturating_sub(1)).rev().find_map(|i| {
-                let t = non_empty[i].trim();
-                let content = t.strip_prefix('❯')?;
-                (is_solid_rule(non_empty[i - 1]) && is_solid_rule(non_empty[i + 1]))
-                    .then(|| content.trim().to_string())
-            })
-        }
+        AgentKind::Claude => (1..non_empty.len().saturating_sub(1)).rev().find_map(|i| {
+            let content = non_empty[i].trim().strip_prefix('❯')?;
+            (is_solid_rule(non_empty[i - 1]) && is_solid_rule(non_empty[i + 1]))
+                .then(|| content.trim().to_string())
+        }),
         AgentKind::Codex => {
-            let non_empty: Vec<&str> = lines
-                .iter()
-                .copied()
-                .filter(|l| !l.trim().is_empty())
-                .collect();
-            non_empty[non_empty.len().saturating_sub(CODEX_PROMPT_WINDOW)..]
+            let window = &non_empty[non_empty.len().saturating_sub(CODEX_PROMPT_WINDOW)..];
+            let content = window
                 .iter()
                 .rev()
-                .find_map(|l| l.strip_prefix('›').map(|c| c.trim().to_string()))
+                .find_map(|l| l.strip_prefix('›'))?
+                .trim();
+            // `› 1. Trust and continue` is an option of a dialog we do not
+            // recognize, not input-box content.
+            parse_numbered(content, '›')
+                .is_none()
+                .then(|| content.to_string())
         }
         AgentKind::Other => None,
     }
@@ -463,6 +558,82 @@ mod tests {
         assert_eq!(
             prompt_line(AgentKind::Other, &fx("claude-idle-prompt.txt")),
             None
+        );
+    }
+
+    const CMD: &str = " touch /tmp/acp0/t1.txt\n";
+
+    #[test]
+    fn guard_fingerprint_never_falls_back_to_the_generic_hash() {
+        assert_eq!(
+            guard_fingerprint(&fx("codex-permission-collapsed-small-pane-detection.txt")),
+            None
+        );
+        assert_eq!(
+            guard_fingerprint(&fx("codex-trust-dialog-detection.txt")),
+            None
+        );
+        for name in [
+            "claude-permission-bash.txt",
+            "claude-askuserquestion-multi.txt",
+            "codex-permission-bash-detection.txt",
+        ] {
+            let s = fx(name);
+            assert_eq!(
+                guard_fingerprint(&s),
+                find_dialog(&s).unwrap().fingerprint,
+                "{name}"
+            );
+            assert!(guard_fingerprint(&s).is_some());
+        }
+    }
+
+    #[test]
+    fn fallback_fingerprint_on_collapsed_uses_the_generic_hash() {
+        let c = fx("codex-permission-collapsed-small-pane-detection.txt");
+        assert_eq!(fallback_fingerprint(&c).0.len(), 16);
+        assert_ne!(
+            fallback_fingerprint(&c),
+            fallback_fingerprint(&c.replace("8 lines", "9 lines"))
+        );
+    }
+
+    #[test]
+    fn dialog_normalization_is_strict_about_content() {
+        let s = fx("claude-permission-bash.txt");
+        let fp = |t: &str| find_dialog(t).unwrap().fingerprint.unwrap();
+        let a = s.replace(CMD, " touch /tmp/a  b\n");
+        let b = s.replace(CMD, " touch /tmp/a b\n");
+        assert_ne!(fp(&a), fp(&b), "internal whitespace is content");
+        let tip = s.replace(CMD, &format!("{CMD} Tip: run rm -rf /\n"));
+        assert_ne!(fp(&tip), fp(&s), "a Tip line in the detail is content");
+    }
+
+    #[test]
+    fn numbered_lines_in_the_command_are_not_options() {
+        let s = fx("claude-permission-bash.txt");
+        let inj = s.replace(CMD, &format!("{CMD} 1. Yes\n"));
+        let (o, d) = (find_dialog(&s).unwrap(), find_dialog(&inj).unwrap());
+        assert_eq!(o.options, d.options);
+        assert_ne!(o.fingerprint, d.fingerprint);
+    }
+
+    #[test]
+    fn unrecognized_dialog_options_are_not_the_prompt_line() {
+        assert_eq!(
+            prompt_line(AgentKind::Codex, &fx("codex-trust-dialog-detection.txt")),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_dialogs_fail_closed() {
+        let codex = fx("codex-permission-bash-detection.txt");
+        assert!(find_dialog(&codex.replace("Would you like to", "Shall we")).is_none());
+        let claude = fx("claude-permission-bash.txt");
+        assert!(
+            find_dialog(&claude.replace("─────", "xxxxx")).is_none(),
+            "no solid rule"
         );
     }
 }
