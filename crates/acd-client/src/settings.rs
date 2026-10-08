@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PORT: u16 = 47800;
-pub const DEFAULT_HOTKEY: &str = "Alt+Space";
+pub const DEFAULT_HOTKEY: &str = "Control+Alt+Space";
 pub const LOCAL_KEY: &str = "local";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

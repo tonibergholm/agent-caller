@@ -52,6 +52,7 @@ pub fn escape(state: State<'_, AppState>) -> bool {
 
 #[tauri::command]
 pub fn mark_seen(state: State<'_, AppState>, card_key: String) -> Result<(), String> {
+    let _runtime_guard = tauri::async_runtime::handle().inner().enter();
     state.inbox.mark_seen(&card_key).map_err(|e| e.to_string())
 }
 

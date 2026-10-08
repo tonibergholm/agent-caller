@@ -1,6 +1,6 @@
+use std::sync::Mutex;
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-use std::sync::Mutex;
 
 static CURRENT_SHORTCUT: Mutex<Option<Shortcut>> = Mutex::new(None);
 

@@ -81,7 +81,9 @@ fn main() {
                 loop {
                     let view = rx.borrow_and_update().clone();
                     tray::update(&handle, &view.tray);
-                    let _ = handle.emit("inbox://view", &view);
+                    if let Err(error) = handle.emit("inbox://view", &view) {
+                        tracing::error!(%error, "could not emit inbox view");
+                    }
                     if rx.changed().await.is_err() {
                         break;
                     }

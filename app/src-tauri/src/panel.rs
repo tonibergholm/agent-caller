@@ -63,24 +63,30 @@ pub fn is_visible() -> bool {
 
 pub fn toggle(app: &AppHandle) {
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    if let Err(error) = app.run_on_main_thread(move || {
         if is_visible() {
             hide_on_main_thread(&handle);
         } else {
             show_on_main_thread(&handle);
         }
-    });
+    }) {
+        tracing::error!(%error, "could not dispatch panel toggle to main thread");
+    }
 }
 
 #[allow(dead_code)] // Public thread-safe operation; toggle uses its main-thread implementation.
 pub fn show(app: &AppHandle) {
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || show_on_main_thread(&handle));
+    if let Err(error) = app.run_on_main_thread(move || show_on_main_thread(&handle)) {
+        tracing::error!(%error, "could not dispatch panel show to main thread");
+    }
 }
 
 pub fn hide(app: &AppHandle) {
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || hide_on_main_thread(&handle));
+    if let Err(error) = app.run_on_main_thread(move || hide_on_main_thread(&handle)) {
+        tracing::error!(%error, "could not dispatch panel hide to main thread");
+    }
 }
 
 fn show_on_main_thread(handle: &AppHandle) {
@@ -94,7 +100,9 @@ fn show_on_main_thread(handle: &AppHandle) {
         panel.show_and_make_key();
         VISIBLE.store(true, Ordering::SeqCst);
         tracing::info!("panel shown");
-        let _ = handle.emit("panel://shown", ());
+        if let Err(error) = handle.emit("panel://shown", ()) {
+            tracing::error!(%error, "could not emit panel shown event");
+        }
     }
 }
 

@@ -67,16 +67,22 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayIcon> {
 
 pub fn update(app: &AppHandle, summary: &TraySummary) {
     let (handle, summary) = (app.clone(), summary.clone());
-    let _ = app.run_on_main_thread(move || {
+    if let Err(error) = app.run_on_main_thread(move || {
         if let Some(tray) = handle.tray_by_id("main") {
-            let _ = tray.set_icon(Some(Image::new_owned(
+            if let Err(error) = tray.set_icon(Some(Image::new_owned(
                 summary_icon(summary.color),
                 SIZE,
                 SIZE,
-            )));
-            let _ = tray.set_title(title(summary.needs_you));
+            ))) {
+                tracing::warn!(%error, "could not update tray icon");
+            }
+            if let Err(error) = tray.set_title(title(summary.needs_you)) {
+                tracing::warn!(%error, "could not update tray title");
+            }
         }
-    });
+    }) {
+        tracing::error!(%error, "could not dispatch tray update to main thread");
+    }
 }
 
 #[cfg(test)]

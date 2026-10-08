@@ -1045,7 +1045,8 @@ react to events, such as notifications.
 - The number of `needs_you` agents is shown next to it.
 
 **Floating panel.**
-- Opened by a global hotkey, by default ⌥Space. It is a non-activating
+- Opened by a global hotkey, by default ⌃⌥Space (Control+Option+Space). ⌥Space
+  is commonly taken by launchers such as Raycast and Alfred. It is a non-activating
   `tauri-nspanel`, so focus stays where it was.
 - Cards are ordered:
   1. requests, oldest first;

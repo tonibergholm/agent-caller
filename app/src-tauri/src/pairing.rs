@@ -6,6 +6,7 @@ pub fn import_text(inbox: &Arc<Inbox>, clip: Option<String>) -> Result<MachineEn
     let text = clip
         .filter(|text| !text.trim().is_empty())
         .ok_or_else(|| "The clipboard does not hold an acd pairing line.".to_owned())?;
+    let _runtime_guard = tauri::async_runtime::handle().inner().enter();
     let entry = inbox.import_pairing(&text)?;
     inbox
         .machines()
@@ -32,8 +33,7 @@ mod tests {
         } = view;
     }
 
-    #[tokio::test]
-    async fn errors_never_echo_the_clipboard() {
+    fn inbox() -> Arc<Inbox> {
         let inbox = Inbox::new(
             Settings {
                 machines: vec![],
@@ -47,13 +47,33 @@ mod tests {
                 client_version: env!("CARGO_PKG_VERSION").into(),
             },
         );
-        inbox.start();
+        tauri::async_runtime::block_on(async {
+            inbox.start();
+        });
+        inbox
+    }
 
+    #[test]
+    fn errors_never_echo_the_clipboard() {
+        let inbox = inbox();
         let empty = import_text(&inbox, None).unwrap_err();
+        let whitespace = import_text(&inbox, Some(" \n\t ".into())).unwrap_err();
         let malformed = import_text(&inbox, Some("hello #tok".into())).unwrap_err();
         assert!(!empty.contains("tok"));
+        assert!(!whitespace.contains("tok"));
         assert!(!malformed.contains("tok"));
+    }
 
-        let _ = view_has_only_public_fields;
+    #[test]
+    fn successful_import_enters_tauri_runtime_from_sync_caller() {
+        let inbox = inbox();
+        let token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let pin = acd_protocol::pairing::spki_pin(b"test certificate");
+        let imported = import_text(
+            &inbox,
+            Some(format!("acd://example.test:47800?pin={pin}#{token}")),
+        )
+        .expect("valid pairing should import outside a Tokio runtime");
+        view_has_only_public_fields(imported);
     }
 }
