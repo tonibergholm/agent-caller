@@ -1,5 +1,8 @@
 //! Text rules shared by adapters (spec §5 limits, §6.4 follow-ups).
 
+use regex::Regex;
+use std::sync::LazyLock;
+
 pub const RAW_SCREEN_LINES: usize = 40;
 pub const LAST_MESSAGE_CHARS: usize = 500;
 pub const PROMPT_MAX_BYTES: usize = 16 * 1024;
@@ -62,6 +65,45 @@ pub fn cap_chars(text: &str, max: usize) -> String {
     let mut s: String = text.chars().take(max.saturating_sub(1)).collect();
     s.push('…');
     s
+}
+
+pub const LOG_BYTES: usize = 4096;
+
+static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    vec![
+        (
+            Regex::new(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+").unwrap(),
+            "${1}[REDACTED]",
+        ),
+        (
+            Regex::new(r#"("(?:ticket|token|wsTicket|authorization)"\s*:\s*")[^"]*"#).unwrap(),
+            "${1}[REDACTED]",
+        ),
+        (Regex::new(r"(wsTicket=)[^&\s]+").unwrap(), "${1}[REDACTED]"),
+        (Regex::new(r"\bsk-[A-Za-z0-9_-]{6,}").unwrap(), "[REDACTED]"),
+        (
+            Regex::new(r"\b([A-Z][A-Z0-9_]{2,}=)[^\s&]+").unwrap(),
+            "${1}[REDACTED]",
+        ),
+    ]
+});
+
+/// Redacts secrets (spec §7.1, Logs) and caps the result at 4 KiB.
+pub fn redact_log(s: &str) -> String {
+    let mut out = s.to_string();
+    for (re, rep) in SECRETS.iter() {
+        out = re.replace_all(&out, *rep).into_owned();
+    }
+    if out.len() <= LOG_BYTES {
+        return out;
+    }
+    let mut end = LOG_BYTES;
+    while !out.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.truncate(end);
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -130,5 +172,22 @@ mod tests {
         assert_eq!(c.chars().count(), LAST_MESSAGE_CHARS);
         assert!(c.ends_with('…'));
         assert_eq!(cap_chars("short", 500), "short");
+    }
+
+    #[test]
+    fn redact_log_hides_secrets_and_truncates() {
+        let s = r#"Authorization: Bearer abc.def-ghi {"ticket":"t0p","token":"s3cret"} sk-ant-api03-XYZ123 GITHUB_TOKEN=ghp_1 path=/tmp"#;
+        let r = redact_log(s);
+        for secret in ["abc.def-ghi", "t0p", "s3cret", "XYZ123", "ghp_1"] {
+            assert!(!r.contains(secret), "{secret} leaked: {r}");
+        }
+        assert!(
+            r.contains("path=/tmp"),
+            "lower-case keys are not secrets: {r}"
+        );
+        let long = "é".repeat(5000);
+        let r = redact_log(&long);
+        assert!(r.len() <= 4096 + '…'.len_utf8());
+        assert!(r.ends_with('…'));
     }
 }
