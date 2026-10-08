@@ -70,6 +70,7 @@ pub fn cap_chars(text: &str, max: usize) -> String {
 pub const LOG_BYTES: usize = 4096;
 
 const SECRET_KEYS: &str = "ticket|token|wsTicket|authorization";
+const VALUE: &str = r#"(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;]+)"#;
 
 static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     vec![
@@ -94,12 +95,10 @@ static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
             .unwrap(),
             "${1}[REDACTED]",
         ),
-        (Regex::new(r"(?i)(token|ticket|wsticket)=([^&\s]+)").unwrap(), "${1}=[REDACTED]"),
+        (Regex::new(&format!(r"(?i)(\b(?:[a-z0-9_]*(?:token|secret|password|passwd|api_?key|key|auth|authorization|ticket|credential))[a-z0-9_]*\s*[:=]\s*){VALUE}")).unwrap(), "${1}[REDACTED]"),
+        (Regex::new(&format!(r"\b([A-Z][A-Z0-9_]*)=(?:{VALUE})")).unwrap(), "${1}=[REDACTED]"),
+        (Regex::new(r"(?i)(token|ticket|wsticket)=([^&\s,;]+)").unwrap(), "${1}=[REDACTED]"),
         (Regex::new(r"\bsk-[A-Za-z0-9_-]{6,}").unwrap(), "[REDACTED]"),
-        (
-            Regex::new(r#"(?i)\b([A-Z][A-Z0-9_]*(?:TOKEN|TICKET|SECRET|PASSWORD|PASS|KEY|AUTH)[A-Z0-9_]*)(=|:\s+)(?:"[^"]*"|'[^']*'|[^\s&]+)"#).unwrap(),
-            "${1}${2}[REDACTED]",
-        ),
     ]
 });
 
@@ -107,7 +106,19 @@ static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 /// should log JSON via `serde_json::to_string` where possible; Debug and
 /// debug-escaped forms are covered too but are best effort.
 pub fn redact_log(s: &str) -> String {
-    let mut out: String = s.chars().filter(|&c| !is_forbidden_format(c)).collect();
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            out.push_str(&format!(r"\u{{{:x}}}", c as u32));
+        } else if !is_format_character(c) && c != '\u{2028}' && c != '\u{2029}' {
+            out.push(c);
+        }
+    }
+    static ESCAPED_ENV_QUOTES: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(\b[A-Z][A-Z0-9_]*=)\\"([^"]*)\\""#).unwrap());
+    out = ESCAPED_ENV_QUOTES
+        .replace_all(&out, "$1\"$2\"")
+        .into_owned();
     for (re, rep) in SECRETS.iter() {
         out = re.replace_all(&out, *rep).into_owned();
     }
@@ -121,6 +132,15 @@ pub fn redact_log(s: &str) -> String {
     out.truncate(end);
     out.push('…');
     out
+}
+
+fn is_format_character(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 |
+        0x08E2 | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 |
+        0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD |
+        0x13430..=0x1343F | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A |
+        0xE0001 | 0xE0020..=0xE007F)
 }
 
 #[cfg(test)]
@@ -240,5 +260,37 @@ mod tests {
         }
         let bidi = redact_log("safe\u{202e}text\u{2028}tail");
         assert_eq!(bidi, "safetexttail");
+    }
+
+    #[test]
+    fn redact_log_normalizes_and_masks_all_assignment_forms() {
+        for (input, fragments) in [
+            ("TOKEN=\"first second\"", &["first", "second"][..]),
+            ("API_TOKEN=\"first second\"", &["first", "second"][..]),
+            ("FOO=secret", &["secret"][..]),
+            ("TOKEN: secret", &["secret"][..]),
+            ("token=secret", &["secret"][..]),
+            ("to\u{200b}ken=secret", &["secret"][..]),
+            ("to\u{202e}ken=secret", &["secret"][..]),
+        ] {
+            let out = redact_log(input);
+            for fragment in fragments {
+                assert!(
+                    !out.contains(fragment),
+                    "{input:?} leaked {fragment:?}: {out:?}"
+                );
+            }
+        }
+        let escaped = redact_log("before\u{1b}[31m TOKEN=secret");
+        assert!(escaped.contains(r"\u{1b}"), "{escaped:?}");
+        assert!(
+            !escaped.contains('\u{1b}'),
+            "raw ESC reached output: {escaped:?}"
+        );
+        assert!(!escaped.contains("secret"), "{escaped:?}");
+        assert_eq!(
+            redact_log("ordinary text\nwith\ttabs\rhere"),
+            "ordinary text\nwith\ttabs\\u{d}here"
+        );
     }
 }

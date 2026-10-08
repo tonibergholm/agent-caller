@@ -556,7 +556,9 @@ fn claude_approval_joins_the_command() {
 fn codex_approval_detail_is_the_command_once() {
     let p = projection("thread_chunk_snapshot_waiting_approval_codex.json");
     let (d, _) = ThreadDetail::from_projection(&p);
-    let (obs, _) = request_obs("t3:y", "y", &d.pending_view(&pending_id(&p)).unwrap());
+    let (obs, target) = request_obs("t3:y", "y", &d.pending_view(&pending_id(&p)).unwrap());
+    assert_eq!(obs.answer_path, AnswerPath::T3);
+    assert_eq!(target.answer, TargetAnswer::Decision);
     assert!(!obs.detail.is_empty());
     assert_eq!(
         obs.detail.lines().count(),

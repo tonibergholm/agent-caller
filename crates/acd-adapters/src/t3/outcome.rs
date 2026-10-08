@@ -250,6 +250,17 @@ mod tests {
             message: "TOKEN=\"first second\" WSTICKET=abc".into(),
         }));
         assert!(!formatted.contains("first second"), "{formatted}");
+        assert!(!formatted.contains("first"), "{formatted}");
+        assert!(!formatted.contains("second"), "{formatted}");
         assert!(!formatted.contains("WSTICKET=abc"), "{formatted}");
+
+        let invisible = CallError::Failed(Failure::Die("to\u{200b}ken=hidden".into()));
+        let text = debug_detail(&invisible);
+        assert!(!text.contains("hidden"), "{text}");
+        let control = CallError::Failed(Failure::Die("prefix\u{1b}[31m TOKEN=hidden".into()));
+        let text = debug_detail(&control);
+        assert!(text.contains(r"\u001b"), "{text}");
+        assert!(!text.contains('\u{1b}'), "{text}");
+        assert!(!text.contains("hidden"), "{text}");
     }
 }
