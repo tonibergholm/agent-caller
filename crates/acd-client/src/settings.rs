@@ -118,7 +118,9 @@ fn valid_pin(s: &str) -> bool {
 impl MachineEntry {
     pub fn validate(&self) -> Result<(), SettingsError> {
         let bad = |m: &str| Err(SettingsError::Invalid(m.into()));
-        if self.key != LOCAL_KEY && uuid::Uuid::parse_str(&self.key).is_err() {
+        let canonical_uuid =
+            uuid::Uuid::parse_str(&self.key).is_ok_and(|u| u.hyphenated().to_string() == self.key);
+        if self.key != LOCAL_KEY && !canonical_uuid {
             return bad("invalid machine key");
         }
         let name = self.name.trim();
@@ -161,7 +163,18 @@ impl Settings {
         let io = |e| SettingsError::Io(path.display().to_string(), e);
         match fs::read_to_string(path) {
             Ok(raw) => match serde_json::from_str::<Settings>(&raw) {
-                Ok(s) if uuid::Uuid::parse_str(&s.client_id).is_ok() => Ok(s),
+                Ok(mut s) if uuid::Uuid::parse_str(&s.client_id).is_ok() => {
+                    let before = s.machines.len();
+                    s.machines.retain(|m| m.validate().is_ok());
+                    if s.machines.len() != before {
+                        tracing::warn!(
+                            dropped = before - s.machines.len(),
+                            "settings file has invalid machines; dropping them"
+                        );
+                        s.save(path)?;
+                    }
+                    Ok(s)
+                }
                 _ => {
                     tracing::warn!(path = %path.display(), "settings file unreadable; starting fresh");
                     fs::rename(path, path.with_extension("json.bad")).map_err(io)?;
@@ -280,6 +293,25 @@ mod tests {
     }
 
     #[test]
+    fn invalid_machines_are_dropped_on_load() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        let mut s = Settings::fresh();
+        s.machines.push(MachineEntry {
+            key: "a/b".into(),
+            name: "bad".into(),
+            endpoint: EndpointConfig::Local,
+        });
+        std::fs::write(&p, serde_json::to_string(&s).unwrap()).unwrap();
+        let loaded = Settings::load_or_init(&p).unwrap();
+        assert_eq!(loaded.machines.len(), 1);
+        assert_eq!(loaded.machines[0].key, LOCAL_KEY);
+        assert_eq!(loaded.client_id, s.client_id);
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(!raw.contains("a/b"), "cleaned settings are saved");
+    }
+
+    #[test]
     fn entry_validation() {
         let tcp = |host: &str, port| MachineEntry {
             key: uuid::Uuid::new_v4().to_string(),
@@ -298,7 +330,19 @@ mod tests {
         assert!(tcp("dev box", 47800).validate().is_err());
         assert!(tcp("devbox", 0).validate().is_err());
         let mut bad_key = tcp("devbox", 1);
-        for invalid_key in ["", "machine", "a/b", "00000000-0000-0000-0000-00000000000g"] {
+        let id = uuid::Uuid::new_v4();
+        let braced = id.braced().to_string();
+        let simple = id.simple().to_string();
+        let upper = id.hyphenated().to_string().to_uppercase();
+        for invalid_key in [
+            "",
+            "machine",
+            "a/b",
+            "00000000-0000-0000-0000-00000000000g",
+            &braced,
+            &simple,
+            &upper,
+        ] {
             bad_key.key = invalid_key.into();
             assert!(bad_key.validate().is_err(), "accepted key {invalid_key:?}");
         }
