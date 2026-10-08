@@ -57,8 +57,17 @@ async fn wait_view(
     what: &str,
     predicate: impl Fn(&acd_client::view::InboxView) -> bool,
 ) -> acd_client::view::InboxView {
+    wait_view_for(inbox, Duration::from_secs(2), what, predicate).await
+}
+
+async fn wait_view_for(
+    inbox: &Inbox,
+    limit: Duration,
+    what: &str,
+    predicate: impl Fn(&acd_client::view::InboxView) -> bool,
+) -> acd_client::view::InboxView {
     let mut rx = inbox.view();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(limit, async {
         loop {
             let view = rx.borrow().clone();
             if predicate(&view) {
@@ -197,6 +206,21 @@ async fn retry_after_drop_delivers_once_end_to_end() {
     fake.open_gate();
 
     wait_until("adapter delivery", || fake.delivered().len() == 1).await;
+    // The outcome is not exposed directly, so the card notice stands in for
+    // it. The fake agent never ends the request on its own, and a card stays
+    // busy while its request is answering, so end it as the agent would. Busy
+    // then clears only once our command has finished, and the notice is set
+    // in the same step (Failed, Uncertain and NotSent all set one; Delivered
+    // sets none).
+    d.core.observe(Observation::RequestEndedById {
+        request_id,
+        by: ResolvedBy::Agent,
+    });
+    let view = wait_view_for(&inbox, Duration::from_secs(5), "command finished", |v| {
+        card(v, "m1/a1").is_some_and(|c| c.agent.pending.is_none() && !c.busy)
+    })
+    .await;
+    assert_eq!(card(&view, "m1/a1").unwrap().notice, None);
     assert_eq!(fake.delivered().len(), 1);
     common::restart(&mut d).await;
 }
@@ -219,6 +243,11 @@ async fn follow_up_retry_sends_once() {
     .await;
     inbox.reply("m1/a1", "Follow up".into()).unwrap();
     wait_until("follow-up send", || !fake.sent().is_empty()).await;
+    let view = wait_view_for(&inbox, Duration::from_secs(5), "command finished", |v| {
+        card(v, "m1/a1").is_some_and(|c| !c.busy)
+    })
+    .await;
+    assert_eq!(card(&view, "m1/a1").unwrap().notice, None);
     assert_eq!(fake.sent().len(), 1);
 }
 
@@ -281,8 +310,26 @@ async fn restart_mid_command_shows_check_the_terminal() {
     })
     .await;
     common::restart(&mut d).await;
+    // The new core knows no agents, so the card would vanish with its notice.
+    d.core.observe(Observation::AgentUpsert(agent_obs("a1")));
     wait_machine_status(&inbox, "new epoch online", |s| *s == MachineStatus::Online).await;
-    assert!(d.fake.delivered().is_empty());
+    let view = wait_view_for(
+        &inbox,
+        Duration::from_secs(5),
+        "check-the-terminal notice",
+        |v| {
+            card(v, "m1/a1").is_some_and(|c| {
+                c.notice
+                    .as_ref()
+                    .is_some_and(|n| n.text == acd_client::view::NOTICE_CHECK_TERMINAL)
+            })
+        },
+    )
+    .await;
+    assert_eq!(
+        card(&view, "m1/a1").unwrap().notice.as_ref().unwrap().text,
+        "Check the terminal"
+    );
     assert!(d.fake.delivered().is_empty());
 }
 
