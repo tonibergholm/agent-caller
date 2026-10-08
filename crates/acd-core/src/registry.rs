@@ -51,6 +51,9 @@ pub enum Observation {
     DialogGone { agent_id: String, key: CorrelationKey },
     /// Ends exactly this request if it is still unresolved; otherwise a no-op.
     RequestEndedById { request_id: String, by: ResolvedBy },
+    /// Like `RequestEndedById`, but only while the request is `open`: a no-op
+    /// once it is claimed (`answering`) or resolved.
+    RequestEndedIfOpen { request_id: String, by: ResolvedBy },
     /// Marks every key of this occurrence confirmed gone, resolved or not.
     DialogGoneById { request_id: String },
     /// Like `RequestSeen`, but a no-op while a structured request is pending.
@@ -150,6 +153,10 @@ impl Registry {
                 }
                 self.resolve_request(&request_id, by)
             }
+            Observation::RequestEndedIfOpen { request_id, by } => {
+                let open = self.requests.get(&request_id).is_some_and(|e| e.req.status == RequestStatus::Open);
+                if open { self.apply(Observation::RequestEndedById { request_id, by }) } else { vec![] }
+            }
             Observation::DialogGoneById { request_id } => { self.mark_gone_by_id(&request_id); vec![] }
             Observation::FallbackSeen(o) => {
                 let structured = self.agents.get(&o.agent_id)
@@ -208,9 +215,11 @@ impl Registry {
 
     fn upsert_agent(&mut self, mut o: AgentObs) -> Vec<Change> {
         let now = Utc::now();
-        if o.state != AgentState::Done {
+        // `Unknown` is a source outage, not a state change: the seen marker
+        // survives it.
+        if o.state != AgentState::Done && o.state != AgentState::Unknown {
             self.seen.remove(&o.id);
-        } else if self.seen.contains(&o.id) {
+        } else if o.state == AgentState::Done && self.seen.contains(&o.id) {
             o.state = AgentState::Idle;
         }
         let (pending, state_since) = match self.agents.get(&o.id) {

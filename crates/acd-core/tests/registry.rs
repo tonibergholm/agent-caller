@@ -372,3 +372,36 @@ fn end_by_id_after_upgrade_uses_the_upgraded_request() {
     assert_eq!(r.request(&rid).unwrap().kind, RequestKind::Permission, "upgraded in place, same id");
     assert_eq!(r.request_id_for("a1", &CorrelationKey("fb".into())), None, "the alias is not a primary key");
 }
+
+#[test]
+fn unknown_upsert_keeps_the_seen_marker() {
+    let mut r = Registry::new("m1".into());
+    let done = AgentObs { state: AgentState::Done, ..agent("a1") };
+    r.apply(Observation::AgentUpsert(done.clone()));
+    r.mark_seen("a1").unwrap();
+    // A source outage reports the agent unknown, then restores it.
+    r.apply(Observation::AgentUpsert(AgentObs { state: AgentState::Unknown, ..agent("a1") }));
+    assert_eq!(r.agent("a1").unwrap().state, AgentState::Unknown);
+    r.apply(Observation::AgentUpsert(done.clone()));
+    assert_eq!(r.agent("a1").unwrap().state, AgentState::Idle, "still seen after the outage");
+    // A real state change still clears it.
+    r.apply(Observation::AgentUpsert(agent("a1")));
+    r.apply(Observation::AgentUpsert(done));
+    assert_eq!(r.agent("a1").unwrap().state, AgentState::Done);
+}
+
+#[test]
+fn end_if_open_leaves_a_claimed_request_alone() {
+    let mut r = reg_with_agent();
+    let rid = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0].id.clone();
+    r.claim(&rid, Answer::Option("allow".into())).unwrap();
+    let ended = r.apply(Observation::RequestEndedIfOpen { request_id: rid.clone(), by: ResolvedBy::Terminal });
+    assert!(ended.is_empty(), "{ended:?}");
+    assert_eq!(r.request(&rid).unwrap().status, RequestStatus::Answering);
+    r.release(&rid);
+    let ended = r.apply(Observation::RequestEndedIfOpen { request_id: rid.clone(), by: ResolvedBy::Terminal });
+    assert_eq!(resolved(&ended), vec![(rid.clone(), ResolvedBy::Terminal, None)]);
+    // Confirmed gone like RequestEndedById, so the reusable key opens a new occurrence.
+    assert_eq!(opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls")))).len(), 1);
+    assert!(r.apply(Observation::RequestEndedIfOpen { request_id: rid, by: ResolvedBy::Terminal }).is_empty());
+}
