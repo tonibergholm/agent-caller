@@ -1,64 +1,92 @@
+mod commands;
 mod hotkey;
 mod keychain;
+mod pairing;
 mod panel;
+mod settings_window;
+mod tray;
 
-use tauri::{RunEvent, WebviewWindow};
-use tauri_plugin_notification::NotificationExt;
+use std::sync::Arc;
 
-// GATE (Task 13): remove in Task 16
-#[tauri::command]
-fn gate_notify(window: WebviewWindow) -> Result<(), String> {
-    window
-        .notification()
-        .builder()
-        .title("Agent Caller")
-        .body("Gate test")
-        .show()
-        .map_err(|error| error.to_string())
-}
-
-// GATE (Task 13): remove in Task 16
-#[tauri::command]
-fn gate_keychain_roundtrip() -> Result<(), String> {
-    keychain::gate_roundtrip().map_err(|error| error.to_string())
-}
+use acd_client::{
+    Timing,
+    inbox::{Inbox, InboxOptions},
+    settings::{DEFAULT_HOTKEY, Settings},
+};
+use tauri::{Emitter, Manager, RunEvent};
 
 fn main() {
-    // GATE (Task 13): remove in Task 16
-    // Gate diagnostics: `open` discards stdout, so log to a file as well.
-    let log_dir = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
-        .join("Library/Logs/AgentCaller");
-    let _ = std::fs::create_dir_all(&log_dir);
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join("gate.log"))
-        .ok();
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    match log_file {
-        Some(file) => tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_ansi(false)
-            .with_writer(std::sync::Mutex::new(file))
-            .init(),
-        None => tracing_subscriber::fmt().with_env_filter(filter).init(),
-    }
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let app = tauri::Builder::default()
         .plugin(tauri_nspanel::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(hotkey::plugin())
-        // GATE (Task 13): remove in Task 16
-        .invoke_handler(tauri::generate_handler![gate_notify, gate_keychain_roundtrip])
+        .invoke_handler(tauri::generate_handler![
+            commands::get_view,
+            commands::pick_option,
+            commands::send_reply,
+            commands::cancel_action,
+            commands::escape,
+            commands::mark_seen,
+            commands::set_show_idle,
+            commands::list_machines,
+            commands::import_pairing_from_clipboard,
+            commands::rename_machine,
+            commands::remove_machine,
+            commands::retry_machine,
+            commands::get_hotkey,
+            commands::set_hotkey,
+            commands::hide_panel,
+            commands::open_settings,
+        ])
         .setup(|app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let path = app.path().app_config_dir()?.join("settings.json");
+            let settings = Settings::load_or_init(&path)?;
+            let inbox = Inbox::new(
+                settings,
+                Arc::new(keychain::KeychainSecrets::new(keychain::SERVICE_NAME)),
+                InboxOptions {
+                    timing: Timing::default(),
+                    settings_path: Some(path),
+                    client_name: "agent-caller-mac".into(),
+                    client_version: env!("CARGO_PKG_VERSION").into(),
+                },
+            );
+            app.manage(commands::AppState {
+                inbox: inbox.clone(),
+            });
+            tray::build(app.handle())?;
             panel::create(app.handle())?;
-            // GATE (Task 13): remove in Task 16
-            let registered = hotkey::apply(app.handle(), "Control+Alt+Space");
-            tracing::info!(?registered, "gate hotkey Control+Alt+Space");
-            registered.map_err(std::io::Error::other)?;
+
+            let saved_hotkey = inbox.settings().hotkey;
+            if let Err(error) = hotkey::apply(app.handle(), &saved_hotkey) {
+                tracing::error!(%error, "could not register saved hotkey; using default");
+                if let Err(default_error) = hotkey::apply(app.handle(), DEFAULT_HOTKEY) {
+                    tracing::error!(%default_error, "could not register default hotkey");
+                }
+            }
+
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                inbox.start();
+                let mut rx = inbox.view();
+                loop {
+                    let view = rx.borrow_and_update().clone();
+                    tray::update(&handle, &view.tray);
+                    let _ = handle.emit("inbox://view", &view);
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
             Ok(())
         })
         .build(tauri::generate_context!())
