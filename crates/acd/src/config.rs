@@ -86,4 +86,12 @@ mod tests {
         assert!(!c.herdr.enabled);
         assert_eq!(c.herdr.extra_sockets, vec!["~/x.sock"]);
     }
+
+    #[test]
+    fn expand_home_only_expands_a_leading_tilde_slash() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_home("~/x"), PathBuf::from(home).join("x"));
+        assert_eq!(expand_home("/abs"), PathBuf::from("/abs"));
+        assert_eq!(expand_home("~user/x"), PathBuf::from("~user/x"));
+    }
 }

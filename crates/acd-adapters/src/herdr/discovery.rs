@@ -34,12 +34,17 @@ pub struct Discovery {
 /// deduplicated.
 pub fn candidates(env_socket: Option<&Path>, home: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
     let base = home.join(".config/herdr");
-    let mut all = vec![
-        env_socket
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| base.join("herdr.sock")),
-    ];
-    all.extend(session_sockets(&base.join("sessions")));
+    // An empty home would make `base` cwd-relative: skip the home-based paths.
+    let has_home = !home.as_os_str().is_empty();
+    let mut all: Vec<PathBuf> = Vec::new();
+    match env_socket {
+        Some(p) => all.push(p.to_path_buf()),
+        None if has_home => all.push(base.join("herdr.sock")),
+        None => {}
+    }
+    if has_home {
+        all.extend(session_sockets(&base.join("sessions")));
+    }
     all.extend(extra.iter().cloned());
     let mut out: Vec<PathBuf> = Vec::new();
     for p in all {
@@ -253,6 +258,17 @@ mod tests {
                 .unwrap(),
             "custom.sock"
         );
+    }
+
+    #[test]
+    fn empty_home_skips_home_paths_but_keeps_env_and_extra() {
+        assert!(candidates(None, Path::new(""), &[]).is_empty());
+        let c = candidates(
+            Some(Path::new("/e.sock")),
+            Path::new(""),
+            &[PathBuf::from("/x.sock")],
+        );
+        assert_eq!(c, vec![PathBuf::from("/e.sock"), PathBuf::from("/x.sock")]);
     }
 
     #[test]

@@ -162,3 +162,42 @@ async fn disabled_config_reports_disabled_and_starts_nothing() {
     };
     assert_eq!(machine.sources.herdr.state, SourceState::Disabled);
 }
+
+#[tokio::test]
+async fn unknown_server_code_is_uncertain() {
+    let r = rig(&[("w1:p1", "claude", "idle")]).await;
+    r.fake.fail_next("agent.prompt", "internal_error");
+    let res = r.adapter.send(&agent(&r), "hi").await;
+    assert!(matches!(res, Err(DeliverError::Uncertain(_))), "{res:?}");
+    assert!(r.fake.prompts().is_empty(), "fail_next applies nothing");
+}
+
+#[tokio::test]
+async fn known_refusal_is_not_delivered_source_unavailable() {
+    let r = rig(&[("w1:p1", "claude", "idle")]).await;
+    r.fake.fail_next("agent.prompt", "invalid_params");
+    let res = r.adapter.send(&agent(&r), "hi").await;
+    assert!(
+        matches!(
+            res,
+            Err(DeliverError::NotDelivered(ErrorCode::SourceUnavailable))
+        ),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty());
+}
+
+#[tokio::test]
+async fn connect_failure_is_not_delivered_source_unavailable() {
+    let r = rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    r.fake.stop().await;
+    let res = r.adapter.send(&a, "hi").await;
+    assert!(
+        matches!(
+            res,
+            Err(DeliverError::NotDelivered(ErrorCode::SourceUnavailable))
+        ),
+        "{res:?}"
+    );
+}

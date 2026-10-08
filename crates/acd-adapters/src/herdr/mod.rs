@@ -17,7 +17,7 @@ use acd_core::{Adapter, Answer, Core, DeliverError};
 use acd_protocol::{Agent, AnswerPath, ErrorCode, Request, Source, SourceState, SourceStatus};
 use async_trait::async_trait;
 
-use self::client::{CallError, KNOWN_REFUSALS};
+use self::client::CallError;
 use self::discovery::Discovery;
 use self::reconciler::{Hint, PaneMap, Timing};
 
@@ -100,20 +100,17 @@ impl HerdrAdapter {
 }
 
 fn map_call_error(e: &CallError) -> DeliverError {
-    match e {
-        CallError::Server { code, .. } => match code.as_str() {
-            "agent_blocked" => DeliverError::NotDelivered(ErrorCode::AgentBusy),
-            "agent_not_found" => DeliverError::NotDelivered(ErrorCode::AgentGone),
-            c if KNOWN_REFUSALS.contains(&c) => {
-                DeliverError::NotDelivered(ErrorCode::SourceUnavailable)
-            }
-            _ => DeliverError::Uncertain(format!("herdr error {code}")),
-        },
-        CallError::Connect(_) | CallError::Write(_) => {
-            DeliverError::NotDelivered(ErrorCode::SourceUnavailable)
-        }
-        CallError::NoReply(_) => DeliverError::Uncertain("herdr did not confirm the prompt".into()),
+    if e.reached_agent() {
+        return DeliverError::Uncertain(match e {
+            CallError::Server { code, .. } => format!("herdr error {code}"),
+            _ => "herdr did not confirm the prompt".into(),
+        });
     }
+    DeliverError::NotDelivered(match e {
+        CallError::Server { code, .. } if code == "agent_blocked" => ErrorCode::AgentBusy,
+        CallError::Server { code, .. } if code == "agent_not_found" => ErrorCode::AgentGone,
+        _ => ErrorCode::SourceUnavailable,
+    })
 }
 
 #[async_trait]
