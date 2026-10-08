@@ -164,14 +164,18 @@ async fn source_terminal_end_waits_for_core_claim_release() {
         r.core.request(&req.id).is_none().then_some(())
     })
     .await;
-    loop {
-        if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
-            && request_id == req.id
-        {
-            assert_eq!(by, ResolvedBy::Terminal);
-            break;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+                && request_id == req.id
+            {
+                assert_eq!(by, ResolvedBy::Terminal);
+                break;
+            }
         }
-    }
+    })
+    .await
+    .expect("timed out waiting for terminal resolution");
 }
 
 #[tokio::test]
@@ -188,14 +192,18 @@ async fn cancelled_request_ends_as_lost() {
         r.core.request(&req.id).is_none().then_some(())
     })
     .await;
-    loop {
-        if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
-            && request_id == req.id
-        {
-            assert_eq!(by, ResolvedBy::Lost);
-            break;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+                && request_id == req.id
+            {
+                assert_eq!(by, ResolvedBy::Lost);
+                break;
+            }
         }
-    }
+    })
+    .await
+    .expect("timed out waiting for lost resolution");
 }
 
 #[tokio::test]
@@ -241,14 +249,18 @@ async fn lost_reply_is_uncertain_and_not_resent() {
     let res = answer(&r, &req, "accept").await;
     assert_eq!(res.outcome, Some(Outcome::Delivered));
     assert_eq!(r.fake.dispatched().len(), 1);
-    loop {
-        if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
-            && request_id == req.id
-        {
-            assert_eq!(by, ResolvedBy::Uncertain);
-            break;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+                && request_id == req.id
+            {
+                assert_eq!(by, ResolvedBy::Uncertain);
+                break;
+            }
         }
-    }
+    })
+    .await
+    .expect("timed out waiting for uncertain resolution");
     assert_eq!(answer(&r, &req, "accept").await, res);
 }
 
@@ -285,6 +297,25 @@ async fn hostile_failure_text_never_reaches_warn_logs_or_source_status() {
     );
     let result = answer(&r, &req, "accept").await;
     assert_eq!(result.outcome, Some(Outcome::Delivered));
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread("send", "completed", None));
+    let r_send = rig(fake).await;
+    let agent = until("send agent", || r_send.core.agent("t3:send")).await;
+    r_send.fake.fail_next_dispatch_value(
+        json!({"_tag":"Failure","cause":[{"_tag":"Die","defect":hostile}]}),
+    );
+    let follow_up = r_send
+        .core
+        .handle(
+            "c",
+            ClientMessage::AgentSend {
+                id: "follow-up".into(),
+                agent_id: agent.id,
+                text: "continue".into(),
+            },
+        )
+        .await;
+    assert_eq!(follow_up.outcome, Some(Outcome::Delivered), "{follow_up:?}");
     let (r2, req2) = with_pending(approval_projection("a", "rq-1", None), "command").await;
     r2.fake.fail_next_dispatch_value(json!({"_tag":"Failure","cause":[{"_tag":"Fail","error":{"_tag":"EnvironmentAuthorizationError","message":hostile}}]}));
     assert_eq!(
@@ -312,6 +343,14 @@ async fn hostile_failure_text_never_reaches_warn_logs_or_source_status() {
     };
     let status = machine.sources.t3.message.unwrap_or_default();
     let ServerMessage::Welcome {
+        machine: send_machine,
+        ..
+    } = r_send.core.welcome()
+    else {
+        panic!()
+    };
+    let send_status = send_machine.sources.t3.message.unwrap_or_default();
+    let ServerMessage::Welcome {
         machine: machine2, ..
     } = r2.core.welcome()
     else {
@@ -333,11 +372,19 @@ async fn hostile_failure_text_never_reaches_warn_logs_or_source_status() {
             "source status leaked {bad:?}: {status}"
         );
         assert!(
+            !send_status.contains(bad),
+            "send source status leaked {bad:?}: {send_status}"
+        );
+        assert!(
             !status2.contains(bad),
             "source status leaked {bad:?}: {status2}"
         );
     }
     assert!(status.is_empty(), "unexpected source status: {status}");
+    assert!(
+        send_status.is_empty(),
+        "unexpected send source status: {send_status}"
+    );
     assert_eq!(
         status2,
         "the T3 token lacks the orchestration:operate scope"
@@ -355,14 +402,18 @@ async fn busy_mailbox_still_updates_answer_state_and_degrades_on_scope_failure()
         answer(&r, &req, "accept").await.outcome,
         Some(Outcome::Delivered)
     );
-    loop {
-        if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
-            && request_id == req.id
-        {
-            assert_eq!(by, ResolvedBy::Inbox);
-            break;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+                && request_id == req.id
+            {
+                assert_eq!(by, ResolvedBy::Inbox);
+                break;
+            }
         }
-    }
+    })
+    .await
+    .expect("timed out waiting for inbox resolution");
     until("answered agent state", || {
         (r.core.agent("t3:a")?.state == AgentState::Working).then_some(())
     })
