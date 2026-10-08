@@ -56,22 +56,48 @@ impl DialogIdentity {
 /// The request id is unique per occurrence, so a later occurrence of the
 /// same reusable key can never be served or removed by mistake.
 ///
-/// Build it with `KeysTarget::from_screen` from the detection snapshot the
-/// request was opened from.
+/// Sealed: P3 must build targets only with `KeysTarget::from_screen`, from
+/// the detection snapshot the request was opened from, so the fingerprint
+/// and identity always come from a parsed dialog. The fields are read-only
+/// outside this crate.
 #[derive(Clone, Debug)]
 pub struct KeysTarget {
-    pub request_id: String,
-    pub agent_id: String,
-    pub key: CorrelationKey,
+    pub(crate) request_id: String,
+    pub(crate) agent_id: String,
+    pub(crate) key: CorrelationKey,
     /// `screen::guard_fingerprint` of the detection snapshot.
-    pub fingerprint: Fingerprint,
+    pub(crate) fingerprint: Fingerprint,
     /// The dialog's identity in that snapshot.
-    pub identity: DialogIdentity,
+    pub(crate) identity: DialogIdentity,
     /// Option id -> herdr key name: `"1"`..`"9"` or `"esc"` only.
-    pub option_keys: HashMap<String, String>,
+    pub(crate) option_keys: HashMap<String, String>,
 }
 
 impl KeysTarget {
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    pub fn key(&self) -> &CorrelationKey {
+        &self.key
+    }
+
+    pub fn fingerprint(&self) -> &Fingerprint {
+        &self.fingerprint
+    }
+
+    pub fn identity(&self) -> &DialogIdentity {
+        &self.identity
+    }
+
+    pub fn option_keys(&self) -> &HashMap<String, String> {
+        &self.option_keys
+    }
+
     /// A target for the dialog on `screen_text` (a `detection` read). Fails
     /// when the screen shows no dialog, the dialog has no fingerprint (a
     /// collapsed Codex dialog), an option key is not `"1"`..`"9"` or
@@ -277,7 +303,8 @@ impl Engine {
     }
 
     /// Whether `request_id` is still ours to answer with `key`: claimed for
-    /// keys in the core, and its target unchanged since the guard.
+    /// keys in the core, and its target unchanged since the guard (same
+    /// fingerprint, identity and key for the option).
     fn lease_held(&self, core: &Weak<Core>, target: &KeysTarget, option_id: &str) -> bool {
         let Some(core) = core.upgrade() else {
             return false;
@@ -288,6 +315,7 @@ impl Engine {
         claimed
             && self.targets.get(&target.request_id).is_some_and(|t| {
                 t.fingerprint == target.fingerprint
+                    && t.identity == target.identity
                     && t.option_keys.get(option_id) == target.option_keys.get(option_id)
             })
     }
@@ -595,6 +623,27 @@ impl Confirm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_rejects_a_target_altered_after_from_screen() {
+        let dialog = std::fs::read_to_string(format!(
+            "{}/../../tests/fixtures/herdr/claude-permission-bash.txt",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let mut t = KeysTarget::from_screen(
+            "r1".into(),
+            "a".into(),
+            CorrelationKey("k".into()),
+            &dialog,
+            [("allow".to_string(), "1".to_string())].into(),
+        )
+        .unwrap();
+        t.option_keys = [("allow".to_string(), "enter".to_string())].into();
+        let targets = KeysTargets::default();
+        assert!(targets.set(t).is_err());
+        assert!(targets.get("r1").is_none());
+    }
 
     #[test]
     fn guardable_keys() {

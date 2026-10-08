@@ -456,14 +456,8 @@ async fn option_keys_must_be_digits_or_esc() {
     for bad in ["enter", "0", "10", "", "backspace", "1 ", "Esc", "y", "5"] {
         assert!(target(&["1", bad]).is_err(), "{bad:?}");
     }
-    // `set` checks key names on its own too.
-    let mut forged = target(&["1"]).unwrap();
-    forged.option_keys = keys(&["enter"]);
-    assert!(targets.set(forged).is_err());
-    assert!(
-        targets.get("r1").is_none(),
-        "a rejected target is not stored"
-    );
+    // A target can only come from `from_screen`; `set` re-checks key names
+    // (unit test `set_rejects_a_target_altered_after_from_screen`).
     targets
         .set(target(&["1", "2", "3", "4", "esc"]).unwrap())
         .unwrap();
@@ -924,13 +918,14 @@ async fn lease_rejects_a_replaced_target() {
     let old = r.adapter.keys_targets().get(&rid).unwrap();
     let replaced = KeysTarget::from_screen(
         rid.clone(),
-        old.agent_id,
-        old.key,
+        old.agent_id().to_string(),
+        old.key().clone(),
         &redrawn_dialog(),
         allow_deny(),
     )
     .unwrap();
-    assert_ne!(replaced.fingerprint, old.fingerprint);
+    assert_ne!(replaced.fingerprint(), old.fingerprint());
+    assert_eq!(replaced.identity(), old.identity());
     r.adapter.keys_targets().set(replaced).unwrap();
     gate.release();
     let res = pending.await.unwrap();
