@@ -226,6 +226,7 @@ async fn end_seen_during_a_claim_is_applied_after_release() {
     let req = until("pending", || pending(&r, "a")).await;
     let core = r.core.clone();
     let id = req.id.clone();
+    fake_adapter.fail_next(DeliverError::NotDelivered(ErrorCode::SourceUnavailable));
     let claim = tokio::spawn(async move {
         core.handle(
             "c",
@@ -255,7 +256,8 @@ async fn end_seen_during_a_claim_is_applied_after_release() {
     );
     fake_adapter.fail_next(DeliverError::NotDelivered(ErrorCode::SourceUnavailable));
     fake_adapter.open_gate();
-    claim.await.unwrap();
+    let result = claim.await.unwrap();
+    assert_eq!(result.error_code(), Some(ErrorCode::SourceUnavailable));
     until("ended", || r.core.request(&req.id).is_none().then_some(())).await;
 }
 
@@ -363,6 +365,63 @@ async fn deferred_end_applies_under_a_steady_event_stream() {
         "spec §14.4: resolved within 2 s"
     );
     noise.abort();
+}
+
+#[tokio::test]
+async fn deferred_end_survives_claim_starting_after_tick_status_read() {
+    let fake_adapter = FakeAdapter::gated();
+    let r = rig_pending(
+        |t, q| approval_projection(t, q, None),
+        Some(fake_adapter.clone()),
+        "command",
+    )
+    .await;
+    let req = until("pending", || pending(&r, "a")).await;
+    let (_, mut rx) = r.core.attach(None);
+    let core = r.core.clone();
+    let id = req.id.clone();
+    let claim = tokio::spawn(async move {
+        core.handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "race".into(),
+                request_id: id,
+                option_id: Some("accept".into()),
+                text: None,
+            },
+        )
+        .await
+    });
+    until("answering", || {
+        (r.core.request(&req.id)?.status == RequestStatus::Answering).then_some(())
+    })
+    .await;
+    r.fake.push_thread_event(
+        "a",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "resolved", "decision": "decline"}),
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fake_adapter.fail_next(DeliverError::NotDelivered(ErrorCode::SourceUnavailable));
+    fake_adapter.open_gate();
+    claim.await.unwrap();
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Terminal);
+    assert!(r.core.request(&req.id).is_none());
+}
+
+#[tokio::test]
+async fn open_deferred_end_is_attempted_on_tick() {
+    let r = rig_pending(|t, q| approval_projection(t, q, None), None, "command").await;
+    let req = until("pending", || pending(&r, "a")).await;
+    let (_, mut rx) = r.core.attach(None);
+    // End detail arrives while the acd request is Open. This guards the
+    // production enqueue condition: the reconciler must defer even in Open.
+    r.fake.push_thread_event(
+        "a",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "resolved", "decision": "decline"}),
+    );
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Terminal);
 }
 
 #[tokio::test]

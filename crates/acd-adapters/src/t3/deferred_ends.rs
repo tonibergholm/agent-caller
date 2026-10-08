@@ -11,28 +11,6 @@ impl DeferredEnds {
         self.0.insert(request_id, by);
     }
 
-    #[cfg(test)]
-    fn enqueue_if_answering(&mut self, request_id: String, by: ResolvedBy, status: RequestStatus) {
-        if status == RequestStatus::Answering {
-            self.enqueue(request_id, by);
-        }
-    }
-
-    #[cfg(test)]
-    fn legacy_tick_retry(
-        &mut self,
-        request_id: &str,
-        by: ResolvedBy,
-        status_read_before_conditional_end: RequestStatus,
-        status_after_conditional_end: RequestStatus,
-    ) {
-        if status_read_before_conditional_end == RequestStatus::Open
-            && status_after_conditional_end == RequestStatus::Open
-        {
-            self.enqueue(request_id.to_owned(), by);
-        }
-    }
-
     /// Returns requests that are open now; an answer claim may have changed
     /// the status since the caller last read it.
     pub(super) fn ready_to_end(
@@ -44,9 +22,9 @@ impl DeferredEnds {
             None => false,
             Some(RequestStatus::Open) => {
                 ready.push((request_id.clone(), *by));
-                false
+                true
             }
-            Some(RequestStatus::Answering | RequestStatus::Resolved) => true,
+            Some(_) => true,
         });
         ready
     }
@@ -73,20 +51,10 @@ mod tests {
     }
 
     #[test]
-    fn release_is_lost_with_pre_fix_conditional_enqueue() {
-        let mut ends = DeferredEnds::default();
-        // Old code only enqueued after reading Answering. A release between
-        // the end observation and that read therefore left nothing to retry.
-        ends.enqueue_if_answering("released".into(), ResolvedBy::Terminal, RequestStatus::Open);
-        assert!(ends.ready_to_end(|_| Some(RequestStatus::Open)).is_empty());
-    }
-
-    #[test]
-    fn claim_between_tick_read_and_conditional_end_is_retained() {
+    fn retries_open_waits_for_answering_then_drops_gone() {
         let mut ends = DeferredEnds::default();
         ends.enqueue("claimed".into(), ResolvedBy::Lost);
 
-        // Tick read Open, then a claim won before RequestEndedIfOpen.
         assert!(
             ends.ready_to_end(|_| Some(RequestStatus::Answering))
                 .is_empty()
@@ -95,20 +63,11 @@ mod tests {
             ends.ready_to_end(|_| Some(RequestStatus::Open)),
             vec![("claimed".into(), ResolvedBy::Lost)]
         );
-    }
-
-    #[test]
-    fn claim_is_lost_with_pre_fix_tick_retry() {
-        let mut ends = DeferredEnds::default();
-        // Legacy on_tick read Open, then a claim won before its conditional
-        // end; legacy code removed the queue entry regardless of outcome.
-        ends.legacy_tick_retry(
-            "claimed",
-            ResolvedBy::Lost,
-            RequestStatus::Open,
-            RequestStatus::Answering,
+        assert_eq!(
+            ends.ready_to_end(|_| Some(RequestStatus::Open)),
+            vec![("claimed".into(), ResolvedBy::Lost)]
         );
-        assert!(ends.ready_to_end(|_| Some(RequestStatus::Open)).is_empty());
+        assert!(ends.ready_to_end(|_| None).is_empty());
     }
 
     #[test]
