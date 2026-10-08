@@ -1,3 +1,4 @@
+<!-- GATE (Task 13): this whole page is the temporary gate page; Task 16 replaces it. -->
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
 

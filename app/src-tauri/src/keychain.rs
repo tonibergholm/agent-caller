@@ -19,6 +19,7 @@ impl KeychainSecrets {
     }
 }
 
+// GATE (Task 13): remove in Task 16.
 /// Stores a throwaway value, verifies it through the SecretStore interface, and removes it.
 pub fn gate_roundtrip() -> Result<(), SecretError> {
     use std::time::{SystemTime, UNIX_EPOCH};

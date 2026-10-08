@@ -27,12 +27,13 @@ pub fn apply(app: &AppHandle, hotkey: &str) -> Result<(), String> {
     shortcuts
         .register(shortcut)
         .map_err(|error| format!("Could not register {hotkey}: {error}"))?;
-    if let Some(old) = current.as_ref() {
-        shortcuts
-            .unregister(*old)
-            .map_err(|error| error.to_string())?;
+    // The new shortcut is live from here on, so record it even if the old
+    // one fails to unregister.
+    if let Some(old) = current.replace(shortcut)
+        && let Err(error) = shortcuts.unregister(old)
+    {
+        tracing::warn!(%error, "could not unregister the previous hotkey");
     }
-    *current = Some(shortcut);
     Ok(())
 }
 
