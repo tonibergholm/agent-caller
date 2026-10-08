@@ -50,8 +50,10 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     panel.set_event_handler(Some(events.as_ref()));
     // Not `panel.to_window()`: that converts the panel back into a plain
     // window and unregisters it, so later lookups fail.
-    if let Some(window) = app.get_webview_window("panel") {
-        let _ = window.center();
+    if let Some(window) = app.get_webview_window("panel")
+        && let Err(error) = window.center()
+    {
+        tracing::warn!(%error, "could not center inbox panel");
     }
     panel.hide();
     Ok(())

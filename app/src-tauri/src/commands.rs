@@ -101,10 +101,10 @@ pub fn set_hotkey(
     state: State<'_, AppState>,
     hotkey: String,
 ) -> Result<(), String> {
-    let previous = state.inbox.settings().hotkey;
+    let previous = crate::hotkey::current_shortcut();
     crate::hotkey::apply(&app, &hotkey)?;
     if let Err(error) = state.inbox.set_hotkey(&hotkey) {
-        if let Err(rollback_error) = crate::hotkey::apply(&app, &previous) {
+        if let Err(rollback_error) = crate::hotkey::restore(&app, previous) {
             tracing::error!(%rollback_error, "could not restore previous hotkey after settings save failed");
         }
         return Err(error);

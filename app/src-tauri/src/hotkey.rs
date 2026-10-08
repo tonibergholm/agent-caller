@@ -17,6 +17,38 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 
 pub fn apply(app: &AppHandle, hotkey: &str) -> Result<(), String> {
     let shortcut = parse_shortcut(hotkey)?;
+    apply_shortcut(app, shortcut)
+}
+
+pub fn current_shortcut() -> Option<Shortcut> {
+    CURRENT_SHORTCUT.lock().ok().and_then(|current| *current)
+}
+
+pub fn restore(app: &AppHandle, previous: Option<Shortcut>) -> Result<(), String> {
+    let shortcuts = app.global_shortcut();
+    let mut current = CURRENT_SHORTCUT
+        .lock()
+        .map_err(|_| "Hotkey state lock poisoned".to_string())?;
+    if *current == previous {
+        return Ok(());
+    }
+    if let Some(previous) = previous {
+        shortcuts
+            .register(previous)
+            .map_err(|error| format!("Could not restore previous hotkey: {error}"))?;
+    }
+    let old = *current;
+    *current = previous;
+    if let Some(old) = old
+        && let Err(error) = shortcuts.unregister(old)
+    {
+        tracing::warn!(%error, "could not unregister the hotkey being rolled back");
+    }
+    Ok(())
+}
+
+fn apply_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<(), String> {
+    let label = shortcut.to_string();
     let shortcuts = app.global_shortcut();
     let mut current = CURRENT_SHORTCUT
         .lock()
@@ -26,7 +58,7 @@ pub fn apply(app: &AppHandle, hotkey: &str) -> Result<(), String> {
     }
     shortcuts
         .register(shortcut)
-        .map_err(|error| format!("Could not register {hotkey}: {error}"))?;
+        .map_err(|error| format!("Could not register {label}: {error}"))?;
     // The new shortcut is live from here on, so record it even if the old
     // one fails to unregister.
     if let Some(old) = current.replace(shortcut)

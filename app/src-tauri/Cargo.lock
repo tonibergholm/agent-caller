@@ -59,6 +59,7 @@ dependencies = [
  "acd-client",
  "acd-protocol",
  "anyhow",
+ "mac-notification-sys",
  "security-framework",
  "serde",
  "serde_json",

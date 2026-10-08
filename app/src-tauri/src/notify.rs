@@ -1,11 +1,6 @@
-use std::sync::atomic::{AtomicI32, Ordering};
-
 use acd_client::inbox::InboxEvent;
 use tauri::AppHandle;
-use tauri_plugin_notification::NotificationExt;
 use tokio::sync::broadcast;
-
-static NEXT_NOTIFICATION_ID: AtomicI32 = AtomicI32::new(1);
 
 pub fn text(e: &InboxEvent) -> (String, String) {
     let InboxEvent::RequestOpened {
@@ -25,20 +20,48 @@ pub async fn run(app: AppHandle, mut events: broadcast::Receiver<InboxEvent>) {
         match events.recv().await {
             Ok(e) if !crate::panel::is_visible() => {
                 let (title, body) = text(&e);
-                let id = NEXT_NOTIFICATION_ID.fetch_add(1, Ordering::Relaxed);
-                let _ = app
-                    .notification()
-                    .builder()
-                    .id(id)
-                    .title(title)
-                    .body(body)
-                    .show();
+                if let Err(error) = show(&app, &title, &body) {
+                    tracing::error!(%error, "could not show notification");
+                }
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn init(app: &AppHandle) -> Result<(), String> {
+    mac_notification_sys::set_application(&app.config().identifier)
+        .map_err(|error| format!("could not set notification application: {error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn init(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn show(_app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
+    let mut notification = mac_notification_sys::Notification::new();
+    notification.title(title).message(body).asynchronous(true);
+    notification
+        .send()
+        .map(|_| ())
+        .map_err(|error| format!("macOS notification backend failed: {error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

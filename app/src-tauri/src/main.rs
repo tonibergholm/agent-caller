@@ -15,7 +15,6 @@ use acd_client::{
     settings::{DEFAULT_HOTKEY, Settings},
 };
 use tauri::{Emitter, Manager, RunEvent};
-use tauri_plugin_notification::NotificationExt;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -27,7 +26,6 @@ fn main() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_nspanel::init())
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(hotkey::plugin())
         .invoke_handler(tauri::generate_handler![
@@ -50,7 +48,9 @@ fn main() {
         ])
         .setup(|app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            let _ = app.handle().notification().request_permission();
+            if let Err(error) = notify::init(app.handle()) {
+                tracing::error!(%error, "could not initialize macOS notifications");
+            }
             let path = app.path().app_config_dir()?.join("settings.json");
             let settings = Settings::load_or_init(&path)?;
             let inbox = Inbox::new(
