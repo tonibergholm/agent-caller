@@ -1,5 +1,6 @@
 use acd_adapters::herdr::{
     client::Herdr,
+    discovery::Discovery,
     fake::{FakeHerdr, fake_agent},
     map,
     reconciler::*,
@@ -617,4 +618,58 @@ async fn restart_with_a_blocked_pane_reopens_the_request() {
     })
     .await;
     assert_eq!(req.kind, RequestKind::BlockedUnparsed);
+}
+
+#[tokio::test]
+async fn discovery_finds_sessions_and_reports_status() {
+    let home = tempfile::Builder::new()
+        .prefix("acd")
+        .tempdir_in("/tmp")
+        .unwrap(); // short: macOS socket paths max 104 bytes
+    let sock = home.path().join(".config/herdr/sessions/x/herdr.sock");
+    std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    let fake = FakeHerdr::start_at(&sock).await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
+    let core = Core::new(test_machine(), vec![]);
+    let panes = Arc::new(PaneMap::default());
+    let d = Discovery {
+        env_socket: None,
+        home: home.path().into(),
+        extra: vec![],
+        interval: Duration::from_millis(100),
+        timing: fast(),
+    };
+    let _task = acd_adapters::herdr::discovery::spawn(d, core.clone(), panes.clone());
+    until("agent", || (panes.read().unwrap().len() == 1).then_some(())).await;
+    until("ok", || matches!(core.welcome(), ServerMessage::Welcome { ref machine, .. } if machine.sources.herdr.state == SourceState::Ok).then_some(())).await;
+}
+
+#[tokio::test]
+async fn socket_missing_twice_removes_its_agents() {
+    let home = tempfile::Builder::new()
+        .prefix("acd")
+        .tempdir_in("/tmp")
+        .unwrap(); // short: macOS socket paths max 104 bytes
+    let sock = home.path().join(".config/herdr/sessions/x/herdr.sock");
+    std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    let fake = FakeHerdr::start_at(&sock).await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
+    let core = Core::new(test_machine(), vec![]);
+    let panes = Arc::new(PaneMap::default());
+    let d = Discovery {
+        env_socket: None,
+        home: home.path().into(),
+        extra: vec![],
+        interval: Duration::from_millis(150),
+        timing: fast(),
+    };
+    let _task = acd_adapters::herdr::discovery::spawn(d, core.clone(), panes.clone());
+    let id = until("agent", || panes.read().unwrap().keys().next().cloned()).await;
+    fake.stop().await;
+    until("unknown first", || {
+        (core.agent(&id).map(|a| a.state) == Some(AgentState::Unknown)).then_some(())
+    })
+    .await;
+    until("removed", || core.agent(&id).is_none().then_some(())).await;
+    until("unconfigured", || matches!(core.welcome(), ServerMessage::Welcome { ref machine, .. } if machine.sources.herdr.state == SourceState::Unconfigured).then_some(())).await;
 }
