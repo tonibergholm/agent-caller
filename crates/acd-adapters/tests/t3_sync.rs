@@ -354,9 +354,9 @@ async fn deferred_end_applies_under_a_steady_event_stream() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     fake_adapter.fail_next(DeliverError::NotDelivered(ErrorCode::SourceUnavailable));
     fake_adapter.open_gate();
+    let released = std::time::Instant::now();
     claim.await.unwrap();
     assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Terminal);
-    let released = std::time::Instant::now();
     until("ended", || r.core.request(&req.id).is_none().then_some(())).await;
     assert!(
         released.elapsed() < Duration::from_secs(2),

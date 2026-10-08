@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval, sleep};
 
 use super::conn::{self, Conn, ConnTiming, ConnectError, StreamMsg};
+use super::deferred_ends::DeferredEnds;
 use super::detail::ThreadDetail;
 use super::map;
 use super::sessions::SessionMap;
@@ -390,7 +391,7 @@ struct Reconciler {
     overflow_streak: usize,
     peak_working: usize,
     peak_discovery: usize,
-    pending_ends: Vec<(String, ResolvedBy)>,
+    pending_ends: DeferredEnds,
 }
 
 fn log_unreadable(what: &str, v: &Value) {
@@ -417,7 +418,7 @@ impl Reconciler {
             overflow_streak: 0,
             peak_working: 0,
             peak_discovery: 0,
-            pending_ends: Vec::new(),
+            pending_ends: DeferredEnds::default(),
         }
     }
 
@@ -558,16 +559,15 @@ impl Reconciler {
 
     fn on_tick(&mut self, conn: &Conn) {
         let now = Instant::now();
-        self.pending_ends.retain(|(rid, by)| {
-            if self.core.request(rid).is_none() {
-                return false;
-            }
+        let ready_ends = self
+            .pending_ends
+            .ready_to_end(|rid| self.core.request(rid).map(|request| request.status));
+        for (rid, by) in ready_ends {
             self.core.observe(Observation::RequestEndedIfOpen {
-                request_id: rid.clone(),
-                by: *by,
+                request_id: rid,
+                by,
             });
-            self.core.request(rid).is_some()
-        });
+        }
         if self.shell_deadline.is_some_and(|d| now >= d) {
             conn.close("T3 shell did not synchronize");
             return;
@@ -1055,7 +1055,7 @@ impl Reconciler {
             if let Some(rid) = self.core.request_id_for(&agent_id, &CorrelationKey(open)) {
                 // Queue independently of the current status: a claim can win
                 // between the detail observation and RequestEndedIfOpen.
-                self.pending_ends.push((rid.clone(), by));
+                self.pending_ends.enqueue(rid.clone(), by);
                 self.core.observe(Observation::RequestEndedIfOpen {
                     request_id: rid.clone(),
                     by,
