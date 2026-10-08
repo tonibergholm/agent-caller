@@ -3,6 +3,7 @@ use std::{net::IpAddr, path::PathBuf, time::Duration};
 use acd_protocol::{ClientInfo, ClientMessage, ErrorCode, Machine, PROTOCOL};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{broadcast, mpsc, oneshot, watch},
@@ -13,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     backoff::Backoff,
-    commands::{Command, NotSent, Outcome},
+    commands::{Command, Commands, NotSent, Outcome},
     endpoint::{self, Endpoint},
     local,
     session::{Applied, EpochChange, Session},
@@ -226,6 +227,10 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
     .unwrap_or_else(|_| Err(End::Offline("connection timed out".into())))
 }
 
+fn credential_hash(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
+}
+
 fn close_code(msg: &Message) -> Option<u16> {
     if let Message::Close(Some(frame)) = msg {
         Some(frame.code.into())
@@ -331,23 +336,38 @@ async fn serve(
     timing: &crate::Timing,
     ctl: &mut mpsc::Receiver<Control>,
     backoff: &mut Backoff,
+    commands: &mut Commands,
+    cred: [u8; 32],
 ) -> End {
     let mut last_frame = tokio::time::Instant::now();
     let mut ping_deadline: Option<tokio::time::Instant> = None;
     let mut became_ready = session.ready();
     loop {
         let ping_at = ping_deadline.unwrap_or(last_frame + timing.idle_ping);
+        let due_at = commands
+            .next_due()
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(86400));
         tokio::select! {
             biased;
             control = ctl.recv() => match control {
                 Some(Control::DropConnection) => return End::Offline("dropped by request".into()),
-                Some(Control::Submit(command, expect_gen, reply)) => { let _ = (command.capability(), expect_gen); let _ = reply.send(Outcome::NotSent(NotSent::Offline)); },
+                Some(Control::Submit(command, expect_gen, reply)) => {
+                    let online = session.ready() && state.borrow().status == MachineStatus::Online;
+            if !online || expect_gen.is_some_and(|g| g != generation) { let _ = reply.send(Outcome::NotSent(NotSent::Offline)); }
+                    else if let Some(msg) = commands.begin(command, reply, &session.capabilities, cred, Instant::now())
+                        && let Err(e) = send_json(&mut ws, &msg).await { return e; }
+                },
                 Some(Control::RetryNow) => {}, None => return End::Stopped,
             },
             _ = tokio::time::sleep_until(ping_at) => {
                 if ping_deadline.is_some() { return End::Offline("no reply to ping".into()); }
                 if let Err(e) = send_json(&mut ws, &ClientMessage::Ping { id: Uuid::new_v4().to_string() }).await { return e; }
                 ping_deadline = Some(tokio::time::Instant::now() + timing.ping_timeout);
+            }
+            _ = tokio::time::sleep_until(due_at), if commands.next_due().is_some() => {
+                for msg in commands.due(Instant::now(), &session.capabilities, timing) {
+                    if let Err(e) = send_json(&mut ws, &msg).await { return e; }
+                }
             }
             incoming = ws.next() => {
                 let Some(incoming) = incoming else { return End::Offline("closed".into()); };
@@ -357,7 +377,7 @@ async fn serve(
                 let text = match msg { Message::Text(t) => t.to_string(), Message::Ping(v) => { if let Err(e) = ws.send(Message::Pong(v)).await { return End::Offline(e.to_string()); } continue; }, Message::Pong(_) => continue, Message::Close(_) => return End::Offline("closed".into()), _ => continue };
                 let decoded = match acd_protocol::decode_server(&text) { Ok(Some(m)) => m, Ok(None) => continue, Err(_) => return End::Resync("undecodable frame") };
                 match decoded {
-                    acd_protocol::ServerMessage::Result(_) => {},
+                    acd_protocol::ServerMessage::Result(result) => commands.on_result(&result, Instant::now(), timing),
                     acd_protocol::ServerMessage::Error { message, .. } => tracing::warn!("daemon error: {message}"),
                     acd_protocol::ServerMessage::Pong { .. } => {},
                     other => {
@@ -412,6 +432,8 @@ async fn run(
     events: broadcast::Sender<(u64, MachineEvent)>,
 ) {
     let mut session = Session::default();
+    let mut commands = Commands::default();
+    let mut previous_cred: Option<[u8; 32]> = None;
     let mut backoff = Backoff::new(cfg.timing.backoff_base, cfg.timing.backoff_max);
     let mut offline_since = None;
     let mut generation = 0;
@@ -426,14 +448,43 @@ async fn run(
             );
         }
         let deadline = Instant::now() + cfg.timing.connect_total;
+        let connecting_cred = match &cfg.credential {
+            Credential::Token(token) => Some(credential_hash(token)),
+            Credential::LocalFile(dir) => local::read_local_token(dir)
+                .ok()
+                .map(|token| credential_hash(&token)),
+        };
+        if let Some(cred) = connecting_cred
+            && previous_cred.is_some_and(|previous| previous != cred)
+        {
+            commands.revoke_other_creds(cred);
+        }
         let end = match open(&cfg, deadline).await {
             Err(e) => e,
             Ok((mut ws, token)) => {
+                let cred = credential_hash(&token);
+                if previous_cred.is_some_and(|previous| previous != cred) {
+                    commands.revoke_other_creds(cred);
+                }
+                previous_cred = Some(cred);
                 match handshake(&mut ws, &token, &cfg.client, session.resume(), deadline).await {
                     Err(e) => e,
                     Ok((machine, caps, epoch, wseq)) => {
                         generation += 1;
                         let change = session.welcome(machine, caps, &epoch, wseq);
+                        let resend = commands.on_welcome(
+                            change,
+                            &session.capabilities,
+                            Instant::now(),
+                            &cfg.timing,
+                        );
+                        let mut send_error = None;
+                        for msg in resend {
+                            if let Err(error) = send_json(&mut ws, &msg).await {
+                                send_error = Some(error);
+                                break;
+                            }
+                        }
                         let _ = events
                             .send((cfg.instance, MachineEvent::Welcomed { generation, change }));
                         offline_since = None;
@@ -456,18 +507,24 @@ async fn run(
                                 generation,
                             );
                         }
-                        let end = serve(
-                            ws,
-                            &mut session,
-                            generation,
-                            &events,
-                            cfg.instance,
-                            &state,
-                            &cfg.timing,
-                            &mut ctl,
-                            &mut backoff,
-                        )
-                        .await;
+                        let end = if let Some(error) = send_error {
+                            error
+                        } else {
+                            serve(
+                                ws,
+                                &mut session,
+                                generation,
+                                &events,
+                                cfg.instance,
+                                &state,
+                                &cfg.timing,
+                                &mut ctl,
+                                &mut backoff,
+                                &mut commands,
+                                cred,
+                            )
+                            .await
+                        };
                         let _ = events
                             .send((cfg.instance, MachineEvent::ConnectionEnded { generation }));
                         end
@@ -514,6 +571,7 @@ async fn run(
                 Duration::ZERO
             }
             End::Unauthorized => {
+                commands.revoke_all();
                 let message = if matches!(cfg.credential, Credential::LocalFile(_)) {
                     "acd rejected client.token; re-reading it"
                 } else {
@@ -623,6 +681,12 @@ pub fn spawn_machine(cfg: MachineConfig) -> MachineHandle {
     let (state_tx, state) = watch::channel(initial);
     let (events, _) = broadcast::channel(256);
     let (ctl, ctl_rx) = mpsc::channel(64);
-    tokio::spawn(run(cfg, ctl_rx, state_tx, events.clone()));
+    let task_events = events.clone();
+    let task_state = state_tx.clone();
+    tokio::spawn(async move {
+        run(cfg, ctl_rx, task_state.clone(), task_events.clone()).await;
+        drop(task_state);
+        drop(task_events);
+    });
     MachineHandle { state, events, ctl }
 }

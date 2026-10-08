@@ -273,16 +273,23 @@ async fn dropping_all_handles_stops_reconnects() {
     let mut ev = h.events();
     while ev.try_recv().is_ok() {}
     drop(h);
-    tokio::time::timeout(Duration::from_secs(1), async {
+    drop(rx);
+    let closed = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if let Ok((_, MachineEvent::ConnectionEnded { .. })) = ev.recv().await {
+            if matches!(
+                ev.recv().await,
+                Err(tokio::sync::broadcast::error::RecvError::Closed)
+            ) {
                 break;
             }
         }
     })
-    .await
-    .unwrap();
-    drop(rx);
+    .await;
+    assert!(
+        closed.is_ok(),
+        "task exits and drops its event sender after handles are gone"
+    );
+    drop(ev);
 }
 
 #[tokio::test]
@@ -321,15 +328,213 @@ async fn offline_submission_does_not_shorten_retry_delay() {
         )
         .await;
     assert!(matches!(outcome, acd_client::commands::Outcome::NotSent(_)));
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap();
     let _d = serve_on(listener, port, FakeAdapter::new(), files).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
     assert_ne!(
         rx.borrow().status,
         MachineStatus::Online,
-        "submit must not bypass backoff"
+        "daemon is available before the scheduled retry"
+    );
+    wait_for(&mut rx, "scheduled retry connects", |s| {
+        s.status == MachineStatus::Online
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn answer_reaches_the_adapter_once() {
+    let d = daemon().await;
+    d.core.observe(Observation::AgentUpsert(agent_obs("a1")));
+    d.core
+        .observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    let h = spawn_machine(tcp(&d, TOKEN));
+    let mut rx = h.state();
+    let s = wait_for(&mut rx, "pending", |s| {
+        s.status == MachineStatus::Online
+            && s.session
+                .agents
+                .get("a1")
+                .is_some_and(|a| a.pending.is_some())
+    })
+    .await;
+    let rid = s.session.agents["a1"].pending.as_ref().unwrap().id.clone();
+    assert_eq!(
+        h.submit(
+            acd_client::commands::Command::Answer {
+                request_id: rid,
+                option_id: "allow".into()
+            },
+            None
+        )
+        .await,
+        acd_client::commands::Outcome::Delivered
+    );
+    assert_eq!(d.fake.delivered().len(), 1);
+}
+
+#[tokio::test]
+async fn rotation_revokes_inflight_and_never_resends() {
+    let dir = local_dir(TOKEN);
+    let fake = FakeAdapter::gated();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    let auth = Arc::new(Auth::new(TOKEN.into()));
+    serve_unix(&dir, core.clone(), auth.clone()).await;
+    core.observe(Observation::AgentUpsert(agent_obs("a1")));
+    core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    let h = Arc::new(spawn_machine(local_cfg(&dir)));
+    let mut rx = h.state();
+    let s = wait_for(&mut rx, "pending", |s| {
+        s.status == MachineStatus::Online
+            && s.session
+                .agents
+                .get("a1")
+                .is_some_and(|a| a.pending.is_some())
+    })
+    .await;
+    let rid = s.session.agents["a1"].pending.as_ref().unwrap().id.clone();
+    let h2 = h.clone();
+    let task = tokio::spawn(async move {
+        h2.submit(
+            acd_client::commands::Command::Answer {
+                request_id: rid,
+                option_id: "allow".into(),
+            },
+            None,
+        )
+        .await
+    });
+    wait_for(&mut rx, "answering", |s| {
+        s.session.agents["a1"]
+            .pending
+            .as_ref()
+            .is_some_and(|r| r.status == RequestStatus::Answering)
+    })
+    .await;
+    let new = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    write_token(&dir, new);
+    auth.rotate(new.into());
+    assert_eq!(
+        task.await.unwrap(),
+        acd_client::commands::Outcome::Uncertain
+    );
+    wait_for(&mut rx, "online with new token", |s| {
+        s.status == MachineStatus::Online
+    })
+    .await;
+    fake.open_gate();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(fake.delivered().len() <= 1);
+}
+
+#[tokio::test]
+async fn rotation_before_delivery_is_uncertain_and_new_token_works() {
+    let dir = local_dir(TOKEN);
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    let auth = Arc::new(Auth::new(TOKEN.into()));
+    serve_unix(&dir, core.clone(), auth.clone()).await;
+    core.observe(Observation::AgentUpsert(agent_obs("a1")));
+    core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    let h = Arc::new(spawn_machine(local_cfg(&dir)));
+    let mut rx = h.state();
+    wait_for(&mut rx, "pending", |s| {
+        s.status == MachineStatus::Online
+            && s.session
+                .agents
+                .get("a1")
+                .is_some_and(|a| a.pending.is_some())
+    })
+    .await;
+    core.observe(Observation::RequestReady {
+        agent_id: "a1".into(),
+        key: acd_core::registry::CorrelationKey("k1".into()),
+        ready: false,
+    });
+    let rid = rx.borrow().session.agents["a1"]
+        .pending
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    let h2 = h.clone();
+    let task = tokio::spawn(async move {
+        h2.submit(
+            acd_client::commands::Command::Answer {
+                request_id: rid,
+                option_id: "allow".into(),
+            },
+            None,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let new = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    write_token(&dir, new);
+    auth.rotate(new.into());
+    assert_eq!(
+        task.await.unwrap(),
+        acd_client::commands::Outcome::Uncertain
+    );
+    wait_for(&mut rx, "online with new token", |s| {
+        s.status == MachineStatus::Online
+    })
+    .await;
+    core.observe(Observation::RequestReady {
+        agent_id: "a1".into(),
+        key: acd_core::registry::CorrelationKey("k1".into()),
+        ready: true,
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let rid = rx.borrow().session.agents["a1"]
+        .pending
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    assert_eq!(
+        h.submit(
+            acd_client::commands::Command::Answer {
+                request_id: rid,
+                option_id: "allow".into()
+            },
+            None
+        )
+        .await,
+        acd_client::commands::Outcome::Delivered
+    );
+}
+
+#[tokio::test]
+async fn offline_submit_is_not_sent() {
+    let tcp_l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = tcp_l.local_addr().unwrap().port();
+    drop(tcp_l);
+    let files = tls::generate("offline");
+    let pin = tls::pin_of_cert_pem(&files.cert_pem).unwrap();
+    let cfg = MachineConfig {
+        key: "m1".into(),
+        instance: 1,
+        endpoint: acd_client::endpoint::Endpoint::Tcp {
+            host: "127.0.0.1".into(),
+            port,
+            pin,
+        },
+        credential: Credential::Token(TOKEN.into()),
+        client: client(),
+        timing: fast(),
+    };
+    let h = spawn_machine(cfg);
+    assert_eq!(
+        h.submit(
+            acd_client::commands::Command::MarkSeen {
+                agent_id: "a".into()
+            },
+            None
+        )
+        .await,
+        acd_client::commands::Outcome::NotSent(acd_client::commands::NotSent::Offline)
     );
 }
