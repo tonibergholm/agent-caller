@@ -52,15 +52,21 @@ pub struct FakeConn {
 
 impl FakeConn {
     pub async fn send(&self, v: Value) {
-        let _ = self.tx.send(Out::Text(v.to_string()));
+        self.tx
+            .send(Out::Text(v.to_string()))
+            .expect("fake connection receiver dropped while sending text");
     }
 
     pub async fn send_raw(&self, s: &str) {
-        let _ = self.tx.send(Out::Text(s.to_owned()));
+        self.tx
+            .send(Out::Text(s.to_owned()))
+            .expect("fake connection receiver dropped while sending raw text");
     }
 
     pub async fn close(&self, code: u16) {
-        let _ = self.tx.send(Out::Close(code));
+        self.tx
+            .send(Out::Close(code))
+            .expect("fake connection receiver dropped while sending close");
     }
 }
 
@@ -70,6 +76,7 @@ pub struct FakeServer {
     pin: String,
     ready_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<FakeConn>>,
     ready_tx: mpsc::UnboundedSender<FakeConn>,
+    listener_tasks: Vec<tokio::task::JoinHandle<()>>,
     _unix_path: Option<PathBuf>,
 }
 
@@ -91,13 +98,13 @@ impl FakeServer {
             .await
             .expect("bind fake server");
         let port = listener.local_addr().expect("listener address").port();
-        let server = Self::new(token, port, pin, None);
-        tokio::spawn(accept_tcp(
+        let mut server = Self::new(token, port, pin, None);
+        server.listener_tasks.push(tokio::spawn(accept_tcp(
             listener,
             acceptor,
             server.shared.clone(),
             server.ready_tx.clone(),
-        ));
+        )));
         server
     }
 
@@ -105,12 +112,12 @@ impl FakeServer {
         let path = dir.join("acd.sock");
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).expect("bind fake unix socket");
-        let server = Self::new(token, 0, String::new(), Some(path));
-        tokio::spawn(accept_unix(
+        let mut server = Self::new(token, 0, String::new(), Some(path));
+        server.listener_tasks.push(tokio::spawn(accept_unix(
             listener,
             server.shared.clone(),
             server.ready_tx.clone(),
-        ));
+        )));
         server
     }
 
@@ -138,6 +145,7 @@ impl FakeServer {
             pin,
             ready_rx: tokio::sync::Mutex::new(rx),
             ready_tx: tx,
+            listener_tasks: Vec::new(),
             _unix_path: path,
         }
     }
@@ -186,6 +194,14 @@ impl FakeServer {
     }
     pub fn connections(&self) -> usize {
         self.shared.0.lock().unwrap().connections
+    }
+}
+
+impl Drop for FakeServer {
+    fn drop(&mut self) {
+        for task in &self.listener_tasks {
+            task.abort();
+        }
     }
 }
 

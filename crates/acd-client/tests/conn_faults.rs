@@ -19,6 +19,16 @@ async fn start() -> (FakeServer, MachineHandle) {
     (f, h)
 }
 
+async fn wait_for_connections(f: &FakeServer, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while f.connections() < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {expected} fake connections"));
+}
+
 #[tokio::test]
 async fn impostor_tls_server_receives_no_hello() {
     let f = FakeServer::start(common::TOKEN, Identity::Impostor).await;
@@ -130,11 +140,17 @@ async fn seq_gap_forces_resync_without_resume() {
 
 #[tokio::test]
 async fn resume_carries_the_cursor_after_a_drop() {
-    let (f, _h) = start().await;
+    let (f, h) = start().await;
     let c = f.next_connection().await;
     c.send(snapshot("e1", 5, &[])).await;
     c.send(upd("e1", 6, "a", "working")).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut rx = h.state();
+    common::wait_for(&mut rx, "cursor at seq 6", |s| {
+        s.session
+            .cursor()
+            .is_some_and(|cursor| cursor.epoch == "e1" && cursor.seq == 6)
+    })
+    .await;
     c.close(1001).await;
     let _c2 = f.next_connection().await;
     assert_eq!(
@@ -150,10 +166,14 @@ async fn resume_carries_the_cursor_after_a_drop() {
 
 #[tokio::test]
 async fn too_slow_reconnects_with_resume() {
-    let (f, _h) = start().await;
+    let (f, h) = start().await;
     let c = f.next_connection().await;
     c.send(snapshot("e1", 2, &[])).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut rx = h.state();
+    common::wait_for(&mut rx, "cursor at seq 2", |s| {
+        s.session.cursor().is_some_and(|cursor| cursor.seq == 2)
+    })
+    .await;
     c.close(4408).await;
     let _c2 = f.next_connection().await;
     assert_eq!(f.hellos()[1]["resume"]["seq"], 2);
@@ -180,9 +200,8 @@ async fn incompatible_protocol_stops() {
         matches!(s.status, MachineStatus::Incompatible { .. })
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(f.connections(), 1, "no retry loop until retry_now");
     h.retry_now();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_connections(&f, 2).await;
     assert_eq!(f.connections(), 2);
 }
