@@ -20,7 +20,7 @@ async fn setup() -> (FakeServer, FakeConn, Arc<Inbox>) {
         )
         .unwrap();
     let settings = Settings {
-        client_id: uuid::Uuid::new_v4().to_string(),
+        client_id: "00000000-0000-4000-8000-000000000001".into(),
         hotkey: DEFAULT_HOTKEY.into(),
         show_idle: false,
         machines: vec![MachineEntry {
@@ -43,11 +43,21 @@ async fn setup() -> (FakeServer, FakeConn, Arc<Inbox>) {
         },
     );
     ib.start();
+    ib.start(); // Starting an Inbox again must not replace its machine task or spawn another loop.
     let c = f.next_connection().await;
+    assert!(
+        f.hellos()
+            .iter()
+            .any(|hello| hello["client"]["id"] == settings_client_id())
+    );
     c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]}))
         .await;
     view_until(&ib, "answerable", |v| v.cards.iter().any(|c| c.answerable)).await;
+    assert_eq!(f.connections(), 1, "start is single-use");
     (f, c, ib)
+}
+fn settings_client_id() -> &'static str {
+    "00000000-0000-4000-8000-000000000001"
 }
 async fn view_until(ib: &Inbox, what: &str, pred: impl Fn(&InboxView) -> bool) {
     let mut rx = ib.view();
@@ -96,7 +106,16 @@ async fn countdown_cancels_when_request_resolves() {
     c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":resolved_agent}))
         .await;
     view_until(&ib, "removed action", |v| {
-        v.actions.is_empty() && v.cards.first().is_some_and(|c| c.notice.is_some())
+        v.actions.is_empty()
+            && v.cards
+                .first()
+                .and_then(|c| c.notice.as_ref())
+                .is_some_and(|n| {
+                    matches!(
+                        n.text.as_str(),
+                        "Answered in the terminal" | "Answered elsewhere"
+                    )
+                })
     })
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -199,7 +218,7 @@ async fn reply_goes_through_the_undo() {
     let sent = f
         .received()
         .iter()
-        .filter(|v| v["type"] == "agent.send")
+        .filter(|v| v["type"] == "agent.send" && v["agent_id"] == "a1" && v["text"] == "next step")
         .count();
     assert_eq!(sent, 1);
 }

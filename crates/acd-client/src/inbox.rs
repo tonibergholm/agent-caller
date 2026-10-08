@@ -54,14 +54,22 @@ struct Inner {
     actions: Actions,
     busy: HashSet<String>,
     notices: HashMap<String, (Notice, Instant)>,
+    #[allow(dead_code)] // Reserved for the notification state added by Task 11.
+    notified: HashSet<(String, String)>,
+}
+#[derive(Clone, Debug)]
+pub enum InboxEvent {
+    Updated,
 }
 pub struct Inbox {
     inner: Mutex<Inner>,
     secrets: Arc<dyn SecretStore>,
     opts: InboxOptions,
     view_tx: watch::Sender<InboxView>,
+    events_tx: broadcast::Sender<InboxEvent>,
     wake: Notify,
     next_instance: AtomicU64,
+    started: std::sync::atomic::AtomicBool,
 }
 impl Inbox {
     pub fn new(settings: Settings, secrets: Arc<dyn SecretStore>, opts: InboxOptions) -> Arc<Self> {
@@ -76,6 +84,7 @@ impl Inbox {
             },
             actions: vec![],
         });
+        let (events_tx, _) = broadcast::channel(64);
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 machines: settings
@@ -91,25 +100,38 @@ impl Inbox {
                 actions: Actions::default(),
                 busy: HashSet::new(),
                 notices: HashMap::new(),
+                notified: HashSet::new(),
             }),
             secrets,
             opts,
             view_tx: tx,
+            events_tx,
             wake: Notify::new(),
             next_instance: AtomicU64::new(1),
+            started: std::sync::atomic::AtomicBool::new(false),
         })
     }
     pub fn view(&self) -> watch::Receiver<InboxView> {
         self.view_tx.subscribe()
     }
     pub fn start(self: &Arc<Self>) {
+        if self.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let this = self.clone();
         tokio::spawn(async move {
             {
                 let mut inner = this.inner.lock().unwrap();
+                let client_id = inner.settings.client_id.clone();
                 for machine in &mut inner.machines {
                     let instance = this.next_instance.fetch_add(1, Ordering::Relaxed);
-                    machine.handle = spawn_for(&machine.entry, &this.secrets, &this.opts, instance);
+                    machine.handle = spawn_for(
+                        &machine.entry,
+                        &this.secrets,
+                        &this.opts,
+                        instance,
+                        &client_id,
+                    );
                 }
             }
             let handles = {
@@ -126,7 +148,7 @@ impl Inbox {
                     let mut state = handle.state();
                     let mut events = handle.events();
                     loop {
-                        tokio::select! {r=state.changed()=>{if r.is_err(){break} ib.wake.notify_one();}, e=events.recv()=>match e {Ok((instance,event))=>ib.on_machine_event(&key,instance,event).await,Err(broadcast::error::RecvError::Lagged(_))=>{ib.end_machine(&key).await;},Err(_)=>break}}
+                        tokio::select! {r=state.changed()=>{if r.is_err(){break} ib.wake.notify_one();}, e=events.recv()=>match e {Ok((instance,event))=>ib.on_machine_event(&key,instance,event).await,Err(broadcast::error::RecvError::Lagged(_))=>{let instance = { handle.state().borrow().instance }; ib.end_machine(&key, instance).await;},Err(_)=>break}}
                     }
                 });
             }
@@ -199,6 +221,7 @@ impl Inbox {
             show_idle: inner.settings.show_idle,
         });
         self.view_tx.send_replace(v);
+        let _ = self.events_tx.send(InboxEvent::Updated);
     }
     async fn fire_due(self: &Arc<Self>) {
         let due = { self.inner.lock().unwrap().actions.due(Instant::now()) };
@@ -228,6 +251,7 @@ impl Inbox {
                 self.set_notice(&action.card_key, n).await;
                 continue;
             }
+            let validation_action = action.clone();
             let cmd = match action.kind {
                 ActionKind::Answer(s) => Command::Answer {
                     request_id: s.request_id,
@@ -247,10 +271,23 @@ impl Inbox {
             }
             let ib = self.clone();
             tokio::spawn(async move {
-                let out = handle.submit(cmd, Some(action.conn_gen)).await;
+                let latest = { handle.state().borrow().clone() };
+                let out = match check(&validation_action, &latest) {
+                    Ok(()) => Some(handle.submit(cmd, Some(action.conn_gen)).await),
+                    Err(n) => {
+                        let mut inner = ib.inner.lock().unwrap();
+                        inner.notices.insert(
+                            validation_action.card_key.clone(),
+                            (n, Instant::now() + ib.opts.timing.notice_ttl),
+                        );
+                        None
+                    }
+                };
                 let mut inner = ib.inner.lock().unwrap();
                 inner.busy.remove(&action.card_key);
-                if let Some(n) = view::notice_for_outcome(&out) {
+                if let Some(out) = out
+                    && let Some(n) = view::notice_for_outcome(&out)
+                {
                     inner.notices.insert(
                         action.card_key,
                         (n, Instant::now() + ib.opts.timing.notice_ttl),
@@ -291,8 +328,14 @@ impl Inbox {
         drop(inner);
         self.wake();
     }
-    async fn end_machine(&self, key: &str) {
+    async fn end_machine(&self, key: &str, instance: u64) {
         let mut inner = self.inner.lock().unwrap();
+        let Some(machine) = inner.machines.iter().find(|m| m.entry.key == key) else {
+            return;
+        };
+        if machine.handle.as_ref().map(|h| h.state().borrow().instance) != Some(instance) {
+            return;
+        }
         for a in inner.actions.end_machine(key) {
             inner.notices.insert(
                 a.card_key,
@@ -494,6 +537,7 @@ fn spawn_for(
     secrets: &Arc<dyn SecretStore>,
     opts: &InboxOptions,
     instance: u64,
+    client_id: &str,
 ) -> Option<MachineHandle> {
     let (endpoint, credential) = match &entry.endpoint {
         EndpointConfig::Local => {
@@ -524,7 +568,7 @@ fn spawn_for(
         endpoint,
         credential,
         client: acd_protocol::ClientInfo {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: client_id.to_owned(),
             name: opts.client_name.clone(),
             version: opts.client_version.clone(),
         },
