@@ -63,6 +63,8 @@ struct State {
     gates: HashMap<String, VecDeque<Held>>,
     delays: HashMap<String, VecDeque<Duration>>,
     truncated: HashSet<(String, String)>,
+    /// `agent.read` source -> queued error codes.
+    read_fails: HashMap<String, VecDeque<String>>,
     on_keys: Option<KeysHook>,
     subscribers: Vec<Subscriber>,
     calls: Vec<(tokio::time::Instant, String, Value)>,
@@ -233,6 +235,16 @@ impl FakeHerdr {
         } else {
             st.truncated.remove(&key);
         }
+    }
+
+    /// The next `agent.read` of `source` (any pane) gets an error with
+    /// `code`; reads of other sources are unaffected.
+    pub fn fail_next_read(&self, source: &str, code: &str) {
+        self.st()
+            .read_fails
+            .entry(source.to_owned())
+            .or_default()
+            .push_back(code.to_owned());
     }
 
     /// The next `method` request is held after its line is read, before any
@@ -530,6 +542,11 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
                         let Some(source) = params["source"].as_str() else {
                             return err("invalid_request", "missing field `source`");
                         };
+                        if let Some(code) =
+                            st.read_fails.get_mut(source).and_then(VecDeque::pop_front)
+                        {
+                            return err(&code, "injected read failure");
+                        }
                         let key = (t.to_owned(), source.to_owned());
                         let text = st.screens.get(&key).cloned().unwrap_or_default();
                         let truncated = st.truncated.contains(&key);

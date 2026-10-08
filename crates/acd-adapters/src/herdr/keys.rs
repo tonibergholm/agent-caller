@@ -20,7 +20,7 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
 use super::client::{CALL_TIMEOUT, CallError, Herdr, KNOWN_REFUSALS};
 use super::reconciler::{Hint, PaneMap};
-use super::screen::{Fingerprint, guard_fingerprint, prompt_line};
+use super::screen::{Dialog, DialogKind, Fingerprint, find_dialog, guard_fingerprint, prompt_line};
 
 /// Consecutive reads without the dialog before it counts as closed or gone.
 pub(crate) const ABSENT_READS: u8 = 2;
@@ -29,10 +29,35 @@ const PROMPT_CHECK_GRACE: Duration = Duration::from_millis(250);
 /// How long a prompt check's read may take.
 const PROMPT_CHECK_READ: Duration = Duration::from_millis(500);
 
+/// What makes a dialog the same dialog across redraws: its kind, option
+/// labels in order and region text. The fingerprint also covers the screen
+/// above the dialog, so it changes on any redraw; the identity does not.
+/// The identity decides whether a dialog is still on screen; only the
+/// fingerprint may let a key through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialogIdentity {
+    pub kind: DialogKind,
+    pub labels: Vec<String>,
+    pub text: String,
+}
+
+impl DialogIdentity {
+    pub fn of(d: &Dialog) -> DialogIdentity {
+        DialogIdentity {
+            kind: d.kind.clone(),
+            labels: d.options.iter().map(|o| o.label.clone()).collect(),
+            text: d.text.clone(),
+        }
+    }
+}
+
 /// One keys-answerable dialog occurrence. P3 registers it right after
 /// opening the request: `request_id = core.request_id_for(agent_id, &key)`.
 /// The request id is unique per occurrence, so a later occurrence of the
 /// same reusable key can never be served or removed by mistake.
+///
+/// Build it with `KeysTarget::from_screen` from the detection snapshot the
+/// request was opened from.
 #[derive(Clone, Debug)]
 pub struct KeysTarget {
     pub request_id: String,
@@ -40,8 +65,67 @@ pub struct KeysTarget {
     pub key: CorrelationKey,
     /// `screen::guard_fingerprint` of the detection snapshot.
     pub fingerprint: Fingerprint,
+    /// The dialog's identity in that snapshot.
+    pub identity: DialogIdentity,
     /// Option id -> herdr key name: `"1"`..`"9"` or `"esc"` only.
     pub option_keys: HashMap<String, String>,
+}
+
+impl KeysTarget {
+    /// A target for the dialog on `screen_text` (a `detection` read). Fails
+    /// when the screen shows no dialog, the dialog has no fingerprint (a
+    /// collapsed Codex dialog), an option key is not `"1"`..`"9"` or
+    /// `"esc"`, or a digit names no option of the dialog.
+    ///
+    /// Register it only once the herdr agent exists (`core.agent(agent_id)`
+    /// is `Some`): a target whose pane the reconciler does not know is
+    /// dropped at its next poll.
+    pub fn from_screen(
+        request_id: String,
+        agent_id: String,
+        key: CorrelationKey,
+        screen_text: &str,
+        option_keys: HashMap<String, String>,
+    ) -> Result<KeysTarget, &'static str> {
+        let dialog = find_dialog(screen_text).ok_or("no dialog on screen")?;
+        let fingerprint = dialog
+            .fingerprint
+            .clone()
+            .ok_or("the dialog cannot be fingerprinted")?;
+        check_keys(&option_keys)?;
+        let digit_ok = |k: &str| {
+            k == "esc"
+                || dialog
+                    .options
+                    .iter()
+                    .any(|o| k.parse::<u8>().is_ok_and(|n| n == o.number))
+        };
+        if !option_keys.values().all(|k| digit_ok(k)) {
+            return Err("an option key names no option of the dialog");
+        }
+        Ok(KeysTarget {
+            request_id,
+            agent_id,
+            key,
+            fingerprint,
+            identity: DialogIdentity::of(&dialog),
+            option_keys,
+        })
+    }
+
+    /// Whether `text` still shows this target's dialog, possibly redrawn.
+    /// No dialog, or a dialog with another identity, is absent.
+    pub(crate) fn shown_in(&self, text: &str) -> bool {
+        find_dialog(text).is_some_and(|d| DialogIdentity::of(&d) == self.identity)
+    }
+}
+
+fn check_keys(option_keys: &HashMap<String, String>) -> Result<(), &'static str> {
+    if option_keys.values().all(|k| is_guardable_key(k)) {
+        Ok(())
+    } else {
+        Err("option keys must be \"1\"..\"9\" or \"esc\"")
+    }
 }
 
 /// Registered targets, by request id.
@@ -61,10 +145,12 @@ impl KeysTargets {
 
     /// Registers or replaces the target for `t.request_id`. Rejects any
     /// option key other than `"1"`..`"9"` or `"esc"`.
+    ///
+    /// Register only once the herdr agent exists (`core.agent(agent_id)` is
+    /// `Some`): a target whose pane the reconciler does not know is dropped
+    /// at its next poll.
     pub fn set(&self, t: KeysTarget) -> Result<(), &'static str> {
-        if !t.option_keys.values().all(|k| is_guardable_key(k)) {
-            return Err("option keys must be \"1\"..\"9\" or \"esc\"");
-        }
+        check_keys(&t.option_keys)?;
         self.lock().insert(t.request_id.clone(), t);
         Ok(())
     }
@@ -383,7 +469,8 @@ struct Confirm {
 
 /// What the reads after the send showed.
 struct Observed {
-    /// The last `ABSENT_READS` usable detection reads lacked the dialog.
+    /// The last `ABSENT_READS` usable detection reads lacked the dialog
+    /// (by identity: a redraw around a visible dialog is not a close).
     closed: bool,
     /// A stray digit in the input box, or a prompt check that could not run.
     stray: bool,
@@ -435,6 +522,8 @@ impl Confirm {
                         .read_screen(&self.pane_id, "visible", None, at + PROMPT_CHECK_READ)
                         .await;
                     stray |= match read {
+                        // A truncated read is unavailable, like a failed one.
+                        Ok(r) if r.truncated => true,
                         Ok(r) => prompt_line(self.kind, &r.text).is_some_and(|p| {
                             p.ends_with(self.key.as_str()) && Some(&p) != self.baseline.as_ref()
                         }),
@@ -453,8 +542,7 @@ impl Confirm {
                     {
                         // A failed or truncated read is neither present nor absent.
                         Ok(r) if !r.truncated => {
-                            if guard_fingerprint(&r.text).as_ref() == Some(&self.target.fingerprint)
-                            {
+                            if self.target.shown_in(&r.text) {
                                 absent = 0;
                             } else {
                                 absent = absent.saturating_add(1);

@@ -18,9 +18,9 @@ use tokio::time::{Instant, sleep, sleep_until};
 
 use super::client::{CALL_TIMEOUT, CallError, Herdr, ScreenRead, Subscription};
 use super::fallback::{self, Fallback, FbOut};
-use super::keys::{ABSENT_READS, KeysTargets};
+use super::keys::{ABSENT_READS, DialogIdentity, KeysTargets};
 use super::map;
-use super::screen::guard_fingerprint;
+use super::screen::find_dialog;
 use super::wire::{AgentInfo, Event};
 
 const HINT_CAPACITY: usize = 256;
@@ -669,7 +669,7 @@ impl Reconciler {
         if targets.is_empty() {
             return;
         }
-        let fingerprint = guard_fingerprint(&read.text);
+        let shown = find_dialog(&read.text).map(|d| DialogIdentity::of(&d));
         for t in targets {
             let status = self.core.request(&t.request_id).map(|r| r.status);
             if status == Some(RequestStatus::Answering) {
@@ -681,7 +681,8 @@ impl Reconciler {
                 continue;
             }
             let absent = self.watch_absent.entry(t.request_id.clone()).or_default();
-            if fingerprint.as_ref() == Some(&t.fingerprint) {
+            // By identity: a redraw around a visible dialog is not a close.
+            if shown.as_ref() == Some(&t.identity) {
                 *absent = 0;
                 continue;
             }

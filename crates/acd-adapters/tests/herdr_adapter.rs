@@ -3,7 +3,6 @@ use acd_adapters::herdr::{
     fake::{FakeHerdr, fake_agent},
     keys::*,
     reconciler::Timing,
-    screen::guard_fingerprint,
 };
 use acd_core::{
     Adapter, Core, CorrelationKey, DeliverError, Observation,
@@ -278,19 +277,35 @@ async fn keys_rig_with(
     let rid = r.core.request_id_for(&id, &key).unwrap();
     r.adapter
         .keys_targets()
-        .set(KeysTarget {
-            request_id: rid.clone(),
-            agent_id: id,
-            key,
-            fingerprint: guard_fingerprint(&dialog).unwrap(),
-            option_keys: [
-                ("allow".to_string(), "1".to_string()),
-                ("deny".to_string(), "esc".to_string()),
-            ]
-            .into(),
-        })
+        .set(KeysTarget::from_screen(rid.clone(), id, key, &dialog, allow_deny()).unwrap())
         .unwrap();
     (r, rid)
+}
+
+fn allow_deny() -> std::collections::HashMap<String, String> {
+    [
+        ("allow".to_string(), "1".to_string()),
+        ("deny".to_string(), "esc".to_string()),
+    ]
+    .into()
+}
+
+/// The permission dialog after a redraw of a transcript line above it: same
+/// dialog, different whole-screen fingerprint.
+fn redrawn_dialog() -> String {
+    let s = screen("claude-permission-bash.txt");
+    let r = s.replace("⏺ Creating empty file", "⏺ Creating an empty file");
+    assert_ne!(s, r);
+    r
+}
+
+/// `agent.read` calls of `source` so far.
+fn reads(r: &Rig, source: &str) -> usize {
+    r.fake
+        .calls()
+        .iter()
+        .filter(|(m, p)| m == "agent.read" && p["source"] == source)
+        .count()
 }
 
 async fn answer(r: &Rig, cmd: &str, rid: &str, option: &str) -> CommandResult {
@@ -422,28 +437,36 @@ async fn truncated_guard_read_sends_nothing() {
 #[tokio::test]
 async fn option_keys_must_be_digits_or_esc() {
     let targets = KeysTargets::default();
-    let target = |keys: &[&str]| KeysTarget {
-        request_id: "r1".into(),
-        agent_id: "a".into(),
-        key: CorrelationKey("k".into()),
-        fingerprint: acd_adapters::herdr::screen::Fingerprint("f".into()),
-        option_keys: keys
-            .iter()
+    let dialog = screen("claude-permission-bash.txt"); // options 1..4
+    let keys = |keys: &[&str]| -> std::collections::HashMap<String, String> {
+        keys.iter()
             .enumerate()
             .map(|(i, k)| (format!("o{i}"), k.to_string()))
-            .collect(),
+            .collect()
     };
-    for bad in ["enter", "0", "10", "", "backspace", "1 ", "Esc", "y"] {
-        assert!(targets.set(target(&["1", bad])).is_err(), "{bad:?}");
-        assert!(
-            targets.get("r1").is_none(),
-            "a rejected target is not stored"
-        );
+    let target = |k: &[&str]| {
+        KeysTarget::from_screen(
+            "r1".into(),
+            "a".into(),
+            CorrelationKey("k".into()),
+            &dialog,
+            keys(k),
+        )
+    };
+    for bad in ["enter", "0", "10", "", "backspace", "1 ", "Esc", "y", "5"] {
+        assert!(target(&["1", bad]).is_err(), "{bad:?}");
     }
-    let all: Vec<String> = (1..=9).map(|d| d.to_string()).collect();
-    let mut ok: Vec<&str> = all.iter().map(String::as_str).collect();
-    ok.push("esc");
-    targets.set(target(&ok)).unwrap();
+    // `set` checks key names on its own too.
+    let mut forged = target(&["1"]).unwrap();
+    forged.option_keys = keys(&["enter"]);
+    assert!(targets.set(forged).is_err());
+    assert!(
+        targets.get("r1").is_none(),
+        "a rejected target is not stored"
+    );
+    targets
+        .set(target(&["1", "2", "3", "4", "esc"]).unwrap())
+        .unwrap();
     assert!(targets.get("r1").is_some());
     assert_eq!(targets.for_agent("a").len(), 1);
     assert!(targets.remove("r1").is_some());
@@ -772,4 +795,188 @@ async fn a_gone_pane_drops_its_targets() {
     })
     .await;
     assert!(r.fake.keys_sent().is_empty());
+}
+
+#[tokio::test]
+async fn from_screen_needs_a_fingerprinted_dialog() {
+    for name in [
+        "codex-permission-collapsed-small-pane-detection.txt",
+        "codex-trust-dialog-detection.txt",
+        "claude-idle-detection.txt",
+    ] {
+        let t = KeysTarget::from_screen(
+            "r1".into(),
+            "a".into(),
+            CorrelationKey("k".into()),
+            &screen(name),
+            [("x".to_string(), "esc".to_string())].into(),
+        );
+        assert!(t.is_err(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn redraw_above_an_unclaimed_dialog_does_not_resolve_it() {
+    let (r, rid) = keys_rig_with("claude-idle-detection.txt", "claude-idle-prompt.txt", true).await;
+    r.fake.set_screen("w1:p1", "detection", &redrawn_dialog());
+    let before = reads(&r, "detection");
+    until("several watch reads", || {
+        (reads(&r, "detection") >= before + 5).then_some(())
+    })
+    .await;
+    assert_eq!(
+        r.core.request(&rid).map(|q| q.status),
+        Some(RequestStatus::Open)
+    );
+    assert!(r.adapter.keys_targets().get(&rid).is_some());
+}
+
+#[tokio::test]
+async fn redraw_after_an_accepted_key_is_not_a_close() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.fake.on_keys(|f, pane, _| {
+        f.set_screen(pane, "detection", &redrawn_dialog());
+        f.set_screen(pane, "visible", &redrawn_dialog());
+    });
+    r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
+    let (_, mut rx) = r.core.attach(None);
+    answer(&r, "a1", &rid, "allow").await;
+    assert_eq!(
+        resolution(&mut rx).await.0,
+        ResolvedBy::Uncertain,
+        "the dialog is still up: never inbox"
+    );
+    assert!(r.adapter.keys_targets().get(&rid).is_some());
+}
+
+#[tokio::test]
+async fn guard_after_a_redraw_is_a_mismatch() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.fake.set_screen("w1:p1", "detection", &redrawn_dialog());
+    assert_eq!(
+        answer(&r, "a1", &rid, "allow").await.error_code(),
+        Some(ErrorCode::ScreenMismatch)
+    );
+    assert!(r.fake.keys_sent().is_empty());
+}
+
+#[tokio::test]
+async fn truncated_reads_are_neutral_in_confirmation() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.fake.on_keys(|f, pane, _| {
+        f.set_screen(pane, "detection", &screen("claude-idle-detection.txt"));
+        f.set_screen(pane, "visible", &screen("claude-idle-prompt.txt"));
+        f.set_truncated(pane, "detection", true);
+    });
+    r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
+    let (_, mut rx) = r.core.attach(None);
+    answer(&r, "a1", &rid, "allow").await;
+    assert_eq!(
+        resolution(&mut rx).await.0,
+        ResolvedBy::Uncertain,
+        "truncated reads never prove a close"
+    );
+    assert!(r.adapter.keys_targets().get(&rid).is_some());
+}
+
+#[tokio::test]
+async fn truncated_reads_are_neutral_in_the_watch() {
+    let (r, rid) = keys_rig_with("claude-idle-detection.txt", "claude-idle-prompt.txt", true).await;
+    let (_, mut rx) = r.core.attach(None);
+    r.fake.set_truncated("w1:p1", "detection", true);
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("claude-idle-detection.txt"));
+    let before = reads(&r, "detection");
+    until("several watch reads", || {
+        (reads(&r, "detection") >= before + 5).then_some(())
+    })
+    .await;
+    assert_eq!(
+        r.core.request(&rid).map(|q| q.status),
+        Some(RequestStatus::Open)
+    );
+    // The same screen, read whole, does count.
+    r.fake.set_truncated("w1:p1", "detection", false);
+    assert_eq!(resolution(&mut rx).await, (ResolvedBy::Terminal, None));
+}
+
+#[tokio::test]
+async fn lease_rejects_a_replaced_target() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    let gate = r.fake.block_next("agent.read");
+    let pending = tokio::spawn({
+        let core = r.core.clone();
+        let rid = rid.clone();
+        async move {
+            core.handle(
+                "c",
+                ClientMessage::RequestAnswer {
+                    id: "a1".into(),
+                    request_id: rid,
+                    option_id: Some("allow".into()),
+                    text: None,
+                },
+            )
+            .await
+        }
+    });
+    gate.arrived().await; // the guard read is held
+    let old = r.adapter.keys_targets().get(&rid).unwrap();
+    let replaced = KeysTarget::from_screen(
+        rid.clone(),
+        old.agent_id,
+        old.key,
+        &redrawn_dialog(),
+        allow_deny(),
+    )
+    .unwrap();
+    assert_ne!(replaced.fingerprint, old.fingerprint);
+    r.adapter.keys_targets().set(replaced).unwrap();
+    gate.release();
+    let res = pending.await.unwrap();
+    assert_eq!(res.error_code(), Some(ErrorCode::RequestGone), "{res:?}");
+    assert!(r.fake.keys_sent().is_empty());
+}
+
+#[tokio::test]
+async fn failed_prompt_check_read_is_uncertain() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.fake.fail_next_read("visible", "internal_error");
+    r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
+    let (_, mut rx) = r.core.attach(None);
+    answer(&r, "a1", &rid, "allow").await;
+    assert_eq!(
+        resolution(&mut rx).await.0,
+        ResolvedBy::Uncertain,
+        "an unavailable prompt check counts like a stray"
+    );
+}
+
+#[tokio::test]
+async fn truncated_prompt_check_read_is_uncertain() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.fake.on_keys(|f, pane, _| {
+        f.set_screen(pane, "detection", &screen("claude-idle-detection.txt"));
+        f.set_screen(pane, "visible", &screen("claude-idle-prompt.txt"));
+        f.set_truncated(pane, "visible", true);
+    });
+    r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
+    let (_, mut rx) = r.core.attach(None);
+    answer(&r, "a1", &rid, "allow").await;
+    assert_eq!(resolution(&mut rx).await.0, ResolvedBy::Uncertain);
+}
+
+#[tokio::test]
+async fn unknown_send_keys_error_is_uncertain() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.fake.fail_next("agent.send_keys", "internal_error");
+    r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
+    let (_, mut rx) = r.core.attach(None);
+    assert!(delivered(&answer(&r, "a1", &rid, "allow").await));
+    assert_eq!(resolution(&mut rx).await, (ResolvedBy::Uncertain, None));
+    assert!(r.core.request(&rid).is_none());
+    assert!(
+        r.adapter.keys_targets().get(&rid).is_some(),
+        "the occurrence stays monitored"
+    );
 }

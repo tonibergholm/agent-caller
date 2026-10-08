@@ -219,16 +219,6 @@ impl Herdr {
         expect_type(&v, "agent_prompted")
     }
 
-    /// Not used by acd: the keys engine (`keys.rs`) writes `agent.send_keys`
-    /// itself, in stages, and is the only sender.
-    pub async fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<(), CallError> {
-        tracing::debug!(pane_id, count = keys.len(), "herdr agent.send_keys");
-        let v = self
-            .call("agent.send_keys", json!({"target": pane_id, "keys": keys}))
-            .await?;
-        expect_type(&v, "ok")
-    }
-
     /// Subscribes to `pane.created`, `pane.closed`, `pane.agent_detected` and
     /// `pane.updated`, plus `pane.agent_status_changed` for each pane.
     pub async fn subscribe(&self, panes: &[String]) -> Result<Subscription, CallError> {
