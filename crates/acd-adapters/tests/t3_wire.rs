@@ -702,8 +702,8 @@ fn prune_keeps_only_live_state() {
     }
     d.prune(&[&id]);
     let (requests, items) = d.retained();
-    assert!(requests <= 1, "{requests}");
-    assert!(items <= MAX_COMMAND_ITEMS + 2, "{items}");
+    assert_eq!(requests, 1);
+    assert_eq!(items, 2, "the approval and its command");
     // The live approval still joins its command after pruning.
     let (obs, _) = request_obs("t3:x", "x", &d.pending_view(&id).unwrap());
     assert!(obs.detail.starts_with("touch /tmp/acp4/proj/x.txt"));
@@ -819,4 +819,154 @@ fn dispatch_payload_matches_the_recording() {
         w["text"].as_str().unwrap(),
     );
     assert_eq!(&got, w);
+}
+
+fn apply_json(d: &mut ThreadDetail, ev: Value) {
+    let ThreadItem::Event { event, .. } = ThreadItem::decode(&ev).unwrap() else {
+        panic!()
+    };
+    d.apply(&event).unwrap();
+}
+
+fn without_commands(p: &Value) -> Value {
+    let mut p = p.clone();
+    p["turnItems"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|i| i["type"] != "command_execution");
+    p
+}
+
+#[test]
+fn approval_without_its_command_is_read_only() {
+    let p = projection("thread_chunk_snapshot_waiting_approval_claude.json");
+    let id = pending_id(&p);
+    let (d, _) = ThreadDetail::from_projection(&without_commands(&p));
+    let view = d.pending_view(&id).unwrap();
+    assert!(view.command.is_none());
+    let (obs, target) = request_obs("t3:x", "x", &view);
+    assert_eq!(obs.answer_path, AnswerPath::None);
+    assert!(obs.options.is_empty());
+    assert_eq!(target.answer, TargetAnswer::ReadOnly);
+    assert_eq!(obs.title, "Run a command");
+    assert!(
+        obs.detail.starts_with("Command not available yet"),
+        "{}",
+        obs.detail
+    );
+    assert!(
+        obs.detail.contains("Description: Create empty file x.txt"),
+        "{}",
+        obs.detail
+    );
+    assert_ne!(obs.detail, "Create empty file x.txt");
+    // With the command item it is answerable and leads with the command.
+    let (d, _) = ThreadDetail::from_projection(&p);
+    let (obs, target) = request_obs("t3:x", "x", &d.pending_view(&id).unwrap());
+    assert_eq!(obs.answer_path, AnswerPath::T3);
+    assert!(obs.detail.starts_with("touch /tmp/acp4/proj/x.txt"));
+    assert_eq!(target.answer, TargetAnswer::Decision);
+    // A blank command counts as absent.
+    let mut view = d.pending_view(&id).unwrap();
+    view.command = Some("  ".into());
+    assert_eq!(
+        request_obs("t3:x", "x", &view).0.answer_path,
+        AnswerPath::None
+    );
+}
+
+#[test]
+fn only_one_single_select_question_is_answerable() {
+    let p = projection("thread_chunk_snapshot_waiting_question_claude.json");
+    let (d, _) = ThreadDetail::from_projection(&p);
+    let view = d.pending_view(&pending_id(&p)).unwrap();
+    let Some(TurnItem::UserInputRequest { questions, .. }) = &view.item else {
+        panic!()
+    };
+    let one = questions[0].clone();
+
+    let mut two = view.clone();
+    let Some(TurnItem::UserInputRequest { questions, .. }) = two.item.as_mut() else {
+        panic!()
+    };
+    questions.push(one.clone());
+    let (obs, target) = request_obs("t3:x", "x", &two);
+    assert_eq!(obs.answer_path, AnswerPath::None);
+    assert_eq!(target.answer, TargetAnswer::ReadOnly);
+    assert_eq!(obs.questions.as_ref().unwrap().len(), 2);
+
+    let mut multi = view.clone();
+    let Some(TurnItem::UserInputRequest { questions, .. }) = multi.item.as_mut() else {
+        panic!()
+    };
+    questions[0].multi_select = true;
+    let (obs, target) = request_obs("t3:x", "x", &multi);
+    assert_eq!(obs.answer_path, AnswerPath::None);
+    assert_eq!(target.answer, TargetAnswer::ReadOnly);
+    assert!(obs.questions.as_ref().unwrap()[0].multi_select);
+}
+
+#[test]
+fn prune_keeps_a_referenced_terminal_command() {
+    let p = projection("thread_chunk_snapshot_waiting_approval_claude.json");
+    let id = pending_id(&p);
+    let mut p = p.clone();
+    for i in p["turnItems"].as_array_mut().unwrap() {
+        if i["type"] == "command_execution" {
+            i["status"] = "completed".into();
+        }
+    }
+    let (mut d, _) = ThreadDetail::from_projection(&p);
+    d.prune(&[&id]);
+    let view = d.pending_view(&id).unwrap();
+    assert_eq!(
+        view.command.as_deref().map(str::trim),
+        Some("touch /tmp/acp4/proj/x.txt")
+    );
+}
+
+#[test]
+fn the_cap_drops_the_oldest_unreferenced_commands_first() {
+    let p = projection("thread_chunk_snapshot_waiting_approval_claude.json");
+    let id = pending_id(&p);
+    let (mut d, _) = ThreadDetail::from_projection(&p);
+    let n = MAX_COMMAND_ITEMS + 6;
+    for i in 0..n {
+        apply_json(
+            &mut d,
+            serde_json::json!({"kind": "event", "sequence": 9000 + i,
+            "event": {"type": "turn-item.updated", "payload": {"id": format!("run-{i}"), "type": "command_execution",
+                "status": "running", "input": format!("sleep {i}"), "nativeItemRef": {"nativeId": format!("n-{i}")}}}}),
+        );
+        d.prune(&[&id]);
+    }
+    for (name, native) in [("oldest", 0), ("newest", n - 1)] {
+        apply_json(
+            &mut d,
+            serde_json::json!({"kind": "event", "sequence": 20000 + native,
+            "event": {"type": "runtime-request.updated", "payload": {"id": format!("late-{name}"), "kind": "command", "status": "pending"}}}),
+        );
+        apply_json(
+            &mut d,
+            serde_json::json!({"kind": "event", "sequence": 30000 + native,
+            "event": {"type": "turn-item.updated", "payload": {"id": format!("appr-{name}"), "type": "approval_request",
+                "requestId": format!("late-{name}"), "requestKind": "command", "prompt": "p",
+                "nativeItemRef": {"nativeId": format!("n-{native}")}}}}),
+        );
+    }
+    assert_eq!(d.pending_view("late-oldest").unwrap().command, None);
+    assert_eq!(
+        d.pending_view("late-newest").unwrap().command,
+        Some(format!("sleep {}", n - 1))
+    );
+}
+
+#[test]
+fn a_waiting_postturn_thread_without_a_request_is_working() {
+    let t = shell_thread("shell_chunk_thread_updated_waiting_postturn_no_request.json");
+    assert!(t.pending_runtime_request.is_none());
+    assert_eq!(
+        agent_obs(&t, None, &HashSet::new()).state,
+        AgentState::Working
+    );
 }

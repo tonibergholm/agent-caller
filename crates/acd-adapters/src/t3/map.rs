@@ -146,24 +146,43 @@ pub fn request_obs(agent_id: &str, thread_id: &str, view: &PendingView) -> (Requ
             ..
         }) if request_kind.as_deref() == Some("command") => {
             let prompt = prompt.as_deref().unwrap_or("").trim();
-            let text = match view.command.as_deref().map(str::trim) {
-                Some(c) if !prompt.is_empty() && c != prompt => format!("{c}\n{prompt}"),
-                Some(c) => c.to_owned(),
-                None => prompt.to_owned(),
-            };
             obs.title = "Run a command".into();
-            obs.detail = detail(&text);
-            obs.answer_path = AnswerPath::T3;
-            obs.options = FALLBACK
-                .iter()
-                .map(|(id, label, effect)| RequestOption {
-                    id: (*id).into(),
-                    label: (*label).into(),
-                    description: None,
-                    effect: *effect,
-                })
-                .collect();
-            answer = TargetAnswer::Decision;
+            // The prompt is model-written text; it never stands in for the
+            // command. Without the joined command the request is read-only.
+            match view
+                .command
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            {
+                Some(c) => {
+                    let text = if !prompt.is_empty() && c != prompt {
+                        format!("{c}\n{prompt}")
+                    } else {
+                        c.to_owned()
+                    };
+                    obs.detail = detail(&text);
+                    obs.answer_path = AnswerPath::T3;
+                    obs.options = FALLBACK
+                        .iter()
+                        .map(|(id, label, effect)| RequestOption {
+                            id: (*id).into(),
+                            label: (*label).into(),
+                            description: None,
+                            effect: *effect,
+                        })
+                        .collect();
+                    answer = TargetAnswer::Decision;
+                }
+                None => {
+                    let mut text = String::from("Command not available yet \u{2014} answer in T3.");
+                    if !prompt.is_empty() {
+                        text.push_str("\nDescription: ");
+                        text.push_str(prompt);
+                    }
+                    obs.detail = detail(&text);
+                }
+            }
         }
         Some(TurnItem::UserInputRequest { questions, .. }) if !questions.is_empty() => {
             let qs: Vec<Question> = questions
@@ -190,25 +209,28 @@ pub fn request_obs(agent_id: &str, thread_id: &str, view: &PendingView) -> (Requ
                 })
                 .collect();
             let q0 = &questions[0];
-            answer = TargetAnswer::Question {
-                question_id: q0.id.clone(),
-                choices: q0
-                    .options
-                    .iter()
-                    .enumerate()
-                    .map(|(i, o)| Choice {
-                        option_id: format!("o{}", i + 1),
-                        label: clean_display(&o.label, TITLE_CHARS),
-                        value: o.value.clone().unwrap_or_else(|| o.label.clone()),
-                    })
-                    .collect(),
-            };
             obs.kind = RequestKind::Question;
             obs.title = qs[0].header.clone().unwrap_or_else(|| "Question".into());
             obs.detail = qs[0].text.clone();
-            obs.options = qs[0].options.clone();
+            // Only a single single-select question can be answered.
+            if questions.len() == 1 && !q0.multi_select {
+                answer = TargetAnswer::Question {
+                    question_id: q0.id.clone(),
+                    choices: q0
+                        .options
+                        .iter()
+                        .enumerate()
+                        .map(|(i, o)| Choice {
+                            option_id: format!("o{}", i + 1),
+                            label: clean_display(&o.label, TITLE_CHARS),
+                            value: o.value.clone().unwrap_or_else(|| o.label.clone()),
+                        })
+                        .collect(),
+                };
+                obs.options = qs[0].options.clone();
+                obs.answer_path = AnswerPath::T3;
+            }
             obs.questions = Some(qs);
-            obs.answer_path = AnswerPath::T3;
         }
         _ => {}
     }
