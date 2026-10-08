@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::io;
 use std::os::unix::fs::FileTypeExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +10,7 @@ use std::time::Duration;
 
 use acd_core::Core;
 use acd_protocol::{Source, SourceState, SourceStatus};
+use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 
@@ -78,11 +78,15 @@ fn session_sockets(dir: &Path) -> Vec<PathBuf> {
     socks
 }
 
-/// The path is a socket and accepts a connection.
-pub fn is_live(path: &Path) -> bool {
+/// The path is a socket and accepts a connection within `LIVE_TIMEOUT`.
+/// The connect is async, so a hung herdr leaves no blocked thread behind.
+pub async fn is_live(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
         && std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket())
-        && UnixStream::connect(path).is_ok()
+        && matches!(
+            timeout(LIVE_TIMEOUT, UnixStream::connect(path)).await,
+            Ok(Ok(_))
+        )
 }
 
 pub fn aggregate(healths: &[(PathBuf, Health)]) -> SourceStatus {
@@ -143,20 +147,7 @@ pub fn spawn(d: Discovery, core: Arc<Core>, panes: Arc<PaneMap>) -> JoinHandle<(
 async fn live_set(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let probes: Vec<_> = paths
         .into_iter()
-        .map(|p| {
-            tokio::spawn(async move {
-                let q = p.clone();
-                let live = matches!(
-                    timeout(
-                        LIVE_TIMEOUT,
-                        tokio::task::spawn_blocking(move || is_live(&q))
-                    )
-                    .await,
-                    Ok(Ok(true))
-                );
-                live.then_some(p)
-            })
-        })
+        .map(|p| tokio::spawn(async move { is_live(&p).await.then_some(p) }))
         .collect();
     let mut live = Vec::new();
     for probe in probes {
@@ -272,6 +263,24 @@ mod tests {
             &[PathBuf::from("/x.sock")],
         );
         assert_eq!(c, vec![PathBuf::from("/e.sock"), PathBuf::from("/x.sock")]);
+    }
+
+    #[tokio::test]
+    async fn only_a_listening_socket_is_live() {
+        let dir = tempfile::Builder::new()
+            .prefix("acd")
+            .tempdir_in("/tmp")
+            .unwrap(); // macOS socket path limit
+        let live = dir.path().join("live.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&live).unwrap();
+        assert!(is_live(&live).await);
+        let stale = dir.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        assert!(!is_live(&stale).await, "no listener");
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(!is_live(&file).await);
+        assert!(!is_live(&dir.path().join("missing")).await);
     }
 
     #[test]
