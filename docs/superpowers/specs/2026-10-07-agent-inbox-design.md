@@ -810,9 +810,10 @@ rules.
 
 **Ownership.** The provider session id is
 `providerThreads[].nativeThreadRef.nativeId` of the provider thread whose
-id equals `thread.activeProviderThreadId`. acd publishes it once a
-synchronized thread stream shows the shell and the thread detail naming
-the same active provider thread. It removes it only on identity evidence:
+id equals `thread.activeProviderThreadId`. acd publishes it as soon as
+the shell and the thread detail (a snapshot or a live event) name the
+same active provider thread and the native id is set, without waiting for
+the stream's `synchronized` marker. It removes it only on identity evidence:
 another active provider thread, a null or different native id, or the
 thread's removal. A stalled stream is not evidence. It
 equals the Claude Code
