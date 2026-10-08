@@ -1,20 +1,26 @@
 //! Per-socket reconciler (spec §6.4 Sync): keeps the registry in step with
 //! one herdr socket. One task makes every `agent.list` / `agent.get` call,
 //! one at a time, so results apply in the order they were issued.
+//!
+//! Its screen poll also runs the keys target watch (spec §5.1): every
+//! registered keys target on this socket's panes is observed until its
+//! dialog is confirmed gone, sharing one detection read per pane per poll.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use acd_core::{AgentObs, Core, CorrelationKey, Observation, RequestObs};
-use acd_protocol::{AgentKind, AgentState, AnswerPath, RequestKind};
+use acd_protocol::{AgentKind, AgentState, AnswerPath, RequestKind, RequestStatus, ResolvedBy};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until};
 
-use super::client::{CallError, Herdr, Subscription};
+use super::client::{CALL_TIMEOUT, CallError, Herdr, ScreenRead, Subscription};
 use super::fallback::{self, Fallback, FbOut};
+use super::keys::{ABSENT_READS, KeysTargets};
 use super::map;
+use super::screen::guard_fingerprint;
 use super::wire::{AgentInfo, Event};
 
 const HINT_CAPACITY: usize = 256;
@@ -81,6 +87,7 @@ pub struct ReconcilerHandle {
     task: JoinHandle<HashMap<String, AgentKind>>,
     core: Arc<Core>,
     panes: Arc<PaneMap>,
+    keys: Arc<KeysTargets>,
     hash: String,
 }
 
@@ -134,6 +141,7 @@ impl ReconcilerHandle {
             }
         };
         for agent_id in ids {
+            self.keys.remove_agent(&agent_id);
             self.core.observe(Observation::AgentGone { agent_id });
         }
     }
@@ -144,6 +152,7 @@ pub fn spawn(
     core: Arc<Core>,
     panes: Arc<PaneMap>,
     timing: Timing,
+    keys: Arc<KeysTargets>,
 ) -> ReconcilerHandle {
     let (hints_tx, hint_rx) = mpsc::channel(HINT_CAPACITY);
     let (down_tx, down_rx) = mpsc::unbounded_channel();
@@ -176,6 +185,8 @@ pub fn spawn(
         next_poll: Instant::now(),
         fallback: Fallback::new(timing_after),
         fb_open: HashMap::new(),
+        keys: keys.clone(),
+        watch_absent: HashMap::new(),
         next_class: Class::Hint,
         last_list: Instant::now(),
     };
@@ -186,6 +197,7 @@ pub fn spawn(
         task: tokio::spawn(reconciler.run()),
         core,
         panes,
+        keys,
         hash,
     }
 }
@@ -256,6 +268,9 @@ struct Reconciler {
     fallback: Fallback,
     /// Pane -> (key, request id) of the fallback request this task opened.
     fb_open: HashMap<String, (CorrelationKey, String)>,
+    keys: Arc<KeysTargets>,
+    /// Request id -> consecutive detection reads without its dialog.
+    watch_absent: HashMap<String, u8>,
     next_class: Class,
     last_list: Instant,
 }
@@ -517,19 +532,52 @@ impl Reconciler {
         }
     }
 
-    /// Every `poll`, queues the panes the fallback wants read, skipping any
-    /// already queued.
+    /// Every `poll`, queues the panes the fallback wants read and the panes
+    /// with keys targets, skipping any already queued.
     fn enqueue_due(&mut self) {
         let now = Instant::now();
         if now < self.next_poll {
             return;
         }
         self.next_poll = now + self.timing.poll;
-        for pane_id in self.fallback.due(now.into_std()) {
+        let mut due = self.fallback.due(now.into_std());
+        due.extend(self.target_panes());
+        for pane_id in due {
             if self.known.contains_key(&pane_id) && !self.poll_queue.contains(&pane_id) {
                 self.poll_queue.push_back(pane_id);
             }
         }
+    }
+
+    /// Known panes of this socket with keys targets. Drops targets of this
+    /// socket whose pane is gone, and watch counts of removed targets.
+    fn target_panes(&mut self) -> Vec<String> {
+        let prefix = format!("herdr:{}:", self.hash);
+        let by_agent: HashMap<String, &String> = self
+            .known
+            .keys()
+            .map(|p| (map::agent_id(&self.hash, p), p))
+            .collect();
+        let mut panes = Vec::new();
+        let mut live = HashSet::new();
+        for t in self.keys.all() {
+            if !t.agent_id.starts_with(&prefix) {
+                continue;
+            }
+            match by_agent.get(&t.agent_id) {
+                Some(p) => {
+                    live.insert(t.request_id);
+                    if !panes.contains(*p) {
+                        panes.push((*p).clone());
+                    }
+                }
+                None => {
+                    self.keys.remove(&t.request_id);
+                }
+            }
+        }
+        self.watch_absent.retain(|rid, _| live.contains(rid));
+        panes
     }
 
     /// One `agent.read source=detection` for the front of the poll queue.
@@ -540,9 +588,14 @@ impl Reconciler {
         if !self.known.contains_key(&pane_id) {
             return Ok(());
         }
-        match self.herdr.read(&pane_id, "detection", None).await {
-            Ok(text) => {
-                self.apply_read(&pane_id, &text);
+        let read = self
+            .herdr
+            .read_screen(&pane_id, "detection", None, Instant::now() + CALL_TIMEOUT)
+            .await;
+        match read {
+            Ok(read) => {
+                self.apply_read(&pane_id, &read.text);
+                self.watch_targets(&pane_id, &read);
                 Ok(())
             }
             Err(e) if is_server(&e) => {
@@ -603,6 +656,53 @@ impl Reconciler {
                     }
                 }
             }
+        }
+    }
+
+    /// The keys target watch (spec §5.1), on this pane's shared read. A
+    /// target is handled by its request's state: `Open` is terminal-first,
+    /// `Answering` belongs to the confirmation task, and a resolved request
+    /// is monitored. Two consecutive absent reads confirm the dialog gone.
+    fn watch_targets(&mut self, pane_id: &str, read: &ScreenRead) {
+        let agent_id = map::agent_id(&self.hash, pane_id);
+        let targets = self.keys.for_agent(&agent_id);
+        if targets.is_empty() {
+            return;
+        }
+        let fingerprint = guard_fingerprint(&read.text);
+        for t in targets {
+            let status = self.core.request(&t.request_id).map(|r| r.status);
+            if status == Some(RequestStatus::Answering) {
+                self.watch_absent.remove(&t.request_id);
+                continue;
+            }
+            // A truncated read is neither present nor absent.
+            if read.truncated {
+                continue;
+            }
+            let absent = self.watch_absent.entry(t.request_id.clone()).or_default();
+            if fingerprint.as_ref() == Some(&t.fingerprint) {
+                *absent = 0;
+                continue;
+            }
+            *absent += 1;
+            if *absent < ABSENT_READS {
+                continue;
+            }
+            self.watch_absent.remove(&t.request_id);
+            // Removed before the resolution is published.
+            self.keys.remove(&t.request_id);
+            self.core.observe(Observation::DialogGoneById {
+                request_id: t.request_id.clone(),
+            });
+            if status == Some(RequestStatus::Open) {
+                // Ended without any acd delivery.
+                self.core.observe(Observation::RequestEndedById {
+                    request_id: t.request_id,
+                    by: ResolvedBy::Terminal,
+                });
+            }
+            self.mark_dirty(pane_id.to_owned());
         }
     }
 
@@ -686,6 +786,7 @@ impl Reconciler {
             None => {
                 self.fallback.forget(pane_id);
                 self.fb_open.remove(pane_id);
+                self.keys.remove_agent(&agent_id);
                 if self.known.remove(pane_id).is_some() {
                     self.subs_changed = true;
                     self.blocked.remove(pane_id);

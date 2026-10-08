@@ -46,7 +46,13 @@ async fn rig_with(fake: FakeHerdr, timing: Timing) -> Rig {
     let panes = Arc::new(PaneMap::default());
     let herdr = Herdr::new(fake.path().to_path_buf());
     let hash = map::socket_hash(fake.path());
-    let handle = spawn(herdr, core.clone(), panes.clone(), timing);
+    let handle = spawn(
+        herdr,
+        core.clone(),
+        panes.clone(),
+        timing,
+        Default::default(),
+    );
     Rig {
         fake,
         core,
@@ -638,6 +644,7 @@ async fn discovery_finds_sessions_and_reports_status() {
         extra: vec![],
         interval: Duration::from_millis(100),
         timing: fast(),
+        keys: Default::default(),
     };
     let _task = acd_adapters::herdr::discovery::spawn(d, core.clone(), panes.clone());
     until("agent", || (panes.read().unwrap().len() == 1).then_some(())).await;
@@ -662,6 +669,7 @@ async fn socket_missing_twice_removes_its_agents() {
         extra: vec![],
         interval: Duration::from_millis(150),
         timing: fast(),
+        keys: Default::default(),
     };
     let _task = acd_adapters::herdr::discovery::spawn(d, core.clone(), panes.clone());
     let id = until("agent", || panes.read().unwrap().keys().next().cloned()).await;

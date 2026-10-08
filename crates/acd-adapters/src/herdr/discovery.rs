@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 
 use super::client::Herdr;
+use super::keys::KeysTargets;
 use super::reconciler::{self, Health, PaneMap, ReconcilerHandle, Timing};
 
 const LIVE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -28,6 +29,7 @@ pub struct Discovery {
     pub extra: Vec<PathBuf>,
     pub interval: Duration,
     pub timing: Timing,
+    pub keys: Arc<KeysTargets>,
 }
 
 /// Candidate sockets in priority order, canonicalized when possible and
@@ -188,6 +190,7 @@ async fn scan(
                     core.clone(),
                     panes.clone(),
                     d.timing.clone(),
+                    d.keys.clone(),
                 );
                 known.insert(path.clone(), Known { handle, missed: 0 });
             }

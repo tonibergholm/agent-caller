@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 type KeysHook = Arc<dyn Fn(&FakeHerdr, &str, &[String]) + Send + Sync>;
@@ -20,6 +21,32 @@ enum Hook {
     Hang,
     /// Reply with an error and apply nothing.
     Fail(String),
+}
+
+/// Server side of a `Gate`.
+struct Held {
+    arrived: watch::Sender<bool>,
+    release: oneshot::Receiver<()>,
+}
+
+/// Holds one call after its request line is read, before any side effect
+/// and before the reply (see `FakeHerdr::block_next`).
+pub struct Gate {
+    arrived: watch::Receiver<bool>,
+    release: oneshot::Sender<()>,
+}
+
+impl Gate {
+    /// Resolves once the call is held.
+    pub async fn arrived(&self) {
+        let mut rx = self.arrived.clone();
+        let _ = rx.wait_for(|held| *held).await;
+    }
+
+    /// Lets the held call proceed. Dropping the gate does the same.
+    pub fn release(self) {
+        let _ = self.release.send(());
+    }
 }
 
 struct Subscriber {
@@ -33,6 +60,9 @@ struct State {
     agents: Vec<Value>,
     screens: HashMap<(String, String), String>,
     hooks: HashMap<String, VecDeque<Hook>>,
+    gates: HashMap<String, VecDeque<Held>>,
+    delays: HashMap<String, VecDeque<Duration>>,
+    truncated: HashSet<(String, String)>,
     on_keys: Option<KeysHook>,
     subscribers: Vec<Subscriber>,
     calls: Vec<(tokio::time::Instant, String, Value)>,
@@ -194,6 +224,48 @@ impl FakeHerdr {
             .insert((pane_id.to_owned(), source.to_owned()), text.to_owned());
     }
 
+    /// `agent.read` of this pane and source reports `truncated: value`.
+    pub fn set_truncated(&self, pane_id: &str, source: &str, value: bool) {
+        let key = (pane_id.to_owned(), source.to_owned());
+        let mut st = self.st();
+        if value {
+            st.truncated.insert(key);
+        } else {
+            st.truncated.remove(&key);
+        }
+    }
+
+    /// The next `method` request is held after its line is read, before any
+    /// side effect and before the reply, until the gate is released. A
+    /// `fail_next` for the same method still applies on release. If the
+    /// client drops the connection while the call is held, it is discarded.
+    pub fn block_next(&self, method: &str) -> Gate {
+        let (arrived_tx, arrived_rx) = watch::channel(false);
+        let (release_tx, release_rx) = oneshot::channel();
+        self.st()
+            .gates
+            .entry(method.to_owned())
+            .or_default()
+            .push_back(Held {
+                arrived: arrived_tx,
+                release: release_rx,
+            });
+        Gate {
+            arrived: arrived_rx,
+            release: release_tx,
+        }
+    }
+
+    /// The next `method` request takes effect at once (keys are recorded,
+    /// `on_keys` runs), but its reply is sent only after `d`.
+    pub fn delay_next(&self, method: &str, d: Duration) {
+        self.st()
+            .delays
+            .entry(method.to_owned())
+            .or_default()
+            .push_back(d);
+    }
+
     /// Runs on `agent.send_keys` (after recording), outside the state lock.
     pub fn on_keys(&self, f: impl Fn(&FakeHerdr, &str, &[String]) + Send + Sync + 'static) {
         self.st().on_keys = Some(Arc::new(f));
@@ -338,7 +410,7 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
     let method = req["method"].as_str().unwrap_or("").to_owned();
     let params = req["params"].clone();
 
-    let hook = {
+    let gate = {
         let mut st = shared.state.lock().expect("fake state");
         st.calls
             .push((tokio::time::Instant::now(), method.clone(), params.clone()));
@@ -346,7 +418,29 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
             st.in_flight += 1;
             st.max_in_flight = st.max_in_flight.max(st.in_flight);
         }
-        st.hooks.get_mut(&method).and_then(VecDeque::pop_front)
+        st.gates.get_mut(&method).and_then(VecDeque::pop_front)
+    };
+    if let Some(held) = gate {
+        let _ = held.arrived.send(true);
+        let mut sink = String::new();
+        let released = tokio::select! {
+            _ = held.release => true,
+            // EOF (or anything else) from the client while held: discard.
+            _ = r.read_line(&mut sink) => false,
+        };
+        if !released {
+            if tracked(&method) {
+                shared.state.lock().expect("fake state").in_flight -= 1;
+            }
+            return;
+        }
+    }
+    let (hook, delay) = {
+        let mut st = shared.state.lock().expect("fake state");
+        (
+            st.hooks.get_mut(&method).and_then(VecDeque::pop_front),
+            st.delays.get_mut(&method).and_then(VecDeque::pop_front),
+        )
     };
     let outcome = match hook {
         Some(Hook::Fail(code)) => Outcome::Error(code, "injected failure".into()),
@@ -375,6 +469,9 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
         ),
         Outcome::Subscribed(result, rx) => (json!({"id": id, "result": result}), Some(rx)),
     };
+    if let Some(d) = delay {
+        tokio::time::sleep(d).await;
+    }
     let mut bytes = frame.to_string().into_bytes();
     bytes.push(b'\n');
     let written = w.write_all(&bytes).await;
@@ -433,14 +530,12 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
                         let Some(source) = params["source"].as_str() else {
                             return err("invalid_request", "missing field `source`");
                         };
-                        let text = st
-                            .screens
-                            .get(&(t.to_owned(), source.to_owned()))
-                            .cloned()
-                            .unwrap_or_default();
+                        let key = (t.to_owned(), source.to_owned());
+                        let text = st.screens.get(&key).cloned().unwrap_or_default();
+                        let truncated = st.truncated.contains(&key);
                         Outcome::Reply(json!({"type": "pane_read", "read": {
                             "pane_id": t, "workspace_id": "w1", "tab_id": "w1:t1", "source": source,
-                            "format": "text", "text": text, "revision": 0, "truncated": false,
+                            "format": "text", "text": text, "revision": 0, "truncated": truncated,
                         }}))
                     }
                     "agent.prompt" => {

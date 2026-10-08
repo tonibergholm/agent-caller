@@ -288,3 +288,62 @@ async fn read_omits_lines_when_none() {
     h.read("w1:p2", "detection", Some(5)).await.unwrap();
     assert_eq!(fake.calls().last().unwrap().1["lines"], 5);
 }
+
+#[tokio::test]
+async fn read_screen_reports_truncated() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p2", "claude", "idle"));
+    fake.set_screen("w1:p2", "detection", "hello");
+    let h = Herdr::new(fake.path().to_path_buf());
+    let by = || tokio::time::Instant::now() + CALL_TIMEOUT;
+    let r = h
+        .read_screen("w1:p2", "detection", None, by())
+        .await
+        .unwrap();
+    assert_eq!((r.text.as_str(), r.truncated), ("hello", false));
+    fake.set_truncated("w1:p2", "detection", true);
+    assert!(
+        h.read_screen("w1:p2", "detection", None, by())
+            .await
+            .unwrap()
+            .truncated
+    );
+    assert!(
+        !h.read_screen("w1:p2", "visible", None, by())
+            .await
+            .unwrap()
+            .truncated
+    );
+}
+
+#[tokio::test]
+async fn read_screen_without_truncated_flag_counts_as_truncated() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    tokio::spawn(async move {
+        let (s, _) = listener.accept().await.unwrap();
+        let (r, mut w) = s.into_split();
+        let mut line = String::new();
+        BufReader::new(r).read_line(&mut line).await.unwrap();
+        let id = serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"].clone();
+        let reply =
+            serde_json::json!({"id": id, "result": {"type": "pane_read", "read": {"text": "hi"}}});
+        w.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+    });
+    let h = Herdr::new(path);
+    let r = h
+        .read_screen(
+            "p",
+            "detection",
+            None,
+            tokio::time::Instant::now() + CALL_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert!(
+        r.truncated,
+        "a reply that does not say it is complete fails closed"
+    );
+}

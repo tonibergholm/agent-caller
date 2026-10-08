@@ -1,0 +1,7 @@
+{
+ "id": "1",
+ "error": {
+  "code": "invalid_key",
+  "message": "unsupported key bogus"
+ }
+}

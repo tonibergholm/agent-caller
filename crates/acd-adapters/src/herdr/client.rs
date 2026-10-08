@@ -72,6 +72,14 @@ pub struct Herdr {
     path: PathBuf,
 }
 
+/// One `agent.read` reply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenRead {
+    pub text: String,
+    /// herdr cut the text short; it is not the whole screen.
+    pub truncated: bool,
+}
+
 /// An open connection; nothing has been sent yet.
 pub struct Connected {
     r: BufReader<OwnedReadHalf>,
@@ -174,15 +182,33 @@ impl Herdr {
         source: &str,
         lines: Option<u32>,
     ) -> Result<String, CallError> {
+        self.read_screen(pane_id, source, lines, Instant::now() + CALL_TIMEOUT)
+            .await
+            .map(|r| r.text)
+    }
+
+    /// `agent.read` with `strip_ansi: true`, by `deadline`. A reply without
+    /// a `truncated` flag counts as truncated, so a screen guard fails closed.
+    pub async fn read_screen(
+        &self,
+        pane_id: &str,
+        source: &str,
+        lines: Option<u32>,
+        deadline: Instant,
+    ) -> Result<ScreenRead, CallError> {
         let mut params = json!({"target": pane_id, "source": source, "strip_ansi": true});
         if let Some(n) = lines {
             params["lines"] = json!(n);
         }
-        let v = self.call("agent.read", params).await?;
-        v["read"]["text"]
+        let v = self.call_until("agent.read", params, deadline).await?;
+        let text = v["read"]["text"]
             .as_str()
             .map(str::to_owned)
-            .ok_or_else(|| CallError::NoReply("read reply has no text".into()))
+            .ok_or_else(|| CallError::NoReply("read reply has no text".into()))?;
+        Ok(ScreenRead {
+            text,
+            truncated: v["read"]["truncated"].as_bool().unwrap_or(true),
+        })
     }
 
     pub async fn prompt(&self, pane_id: &str, text: &str) -> Result<(), CallError> {
@@ -193,7 +219,8 @@ impl Herdr {
         expect_type(&v, "agent_prompted")
     }
 
-    /// Only the keys engine (Task 9) may call this.
+    /// Not used by acd: the keys engine (`keys.rs`) writes `agent.send_keys`
+    /// itself, in stages, and is the only sender.
     pub async fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<(), CallError> {
         tracing::debug!(pane_id, count = keys.len(), "herdr agent.send_keys");
         let v = self

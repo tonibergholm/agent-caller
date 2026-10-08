@@ -4,6 +4,7 @@ pub mod discovery;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 pub mod fallback;
+pub mod keys;
 pub mod map;
 pub mod reconciler;
 pub mod screen;
@@ -19,6 +20,7 @@ use async_trait::async_trait;
 
 use self::client::CallError;
 use self::discovery::Discovery;
+use self::keys::{Engine, Evidence, KeysTargets, KeysTiming};
 use self::reconciler::{Hint, PaneMap, Timing};
 
 const SEND_DEADLINE: Duration = Duration::from_secs(10);
@@ -32,6 +34,7 @@ pub struct HerdrConfig {
     pub extra_sockets: Vec<PathBuf>,
     pub scan_interval: Duration,
     pub timing: Timing,
+    pub keys: KeysTiming,
 }
 
 impl HerdrConfig {
@@ -55,6 +58,7 @@ impl HerdrConfig {
             extra_sockets,
             scan_interval: SCAN_INTERVAL,
             timing: Timing::default(),
+            keys: KeysTiming::default(),
         }
     }
 }
@@ -62,13 +66,15 @@ impl HerdrConfig {
 pub struct HerdrAdapter {
     cfg: HerdrConfig,
     panes: Arc<PaneMap>,
-    /// Kept for the keys engine (Task 9).
+    keys: Engine,
+    /// Held weakly: the core owns the adapter.
     core: Mutex<Weak<Core>>,
 }
 
 impl HerdrAdapter {
     pub fn new(cfg: HerdrConfig) -> Arc<HerdrAdapter> {
         Arc::new(HerdrAdapter {
+            keys: Engine::new(cfg.keys.clone()),
             cfg,
             panes: Arc::default(),
             core: Mutex::new(Weak::new()),
@@ -95,6 +101,7 @@ impl HerdrAdapter {
                 extra: self.cfg.extra_sockets.clone(),
                 interval: self.cfg.scan_interval,
                 timing: self.cfg.timing.clone(),
+                keys: self.keys.targets(),
             },
             core,
             self.panes.clone(),
@@ -103,6 +110,16 @@ impl HerdrAdapter {
 
     pub fn panes(&self) -> Arc<PaneMap> {
         self.panes.clone()
+    }
+
+    /// Where P3 registers keys-answerable occurrences.
+    pub fn keys_targets(&self) -> Arc<KeysTargets> {
+        self.keys.targets()
+    }
+
+    /// Replaces the default `NoEvidence`.
+    pub fn set_evidence(&self, e: Arc<dyn Evidence>) {
+        self.keys.set_evidence(e);
     }
 }
 
@@ -127,15 +144,16 @@ impl Adapter for HerdrAdapter {
     }
 
     fn answer_paths(&self) -> &[AnswerPath] {
-        &[]
+        &[AnswerPath::Keys]
     }
 
     fn sources(&self) -> &[Source] {
         &[Source::Herdr]
     }
 
-    async fn deliver(&self, _request: &Request, _answer: &Answer) -> Result<(), DeliverError> {
-        Err(DeliverError::NotDelivered(ErrorCode::NotSupported))
+    async fn deliver(&self, request: &Request, answer: &Answer) -> Result<(), DeliverError> {
+        let core = self.core.lock().expect("core slot").clone();
+        self.keys.deliver(core, &self.panes, request, answer).await
     }
 
     async fn send(&self, agent: &Agent, text: &str) -> Result<(), DeliverError> {
