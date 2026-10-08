@@ -35,7 +35,9 @@ struct State {
     hooks: HashMap<String, VecDeque<Hook>>,
     on_keys: Option<KeysHook>,
     subscribers: Vec<Subscriber>,
-    calls: Vec<(String, Value)>,
+    calls: Vec<(tokio::time::Instant, String, Value)>,
+    in_flight: usize,
+    max_in_flight: usize,
     prompts: Vec<(String, String)>,
     keys_sent: Vec<(String, Vec<String>)>,
     subscriptions: Vec<Vec<String>>,
@@ -51,13 +53,18 @@ struct Shared {
 
 /// Owns the socket directory and the accept loop; dropping it stops both.
 struct Owner {
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
+    /// Set by `start_at`, which reuses a directory it does not own.
+    cleanup: Option<PathBuf>,
     task: JoinHandle<()>,
 }
 
 impl Drop for Owner {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(path) = &self.cleanup {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -103,8 +110,52 @@ impl FakeHerdr {
         let task = tokio::spawn(accept_loop(listener, shared.clone()));
         FakeHerdr {
             shared,
-            owner: Some(Arc::new(Owner { _dir: dir, task })),
+            owner: Some(Arc::new(Owner {
+                _dir: Some(dir),
+                cleanup: None,
+                task,
+            })),
         }
+    }
+
+    /// A fresh server on an existing socket path, for a herdr restart. The
+    /// previous server must be stopped; its state is not carried over.
+    pub async fn start_at(path: &Path) -> FakeHerdr {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).expect("socket dir");
+        }
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(path).expect("rebind fake herdr socket");
+        let shared = Arc::new(Shared {
+            path: path.to_path_buf(),
+            version: "0.9.3".to_owned(),
+            protocol: 22,
+            state: Mutex::new(State::default()),
+        });
+        let task = tokio::spawn(accept_loop(listener, shared.clone()));
+        FakeHerdr {
+            shared,
+            owner: Some(Arc::new(Owner {
+                _dir: None,
+                cleanup: Some(path.to_path_buf()),
+                task,
+            })),
+        }
+    }
+
+    /// A second handle to the same server state, for helper tasks. It does
+    /// not keep the server alive.
+    pub fn clone_handle(&self) -> FakeHerdr {
+        FakeHerdr {
+            shared: self.shared.clone(),
+            owner: None,
+        }
+    }
+
+    /// The most `agent.list`, `agent.get` and `agent.read` requests that were
+    /// being served at once.
+    pub fn max_in_flight(&self) -> usize {
+        self.st().max_in_flight
     }
 
     fn st(&self) -> MutexGuard<'_, State> {
@@ -196,6 +247,15 @@ impl FakeHerdr {
 
     /// Every request: `(method, params)`.
     pub fn calls(&self) -> Vec<(String, Value)> {
+        self.st()
+            .calls
+            .iter()
+            .map(|(_, m, p)| (m.clone(), p.clone()))
+            .collect()
+    }
+
+    /// Like `calls`, with the arrival time of each request.
+    pub fn calls_timed(&self) -> Vec<(tokio::time::Instant, String, Value)> {
         self.st().calls.clone()
     }
 
@@ -251,6 +311,10 @@ async fn accept_loop(listener: UnixListener, shared: Arc<Shared>) {
     }
 }
 
+fn tracked(method: &str) -> bool {
+    matches!(method, "agent.list" | "agent.get" | "agent.read")
+}
+
 enum Outcome {
     Reply(Value),
     Error(String, String),
@@ -276,7 +340,12 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
 
     let hook = {
         let mut st = shared.state.lock().expect("fake state");
-        st.calls.push((method.clone(), params.clone()));
+        st.calls
+            .push((tokio::time::Instant::now(), method.clone(), params.clone()));
+        if tracked(&method) {
+            st.in_flight += 1;
+            st.max_in_flight = st.max_in_flight.max(st.in_flight);
+        }
         st.hooks.get_mut(&method).and_then(VecDeque::pop_front)
     };
     let outcome = match hook {
@@ -288,6 +357,9 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
                 let mut sink = String::new();
                 while matches!(r.read_line(&mut sink).await, Ok(n) if n > 0) {
                     sink.clear();
+                }
+                if tracked(&method) {
+                    shared.state.lock().expect("fake state").in_flight -= 1;
                 }
                 return;
             }
@@ -305,7 +377,11 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
     };
     let mut bytes = frame.to_string().into_bytes();
     bytes.push(b'\n');
-    if w.write_all(&bytes).await.is_err() {
+    let written = w.write_all(&bytes).await;
+    if tracked(&method) {
+        shared.state.lock().expect("fake state").in_flight -= 1;
+    }
+    if written.is_err() {
         return;
     }
 

@@ -3,5 +3,6 @@ pub mod client;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 pub mod map;
+pub mod reconciler;
 pub mod screen;
 pub mod wire;
