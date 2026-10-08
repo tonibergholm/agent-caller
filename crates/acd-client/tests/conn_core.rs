@@ -319,6 +319,7 @@ async fn offline_submission_does_not_shorten_retry_delay() {
         matches!(s.status, MachineStatus::Offline { .. })
     })
     .await;
+    let offline_at = tokio::time::Instant::now();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap();
@@ -332,16 +333,17 @@ async fn offline_submission_does_not_shorten_retry_delay() {
         )
         .await;
     assert!(matches!(outcome, acd_client::commands::Outcome::NotSent(_)));
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_ne!(
-        rx.borrow().status,
-        MachineStatus::Online,
-        "listener was available throughout the original retry interval"
-    );
     wait_for(&mut rx, "scheduled retry connects", |s| {
         s.status == MachineStatus::Online
     })
     .await;
+    // The listener was up the whole time, so only the 400 ms backoff can
+    // delay the reconnect; a Submit that cut the wait short connects sooner.
+    assert!(
+        offline_at.elapsed() >= Duration::from_millis(350),
+        "reconnected after {:?}, before the scheduled retry",
+        offline_at.elapsed()
+    );
 }
 
 #[tokio::test]
