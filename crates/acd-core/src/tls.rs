@@ -1,4 +1,3 @@
-use futures_util::task::AtomicWaker;
 use rustls_pki_types::pem::PemObject;
 
 use axum::{
@@ -253,22 +252,23 @@ impl Admit {
 #[derive(Clone)]
 pub struct KillSwitch {
     tx: watch::Sender<bool>,
-    waker: Arc<AtomicWaker>,
 }
 impl KillSwitch {
+    /// Kill active connections. If all senders are dropped without calling this,
+    /// receivers observe channel closure and keep their streams open.
     pub fn kill(&self) {
         self.tx.send_replace(true);
-        self.waker.wake();
     }
 }
+
+type KillFuture = Pin<Box<dyn Future<Output = Result<(), watch::error::RecvError>> + Send>>;
 
 pub struct TlsIo {
     stream: TlsStream<TcpStream>,
     admit: Admit,
     deadline: Instant,
     sleep: Pin<Box<Sleep>>,
-    killed: watch::Receiver<bool>,
-    kill_waker: Arc<AtomicWaker>,
+    killed: Option<KillFuture>,
 }
 impl TlsIo {
     fn new(
@@ -276,25 +276,34 @@ impl TlsIo {
         admit: Admit,
         deadline: Instant,
         killed: watch::Receiver<bool>,
-        kill_waker: Arc<AtomicWaker>,
     ) -> Self {
+        let killed = Box::pin(async move {
+            let mut killed = killed;
+            killed.wait_for(|k| *k).await.map(|_| ())
+        });
         Self {
             stream,
             admit,
             deadline,
             sleep: Box::pin(tokio::time::sleep_until(deadline)),
-            killed,
-            kill_waker,
+            killed: Some(killed),
         }
     }
     pub fn admit(&self) -> Admit {
         self.admit.clone()
     }
     fn ended(&mut self, cx: &mut Context<'_>) -> bool {
-        self.kill_waker.register(cx.waker());
-        if *self.killed.borrow()
-            || (!self.admit.is_authenticated() && Instant::now() >= self.deadline)
-        {
+        if let Some(killed) = &mut self.killed {
+            match killed.as_mut().poll(cx) {
+                Poll::Ready(Ok(())) => {
+                    self.killed = None;
+                    return true;
+                }
+                Poll::Ready(Err(_)) => self.killed = None,
+                Poll::Pending => {}
+            }
+        }
+        if !self.admit.is_authenticated() && Instant::now() >= self.deadline {
             return true;
         }
         if !self.admit.is_authenticated() && self.sleep.as_mut().poll(cx).is_ready() {
@@ -366,11 +375,7 @@ impl TlsListener {
         let local = tcp.local_addr().expect("bound TCP listener");
         let (tx, rx) = mpsc::channel(16);
         let (kill_tx, _) = watch::channel(false);
-        let kill_waker = Arc::new(AtomicWaker::new());
-        let kill = KillSwitch {
-            tx: kill_tx,
-            waker: kill_waker.clone(),
-        };
+        let kill = KillSwitch { tx: kill_tx };
         let kill_rx = kill.tx.subscribe();
         let task = tokio::spawn(async move {
             let mut handshakes = JoinSet::new();
@@ -391,11 +396,10 @@ impl TlsListener {
                         let acceptor = TlsAcceptor::from(config.borrow_and_update().clone());
                         let tx = tx.clone();
                         let kill = kill_rx.clone();
-                        let kill_waker = kill_waker.clone();
                         let timeout = limits.handshake;
                         handshakes.spawn(async move {
                             let Ok(Ok(tls)) = tokio::time::timeout(timeout, acceptor.accept(stream)).await else { return };
-                            let io = TlsIo::new(tls, admit, deadline, kill, kill_waker);
+                            let io = TlsIo::new(tls, admit, deadline, kill);
                             let _ = tx.send((io, addr)).await;
                         });
                     }

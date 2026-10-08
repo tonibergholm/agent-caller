@@ -122,16 +122,31 @@ async fn killing_listener_wakes_an_authenticated_parked_read() {
         }
     }).await.expect("welcome received");
 
-    let (mut sink, mut stream) = ws.split();
-    let read = tokio::spawn(async move { stream.next().await });
-    tokio::task::yield_now().await;
+    let mut clients = vec![ws];
+    for _ in 0..2 {
+        clients.push(authenticate_ok(s.port).await);
+    }
+    let (parked_tx, mut parked_rx) = tokio::sync::mpsc::channel(clients.len());
+    let reads = clients
+        .into_iter()
+        .map(|ws| {
+            let (_sink, mut stream) = ws.split();
+            let parked_tx = parked_tx.clone();
+            tokio::spawn(async move {
+                parked_tx.send(()).await.unwrap();
+                stream.next().await
+            })
+        })
+        .collect::<Vec<_>>();
+    drop(parked_tx);
+    for _ in 0..reads.len() {
+        parked_rx.recv().await.unwrap();
+    }
     s.kill.kill();
-    let result = tokio::time::timeout(Duration::from_secs(1), read).await;
-    assert!(
-        result.is_ok(),
-        "parked read wakes when the TLS listener is killed"
-    );
-    let _ = sink.close().await;
+    for read in reads {
+        let result = tokio::time::timeout(Duration::from_secs(2), read).await;
+        assert!(result.is_ok(), "every parked read wakes when killed");
+    }
     s.task.abort();
 }
 
@@ -163,12 +178,21 @@ async fn completed_handshake_frees_capacity_under_continuous_accepts() {
             clients.push(tokio::spawn(tls_connect(port)));
             tokio::task::yield_now().await;
         }
-        tokio::time::timeout(Duration::from_secs(3), listener.accept()).await
+        let Ok(first) = tokio::time::timeout(Duration::from_secs(3), listener.accept()).await
+        else {
+            return false;
+        };
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(3), listener.accept()).await;
+        for client in clients {
+            client.abort();
+        }
+        second.is_ok()
     });
     let accepted = task.await.unwrap();
     assert!(
-        accepted.is_ok(),
-        "a completed handshake releases its bounded slot"
+        accepted,
+        "each completed handshake releases its bounded slot for the next connection"
     );
     kill.kill();
     drop(tx);
