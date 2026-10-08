@@ -154,6 +154,18 @@ mod tests {
                 degrade: Some(SCOPE)
             }
         );
+        let missing = Failure::Fail {
+            tag: DISPATCH_ERROR.into(),
+            message: "Runtime request rq-9 was not found.".into(),
+        };
+        assert_eq!(
+            classify(&Err(CallError::Failed(missing)), Some("rq-9")),
+            Outcome::NotDelivered {
+                code: ErrorCode::RequestGone,
+                end: Some(ResolvedBy::Lost),
+                degrade: None
+            }
+        );
         assert!(matches!(
             classify(&Err(CallError::NotConnected), None),
             Outcome::NotDelivered { .. }
