@@ -77,6 +77,10 @@ pub struct FakeServer {
     pin: String,
     ready_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<FakeConn>>,
     ready_tx: mpsc::UnboundedSender<FakeConn>,
+    hello_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<()>>,
+    hello_tx: mpsc::UnboundedSender<()>,
+    welcome_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<()>>,
+    welcome_tx: mpsc::UnboundedSender<()>,
     listener_tasks: Vec<tokio::task::JoinHandle<()>>,
     _unix_path: Option<PathBuf>,
 }
@@ -105,6 +109,8 @@ impl FakeServer {
             acceptor,
             server.shared.clone(),
             server.ready_tx.clone(),
+            server.hello_tx.clone(),
+            server.welcome_tx.clone(),
         )));
         server
     }
@@ -118,12 +124,16 @@ impl FakeServer {
             listener,
             server.shared.clone(),
             server.ready_tx.clone(),
+            server.hello_tx.clone(),
+            server.welcome_tx.clone(),
         )));
         server
     }
 
     fn new(token: &str, port: u16, pin: String, path: Option<PathBuf>) -> FakeServer {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (hello_tx, hello_rx) = mpsc::unbounded_channel();
+        let (welcome_tx, welcome_rx) = mpsc::unbounded_channel();
         let state = State {
             token: token.to_owned(),
             epoch: "e1".into(),
@@ -147,6 +157,10 @@ impl FakeServer {
             pin,
             ready_rx: tokio::sync::Mutex::new(rx),
             ready_tx: tx,
+            hello_rx: tokio::sync::Mutex::new(hello_rx),
+            hello_tx,
+            welcome_rx: tokio::sync::Mutex::new(welcome_rx),
+            welcome_tx,
             listener_tasks: Vec::new(),
             _unix_path: path,
         }
@@ -188,6 +202,18 @@ impl FakeServer {
             .expect("timed out waiting for fake connection")
             .expect("fake server stopped")
     }
+    pub async fn next_hello(&self) {
+        timeout(Duration::from_secs(5), self.hello_rx.lock().await.recv())
+            .await
+            .expect("timed out waiting for fake hello")
+            .expect("fake server stopped");
+    }
+    pub async fn next_welcome_release(&self) {
+        timeout(Duration::from_secs(5), self.welcome_rx.lock().await.recv())
+            .await
+            .expect("timed out waiting for fake welcome release")
+            .expect("fake server stopped");
+    }
     pub fn tls_accepts(&self) -> usize {
         self.shared.0.lock().unwrap().tls_accepts
     }
@@ -215,17 +241,28 @@ async fn accept_tcp(
     acceptor: tokio_rustls::TlsAcceptor,
     shared: Shared,
     ready: mpsc::UnboundedSender<FakeConn>,
+    hello: mpsc::UnboundedSender<()>,
+    welcome: mpsc::UnboundedSender<()>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let acceptor = acceptor.clone();
         let shared = shared.clone();
         let ready = ready.clone();
+        let hello = hello.clone();
+        let welcome = welcome.clone();
         tokio::spawn(async move {
             let Ok(stream) = acceptor.accept(stream).await else {
                 return;
             };
             shared.0.lock().unwrap().tls_accepts += 1;
-            serve_ws(tokio_tungstenite::accept_async(stream).await, shared, ready).await;
+            serve_ws(
+                tokio_tungstenite::accept_async(stream).await,
+                shared,
+                ready,
+                hello,
+                welcome,
+            )
+            .await;
         });
     }
 }
@@ -234,12 +271,23 @@ async fn accept_unix(
     listener: UnixListener,
     shared: Shared,
     ready: mpsc::UnboundedSender<FakeConn>,
+    hello: mpsc::UnboundedSender<()>,
+    welcome: mpsc::UnboundedSender<()>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let shared = shared.clone();
         let ready = ready.clone();
+        let hello = hello.clone();
+        let welcome = welcome.clone();
         tokio::spawn(async move {
-            serve_ws(tokio_tungstenite::accept_async(stream).await, shared, ready).await;
+            serve_ws(
+                tokio_tungstenite::accept_async(stream).await,
+                shared,
+                ready,
+                hello,
+                welcome,
+            )
+            .await;
         });
     }
 }
@@ -248,6 +296,8 @@ async fn serve_ws<S>(
     ws: Result<WebSocketStream<S>, tokio_tungstenite::tungstenite::Error>,
     shared: Shared,
     ready: mpsc::UnboundedSender<FakeConn>,
+    hello_tx: mpsc::UnboundedSender<()>,
+    welcome_tx: mpsc::UnboundedSender<()>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -260,6 +310,7 @@ async fn serve_ws<S>(
         return;
     };
     let hello: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let _ = hello_tx.send(());
     let state_snapshot = {
         let mut s = shared.0.lock().unwrap();
         s.hellos.push(hello.clone());
@@ -290,6 +341,7 @@ async fn serve_ws<S>(
         json!({"type":"error","code":"unauthorized","message":"unauthorized"})
     };
     tokio::time::sleep(welcome_delay).await;
+    let _ = welcome_tx.send(());
     let _ = ws.send(Message::Text(response.to_string().into())).await;
     let _ = ready.send(FakeConn { tx });
     let unauthorized = hello["token"] != token;

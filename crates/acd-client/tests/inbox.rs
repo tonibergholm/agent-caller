@@ -560,8 +560,8 @@ async fn save_failure_preserves_import_rename_remove_and_hotkey_state() {
     let line = format!(
         "acd://127.0.0.1:{}?pin={}#{}",
         f.port(),
-        f.pin(),
-        common::TOKEN
+        "QWERTYUIOPASDFGHJKLZXCVBNM1234567890abcd",
+        "NEW-IMPORT-TOKEN-THAT-MUST-NOT-REMAIN"
     );
     assert!(ib.import_pairing(&line).is_err());
     assert_eq!(ib.settings(), before);

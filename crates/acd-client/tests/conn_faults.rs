@@ -471,16 +471,20 @@ async fn cancelling_during_welcome_handshake_does_not_resend_pending_commands() 
     let first = until("first answer", || answers(&f).first().cloned()).await;
     c.send(serde_json::json!({"type":"result","id":first["id"],"ok":false,"error":{"code":"request_not_ready","message":"m"}})).await;
     tokio::time::sleep(Duration::from_millis(10)).await;
-    f.set_welcome_delay(Duration::from_millis(300));
+    f.set_welcome_delay(Duration::from_millis(1500));
     c.close(1001).await;
-    let _reconnecting = f.next_connection().await;
-    until("reconnect hello", || (f.hellos().len() >= 2).then_some(())).await;
+    f.next_hello().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     h.cancel();
     assert_eq!(
-        submit.await.unwrap(),
+        tokio::time::timeout(Duration::from_millis(200), submit)
+            .await
+            .expect("cancellation interrupts a held handshake")
+            .unwrap(),
         acd_client::commands::Outcome::Uncertain
     );
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    f.next_welcome_release().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
         answers(&f).len(),
         1,
