@@ -1,0 +1,7 @@
+{
+ "id": "1",
+ "error": {
+  "code": "agent_blocked",
+  "message": "agent w1:p2 is blocked and requires interactive input"
+ }
+}

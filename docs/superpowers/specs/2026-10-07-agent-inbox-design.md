@@ -96,8 +96,9 @@ It is built for two audiences, in this order:
    - **`hook` and `t3`: atomic at the source.** The agent or T3 accepts
      exactly one answer. A late answer is rejected (`request_gone`).
    - **`keys`: best effort, with a guard.**
-     - herdr has no conditional input, so a terminal answer can land
-       between acd's screen check and its keystroke.
+     - herdr has no conditional input, so a terminal answer, or a new
+       dialog replacing the checked one, can land between acd's screen
+       check and its keystroke.
      - acd keeps that window small: it re-reads the screen and compares the
        fingerprint immediately before sending one key.
      - If the outcome cannot be confirmed, acd reports it as uncertain.
@@ -617,17 +618,23 @@ Agent ids include a hash of the socket path.
 **Sync** (P0 item 7). The stream carries no `state_change_seq` and has no
 `events_lost` message.
 
-1. Open one subscription connection for `pane.created`, `pane.closed` and
-   `pane.agent_detected`, plus one `pane.agent_status_changed{pane_id}` per
-   known pane. Add per-pane subscriptions as panes appear.
+1. Open one subscription connection for `pane.created`, `pane.closed`,
+   `pane.agent_detected` and `pane.updated`, plus one
+   `pane.agent_status_changed{pane_id}` per known pane. Add per-pane
+   subscriptions as panes appear. Stream frames are named differently
+   from subscriptions (gate 6): `pane_created`, `pane_closed`,
+   `pane_agent_detected` (with `released: true` when the agent exits) and
+   `pane_updated`, but `pane.agent_status_changed`. Any other frame is a
+   resync hint.
 2. Build the initial state from `agent.list`, on a separate connection.
-3. Treat every stream event as a hint. On an event, call `agent.get` for
-   that pane. Every `agent.list` and `agent.get` call happens on a single
-   per-socket reconciler task. Each pane result is applied only if its
-   `revision`/`state_change_seq` is not older than the last one applied for
-   that pane. Results that tie or have no revision are applied in the order
-   the calls were issued. A stale list can therefore never roll back a
-   newer per-pane result.
+3. Treat every stream event as a hint. On an event, call
+   `agent.get {target: pane_id}` for that pane. Every `agent.list` and
+   `agent.get` call happens serially on a single per-socket reconciler
+   task, and results are applied in the order the calls were issued. A
+   stale list can therefore never roll back a newer per-pane result.
+   (Gate 6: `AgentInfo.revision` is per pane but counts metadata changes
+   such as title, cwd and detection, not status changes, so it cannot
+   order state results. `state_change_seq` is server-wide.)
 3a. Install a `pane.agent_status_changed` subscription for every pane
    found by any means: event, initial list or periodic list.
 4. Reconcile with `agent.list`:
@@ -647,12 +654,23 @@ opens a read-only `blocked_unparsed` request:
 - key `(socket, pane, fingerprint)`, reusable;
 - `raw_screen` at most 40 lines.
 
+**Agents shown.** Only panes with a detected agent (`agent.list`). A plain
+shell is not listed, and `agent.get` on it returns `agent_not_found`.
+Agent trust dialogs (Claude, Codex) also report `blocked` and get the
+fallback.
+
 **Follow-ups.**
 
-- `agent.send` uses `agent.prompt`.
-- Text containing control characters (except `\n` and `\t`), Unicode
-  format characters (bidi overrides, U+2028/2029) or more than 16 KiB is
-  rejected with `bad_request`.
+- `agent.send` uses `agent.prompt`. herdr refuses a blocked agent with
+  `agent_blocked`, which acd reports as `agent_busy`.
+- Text is rejected with `bad_request` when it:
+  - contains control characters other than `\n` and `\t`;
+  - contains bidi controls (U+061C, U+200E, U+200F, U+202A–U+202E,
+    U+2066–U+2069) or U+2028/U+2029;
+  - is longer than 16 KiB.
+
+  Other format characters, such as ZWJ, ZWNJ and variation selectors,
+  are allowed because ordinary emoji use them.
 
 **Seen state** (P0 item 4). herdr has no mark-seen method.
 
@@ -1040,9 +1058,10 @@ until it has been checked and the spec updated.
    - two Codex panes in one cwd stay read-only.
 5. **Claude session registry (blocks P3):** observed `status` values, and
    the behaviour when entries are unreadable.
-6. **herdr ordering (blocks P2):** whether `agent.list` and `agent.get`
-   expose a per-pane `revision`. Without one, issue-order application on
-   the single reconciler is the rule.
+6. **herdr ordering: resolved 2026-10-08**
+   (`docs/research/2026-10-08-herdr-gate6.md`). `revision` exists per pane
+   but does not move on status changes, so issue-order application on the
+   single reconciler is the rule (§6.4 step 3).
 7. **Hook token rotation (blocks P3):** rotate while Claude sessions run,
    and confirm the old-token grace window and the failure report.
 8. **Upstream ask, not blocking.** Propose a conditional-input method to
@@ -1227,3 +1246,10 @@ contradiction was found. Revision 4.2 fixes them:
 **Round 6, Sol (revision 4.2), 2026-10-07.** All items were resolved
 except one remaining contradiction: the §6 adapter contract still used the
 old attribution rule. Revision 4.3 aligns it with §5.1.
+
+**Gate 6, 2026-10-08.** A live check on herdr 0.9.3 settled §11 item 6
+(`docs/research/2026-10-08-herdr-gate6.md`, fixtures in
+`tests/fixtures/herdr/api/`). §6.4 now states the issue-order rule, the
+frame names, the `target` parameter, which panes are shown, and the
+`agent_blocked` refusal. Sol reviewed the P2 plan (9 blocking findings, all
+accepted). §6.4 now lists the exact set of rejected follow-up characters.
