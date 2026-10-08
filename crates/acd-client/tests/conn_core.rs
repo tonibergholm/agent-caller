@@ -319,6 +319,10 @@ async fn offline_submission_does_not_shorten_retry_delay() {
         matches!(s.status, MachineStatus::Offline { .. })
     })
     .await;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let _d = serve_on(listener, port, FakeAdapter::new(), files).await;
     let outcome = h
         .submit(
             acd_client::commands::Command::MarkSeen {
@@ -328,15 +332,11 @@ async fn offline_submission_does_not_shorten_retry_delay() {
         )
         .await;
     assert!(matches!(outcome, acd_client::commands::Outcome::NotSent(_)));
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .unwrap();
-    let _d = serve_on(listener, port, FakeAdapter::new(), files).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_ne!(
         rx.borrow().status,
         MachineStatus::Online,
-        "daemon is available before the scheduled retry"
+        "listener was available throughout the original retry interval"
     );
     wait_for(&mut rx, "scheduled retry connects", |s| {
         s.status == MachineStatus::Online
@@ -432,7 +432,7 @@ async fn rotation_revokes_inflight_and_never_resends() {
 #[tokio::test]
 async fn rotation_before_delivery_is_uncertain_and_new_token_works() {
     let dir = local_dir(TOKEN);
-    let fake = FakeAdapter::new();
+    let fake = FakeAdapter::gated();
     let core = Core::new(test_machine(), vec![fake.clone()]);
     let auth = Arc::new(Auth::new(TOKEN.into()));
     serve_unix(&dir, core.clone(), auth.clone()).await;
@@ -448,11 +448,6 @@ async fn rotation_before_delivery_is_uncertain_and_new_token_works() {
                 .is_some_and(|a| a.pending.is_some())
     })
     .await;
-    core.observe(Observation::RequestReady {
-        agent_id: "a1".into(),
-        key: acd_core::registry::CorrelationKey("k1".into()),
-        ready: false,
-    });
     let rid = rx.borrow().session.agents["a1"]
         .pending
         .as_ref()
@@ -470,7 +465,18 @@ async fn rotation_before_delivery_is_uncertain_and_new_token_works() {
         )
         .await
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(request) = rx.borrow().session.agents["a1"].pending.as_ref()
+                && request.status == RequestStatus::Answering
+            {
+                break;
+            }
+            rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
     let new = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
     write_token(&dir, new);
     auth.rotate(new.into());
@@ -482,13 +488,17 @@ async fn rotation_before_delivery_is_uncertain_and_new_token_works() {
         s.status == MachineStatus::Online
     })
     .await;
-    core.observe(Observation::RequestReady {
-        agent_id: "a1".into(),
-        key: acd_core::registry::CorrelationKey("k1".into()),
-        ready: true,
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let rid = rx.borrow().session.agents["a1"]
+    fake.open_gate();
+    core.observe(Observation::RequestSeen(permission_obs("a1", "k2")));
+    let state = wait_for(&mut rx, "new request on rotated connection", |s| {
+        s.status == MachineStatus::Online
+            && s.session.agents["a1"]
+                .pending
+                .as_ref()
+                .is_some_and(|request| request.status == RequestStatus::Open)
+    })
+    .await;
+    let rid = state.session.agents["a1"]
         .pending
         .as_ref()
         .unwrap()

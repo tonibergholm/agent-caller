@@ -57,6 +57,51 @@ async fn wait_for_connections(f: &FakeServer, expected: usize) {
     .unwrap_or_else(|_| panic!("timed out waiting for {expected} fake connections"));
 }
 
+fn command_id(frame: &serde_json::Value) -> Option<&serde_json::Value> {
+    matches!(
+        frame["type"].as_str(),
+        Some("request.answer" | "agent.send" | "agent.mark_seen")
+    )
+    .then(|| &frame["id"])
+}
+
+fn assert_no_command_after(f: &FakeServer, received_offset: usize, id: &serde_json::Value) {
+    assert!(
+        f.received()[received_offset..]
+            .iter()
+            .all(|v| command_id(v) != Some(id))
+    );
+}
+
+async fn recording_server() -> (tempfile::TempDir, FakeServer, MachineHandle, FakeConn) {
+    let dir = common::local_dir(common::TOKEN);
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let mut cfg = cfg_for(&f, common::TOKEN, common::fast());
+    cfg.credential = Credential::LocalFile(dir.path().to_owned());
+    let h = spawn_machine(cfg);
+    let c = f.next_connection().await;
+    c.send(snapshot("e1", 1, &[])).await;
+    let mut rx = h.state();
+    common::wait_for(&mut rx, "online", |s| s.status == MachineStatus::Online).await;
+    (dir, f, h, c)
+}
+
+async fn submit_answer(
+    h: &MachineHandle,
+) -> tokio::task::JoinHandle<acd_client::commands::Outcome> {
+    let h = std::sync::Arc::new(h.clone());
+    tokio::spawn(async move {
+        h.submit(
+            acd_client::commands::Command::Answer {
+                request_id: "r1".into(),
+                option_id: "allow".into(),
+            },
+            None,
+        )
+        .await
+    })
+}
+
 #[tokio::test]
 async fn impostor_tls_server_receives_no_hello() {
     let f = FakeServer::start(common::TOKEN, Identity::Impostor).await;
@@ -396,6 +441,83 @@ async fn retry_result_lost_is_resent_and_recovers() {
         task.await.unwrap(),
         acd_client::commands::Outcome::Delivered
     );
+}
+
+#[tokio::test]
+async fn rotation_while_disconnected_revokes_undelivered() {
+    let (dir, f, h, c) = recording_server().await;
+    let task = submit_answer(&h).await;
+    let first = until("first answer", || answers(&f).first().cloned()).await;
+    c.send(serde_json::json!({"type":"result","id":first["id"],"ok":false,"error":{"code":"request_not_ready","message":"m"}})).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(answers(&f).len(), 1, "retry remains pending at 10 ms");
+    let new = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    common::write_token(&dir, new);
+    f.set_token(new);
+    let old_frame_count = f.received().len();
+    c.close(1001).await;
+    assert_eq!(
+        task.await.unwrap(),
+        acd_client::commands::Outcome::Uncertain
+    );
+    wait_for_connections(&f, 2).await;
+    let _c2 = f.next_connection().await;
+    until("new-token hello", || {
+        (f.hellos().len() >= 2 && f.hellos()[1]["token"] == new).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_no_command_after(&f, old_frame_count, &first["id"]);
+}
+
+#[tokio::test]
+async fn rotation_while_disconnected_revokes_gated() {
+    let (dir, f, h, c) = recording_server().await;
+    let task = submit_answer(&h).await;
+    let first = until("first answer", || answers(&f).first().cloned()).await;
+    // The already observed frame is left unanswered, so delivery remains Unknown.
+    assert_eq!(first["type"], "request.answer");
+    let new = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    common::write_token(&dir, new);
+    f.set_token(new);
+    let old_frame_count = f.received().len();
+    c.close(1001).await;
+    assert_eq!(
+        task.await.unwrap(),
+        acd_client::commands::Outcome::Uncertain
+    );
+    wait_for_connections(&f, 2).await;
+    let _c2 = f.next_connection().await;
+    until("new-token hello", || {
+        (f.hellos().len() >= 2 && f.hellos()[1]["token"] == new).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_no_command_after(&f, old_frame_count, &first["id"]);
+}
+
+#[tokio::test]
+async fn revoked_command_id_never_reappears_after_4401() {
+    let (dir, f, h, c) = recording_server().await;
+    let task = submit_answer(&h).await;
+    let first = until("first answer", || answers(&f).first().cloned()).await;
+    let new = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    common::write_token(&dir, new);
+    f.set_token(new);
+    let old_frame_count = f.received().len();
+    c.close(4401).await;
+    assert_eq!(
+        task.await.unwrap(),
+        acd_client::commands::Outcome::Uncertain
+    );
+    wait_for_connections(&f, 2).await;
+    let _c2 = f.next_connection().await;
+    until("new-token hello", || {
+        (f.hellos().len() >= 2 && f.hellos()[1]["token"] == new).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_no_command_after(&f, old_frame_count, &first["id"]);
 }
 
 #[tokio::test]
