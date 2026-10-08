@@ -254,6 +254,32 @@ mod tests {
         assert!(!formatted.contains("second"), "{formatted}");
         assert!(!formatted.contains("WSTICKET=abc"), "{formatted}");
 
+        for (input, words) in [
+            (r#"TOKEN=\"first \\\" second\""#, &["first", "second"][..]),
+            (r#"FOO='first'\"second\""#, &["first", "second"][..]),
+            (r#"FOO=\"first second"#, &["first", "second"][..]),
+            ("TOKEN: a b c", &["a", "b", "c"][..]),
+            (r#"{"token":"x y","next":1}"#, &["x", "y"][..]),
+            ("Authorization: Bearer abc def", &["abc", "def"][..]),
+            ("TO\u{200b}KEN: split secret", &["split", "secret"][..]),
+        ] {
+            let detail = debug_detail(&CallError::Failed(Failure::Die(input.into())));
+            for word in words {
+                assert!(
+                    !detail.contains(word),
+                    "{input:?} leaked {word:?}: {detail}"
+                );
+            }
+        }
+        let multiline = debug_detail(&CallError::Failed(Failure::Die(
+            "TOKEN=hidden\npublic text".into(),
+        )));
+        assert!(!multiline.contains("hidden"), "{multiline}");
+        let plain = debug_detail(&CallError::Failed(Failure::Die(
+            "plain text without secrets".into(),
+        )));
+        assert!(plain.contains("plain text without secrets"), "{plain}");
+
         let invisible = CallError::Failed(Failure::Die("to\u{200b}ken=hidden".into()));
         let text = debug_detail(&invisible);
         assert!(!text.contains("hidden"), "{text}");

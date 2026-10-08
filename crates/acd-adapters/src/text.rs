@@ -69,38 +69,18 @@ pub fn cap_chars(text: &str, max: usize) -> String {
 
 pub const LOG_BYTES: usize = 4096;
 
-const SECRET_KEYS: &str = "ticket|token|wsTicket|authorization";
-const VALUE: &str = r#"(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;]+)"#;
-
-static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+static SECRET_INDICATORS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
-        (
-            Regex::new(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+").unwrap(),
-            "${1}[REDACTED]",
-        ),
-        // Debug-escaped JSON: \"token\":\"value\"
-        (
-            Regex::new(&format!(
-                r#"(?i)(\\"(?:{SECRET_KEYS})\\"\s*:\s*(?:String\()?\\")(?:[^"\\]|\\[^"])*"#
-            ))
-            .unwrap(),
-            "${1}[REDACTED]",
-        ),
-        // Plain JSON ("token":"v", escaped quotes allowed) and the Debug
-        // rendering of a serde_json value ("token": String("v")).
-        (
-            Regex::new(&format!(
-                r#"(?i)("(?:{SECRET_KEYS})"\s*:\s*(?:String\()?")(?:[^"\\]|\\.)*"#
-            ))
-            .unwrap(),
-            "${1}[REDACTED]",
-        ),
-        (Regex::new(&format!(r"(?i)(\b(?:[a-z0-9_]*(?:token|secret|password|passwd|api_?key|key|auth|authorization|ticket|credential))[a-z0-9_]*\s*[:=]\s*){VALUE}")).unwrap(), "${1}[REDACTED]"),
-        (Regex::new(&format!(r"\b([A-Z][A-Z0-9_]*)=(?:{VALUE})")).unwrap(), "${1}=[REDACTED]"),
-        (Regex::new(r"(?i)(token|ticket|wsticket)=([^&\s,;]+)").unwrap(), "${1}=[REDACTED]"),
-        (Regex::new(r"\bsk-[A-Za-z0-9_-]{6,}").unwrap(), "[REDACTED]"),
+        Regex::new(r"(?i)\b(?:[a-z0-9_]*(?:token|secret|password|passwd|api_?key|key|auth|authorization|ticket|credential)[a-z0-9_]*)\s*[:=]\s*").unwrap(),
+        Regex::new(r"\b[A-Z][A-Z0-9_]*=").unwrap(),
+        Regex::new(r#"(?i)(?:\\"|\")?[a-z0-9_]*(?:token|secret|password|passwd|api_?key|key|auth|authorization|ticket|credential)[a-z0-9_]*(?:\\"|\")?\s*:\s*(?:String\()?"#).unwrap(),
+        Regex::new(r"(?i)\b(?:token|ticket|wsticket)=").unwrap(),
     ]
 });
+static BEARER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+").unwrap());
+static KNOWN_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bsk-[A-Za-z0-9_-]{6,}").unwrap());
 
 /// Redacts secrets (spec §7.1, Logs) and caps the result at 4 KiB. Callers
 /// should log JSON via `serde_json::to_string` where possible; Debug and
@@ -110,18 +90,34 @@ pub fn redact_log(s: &str) -> String {
     for c in s.chars() {
         if c.is_control() && c != '\n' && c != '\t' {
             out.push_str(&format!(r"\u{{{:x}}}", c as u32));
-        } else if !is_format_character(c) && c != '\u{2028}' && c != '\u{2029}' {
+        } else if !is_forbidden_format(c) && !is_format_character(c) {
             out.push(c);
         }
     }
-    static ESCAPED_ENV_QUOTES: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r#"(\b[A-Z][A-Z0-9_]*=)\\"([^"]*)\\""#).unwrap());
-    out = ESCAPED_ENV_QUOTES
-        .replace_all(&out, "$1\"$2\"")
-        .into_owned();
-    for (re, rep) in SECRETS.iter() {
-        out = re.replace_all(&out, *rep).into_owned();
+    let mut starts: Vec<usize> = BEARER.find_iter(&out).map(|m| m.start()).collect();
+    starts.extend(KNOWN_PREFIX.find_iter(&out).map(|m| m.start()));
+    for re in SECRET_INDICATORS.iter() {
+        starts.extend(re.find_iter(&out).map(|m| m.end()));
     }
+    starts.sort_unstable();
+    starts.dedup();
+    let mut redacted = String::with_capacity(out.len());
+    let mut copied = 0;
+    let mut masked_until = 0;
+    for start in starts {
+        if start < masked_until || start >= out.len() {
+            continue;
+        }
+        let line_end = out[start..]
+            .find('\n')
+            .map_or(out.len(), |offset| start + offset);
+        redacted.push_str(&out[copied..start]);
+        redacted.push_str("[REDACTED]");
+        copied = line_end;
+        masked_until = line_end;
+    }
+    redacted.push_str(&out[copied..]);
+    let mut out = redacted;
     if out.len() <= LOG_BYTES {
         return out;
     }
@@ -146,6 +142,24 @@ fn is_format_character(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_log_masks_any_secret_like_json_key() {
+        for input in [
+            r#"{"password":"hunter2 x","next":1}"#,
+            r#"{"api_key":"hunter2 x"}"#,
+            r#"{"client_secret":"hunter2 x"}"#,
+            r#"{\"Password\":\"hunter2 x\"}"#,
+            r#""credential": String("hunter2 x")"#,
+        ] {
+            let out = redact_log(input);
+            assert!(
+                !out.contains("hunter2") && !out.contains(" x"),
+                "leaked: {input} -> {out}"
+            );
+        }
+        assert_eq!(redact_log(r#"{"name":"ok"}"#), r#"{"name":"ok"}"#);
+    }
 
     #[test]
     fn prompt_text_rules() {
@@ -218,14 +232,41 @@ mod tests {
         for secret in ["abc.def-ghi", "t0p", "s3cret", "XYZ123", "ghp_1"] {
             assert!(!r.contains(secret), "{secret} leaked: {r}");
         }
-        assert!(
-            r.contains("path=/tmp"),
-            "lower-case keys are not secrets: {r}"
-        );
+        assert!(r.contains("Authorization: [REDACTED]"), "{r}");
         let long = "é".repeat(5000);
         let r = redact_log(&long);
         assert!(r.len() <= 4096 + '…'.len_utf8());
         assert!(r.ends_with('…'));
+    }
+
+    #[test]
+    fn redact_log_masks_secret_tails_to_newline() {
+        let cases = [
+            (r#"TOKEN=\"first \\\" second\""#, &["first", "second"][..]),
+            (r#"FOO='first'\"second\""#, &["first", "second"][..]),
+            (r#"FOO=\"first second"#, &["first", "second"][..]),
+            ("TOKEN: a b c", &["a", "b", "c"][..]),
+            (r#"{"token":"x y","next":1}"#, &["x", "y"][..]),
+            ("Authorization: Bearer abc def", &["abc", "def"][..]),
+            ("TO\u{200b}KEN: split secret", &["split", "secret"][..]),
+        ];
+        for (input, words) in cases {
+            let output = redact_log(input);
+            for word in words {
+                assert!(
+                    !output.contains(word),
+                    "{input:?} leaked {word:?}: {output:?}"
+                );
+            }
+        }
+        assert_eq!(
+            redact_log("TOKEN=hidden\npublic text"),
+            "TOKEN=[REDACTED]\npublic text"
+        );
+        assert_eq!(
+            redact_log("plain text without secrets"),
+            "plain text without secrets"
+        );
     }
 
     #[test]
@@ -244,10 +285,7 @@ mod tests {
             assert!(r.contains("[REDACTED]"), "{s}: {r}");
         }
         let r = redact_log(r#"{"token":"ab\"cd","x":1}"#);
-        assert!(
-            r.contains(r#""x":1"#),
-            "text after the secret survives: {r}"
-        );
+        assert!(!r.contains("x"), "same-line tail survives: {r}");
         for (s, secret) in [
             ("token=abc&x=1", "abc"),
             ("Ticket=abc", "abc"),
