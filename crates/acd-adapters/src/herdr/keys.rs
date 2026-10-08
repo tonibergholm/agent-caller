@@ -353,6 +353,11 @@ impl Engine {
         if !target.guard_passes(&read) {
             return Err(not_delivered(ErrorCode::ScreenMismatch));
         }
+        // Always `None` today: the guard just required a parsed dialog, and
+        // `prompt_line` reads no input box while a dialog is up. So the
+        // spec's "read the prompt line before the key" cannot see a draft,
+        // and a draft that already ends in the sent digit is reported as a
+        // stray (`uncertain`, the safe side).
         let baseline = prompt_line(pane.kind, &read.text);
 
         // Connect first, then check the lease, so only the local write lies
@@ -483,6 +488,8 @@ struct Confirm {
     target: KeysTarget,
     option_id: String,
     key: String,
+    /// The prompt line at the guard read; `None` while a dialog is up,
+    /// which is always (see `Engine::deliver`).
     baseline: Option<String>,
     t_send: Instant,
 }
