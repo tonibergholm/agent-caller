@@ -73,11 +73,15 @@ async fn with_pending(projection: serde_json::Value, kind: &str) -> (Rig, Reques
 }
 
 async fn answer(r: &Rig, req: &Request, option: &str) -> CommandResult {
+    answer_with_id(r, req, option, "x1").await
+}
+
+async fn answer_with_id(r: &Rig, req: &Request, option: &str, command_id: &str) -> CommandResult {
     r.core
         .handle(
             "c",
             ClientMessage::RequestAnswer {
-                id: "x1".into(),
+                id: command_id.into(),
                 request_id: req.id.clone(),
                 option_id: Some(option.into()),
                 text: None,
@@ -149,6 +153,7 @@ async fn question_answer_sends_value_by_question_id() {
 #[tokio::test]
 async fn source_terminal_end_waits_for_core_claim_release() {
     let (r, req) = with_pending(approval_projection("a", "rq-1", None), "command").await;
+    let (_, mut rx) = r.core.attach(None);
     r.fake
         .fail_next_dispatch("cmd_exit_respond_fail_already_resolved.json");
     assert_eq!(
@@ -159,11 +164,20 @@ async fn source_terminal_end_waits_for_core_claim_release() {
         r.core.request(&req.id).is_none().then_some(())
     })
     .await;
+    loop {
+        if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+            && request_id == req.id
+        {
+            assert_eq!(by, ResolvedBy::Terminal);
+            break;
+        }
+    }
 }
 
 #[tokio::test]
 async fn cancelled_request_ends_as_lost() {
     let (r, req) = with_pending(approval_projection("a", "rq-1", None), "command").await;
+    let (_, mut rx) = r.core.attach(None);
     r.fake
         .fail_next_dispatch("cmd_exit_respond_fail_cancelled_after_restart.json");
     assert_eq!(
@@ -174,6 +188,14 @@ async fn cancelled_request_ends_as_lost() {
         r.core.request(&req.id).is_none().then_some(())
     })
     .await;
+    loop {
+        if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+            && request_id == req.id
+        {
+            assert_eq!(by, ResolvedBy::Lost);
+            break;
+        }
+    }
 }
 
 #[tokio::test]
@@ -214,11 +236,163 @@ async fn disconnected_answer_is_source_unavailable_and_sends_nothing() {
 #[tokio::test]
 async fn lost_reply_is_uncertain_and_not_resent() {
     let (r, req) = with_pending(approval_projection("a", "rq-1", None), "command").await;
+    let (_, mut rx) = r.core.attach(None);
     r.fake.hang_next_dispatch();
     let res = answer(&r, &req, "accept").await;
     assert_eq!(res.outcome, Some(Outcome::Delivered));
     assert_eq!(r.fake.dispatched().len(), 1);
+    loop {
+        if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+            && request_id == req.id
+        {
+            assert_eq!(by, ResolvedBy::Uncertain);
+            break;
+        }
+    }
     assert_eq!(answer(&r, &req, "accept").await, res);
+}
+
+#[tokio::test]
+async fn hostile_failure_text_never_reaches_warn_logs_or_source_status() {
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<StdMutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let hostile =
+        "sk-ant-api03-SECRETSECRET Bearer abc.def.ghi \u{1b}[31m rm -rf ~/work \u{202E}evil";
+    let (r, req) = with_pending(approval_projection("a", "rq-1", None), "command").await;
+    r.fake.fail_next_dispatch_value(
+        json!({"_tag":"Failure","cause":[{"_tag":"Die","defect":hostile}]}),
+    );
+    let result = answer(&r, &req, "accept").await;
+    assert_eq!(result.outcome, Some(Outcome::Delivered));
+    let (r2, req2) = with_pending(approval_projection("a", "rq-1", None), "command").await;
+    r2.fake.fail_next_dispatch_value(json!({"_tag":"Failure","cause":[{"_tag":"Fail","error":{"_tag":"EnvironmentAuthorizationError","message":hostile}}]}));
+    assert_eq!(
+        answer(&r2, &req2, "accept").await.error_code(),
+        Some(ErrorCode::SourceUnavailable)
+    );
+    until("degraded source", || {
+        let ServerMessage::Welcome { machine, .. } = r2.core.welcome() else {
+            panic!()
+        };
+        (machine.sources.t3.state == SourceState::Degraded).then_some(())
+    })
+    .await;
+    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("answer delivery uncertain"),
+        "missing fixed warning: {logs}"
+    );
+    assert!(
+        logs.contains("T3 reported an internal error"),
+        "missing fixed diagnostic: {logs}"
+    );
+    let ServerMessage::Welcome { machine, .. } = r.core.welcome() else {
+        panic!()
+    };
+    let status = machine.sources.t3.message.unwrap_or_default();
+    let ServerMessage::Welcome {
+        machine: machine2, ..
+    } = r2.core.welcome()
+    else {
+        panic!()
+    };
+    let status2 = machine2.sources.t3.message.unwrap_or_default();
+    for bad in [
+        "sk-ant-",
+        "SECRETSECRET",
+        "Bearer",
+        "abc.def.ghi",
+        "rm -rf",
+        "\u{1b}",
+        "\u{202E}",
+    ] {
+        assert!(!logs.contains(bad), "warn log leaked {bad:?}: {logs}");
+        assert!(
+            !status.contains(bad),
+            "source status leaked {bad:?}: {status}"
+        );
+        assert!(
+            !status2.contains(bad),
+            "source status leaked {bad:?}: {status2}"
+        );
+    }
+    assert!(status.is_empty(), "unexpected source status: {status}");
+    assert_eq!(
+        status2,
+        "the T3 token lacks the orchestration:operate scope"
+    );
+}
+
+#[tokio::test]
+async fn busy_mailbox_still_updates_answer_state_and_degrades_on_scope_failure() {
+    let (r, req) = with_pending(approval_projection("a", "rq-1", None), "command").await;
+    let (_, mut rx) = r.core.attach(None);
+    let shared = r.adapter.shared_for_tests();
+    // Fill the coalescing mailbox with unrelated hints before the answer arrives.
+    shared.mailbox.fill_for_tests(10_000);
+    assert_eq!(
+        answer(&r, &req, "accept").await.outcome,
+        Some(Outcome::Delivered)
+    );
+    loop {
+        if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+            && request_id == req.id
+        {
+            assert_eq!(by, ResolvedBy::Inbox);
+            break;
+        }
+    }
+    until("answered agent state", || {
+        (r.core.agent("t3:a")?.state == AgentState::Working).then_some(())
+    })
+    .await;
+    // Keep the shell view stale so the mailbox hint must suppress reopening.
+    r.fake
+        .put_thread(shell_thread("a", "running", Some(("rq-1", "command"))));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        r.core.agent("t3:a").unwrap().pending.is_none(),
+        "answered request reopened from stale shell state"
+    );
+
+    r.fake
+        .set_projection("b", approval_projection("b", "rq-2", None));
+    r.fake
+        .put_thread(shell_thread("b", "running", Some(("rq-2", "command"))));
+    let req2 = until("second request", || r.core.agent("t3:b")?.pending).await;
+    r.fake.deny_operate(true);
+    assert_eq!(
+        answer_with_id(&r, &req2, "accept", "x2").await.error_code(),
+        Some(ErrorCode::SourceUnavailable)
+    );
+    until("degraded source", || {
+        let ServerMessage::Welcome { machine, .. } = r.core.welcome() else {
+            panic!()
+        };
+        (machine.sources.t3.state == SourceState::Degraded).then_some(())
+    })
+    .await;
 }
 
 #[tokio::test]

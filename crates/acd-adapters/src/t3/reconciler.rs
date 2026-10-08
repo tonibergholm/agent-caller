@@ -85,6 +85,17 @@ struct MailboxInner {
 }
 
 impl Mailbox {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn fill_for_tests(&self, count: usize) {
+        let mut inner = self.inner.lock().expect("mailbox");
+        for i in 0..count {
+            inner
+                .answered
+                .insert((format!("ghost{i}"), "rq-x".to_owned()));
+        }
+        self.notify.notify_one();
+    }
+
     pub fn answered(&self, thread_id: &str, t3_request_id: &str) {
         self.inner
             .lock()
