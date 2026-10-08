@@ -8,3 +8,154 @@ pub mod map;
 pub mod reconciler;
 pub mod screen;
 pub mod wire;
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
+
+use acd_core::{Adapter, Answer, Core, DeliverError};
+use acd_protocol::{Agent, AnswerPath, ErrorCode, Request, Source, SourceState, SourceStatus};
+use async_trait::async_trait;
+
+use self::client::{CallError, KNOWN_REFUSALS};
+use self::discovery::Discovery;
+use self::reconciler::{Hint, PaneMap, Timing};
+
+const SEND_DEADLINE: Duration = Duration::from_secs(10);
+const SCAN_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug)]
+pub struct HerdrConfig {
+    pub enabled: bool,
+    pub home: PathBuf,
+    pub env_socket: Option<PathBuf>,
+    pub extra_sockets: Vec<PathBuf>,
+    pub scan_interval: Duration,
+    pub timing: Timing,
+}
+
+impl HerdrConfig {
+    /// Reads `$HOME` and `$HERDR_SOCKET_PATH`; default timing, 30 s scan.
+    pub fn from_env(enabled: bool, extra_sockets: Vec<PathBuf>) -> HerdrConfig {
+        HerdrConfig {
+            enabled,
+            home: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default(),
+            env_socket: std::env::var_os("HERDR_SOCKET_PATH")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            extra_sockets,
+            scan_interval: SCAN_INTERVAL,
+            timing: Timing::default(),
+        }
+    }
+}
+
+pub struct HerdrAdapter {
+    cfg: HerdrConfig,
+    panes: Arc<PaneMap>,
+    /// Kept for the keys engine (Task 9).
+    core: Mutex<Weak<Core>>,
+}
+
+impl HerdrAdapter {
+    pub fn new(cfg: HerdrConfig) -> Arc<HerdrAdapter> {
+        Arc::new(HerdrAdapter {
+            cfg,
+            panes: Arc::default(),
+            core: Mutex::new(Weak::new()),
+        })
+    }
+
+    /// Spawns socket discovery. A disabled config only reports `disabled`.
+    pub fn start(self: &Arc<Self>, core: Arc<Core>) {
+        if !self.cfg.enabled {
+            core.set_source_status(
+                Source::Herdr,
+                SourceStatus {
+                    state: SourceState::Disabled,
+                    message: None,
+                },
+            );
+            return;
+        }
+        *self.core.lock().expect("core slot") = Arc::downgrade(&core);
+        discovery::spawn(
+            Discovery {
+                env_socket: self.cfg.env_socket.clone(),
+                home: self.cfg.home.clone(),
+                extra: self.cfg.extra_sockets.clone(),
+                interval: self.cfg.scan_interval,
+                timing: self.cfg.timing.clone(),
+            },
+            core,
+            self.panes.clone(),
+        );
+    }
+
+    pub fn panes(&self) -> Arc<PaneMap> {
+        self.panes.clone()
+    }
+}
+
+fn map_call_error(e: &CallError) -> DeliverError {
+    match e {
+        CallError::Server { code, .. } => match code.as_str() {
+            "agent_blocked" => DeliverError::NotDelivered(ErrorCode::AgentBusy),
+            "agent_not_found" => DeliverError::NotDelivered(ErrorCode::AgentGone),
+            c if KNOWN_REFUSALS.contains(&c) => {
+                DeliverError::NotDelivered(ErrorCode::SourceUnavailable)
+            }
+            _ => DeliverError::Uncertain(format!("herdr error {code}")),
+        },
+        CallError::Connect(_) | CallError::Write(_) => {
+            DeliverError::NotDelivered(ErrorCode::SourceUnavailable)
+        }
+        CallError::NoReply(_) => DeliverError::Uncertain("herdr did not confirm the prompt".into()),
+    }
+}
+
+#[async_trait]
+impl Adapter for HerdrAdapter {
+    fn name(&self) -> &'static str {
+        "herdr"
+    }
+
+    fn answer_paths(&self) -> &[AnswerPath] {
+        &[]
+    }
+
+    fn sources(&self) -> &[Source] {
+        &[Source::Herdr]
+    }
+
+    async fn deliver(&self, _request: &Request, _answer: &Answer) -> Result<(), DeliverError> {
+        Err(DeliverError::NotDelivered(ErrorCode::NotSupported))
+    }
+
+    async fn send(&self, agent: &Agent, text: &str) -> Result<(), DeliverError> {
+        if crate::text::check_prompt_text(text).is_err() {
+            return Err(DeliverError::NotDelivered(ErrorCode::BadRequest));
+        }
+        // Clone out of the map so no lock is held across an await.
+        let pane = self.panes.read().expect("pane map").get(&agent.id).cloned();
+        let Some(pane) = pane else {
+            return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
+        };
+        let result =
+            match tokio::time::timeout(SEND_DEADLINE, pane.herdr.prompt(&pane.pane_id, text)).await
+            {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(map_call_error(&e)),
+                Err(_) => Err(DeliverError::Uncertain(
+                    "herdr did not confirm the prompt in time".into(),
+                )),
+            };
+        if matches!(result, Ok(()) | Err(DeliverError::Uncertain(_))) {
+            // The reconciler may be reconnecting and not draining: never block.
+            let _ = pane.hints.try_send(Hint::Pane(pane.pane_id.clone()));
+        }
+        result
+    }
+}
