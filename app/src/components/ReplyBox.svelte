@@ -1,9 +1,9 @@
 <script lang="ts">
-  const MAX_BYTES = 64 * 1024;
+  import { MAX_REPLY_BYTES as MAX_BYTES, byteLength } from "../lib/limits";
 
   let { value = $bindable(""), label = "Reply" }: { value?: string; label?: string } = $props();
 
-  const bytes = $derived(new TextEncoder().encode(value).length);
+  const bytes = $derived(byteLength(value));
   const over = $derived(bytes > MAX_BYTES);
 
   function focus(node: HTMLTextAreaElement) {

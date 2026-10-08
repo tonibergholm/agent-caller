@@ -5,14 +5,24 @@
   import { fromEvent, normalize, onKey, type Effect, type KeyState } from "../lib/keys";
   import ReplyBox from "./ReplyBox.svelte";
 
-  const MAX_REPLY_BYTES = 64 * 1024;
+  import { MAX_REPLY_BYTES, byteLength } from "../lib/limits";
 
-  let { view, api }: { view: InboxView; api: Api } = $props();
+  let {
+    view,
+    api,
+    hotkey = "Control+Option+Space",
+  }: { view: InboxView; api: Api; hotkey?: string } = $props();
 
   // svelte-ignore state_referenced_locally
   let st = $state<KeyState>(normalize(view, { selected: null, replyFor: null }));
   let replyText = $state("");
   let now = $state(Date.now());
+  let error = $state<string | null>(null);
+
+  $effect(() => {
+    void view;
+    error = null;
+  });
 
   $effect(() => {
     const next = normalize(view, st);
@@ -43,8 +53,8 @@
         await api.markSeen(effect.cardKey);
         return;
       case "submitReply": {
-        const text = replyText.trim();
-        if (text === "" || new TextEncoder().encode(text).length > MAX_REPLY_BYTES) return;
+        const text = replyText;
+        if (text.trim() === "" || byteLength(text) > MAX_REPLY_BYTES) return;
         await api.reply(effect.cardKey, text);
         st = { ...st, replyFor: null };
         return;
@@ -62,11 +72,14 @@
   }
 
   function handle(event: KeyboardEvent) {
+    error = null;
     const { state, effect } = onKey(view, st, fromEvent(event));
     st = state;
     if (effect.kind === "none") return;
     event.preventDefault();
-    void run(effect).catch(() => {});
+    run(effect).catch((e) => {
+      error = `Could not send: ${e instanceof Error ? e.message : String(e)}`;
+    });
   }
 
   function remaining(firesAt: number): string {
@@ -85,9 +98,13 @@
     {/each}
   </header>
 
+  {#if error}
+    <div class="error" role="alert">{error}</div>
+  {/if}
+
   {#if view.cards.length === 0}
     <p class="empty">No agents need you.</p>
-    <p class="hint">Press Control+Option+Space to open this panel.</p>
+    <p class="hint">Press {hotkey} to open this panel.</p>
   {/if}
 
   {#each view.cards as c (c.key)}
@@ -156,6 +173,9 @@
   }
   .disabled {
     opacity: 0.5;
+  }
+  .error {
+    color: #c00;
   }
   .notice[data-tone="warning"] {
     color: #b60;

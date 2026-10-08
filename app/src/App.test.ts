@@ -1,9 +1,9 @@
 import { cleanup, render, screen } from "@testing-library/svelte";
 import { afterEach, expect, test } from "vitest";
-
-afterEach(cleanup);
 import App from "./App.svelte";
 import { card, fakeApi, view } from "./lib/fixtures";
+
+afterEach(cleanup);
 
 test("the panel label loads the view and renders its cards", async () => {
   const api = fakeApi();
@@ -28,4 +28,20 @@ test("a pushed view replaces the loaded one", async () => {
   expect(await screen.findByText("No agents need you.")).toBeTruthy();
   push(view({ cards: [card({ key: "m/z" })] }));
   expect(await screen.findByText("Fix the build")).toBeTruthy();
+});
+
+test("a getView failure is shown", async () => {
+  const api = fakeApi();
+  api.getView = async () => {
+    throw "no backend";
+  };
+  render(App, { api, label: "panel" });
+  expect((await screen.findByRole("alert")).textContent).toContain("no backend");
+});
+
+test("the empty-state hint shows the stored hotkey", async () => {
+  const api = fakeApi();
+  api.getHotkey = async () => "Command+Shift+K";
+  render(App, { api, label: "panel" });
+  expect(await screen.findByText(/Command\+Shift\+K/)).toBeTruthy();
 });

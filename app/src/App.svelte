@@ -13,18 +13,24 @@
   const resolvedLabel = label ?? windowLabel();
 
   let v = $state<InboxView | null>(null);
+  let hotkey = $state<string | undefined>(undefined);
+  let loadError = $state<string | null>(null);
 
   onMount(() => {
     let off: (() => void) | undefined;
     let closed = false;
-    // Subscribe first, then load, so no update falls between the two.
-    void api.onView((next) => (v = next)).then((un) => {
-      if (closed) un();
-      else off = un;
-    });
-    void api.getView().then((initial) => {
-      v ??= initial;
-    });
+    void (async () => {
+      try {
+        // Subscribe first, then load, so no update falls between the two.
+        const un = await api.onView((next) => (v = next));
+        if (closed) un();
+        else off = un;
+        v ??= await api.getView();
+      } catch (e) {
+        loadError = `Could not load the inbox: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    })();
+    api.getHotkey().then((h) => (hotkey = h), () => {});
     return () => {
       closed = true;
       off?.();
@@ -36,5 +42,7 @@
   <!-- Placeholder until Task 17 adds Settings. -->
   <main><h1>Settings</h1></main>
 {:else if v}
-  <Panel view={v} {api} />
+  <Panel view={v} {api} {hotkey} />
+{:else if loadError}
+  <main role="alert">{loadError}</main>
 {/if}

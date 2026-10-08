@@ -1,10 +1,10 @@
 import { cleanup, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test } from "vitest";
-
-afterEach(cleanup);
 import Panel from "./Panel.svelte";
 import { card, view, fakeApi } from "../lib/fixtures";
+
+afterEach(cleanup);
 
 test("esc_before_the_view_event_still_cancels", async () => {   // finding 5
   // The view has NO actions yet (the pick's view event has not arrived), but Rust holds a countdown.
@@ -37,6 +37,7 @@ test("composition Enter in the reply field does not submit", async () => {   // 
   const api = fakeApi();
   render(Panel, { view: view({ cards: [card({ key: "m/b", can_reply: true })] }), api });
   await userEvent.keyboard("r");
+  await userEvent.keyboard("hello");
   const box = screen.getByRole("textbox");
   box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }));
   box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true }));
@@ -64,4 +65,32 @@ test("an empty view shows the empty state with the hotkey", () => {
   render(Panel, { view: view(), api: fakeApi() });
   expect(screen.getByText("No agents need you.")).toBeTruthy();
   expect(screen.getByText(/Control\+Option\+Space/)).toBeTruthy();
+});
+
+test("a rejected pick is shown to the user", async () => {
+  const api = fakeApi();
+  api.pick = async () => {
+    throw "StaleRequest";
+  };
+  const c = card({ key: "m/a", answerable: true, selectable_options: ["allow"] });
+  render(Panel, { view: view({ cards: [c] }), api });
+  await userEvent.keyboard("1");
+  expect((await screen.findByRole("alert")).textContent).toContain("StaleRequest");
+});
+
+test("a rejected markSeen is shown, and the next key clears it", async () => {
+  const api = fakeApi();
+  api.markSeen = async () => {
+    throw "boom";
+  };
+  render(Panel, { view: view({ cards: [card({ key: "m/b", can_mark_seen: true })] }), api });
+  await userEvent.keyboard("e");
+  expect((await screen.findByRole("alert")).textContent).toContain("boom");
+  await userEvent.keyboard("x");
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("the empty-state hint uses the given hotkey", () => {
+  render(Panel, { view: view(), api: fakeApi(), hotkey: "Command+Shift+K" });
+  expect(screen.getByText(/Command\+Shift\+K/)).toBeTruthy();
 });
