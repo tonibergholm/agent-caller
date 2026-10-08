@@ -3,10 +3,17 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
-pub struct ClientInfo { pub id: String, pub name: String, pub version: String }
+pub struct ClientInfo {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
-pub struct Cursor { pub epoch: String, pub seq: u64 }
+pub struct Cursor {
+    pub epoch: String,
+    pub seq: u64,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "type")]
@@ -29,7 +36,11 @@ pub enum ClientMessage {
         text: Option<String>,
     },
     #[serde(rename = "agent.send")]
-    AgentSend { id: String, agent_id: String, text: String },
+    AgentSend {
+        id: String,
+        agent_id: String,
+        text: String,
+    },
     #[serde(rename = "agent.mark_seen")]
     AgentMarkSeen { id: String, agent_id: String },
     #[serde(rename = "ping")]
@@ -91,11 +102,16 @@ impl ErrorCode {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
-pub struct ErrorBody { pub code: ErrorCode, pub message: String }
+pub struct ErrorBody {
+    pub code: ErrorCode,
+    pub message: String,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Outcome { Delivered }
+pub enum Outcome {
+    Delivered,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct CommandResult {
@@ -108,29 +124,72 @@ pub struct CommandResult {
 }
 
 impl CommandResult {
-    pub fn ok(id: &str) -> Self { Self { id: id.into(), ok: true, outcome: None, error: None } }
+    pub fn ok(id: &str) -> Self {
+        Self {
+            id: id.into(),
+            ok: true,
+            outcome: None,
+            error: None,
+        }
+    }
     pub fn delivered(id: &str) -> Self {
-        Self { id: id.into(), ok: true, outcome: Some(Outcome::Delivered), error: None }
+        Self {
+            id: id.into(),
+            ok: true,
+            outcome: Some(Outcome::Delivered),
+            error: None,
+        }
     }
     pub fn err(id: &str, code: ErrorCode, message: &str) -> Self {
-        Self { id: id.into(), ok: false, outcome: None, error: Some(ErrorBody { code, message: message.into() }) }
+        Self {
+            id: id.into(),
+            ok: false,
+            outcome: None,
+            error: Some(ErrorBody {
+                code,
+                message: message.into(),
+            }),
+        }
     }
-    pub fn error_code(&self) -> Option<ErrorCode> { self.error.as_ref().map(|e| e.code) }
+    pub fn error_code(&self) -> Option<ErrorCode> {
+        self.error.as_ref().map(|e| e.code)
+    }
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
     #[serde(rename = "welcome")]
-    Welcome { machine: Machine, capabilities: Vec<String>, epoch: String, seq: u64 },
+    Welcome {
+        machine: Machine,
+        capabilities: Vec<String>,
+        epoch: String,
+        seq: u64,
+    },
     #[serde(rename = "snapshot")]
-    Snapshot { epoch: String, seq: u64, agents: Vec<Agent> },
+    Snapshot {
+        epoch: String,
+        seq: u64,
+        agents: Vec<Agent>,
+    },
     #[serde(rename = "agent.updated")]
-    AgentUpdated { epoch: String, seq: u64, agent: Agent },
+    AgentUpdated {
+        epoch: String,
+        seq: u64,
+        agent: Agent,
+    },
     #[serde(rename = "agent.removed")]
-    AgentRemoved { epoch: String, seq: u64, agent_id: String },
+    AgentRemoved {
+        epoch: String,
+        seq: u64,
+        agent_id: String,
+    },
     #[serde(rename = "request.opened")]
-    RequestOpened { epoch: String, seq: u64, request: Request },
+    RequestOpened {
+        epoch: String,
+        seq: u64,
+        request: Request,
+    },
     #[serde(rename = "request.resolved")]
     RequestResolved {
         epoch: String,
@@ -142,7 +201,11 @@ pub enum ServerMessage {
         option_id: Option<String>,
     },
     #[serde(rename = "machine.updated")]
-    MachineUpdated { epoch: String, seq: u64, machine: Machine },
+    MachineUpdated {
+        epoch: String,
+        seq: u64,
+        machine: Machine,
+    },
     #[serde(rename = "result")]
     Result(CommandResult),
     #[serde(rename = "pong")]
@@ -167,15 +230,25 @@ impl ServerMessage {
             | ServerMessage::RequestOpened { seq, .. }
             | ServerMessage::RequestResolved { seq, .. }
             | ServerMessage::MachineUpdated { seq, .. } => Some(*seq),
-            ServerMessage::Result(_) | ServerMessage::Pong { .. } | ServerMessage::Error { .. } => None,
+            ServerMessage::Result(_) | ServerMessage::Pong { .. } | ServerMessage::Error { .. } => {
+                None
+            }
         }
     }
 }
 
 /// The `type` of every message this version of the daemon sends.
 pub const SERVER_MESSAGE_TYPES: [&str; 10] = [
-    "welcome", "snapshot", "agent.updated", "agent.removed", "request.opened",
-    "request.resolved", "machine.updated", "result", "pong", "error",
+    "welcome",
+    "snapshot",
+    "agent.updated",
+    "agent.removed",
+    "request.opened",
+    "request.resolved",
+    "machine.updated",
+    "result",
+    "pong",
+    "error",
 ];
 
 /// Decodes a daemon frame, tolerating newer daemons (spec §7.2).
@@ -187,8 +260,9 @@ pub const SERVER_MESSAGE_TYPES: [&str; 10] = [
 pub fn decode_server(raw: &str) -> Result<Option<ServerMessage>, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(raw)?;
     if let Some(t) = value.get("type").and_then(|t| t.as_str())
-        && !SERVER_MESSAGE_TYPES.contains(&t) {
-            return Ok(None);
-        }
+        && !SERVER_MESSAGE_TYPES.contains(&t)
+    {
+        return Ok(None);
+    }
     serde_json::from_value(value).map(Some)
 }

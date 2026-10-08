@@ -88,6 +88,10 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
     - unknown agent state: `unknown`;
     - unknown request `kind` or `answer_path`: shown read-only;
     - unknown `effect`: that option is not selectable.
+    - unknown `source`, `kind`, `status`, `by` or source `state`: decoded as
+      `unknown`;
+    - an unknown request status is read-only;
+    - an unknown resolution is shown as "check the terminal".
 - **Version mismatch.** If `hello.protocol` is not supported, the daemon
   sends `error {code: "unsupported_protocol", supported: ["acd/1"]}` and
   closes with code 4400.

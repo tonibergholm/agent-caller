@@ -1,9 +1,45 @@
 {
+  "$defs": {
+    "ClientInfo": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "Cursor": {
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "epoch",
+        "seq"
+      ],
+      "type": "object"
+    }
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ClientMessage",
   "oneOf": [
     {
-      "type": "object",
       "properties": {
         "client": {
           "$ref": "#/$defs/ClientInfo"
@@ -25,8 +61,8 @@
           "type": "string"
         },
         "type": {
-          "type": "string",
-          "const": "hello"
+          "const": "hello",
+          "type": "string"
         }
       },
       "required": [
@@ -34,10 +70,42 @@
         "protocol",
         "token",
         "client"
-      ]
+      ],
+      "type": "object"
     },
     {
-      "type": "object",
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "option_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "option_id"
+              ]
+            },
+            {
+              "properties": {
+                "option_id": {
+                  "type": "null"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ]
+            }
+          ]
+        }
+      ],
       "properties": {
         "id": {
           "type": "string"
@@ -58,18 +126,18 @@
           ]
         },
         "type": {
-          "type": "string",
-          "const": "request.answer"
+          "const": "request.answer",
+          "type": "string"
         }
       },
       "required": [
         "type",
         "id",
         "request_id"
-      ]
+      ],
+      "type": "object"
     },
     {
-      "type": "object",
       "properties": {
         "agent_id": {
           "type": "string"
@@ -81,8 +149,8 @@
           "type": "string"
         },
         "type": {
-          "type": "string",
-          "const": "agent.send"
+          "const": "agent.send",
+          "type": "string"
         }
       },
       "required": [
@@ -90,10 +158,10 @@
         "id",
         "agent_id",
         "text"
-      ]
+      ],
+      "type": "object"
     },
     {
-      "type": "object",
       "properties": {
         "agent_id": {
           "type": "string"
@@ -102,69 +170,33 @@
           "type": "string"
         },
         "type": {
-          "type": "string",
-          "const": "agent.mark_seen"
+          "const": "agent.mark_seen",
+          "type": "string"
         }
       },
       "required": [
         "type",
         "id",
         "agent_id"
-      ]
+      ],
+      "type": "object"
     },
     {
-      "type": "object",
       "properties": {
         "id": {
           "type": "string"
         },
         "type": {
-          "type": "string",
-          "const": "ping"
+          "const": "ping",
+          "type": "string"
         }
       },
       "required": [
         "type",
         "id"
-      ]
+      ],
+      "type": "object"
     }
   ],
-  "$defs": {
-    "ClientInfo": {
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "name",
-        "version"
-      ]
-    },
-    "Cursor": {
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "string"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "epoch",
-        "seq"
-      ]
-    }
-  }
+  "title": "ClientMessage"
 }

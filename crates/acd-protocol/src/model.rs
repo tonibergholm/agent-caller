@@ -21,14 +21,29 @@ pub(crate) mod ts {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum Source { Herdr, T3, Hooks }
+pub enum Source {
+    Herdr,
+    T3,
+    Hooks,
+    #[serde(other)]
+    Unknown,
+}
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentKind { Claude, Codex, Other }
+pub enum AgentKind {
+    Claude,
+    Codex,
+    Other,
+    #[serde(other)]
+    Unknown,
+}
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
@@ -40,6 +55,7 @@ pub enum AgentState {
     Unknown,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestKind {
@@ -50,10 +66,18 @@ pub enum RequestKind {
     Unknown,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum RequestStatus { Open, Answering, Resolved }
+pub enum RequestStatus {
+    Open,
+    Answering,
+    Resolved,
+    #[serde(other)]
+    Unknown,
+}
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum AnswerPath {
@@ -65,6 +89,7 @@ pub enum AnswerPath {
     Unknown,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Effect {
@@ -76,14 +101,33 @@ pub enum Effect {
     Unknown,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum ResolvedBy { Inbox, Terminal, Agent, Superseded, Uncertain, Lost }
+pub enum ResolvedBy {
+    Inbox,
+    Terminal,
+    Agent,
+    Superseded,
+    Uncertain,
+    Lost,
+    #[serde(other)]
+    Unknown,
+}
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum SourceState { Ok, Degraded, Disabled, Unconfigured }
+pub enum SourceState {
+    Ok,
+    Degraded,
+    Disabled,
+    Unconfigured,
+    #[serde(other)]
+    Unknown,
+}
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct SourceStatus {
     pub state: SourceState,
@@ -92,12 +136,23 @@ pub struct SourceStatus {
 }
 
 impl SourceStatus {
-    pub fn unconfigured() -> Self { Self { state: SourceState::Unconfigured, message: None } }
+    pub fn unconfigured() -> Self {
+        Self {
+            state: SourceState::Unconfigured,
+            message: None,
+        }
+    }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
-pub struct Sources { pub hooks: SourceStatus, pub herdr: SourceStatus, pub t3: SourceStatus }
+pub struct Sources {
+    pub hooks: SourceStatus,
+    pub herdr: SourceStatus,
+    pub t3: SourceStatus,
+}
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct Machine {
     pub id: String,
@@ -106,6 +161,7 @@ pub struct Machine {
     pub sources: Sources,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct RequestOption {
     pub id: String,
@@ -114,6 +170,7 @@ pub struct RequestOption {
     pub effect: Effect,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct Question {
     pub id: String,
@@ -123,6 +180,7 @@ pub struct Question {
     pub options: Vec<RequestOption>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub id: String,
@@ -137,7 +195,8 @@ pub struct Request {
     pub free_text: bool,
     pub raw_screen: Option<String>,
     #[serde(with = "ts")]
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("format" = "date-time"))]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub opened_at: Timestamp,
 }
 
@@ -159,6 +218,7 @@ impl Request {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub id: String,
@@ -170,7 +230,8 @@ pub struct Agent {
     pub project: Option<String>,
     pub state: AgentState,
     #[serde(with = "ts")]
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("format" = "date-time"))]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub state_since: Timestamp,
     pub failed: bool,
     pub last_message: Option<String>,

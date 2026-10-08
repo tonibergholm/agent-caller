@@ -359,6 +359,7 @@ impl Registry {
             RequestStatus::Answering => return Err(ErrorCode::RequestBusy),
             RequestStatus::Resolved => return Err(ErrorCode::RequestGone),
             RequestStatus::Open => {}
+            RequestStatus::Unknown => return Err(ErrorCode::NotAnswerable),
         }
         if !e.req.is_answerable() { return Err(ErrorCode::NotAnswerable); }
         if !e.ready { return Err(ErrorCode::RequestNotReady); }

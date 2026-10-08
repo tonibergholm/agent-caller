@@ -4,11 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+ts = ["dep:ts-rs"]
+
 [dependencies]
 chrono.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ts-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
 jsonschema.workspace = true
