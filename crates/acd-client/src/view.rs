@@ -130,7 +130,16 @@ pub struct MachineEntryView {
     pub key: String,
     pub name: String,
     pub endpoint: EndpointConfig,
-    pub paired: bool,
+    pub pairing: PairingState,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum PairingState {
+    Paired,
+    NotPaired,
+    Unreadable,
 }
 
 impl MachineEntryView {
@@ -139,7 +148,11 @@ impl MachineEntryView {
             key: entry.key.clone(),
             name: entry.name.clone(),
             endpoint: entry.endpoint.clone(),
-            paired: matches!(entry.endpoint, EndpointConfig::Local) || secret.is_some(),
+            pairing: if matches!(entry.endpoint, EndpointConfig::Local) || secret.is_some() {
+                PairingState::Paired
+            } else {
+                PairingState::NotPaired
+            },
         }
     }
 }
@@ -147,25 +160,27 @@ impl MachineEntryView {
 pub fn machine_entry_views(
     entries: &[MachineEntry],
     secrets: &dyn SecretStore,
-) -> Vec<MachineEntryView> {
+) -> Result<Vec<MachineEntryView>, String> {
     entries
         .iter()
         .map(|entry| {
-            let paired = match entry.endpoint {
-                EndpointConfig::Local => true,
-                EndpointConfig::Tcp { .. } => secrets
-                    .get(&entry.key)
-                    .ok()
-                    .flatten()
-                    .and_then(|raw| MachineSecret::from_json(&raw).ok())
-                    .is_some(),
+            let pairing = match entry.endpoint {
+                EndpointConfig::Local => PairingState::Paired,
+                EndpointConfig::Tcp { .. } => match secrets.get(&entry.key) {
+                    Err(_) => return Err("Could not read saved machine credentials".into()),
+                    Ok(None) => PairingState::NotPaired,
+                    Ok(Some(raw)) => match MachineSecret::from_json(&raw) {
+                        Ok(_) => PairingState::Paired,
+                        Err(_) => PairingState::Unreadable,
+                    },
+                },
             };
-            MachineEntryView {
+            Ok(MachineEntryView {
                 key: entry.key.clone(),
                 name: entry.name.clone(),
                 endpoint: entry.endpoint.clone(),
-                paired,
-            }
+                pairing,
+            })
         })
         .collect()
 }
@@ -413,6 +428,7 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
 mod tests {
     use super::*;
     use crate::session::Session;
+    use crate::settings::{MachineSecret, MemorySecrets, SecretError};
     use acd_protocol::RequestKind;
     use acd_protocol::*;
     use std::collections::{HashMap, HashSet};
@@ -517,6 +533,71 @@ mod tests {
         let hidden = view_of(&[(&e, &s)], false);
         assert_eq!(ids(&hidden), ["b", "a", "d", "c", "e", "f"]);
         assert_eq!(hidden.hidden_idle, 1);
+    }
+
+    #[test]
+    fn actions_are_ordered_by_fire_time() {
+        let (e, s) = (entry("m"), state(true, ALL, vec![]));
+        let actions = vec![
+            ActionView {
+                id: "later".into(),
+                card_key: "m/a".into(),
+                label: "later".into(),
+                detail: None,
+                fires_at_ms: 20.0,
+            },
+            ActionView {
+                id: "first".into(),
+                card_key: "m/b".into(),
+                label: "first".into(),
+                detail: None,
+                fires_at_ms: 10.0,
+            },
+        ];
+        let v = build_view(&ViewInput {
+            machines: vec![MachineInput {
+                entry: &e,
+                state: Some(&s),
+            }],
+            actions: &actions,
+            busy: &HashSet::new(),
+            notices: &HashMap::new(),
+            show_idle: false,
+        });
+        assert_eq!(
+            v.actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["first", "later"]
+        );
+    }
+
+    #[test]
+    fn cards_resolve_notice_and_action_by_card_key() {
+        let t = "2026-10-08T10:00:00.000Z";
+        let (e, s) = (entry("m"), state(true, ALL, vec![agent("a", "working", t)]));
+        let notice = Notice {
+            tone: NoticeTone::Info,
+            text: "saved".into(),
+        };
+        let action = ActionView {
+            id: "act".into(),
+            card_key: "m/a".into(),
+            label: "Undo".into(),
+            detail: Some("allow".into()),
+            fires_at_ms: 10.0,
+        };
+        let notices = HashMap::from([("m/a".into(), notice.clone())]);
+        let v = build_view(&ViewInput {
+            machines: vec![MachineInput {
+                entry: &e,
+                state: Some(&s),
+            }],
+            actions: std::slice::from_ref(&action),
+            busy: &HashSet::new(),
+            notices: &notices,
+            show_idle: false,
+        });
+        assert_eq!(v.cards[0].notice, Some(notice));
+        assert_eq!(v.cards[0].action, Some(action));
     }
     #[test]
     fn tray_counts_live_needs_you_only() {
@@ -802,6 +883,11 @@ mod tests {
         assert_eq!(t(NotSupported), "Not supported for this agent");
         assert_eq!(t(BadRequest), "Could not send: srv");
         assert_eq!(t(Unknown), "Could not send: srv");
+        assert_eq!(notice_for_error(RequestGone, "").tone, NoticeTone::Info);
+        assert_eq!(
+            notice_for_error(RequestNotReady, "").tone,
+            NoticeTone::Warning
+        );
         assert_eq!(
             notice_for_outcome(&super::Outcome::Uncertain).unwrap().text,
             "Check the terminal"
@@ -813,6 +899,16 @@ mod tests {
             "Offline. Nothing was sent."
         );
         assert_eq!(notice_for_outcome(&super::Outcome::Delivered), None);
+        assert_eq!(
+            notice_for_outcome(&super::Outcome::Uncertain).unwrap().tone,
+            NoticeTone::Warning
+        );
+        assert_eq!(
+            notice_for_outcome(&super::Outcome::NotSent(NotSent::NotAdvertised))
+                .unwrap()
+                .tone,
+            NoticeTone::Info
+        );
         assert_eq!(
             resolution_notice(ResolvedBy::Uncertain).unwrap().text,
             "Check the terminal"
@@ -832,5 +928,60 @@ mod tests {
         assert_eq!(resolution_notice(ResolvedBy::Inbox), None);
         assert_eq!(resolution_notice(ResolvedBy::Agent), None);
         assert_eq!(resolution_notice(ResolvedBy::Superseded), None);
+    }
+
+    #[test]
+    fn settings_pairing_distinguishes_absent_and_unreadable_secrets() {
+        struct FailingSecrets;
+        impl crate::settings::SecretStore for FailingSecrets {
+            fn get(&self, _: &str) -> Result<Option<String>, SecretError> {
+                Err(SecretError("sensitive detail".into()))
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), SecretError> {
+                unreachable!()
+            }
+            fn delete(&self, _: &str) -> Result<(), SecretError> {
+                unreachable!()
+            }
+        }
+        let remote = entry("remote");
+        let local = MachineEntry {
+            key: "local".into(),
+            name: "Local".into(),
+            endpoint: EndpointConfig::Local,
+        };
+        let absent = MemorySecrets::default();
+        let list = machine_entry_views(std::slice::from_ref(&remote), &absent).unwrap();
+        assert_eq!(list[0].pairing, PairingState::NotPaired);
+        assert_eq!(
+            machine_entry_views(std::slice::from_ref(&local), &FailingSecrets).unwrap()[0].pairing,
+            PairingState::Paired
+        );
+        assert_eq!(
+            machine_entry_views(std::slice::from_ref(&remote), &FailingSecrets).unwrap_err(),
+            "Could not read saved machine credentials"
+        );
+
+        let malformed = MemorySecrets::default();
+        malformed.set(&remote.key, "not-json").unwrap();
+        assert_eq!(
+            machine_entry_views(std::slice::from_ref(&remote), &malformed).unwrap()[0].pairing,
+            PairingState::Unreadable
+        );
+        let valid = MemorySecrets::default();
+        valid
+            .set(
+                &remote.key,
+                &MachineSecret {
+                    token: "A".repeat(43),
+                    pin: format!("sha256:{}", "A".repeat(43)),
+                }
+                .to_json(),
+            )
+            .unwrap();
+        assert_eq!(
+            machine_entry_views(&[remote], &valid).unwrap()[0].pairing,
+            PairingState::Paired
+        );
     }
 }
