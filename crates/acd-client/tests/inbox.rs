@@ -222,3 +222,218 @@ async fn reply_goes_through_the_undo() {
         .count();
     assert_eq!(sent, 1);
 }
+
+#[tokio::test]
+async fn import_pairing_stores_the_secret_and_never_reports_it() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let secrets = Arc::new(MemorySecrets::default());
+    let ib = Inbox::new(
+        Settings {
+            machines: vec![],
+            ..Settings::fresh()
+        },
+        secrets.clone(),
+        InboxOptions {
+            timing: common::fast(),
+            settings_path: None,
+            client_name: "t".into(),
+            client_version: "0".into(),
+        },
+    );
+    ib.start();
+    let line = format!(
+        "acd://127.0.0.1:{}?pin={}#{}",
+        f.port(),
+        f.pin(),
+        common::TOKEN
+    );
+    let err = ib.import_pairing("garbage #secret-ish").unwrap_err();
+    assert!(!err.contains("secret-ish"));
+    let e = ib.import_pairing(&line).unwrap();
+    let stored = MachineSecret::from_json(&secrets.get(&e.key).unwrap().unwrap()).unwrap();
+    assert_eq!(
+        (stored.token.as_str(), stored.pin.clone()),
+        (common::TOKEN, f.pin())
+    );
+    let listed = ib.machines();
+    assert!(
+        listed
+            .iter()
+            .any(|m| m.key == e.key && m.pairing == PairingState::Paired)
+    );
+    let json = serde_json::to_string(&listed).unwrap()
+        + &serde_json::to_string(&*ib.view().borrow()).unwrap();
+    assert!(
+        !json.contains(common::TOKEN) && !json.contains(&f.pin()),
+        "no secret or pin in anything the webview gets"
+    );
+    let c = f.next_connection().await;
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[]}))
+        .await;
+    if f.connections() > 1 {
+        f.next_connection()
+            .await
+            .send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[]}))
+            .await;
+    }
+    view_until(&ib, "online", |v| {
+        v.machines
+            .iter()
+            .any(|m| m.key == e.key && m.status == acd_client::conn::MachineStatus::Online)
+    })
+    .await;
+    let again = ib.import_pairing(&line).unwrap();
+    assert_eq!(
+        again.key, e.key,
+        "re-pairing the same host:port updates the entry"
+    );
+}
+
+#[tokio::test]
+async fn notifications_only_for_opened_events_and_deduped() {
+    let (f, c, ib) = setup().await;
+    let mut events = ib.events();
+    let mut pending = pending_agent()["pending"].clone();
+    pending["title"] = Value::String("Bash".into());
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":2,"request":pending}))
+        .await;
+    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        event,
+        InboxEvent::RequestOpened {
+            machine_key: "m1".into(),
+            machine_name: "Box".into(),
+            agent_title: "agent".into(),
+            request_title: "Bash".into(),
+            request_id: ANSWER_REQ.into()
+        }
+    );
+    c.close(1001).await;
+    let c2 = f.next_connection().await;
+    c2.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]}))
+        .await;
+    c2.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":2,"request":pending_agent()["pending"]})).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert_eq!(f.connections(), 2);
+}
+
+#[tokio::test]
+async fn duplicate_machine_is_hidden() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let secrets = Arc::new(MemorySecrets::default());
+    for key in ["m1", "m2"] {
+        secrets
+            .set(
+                key,
+                &MachineSecret {
+                    token: common::TOKEN.into(),
+                    pin: f.pin(),
+                }
+                .to_json(),
+            )
+            .unwrap();
+    }
+    let mut settings = Settings {
+        client_id: settings_client_id().into(),
+        hotkey: DEFAULT_HOTKEY.into(),
+        show_idle: false,
+        machines: vec![],
+    };
+    for (key, name) in [("m1", "One"), ("m2", "Two")] {
+        settings.machines.push(MachineEntry {
+            key: key.into(),
+            name: name.into(),
+            endpoint: EndpointConfig::Tcp {
+                host: "127.0.0.1".into(),
+                port: f.port(),
+            },
+        });
+    }
+    let ib = Inbox::new(
+        settings,
+        secrets,
+        InboxOptions {
+            timing: common::fast(),
+            settings_path: None,
+            client_name: "t".into(),
+            client_version: "0".into(),
+        },
+    );
+    ib.start();
+    let c1 = f.next_connection().await;
+    let c2 = f.next_connection().await;
+    let snapshot = serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"machine":{"id":"same","name":"daemon"},"agents":[pending_agent()]});
+    c1.send(snapshot.clone()).await;
+    c2.send(snapshot).await;
+    view_until(&ib, "duplicate hidden", |v| {
+        v.machines
+            .iter()
+            .any(|m| m.key == "m2" && m.duplicate_of.as_deref() == Some("m1"))
+            && v.cards.iter().all(|c| !c.key.starts_with("m2/"))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn repairing_inside_the_undo_window_sends_nothing() {
+    let (f, _, ib) = setup().await;
+    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    let line = format!(
+        "acd://127.0.0.1:{}?pin={}#{}",
+        f.port(),
+        f.pin(),
+        common::TOKEN
+    );
+    ib.import_pairing(&line).unwrap();
+    let new_conn = f.next_connection().await;
+    new_conn
+        .send(
+            serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]}),
+        )
+        .await;
+    view_until(&ib, "replacement online", |v| {
+        v.machines
+            .iter()
+            .any(|m| m.key == "m1" && m.status == acd_client::conn::MachineStatus::Online)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(answers(&f), 0);
+    let view = ib.view();
+    assert!(view.borrow().actions.is_empty());
+    assert!(
+        view.borrow()
+            .cards
+            .iter()
+            .find(|c| c.key == "m1/a1")
+            .and_then(|c| c.notice.as_ref())
+            .is_some_and(|n| n.text == "Offline. Nothing was sent.")
+    );
+    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(answers(&f), 1);
+}
+
+#[tokio::test]
+async fn removing_a_machine_cancels_its_countdowns() {
+    let (f, _, ib) = setup().await;
+    ib.pick("m1/a1", ANSWER_REQ, "allow").unwrap();
+    ib.remove_machine("m1").unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(answers(&f), 0);
+    assert!(ib.view().borrow().actions.is_empty());
+}

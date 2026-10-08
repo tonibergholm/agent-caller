@@ -5,9 +5,12 @@ use crate::{
     conn::{self, MachineHandle, MachineState, now_ms},
     endpoint::Endpoint,
     settings::{EndpointConfig, MachineEntry, MachineSecret, SecretStore, Settings},
-    view::{self, ActionView, InboxView, MachineInput, Notice, NoticeTone},
+    view::{
+        self, ActionView, InboxView, MachineEntryView, MachineInput, Notice, NoticeTone,
+        PairingState,
+    },
 };
-use acd_protocol::Effect;
+use acd_protocol::{Effect, pairing::Pairing};
 use std::sync::Mutex;
 use std::time::Instant;
 use std::{
@@ -57,9 +60,15 @@ struct Inner {
     #[allow(dead_code)] // Reserved for the notification state added by Task 11.
     notified: HashSet<(String, String)>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum InboxEvent {
-    Updated,
+    RequestOpened {
+        machine_key: String,
+        machine_name: String,
+        agent_title: String,
+        request_title: String,
+        request_id: String,
+    },
 }
 pub struct Inbox {
     inner: Mutex<Inner>,
@@ -114,6 +123,198 @@ impl Inbox {
     pub fn view(&self) -> watch::Receiver<InboxView> {
         self.view_tx.subscribe()
     }
+    pub fn events(&self) -> broadcast::Receiver<InboxEvent> {
+        self.events_tx.subscribe()
+    }
+    pub fn machines(&self) -> Vec<MachineEntryView> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .settings
+            .machines
+            .iter()
+            .map(|entry| {
+                let pairing = match &entry.endpoint {
+                    EndpointConfig::Local => PairingState::Paired,
+                    EndpointConfig::Tcp { .. } => match self.secrets.get(&entry.key) {
+                        Ok(None) => PairingState::NotPaired,
+                        Err(_) => PairingState::Unreadable,
+                        Ok(Some(raw)) => {
+                            if MachineSecret::from_json(&raw).is_ok() {
+                                PairingState::Paired
+                            } else {
+                                PairingState::Unreadable
+                            }
+                        }
+                    },
+                };
+                MachineEntryView {
+                    key: entry.key.clone(),
+                    name: entry.name.clone(),
+                    endpoint: entry.endpoint.clone(),
+                    pairing,
+                }
+            })
+            .collect()
+    }
+    pub fn import_pairing(self: &Arc<Self>, line: &str) -> Result<MachineEntry, String> {
+        let pairing = Pairing::parse(line).map_err(|_| "That is not an acd pairing line. Run `acd pair` on the machine and copy its output.".to_owned())?;
+        let mut inner = self.inner.lock().unwrap();
+        let key_match = inner.settings.machines.iter().find(|m| matches!(&m.endpoint, EndpointConfig::Tcp { host, port } if host == &pairing.host && *port == pairing.port)).cloned();
+        let entry = key_match.unwrap_or_else(|| MachineEntry {
+            key: uuid::Uuid::new_v4().to_string(),
+            name: pairing
+                .host
+                .split('.')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&pairing.host)
+                .to_owned(),
+            endpoint: EndpointConfig::Tcp {
+                host: pairing.host.clone(),
+                port: pairing.port,
+            },
+        });
+        self.secrets
+            .set(
+                &entry.key,
+                &MachineSecret {
+                    token: pairing.token,
+                    pin: pairing.pin,
+                }
+                .to_json(),
+            )
+            .map_err(|e| e.to_string())?;
+        inner.settings.machines.retain(|m| m.key != entry.key);
+        inner.settings.machines.push(entry.clone());
+        if let Some(path) = &self.opts.settings_path {
+            inner.settings.save(path).map_err(|e| e.to_string())?;
+        }
+        if let Some(old) = inner.machines.iter().position(|m| m.entry.key == entry.key) {
+            for action in inner.actions.end_machine(&entry.key) {
+                inner.notices.insert(
+                    action.card_key,
+                    (
+                        notice("Offline. Nothing was sent.", NoticeTone::Warning),
+                        Instant::now() + self.opts.timing.notice_ttl,
+                    ),
+                );
+            }
+            inner.machines.remove(old); // dropping the handle aborts its task; pending submits become Uncertain.
+        }
+        let instance = self.next_instance.fetch_add(1, Ordering::Relaxed);
+        let client_id = inner.settings.client_id.clone();
+        let handle = spawn_for(&entry, &self.secrets, &self.opts, instance, &client_id);
+        inner.machines.push(Machine {
+            entry: entry.clone(),
+            handle: handle.clone(),
+        });
+        drop(inner);
+        if let Some(handle) = handle {
+            self.watch_machine(entry.key.clone(), handle);
+        }
+        self.wake();
+        Ok(entry)
+    }
+    pub fn rename_machine(&self, key: &str, name: &str) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut candidate = inner
+            .settings
+            .machines
+            .iter()
+            .find(|m| m.key == key)
+            .cloned()
+            .ok_or("Unknown machine")?;
+        candidate.name = name.to_owned();
+        candidate.validate().map_err(|e| e.to_string())?;
+        inner
+            .settings
+            .machines
+            .iter_mut()
+            .find(|m| m.key == key)
+            .unwrap()
+            .name = name.to_owned();
+        if let Some(path) = &self.opts.settings_path {
+            inner.settings.save(path).map_err(|e| e.to_string())?;
+        }
+        if let Some(machine) = inner.machines.iter_mut().find(|m| m.entry.key == key) {
+            machine.entry.name = name.to_owned();
+        }
+        drop(inner);
+        self.wake();
+        Ok(())
+    }
+    pub fn remove_machine(&self, key: &str) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let pos = inner
+            .settings
+            .machines
+            .iter()
+            .position(|m| m.key == key)
+            .ok_or("Unknown machine")?;
+        self.secrets.delete(key).map_err(|e| e.to_string())?;
+        inner.settings.machines.remove(pos);
+        if let Some(path) = &self.opts.settings_path {
+            inner.settings.save(path).map_err(|e| e.to_string())?;
+        }
+        inner.machines.retain(|m| m.entry.key != key);
+        for action in inner.actions.end_machine(key) {
+            inner.notices.insert(
+                action.card_key,
+                (
+                    notice("Offline. Nothing was sent.", NoticeTone::Warning),
+                    Instant::now() + self.opts.timing.notice_ttl,
+                ),
+            );
+        }
+        drop(inner);
+        self.wake();
+        Ok(())
+    }
+    pub fn retry_machine(&self, key: &str) {
+        if let Some(handle) = self
+            .inner
+            .lock()
+            .unwrap()
+            .machines
+            .iter()
+            .find(|m| m.entry.key == key)
+            .and_then(|m| m.handle.clone())
+        {
+            handle.retry_now();
+        }
+    }
+    pub fn settings(&self) -> Settings {
+        self.inner.lock().unwrap().settings.clone()
+    }
+    pub fn set_hotkey(&self, hotkey: &str) -> Result<(), String> {
+        if hotkey.trim().is_empty() {
+            return Err("Hotkey cannot be empty".into());
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.settings.hotkey = hotkey.to_owned();
+        if let Some(path) = &self.opts.settings_path {
+            inner.settings.save(path).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+    #[cfg(feature = "testing")]
+    pub fn drop_connections_for_test(&self) {
+        for m in &self.inner.lock().unwrap().machines {
+            if let Some(h) = &m.handle {
+                h.drop_connection();
+            }
+        }
+    }
+    fn watch_machine(self: &Arc<Self>, key: String, handle: MachineHandle) {
+        let ib = self.clone();
+        let mut state = handle.state();
+        let mut events = handle.events();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! { r=state.changed()=>{if r.is_err(){break} ib.wake.notify_one();}, e=events.recv()=>match e { Ok((instance,event))=>ib.on_machine_event(&key,instance,event).await, Err(broadcast::error::RecvError::Lagged(_))=>{let instance=state.borrow().instance; ib.end_machine(&key,instance).await;}, Err(_)=>break } }
+            }
+        });
+    }
     pub fn start(self: &Arc<Self>) {
         if self.started.swap(true, Ordering::AcqRel) {
             return;
@@ -144,11 +345,11 @@ impl Inbox {
             };
             for (key, handle) in handles {
                 let ib = this.clone();
+                let mut state = handle.state();
+                let mut events = handle.events();
                 tokio::spawn(async move {
-                    let mut state = handle.state();
-                    let mut events = handle.events();
                     loop {
-                        tokio::select! {r=state.changed()=>{if r.is_err(){break} ib.wake.notify_one();}, e=events.recv()=>match e {Ok((instance,event))=>ib.on_machine_event(&key,instance,event).await,Err(broadcast::error::RecvError::Lagged(_))=>{let instance = { handle.state().borrow().instance }; ib.end_machine(&key, instance).await;},Err(_)=>break}}
+                        tokio::select! {r=state.changed()=>{if r.is_err(){break} ib.wake.notify_one();}, e=events.recv()=>match e {Ok((instance,event))=>ib.on_machine_event(&key,instance,event).await,Err(broadcast::error::RecvError::Lagged(_))=>{let instance = state.borrow().instance; ib.end_machine(&key, instance).await;},Err(_)=>break}}
                     }
                 });
             }
@@ -221,7 +422,6 @@ impl Inbox {
             show_idle: inner.settings.show_idle,
         });
         self.view_tx.send_replace(v);
-        let _ = self.events_tx.send(InboxEvent::Updated);
     }
     async fn fire_due(self: &Arc<Self>) {
         let due = { self.inner.lock().unwrap().actions.due(Instant::now()) };
@@ -314,16 +514,55 @@ impl Inbox {
         if current != Some(instance) {
             return;
         }
-        if let conn::MachineEvent::ConnectionEnded { generation } = event {
-            for a in inner.actions.end_generation(key, generation) {
-                inner.notices.insert(
-                    a.card_key,
-                    (
-                        notice("Offline. Nothing was sent.", NoticeTone::Warning),
-                        Instant::now() + self.opts.timing.notice_ttl,
-                    ),
-                );
+        match event {
+            conn::MachineEvent::ConnectionEnded { generation } => {
+                for a in inner.actions.end_generation(key, generation) {
+                    inner.notices.insert(
+                        a.card_key,
+                        (
+                            notice("Offline. Nothing was sent.", NoticeTone::Warning),
+                            Instant::now() + self.opts.timing.notice_ttl,
+                        ),
+                    );
+                }
             }
+            conn::MachineEvent::Opened(req) => {
+                let machine = inner.machines.iter().find(|m| m.entry.key == key).unwrap();
+                let machine_name = machine.entry.name.clone();
+                let state = machine.handle.as_ref().unwrap().state();
+                let state = state.borrow();
+                let machine_id = state
+                    .session
+                    .machine
+                    .as_ref()
+                    .map(|m| m.id.clone())
+                    .unwrap_or_else(|| key.to_owned());
+                let agent_title = state
+                    .session
+                    .agents
+                    .get(&req.agent_id)
+                    .map(|a| a.title.clone())
+                    .unwrap_or_else(|| req.agent_id.clone());
+                drop(state);
+                if inner.notified.insert((machine_id, req.id.clone())) {
+                    let _ = self.events_tx.send(InboxEvent::RequestOpened {
+                        machine_key: key.to_owned(),
+                        machine_name,
+                        agent_title,
+                        request_title: req.title,
+                        request_id: req.id,
+                    });
+                }
+            }
+            conn::MachineEvent::Resolved { agent_id, by, .. } => {
+                if let Some(n) = view::resolution_notice(by) {
+                    inner.notices.insert(
+                        view::card_key(key, &agent_id),
+                        (n, Instant::now() + self.opts.timing.notice_ttl),
+                    );
+                }
+            }
+            conn::MachineEvent::Welcomed { .. } | conn::MachineEvent::Ready { .. } => {}
         }
         drop(inner);
         self.wake();
