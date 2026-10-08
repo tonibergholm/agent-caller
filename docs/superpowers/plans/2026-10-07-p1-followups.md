@@ -74,6 +74,15 @@ its name.
   the fallback keeps its open-time key across redraws.
 - A malformed `agent.get` reply still drops the herdr connection (agents go
   `unknown`, then reconnect). Decode it leniently, as `agent.list` now is.
+- Dialog identity keeps `Tip:` lines (so a wrapped tip doesn't look like a
+  new dialog). If a Claude tip ever changes while the same dialog stays up,
+  the watch would publish a false `terminal` and a confirmation could count
+  the dialog closed. Check tip behaviour live before keys requests go live,
+  and drop tip lines from the identity if they rotate.
+- The target watch removes the target and emits `DialogGoneById` before
+  `RequestEndedIfOpen`. A claim landing in that window leaves the request
+  with no target: the delivery fails its lease and the request reopens with
+  no watcher. Reorder (end first, then remove) or re-check under one step.
 - If a dialog with the same identity reappears within about 2 polls after a
   terminal answer, the old occurrence stays open (answers get
   `screen_mismatch`). Re-register with `from_screen` when the hook reports a
