@@ -25,7 +25,13 @@
     unreadable: "stored credentials unreadable",
   } as const;
 
+  let hotkeyEdited = false;
+
   function applyView(v: { machines: { key: string; status: MachineStatus }[]; show_idle: boolean }) {
+    const known = new Set(machines.map((m) => m.key));
+    if (v.machines.length !== known.size || v.machines.some((m) => !known.has(m.key))) {
+      refresh().catch((e) => (error ??= `Could not list machines: ${message(e)}`));
+    }
     statuses = Object.fromEntries(v.machines.map((m) => [m.key, m.status]));
     showIdle = v.show_idle;
   }
@@ -55,7 +61,8 @@
     let off: (() => void) | undefined;
     let closed = false;
     void act(async () => {
-      hotkey = await api.getHotkey();
+      const stored = await api.getHotkey();
+      if (!hotkeyEdited) hotkey = stored;
     }, "Could not read the hotkey");
     void (async () => {
       try {
@@ -82,8 +89,14 @@
       added = `Added ${m.name}`;
     }, "Could not add the machine");
 
-  const rename = (m: MachineEntryView) =>
-    act(() => api.renameMachine(m.key, names[m.key] ?? m.name), "Could not rename");
+  const rename = (m: MachineEntryView) => {
+    const name = (names[m.key] ?? m.name).trim();
+    if (name === "") {
+      error = "Could not rename: the name cannot be empty";
+      return;
+    }
+    return act(() => api.renameMachine(m.key, name), "Could not rename");
+  };
 
   const remove = (m: MachineEntryView) => {
     if (!window.confirm(`Remove ${m.name}?`)) return;
@@ -92,10 +105,17 @@
 
   const saveHotkey = () => act(() => api.setHotkey(hotkey), "Could not set the hotkey");
 
-  const toggleIdle = (on: boolean) =>
+  const toggleIdle = (box: HTMLInputElement) =>
     act(async () => {
-      await api.setShowIdle(on);
-      showIdle = on;
+      const on = box.checked;
+      try {
+        await api.setShowIdle(on);
+        showIdle = on;
+      } catch (e) {
+        // `checked` is one-way bound, so put the DOM back explicitly.
+        box.checked = showIdle;
+        throw e;
+      }
     }, "Could not change idle agents");
 </script>
 
@@ -144,14 +164,14 @@
   <section aria-label="Shortcut">
     <label>
       Hotkey
-      <input bind:value={hotkey} />
+      <input bind:value={hotkey} oninput={() => (hotkeyEdited = true)} />
     </label>
     <button onclick={saveHotkey}>Save hotkey</button>
   </section>
 
   <section aria-label="Idle agents">
     <label>
-      <input type="checkbox" checked={showIdle} onchange={(e) => toggleIdle(e.currentTarget.checked)} />
+      <input type="checkbox" checked={showIdle} onchange={(e) => toggleIdle(e.currentTarget)} />
       Show idle agents
     </label>
   </section>

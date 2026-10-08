@@ -99,3 +99,32 @@ test("a question shows its first question text", () => {
   render(Card, props(c));
   expect(screen.getByText("Which branch?")).toBeTruthy();
 });
+
+test("an offline card still shows the request but no options, countdown or terminal hint", () => {
+  const c = card({
+    key: "m/x",
+    live: false,
+    offline_since_ms: 0,
+    answerable: true,
+    selectable_options: ["allow"],
+    action: { id: "a1", card_key: "m/x", label: "Yes", detail: null, fires_at_ms: 5000 },
+  });
+  c.agent.pending = { ...c.agent.pending!, kind: "blocked_unparsed", raw_screen: "SCREEN TEXT" };
+  const { container } = render(Card, props(c, 1000));
+  expect(screen.getByText("Run npm test?")).toBeTruthy();
+  expect(screen.getByText("Bash(npm test)")).toBeTruthy();
+  expect(container.querySelector("pre")?.textContent).toBe("SCREEN TEXT");
+  expect(container.querySelector("button.undo")).toBeNull();
+  expect(container.querySelectorAll("button").length).toBe(0);
+  expect(container.textContent).not.toMatch(/answer in terminal/i);
+});
+
+test("answer in terminal is not shown while busy or answering", () => {
+  const busy = render(Card, props(card({ key: "m/x", busy: true })));
+  expect(busy.container.textContent).not.toMatch(/answer in terminal/i);
+  cleanup();
+  const c = card({ key: "m/y" });
+  c.agent.pending = { ...c.agent.pending!, status: "answering" };
+  const r = render(Card, props(c));
+  expect(r.container.textContent).not.toMatch(/answer in terminal/i);
+});

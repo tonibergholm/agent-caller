@@ -83,7 +83,7 @@
   function act(p: Promise<unknown>, clear = true) {
     if (clear) error = null;
     p.catch((e) => {
-      error = `Could not send: ${e instanceof Error ? e.message : String(e)}`;
+      error = `Failed: ${e instanceof Error ? e.message : String(e)}`;
     });
   }
 

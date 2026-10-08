@@ -136,6 +136,56 @@ test("rejected rename, remove, retry, import and show-idle are each shown", asyn
   render(Settings, { api });
   await userEvent.click(await screen.findByRole("checkbox", { name: /show idle/i }));
   expect((await screen.findByRole("alert")).textContent).toContain("nope");
+  expect((screen.getByRole("checkbox", { name: /show idle/i }) as HTMLInputElement).checked).toBe(false);
+});
+
+test("an empty or blank name is not sent", async () => {
+  const api = fakeApi({ machines: [devbox()] });
+  render(Settings, { api });
+  const input = await screen.findByLabelText("Name for devbox");
+  await userEvent.clear(input);
+  await userEvent.type(input, "   ");
+  await userEvent.click(screen.getByRole("button", { name: "Rename" }));
+  expect(api.calls.some((c) => c[0] === "renameMachine")).toBe(false);
+  expect((await screen.findByRole("alert")).textContent).toContain("cannot be empty");
+});
+
+test("a padded name is trimmed before sending", async () => {
+  const api = fakeApi({ machines: [devbox()] });
+  render(Settings, { api });
+  const input = await screen.findByLabelText("Name for devbox");
+  await userEvent.clear(input);
+  await userEvent.type(input, "  box  ");
+  await userEvent.click(screen.getByRole("button", { name: "Rename" }));
+  expect(api.calls).toContainEqual(["renameMachine", "m1", "box"]);
+});
+
+test("a slow getHotkey does not overwrite what the user typed", async () => {
+  const api = fakeApi();
+  let release: (h: string) => void = () => {};
+  api.getHotkey = () => new Promise((r) => (release = r));
+  render(Settings, { api });
+  const field = (await screen.findByLabelText("Hotkey")) as HTMLInputElement;
+  await userEvent.type(field, "Command+K");
+  release("Control+Option+Space");
+  await new Promise((r) => setTimeout(r, 0));
+  expect(field.value).toBe("Command+K");
+});
+
+test("a changed machine set in a pushed view refreshes the list", async () => {
+  const api = fakeApi();
+  let push: (v: ReturnType<typeof view>) => void = () => {};
+  api.onView = async (cb) => {
+    push = cb;
+    return () => {};
+  };
+  let list: MachineEntryView[] = [];
+  api.listMachines = async () => list;
+  render(Settings, { api });
+  await new Promise((r) => setTimeout(r, 0));
+  list = [devbox()];
+  push(view({ machines: [{ key: "m1", name: "devbox", machine_id: null, status: { kind: "online" }, is_local: false, duplicate_of: null }] }));
+  expect(await screen.findByText("devbox.ts.net:47800")).toBeTruthy();
 });
 
 test("a successful import names the new machine and clears a previous error", async () => {

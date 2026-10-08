@@ -46,14 +46,15 @@
     <div class="offline-note">
       {card.offline_since_ms !== null ? `offline since ${since(card.offline_since_ms, now)}` : "connecting…"}
     </div>
-  {:else if pending}
+  {/if}
+  {#if pending}
     <div class="request">{pending.title}</div>
     {#if pending.detail}<div class="detail">{pending.detail}</div>{/if}
     {#if question}<div class="question">{question}</div>{/if}
     {#if pending.kind === "blocked_unparsed" && pending.raw_screen !== null}
       <pre>{pending.raw_screen}</pre>
     {/if}
-    {#if card.answerable}
+    {#if card.live && card.answerable}
       <ol class="options">
         {#each pending.options as o, i (o.id)}
           {@const ok = card.selectable_options.includes(o.id)}
@@ -69,7 +70,7 @@
           </li>
         {/each}
       </ol>
-    {:else}
+    {:else if card.live && !card.busy && pending.status !== "answering"}
       <div class="readonly">Answer in terminal</div>
     {/if}
   {/if}
