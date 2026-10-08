@@ -6,6 +6,8 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
 
 **Binding.**
 - WebSocket on port 47800 by default.
+- TCP listeners serve WebSocket over TLS 1.3 only. The Unix socket serves
+  plain WebSocket.
 - acd binds only to loopback and to addresses that the local Tailscale
   daemon reports as its own (`tailscale ip`, or the LocalAPI). Each such
   address must also fall in `100.64.0.0/10` or `fd7a:115c:a1e0::/48`.
@@ -21,6 +23,20 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
   startup.
 - When the Mac app connects to a MagicDNS name, it checks that the name
   resolved to an address in these ranges before sending `hello`.
+- The address range check is not authentication; the TLS certificate pin is.
+  `acd pair` prints a pairing line containing the pin and client token. TCP
+  clients must verify the configured pin; there is no plaintext fallback.
+  `acd tls rotate` changes the certificate for new sessions, keeps existing
+  sessions open, and keeps the client token unchanged. Pair every app again.
+
+**Pre-authentication stages.**
+
+| Stage | Bound |
+|---|---|
+| A. TCP accept → TLS finished | At most 16 handshakes at once. 5 s each, then the socket is dropped. |
+| B. TLS finished → HTTP upgrade request complete | Covered by the 10 s pre-authentication deadline; silent or trickling HTTP clients are cut when it passes. |
+| C. Upgrade → `hello` authenticated | At most 8 at once; `hello` within 5 s. |
+| A + B + C | At most 32 unauthenticated TCP connections daemon-wide across all TCP listeners. Each must authenticate within 10 s of TCP accept. |
 
 **Limits.**
 - `hello` must arrive within 5 s.

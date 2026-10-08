@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use acd_core::{Auth, Core, ServerOptions, router};
+use acd_core::{Auth, Core, ServerOptions, router, tls as core_tls};
 use acd_protocol::{Machine, SourceStatus, Sources};
 use anyhow::{Context, Result, bail};
 
@@ -22,6 +22,23 @@ pub fn socket_path(dir: &Path) -> PathBuf {
 pub async fn run(dir: &Path) -> Result<()> {
     crate::preflight(dir)?;
     let cfg = Config::load(dir)?;
+    let (key_files, _) = crate::tls::load(dir)?;
+    let server_config = core_tls::server_config(&key_files)?;
+    let (tls_tx, tls_rx) = tokio::sync::watch::channel(server_config);
+    let admission_limit = {
+        #[cfg(debug_assertions)]
+        {
+            std::env::var("ACD_TEST_MAX_UNAUTH")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(core_tls::MAX_UNAUTHENTICATED_TCP)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            core_tls::MAX_UNAUTHENTICATED_TCP
+        }
+    };
+    let admission = core_tls::Admission::new(admission_limit);
     let token = secrets::read_secret(&dir.join("client.token"))
         .and_then(|t| secrets::parse_token(&t))
         .map_err(|e| {
@@ -98,12 +115,24 @@ pub async fn run(dir: &Path) -> Result<()> {
     for (addr, listener) in listeners {
         tracing::info!(%addr, "listening");
         let app = app.clone();
+        let tls_listener = core_tls::TlsListener::new(
+            listener,
+            tls_rx.clone(),
+            admission.clone(),
+            core_tls::Limits::default(),
+        );
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
+            if let Err(e) = axum::serve(
+                tls_listener,
+                app.into_make_service_with_connect_info::<core_tls::Admit>(),
+            )
+            .await
+            {
                 tracing::error!(%addr, error = %e, "server stopped");
             }
         });
     }
+    let tls_watch = tokio::spawn(crate::tls::watch(dir.to_path_buf(), tls_tx));
     // The same router (and so the same limits) on the Unix socket. Hello and
     // token auth still apply; the Origin check passes trivially because no
     // browser can reach a Unix socket, and there is no address to allowlist.
@@ -178,6 +207,7 @@ pub async fn run(dir: &Path) -> Result<()> {
         _ = tokio::signal::ctrl_c() => None,
         _ = watch => Some(EXIT_ADDRESSES_CHANGED),
     };
+    tls_watch.abort();
     let _ = std::fs::remove_file(&sock);
     match exit_code {
         Some(code) => std::process::exit(code),

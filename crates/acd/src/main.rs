@@ -2,13 +2,15 @@ mod bind;
 mod config;
 mod daemon;
 mod identity;
+mod pair;
 mod paths;
 mod secrets;
 mod status;
+mod tls;
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -34,6 +36,22 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TokenCmd,
     },
+    /// TLS key management.
+    Tls {
+        #[command(subcommand)]
+        cmd: TlsCmd,
+    },
+    /// Print a pairing line for a client app.
+    Pair {
+        #[arg(long)]
+        host: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TlsCmd {
+    /// Replace the TLS key and certificate.
+    Rotate,
 }
 
 #[derive(Subcommand)]
@@ -100,6 +118,25 @@ fn real_main() -> Result<()> {
             println!("{token}");
             Ok(())
         }
+        Cmd::Tls {
+            cmd: TlsCmd::Rotate,
+        } => {
+            if !dir.is_dir() {
+                bail!("{} not initialized; run `acd init`", dir.display());
+            }
+            preflight(&dir)?;
+            tls::rotate(&dir)?;
+            println!(
+                "TLS key replaced. Re-pair every app with `acd pair`. If you rotated because the key may be compromised, also run `acd token rotate client`."
+            );
+            Ok(())
+        }
+        Cmd::Pair { host } => {
+            if !dir.is_dir() {
+                bail!("{} not initialized; run `acd init`", dir.display());
+            }
+            tokio::runtime::Runtime::new()?.block_on(pair::print(&dir, host))
+        }
         Cmd::Run => tokio::runtime::Runtime::new()?.block_on(daemon::run(&dir)),
         Cmd::Status => tokio::runtime::Runtime::new()?.block_on(status::status(&dir)),
     }
@@ -114,19 +151,14 @@ pub(crate) fn preflight(dir: &Path) -> Result<()> {
             secrets::check_mode(&p, 0o600)?;
         }
     }
+    tls::load(dir).context("TLS bundle is invalid or unsafe; run `acd init` to repair it")?;
     Ok(())
 }
 
 fn init(dir: &Path, force: bool) -> Result<()> {
-    const FILES: [&str; 4] = ["client.token", "hook.token", "machine-id", "config.toml"];
-    if FILES.iter().all(|f| dir.join(f).exists()) && !force {
-        bail!(
-            "{} is already initialized; use --force to regenerate tokens",
-            dir.display()
-        );
-    }
     secrets::ensure_private_dir(dir)?;
     let mut created = Vec::new();
+    let had_tls = dir.join("tls.pem").exists();
     let mut client = None;
     for (file, is_client) in [("client.token", true), ("hook.token", false)] {
         let path = dir.join(file);
@@ -150,6 +182,10 @@ fn init(dir: &Path, force: bool) -> Result<()> {
     if !cfg_path.exists() {
         secrets::write_secret(&cfg_path, &toml::to_string(&config::Config::default())?)?;
         created.push("config.toml");
+    }
+    tls::ensure(dir)?;
+    if !had_tls {
+        created.push("tls.pem");
     }
     println!("Initialized acd in {}", dir.display());
     println!("created: {}", created.join(", "));

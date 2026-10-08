@@ -7,10 +7,201 @@ fn acd(dir: &std::path::Path) -> Command {
     c
 }
 
+fn initialized() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let out = acd(dir.path()).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    dir
+}
+
+fn pin_of(dir: &std::path::Path) -> String {
+    let bundle = std::fs::read_to_string(dir.join("tls.pem")).unwrap();
+    acd_core::tls::check_pair(&acd_core::tls::KeyFiles::from_bundle(&bundle).unwrap()).unwrap()
+}
 fn mode(p: std::path::PathBuf) -> u32 { std::fs::metadata(p).unwrap().permissions().mode() & 0o777 }
 
 #[test]
-fn init_creates_private_files_and_refuses_to_run_twice() {
+fn init_creates_one_private_bundle_and_repairs_it() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(acd(dir.path()).arg("init").status().unwrap().success());
+    assert_eq!(mode(dir.path().join("tls.pem")), 0o600);
+    let pin = pin_of(dir.path());
+    assert!(acd(dir.path()).arg("init").status().unwrap().success());
+    assert_eq!(pin_of(dir.path()), pin, "init keeps a healthy key");
+    let a = acd_core::tls::generate("a");
+    let b = acd_core::tls::generate("b");
+    std::fs::write(
+        dir.path().join("tls.pem"),
+        format!("{}{}", a.key_pem, b.cert_pem),
+    )
+    .unwrap();
+    assert!(acd(dir.path()).arg("init").status().unwrap().success());
+    assert_ne!(pin_of(dir.path()), pin);
+}
+
+#[test]
+fn client_token_rotation_keeps_the_tls_key() {
+    let dir = initialized();
+    let pin = pin_of(dir.path());
+    assert!(
+        acd(dir.path())
+            .args(["token", "rotate", "client"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(pin_of(dir.path()), pin);
+}
+
+#[test]
+fn tls_rotate_changes_the_pin_and_advises_token_rotation_on_compromise() {
+    let dir = initialized();
+    let pin = pin_of(dir.path());
+    let out = acd(dir.path()).args(["tls", "rotate"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Re-pair") && text.contains("token rotate client"));
+    assert_ne!(pin_of(dir.path()), pin);
+}
+
+#[test]
+fn concurrent_rotations_leave_one_coherent_bundle() {
+    let dir = initialized();
+    let kids: Vec<_> = (0..8)
+        .map(|_| acd(dir.path()).args(["tls", "rotate"]).spawn().unwrap())
+        .collect();
+    for mut kid in kids {
+        assert!(kid.wait().unwrap().success());
+    }
+    pin_of(dir.path());
+    let leftovers = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        })
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+#[test]
+fn a_stray_temporary_file_is_ignored_by_readers() {
+    let dir = initialized();
+    let pin = pin_of(dir.path());
+    std::fs::write(
+        dir.path().join("tls.pem.999.deadbeefdeadbeef.tmp"),
+        "-----BEGIN PRIVATE KEY-----\ntrunc",
+    )
+    .unwrap();
+    let out = acd(dir.path())
+        .args(["pair", "--host", "h"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        acd_protocol::pairing::Pairing::parse(String::from_utf8_lossy(&out.stdout).trim())
+            .unwrap()
+            .pin,
+        pin
+    );
+}
+
+#[test]
+fn a_failed_publication_keeps_the_old_bundle_then_a_good_one_replaces_it() {
+    let dir = initialized();
+    let before = std::fs::read(dir.path().join("tls.pem")).unwrap();
+    let pin = pin_of(dir.path());
+    let out = acd(dir.path())
+        .args(["tls", "rotate"])
+        .env("ACD_TEST_FAILPOINT", "publish_before_rename")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read(dir.path().join("tls.pem")).unwrap(), before);
+    assert_eq!(pin_of(dir.path()), pin);
+    let paired = acd(dir.path())
+        .args(["pair", "--host", "h"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        acd_protocol::pairing::Pairing::parse(String::from_utf8_lossy(&paired.stdout).trim())
+            .unwrap()
+            .pin,
+        pin
+    );
+    assert!(
+        acd(dir.path())
+            .args(["tls", "rotate"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let new_pin = pin_of(dir.path());
+    assert_ne!(new_pin, pin);
+    let paired = acd(dir.path())
+        .args(["pair", "--host", "h"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        acd_protocol::pairing::Pairing::parse(String::from_utf8_lossy(&paired.stdout).trim())
+            .unwrap()
+            .pin,
+        new_pin
+    );
+}
+
+#[test]
+fn tls_bundle_must_be_a_private_regular_file() {
+    let dir = initialized();
+    let real = dir.path().join("real.pem");
+    std::fs::rename(dir.path().join("tls.pem"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("tls.pem")).unwrap();
+    let out = acd(dir.path())
+        .args(["pair", "--host", "h"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("symlink"));
+}
+
+#[test]
+fn pair_prints_one_parseable_line() {
+    let dir = initialized();
+    let out = acd(dir.path())
+        .args(["pair", "--host", "devbox.example.ts.net"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let p = acd_protocol::pairing::Pairing::parse(String::from_utf8(out.stdout).unwrap().trim())
+        .unwrap();
+    assert_eq!((p.host.as_str(), p.port), ("devbox.example.ts.net", 47800));
+    assert_eq!(p.pin, pin_of(dir.path()));
+    assert_eq!(
+        p.token,
+        std::fs::read_to_string(dir.path().join("client.token"))
+            .unwrap()
+            .trim()
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("secret"));
+}
+
+#[test]
+fn init_creates_private_files_and_is_repeatable() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("acd");
     let out = acd(&dir).arg("init").output().unwrap();
@@ -24,8 +215,7 @@ fn init_creates_private_files_and_refuses_to_run_twice() {
     assert!(String::from_utf8_lossy(&out.stdout).contains(token.trim()));
 
     let again = acd(&dir).arg("init").output().unwrap();
-    assert!(!again.status.success());
-    assert!(String::from_utf8_lossy(&again.stderr).contains("already initialized"));
+    assert!(again.status.success(), "{}", String::from_utf8_lossy(&again.stderr));
 }
 
 #[test]
