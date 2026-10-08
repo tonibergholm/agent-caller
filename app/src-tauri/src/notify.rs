@@ -20,9 +20,14 @@ pub async fn run(app: AppHandle, mut events: broadcast::Receiver<InboxEvent>) {
         match events.recv().await {
             Ok(e) if !crate::panel::is_visible() => {
                 let (title, body) = text(&e);
-                if let Err(error) = show(&app, &title, &body) {
-                    tracing::error!(%error, "could not show notification");
-                }
+                // The macOS backend can block for up to 2 s waiting for
+                // delivery, so keep it off the async workers.
+                let app = app.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = show(&app, &title, &body) {
+                        tracing::error!(%error, "could not show notification");
+                    }
+                });
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -33,7 +38,14 @@ pub async fn run(app: AppHandle, mut events: broadcast::Receiver<InboxEvent>) {
 
 #[cfg(target_os = "macos")]
 pub fn init(app: &AppHandle) -> Result<(), String> {
-    mac_notification_sys::set_application(&app.config().identifier)
+    // An unbundled dev build has no registered bundle id; post as Terminal,
+    // as tauri-plugin-notification does in dev.
+    let bundle = if tauri::is_dev() {
+        "com.apple.Terminal"
+    } else {
+        app.config().identifier.as_str()
+    };
+    mac_notification_sys::set_application(bundle)
         .map_err(|error| format!("could not set notification application: {error}"))
 }
 

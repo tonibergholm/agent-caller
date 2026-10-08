@@ -24,7 +24,12 @@ fn main() {
         )
         .init();
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // macOS posts through mac-notification-sys (notify.rs); elsewhere the
+    // plugin is the backend and must be registered.
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(tauri_plugin_notification::init());
+    let app = builder
         .plugin(tauri_nspanel::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(hotkey::plugin())
