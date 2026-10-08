@@ -151,7 +151,7 @@ async fn projection(live: &Live) -> Value {
             if let Some(p) = values
                 .iter()
                 .find(|v| v["kind"] == "snapshot")
-                .and_then(|v| v["snapshot"]["projection"].as_object())
+                .and_then(|v| v["projection"].as_object())
             {
                 return Value::Object(p.clone());
             }
@@ -248,11 +248,13 @@ async fn acd_and_raw_client_race_in_both_orders() {
         .as_str()
         .expect("T3 agent must have a pending acd request")
         .to_owned();
+    // A fresh command id per run: acd caches results by (client, id) for 15 minutes.
+    let answer_id = format!("t3-live-{}", uuid::Uuid::new_v4());
     let (resolved, recorded) = match order.as_str() {
         "raw_first" => {
             let raw = respond(&live, "decline", std::sync::Arc::new(Barrier::new(1))).await;
             assert!(raw.is_ok(), "raw decline should win: {raw:?}");
-            let (result, resolved) = acd_answer(&mut ws, &request_id, "t3-live-answer", None).await;
+            let (result, resolved) = acd_answer(&mut ws, &request_id, &answer_id, None).await;
             assert_eq!(
                 result["ok"], false,
                 "acd answer should be rejected: {result}"
@@ -263,7 +265,7 @@ async fn acd_and_raw_client_race_in_both_orders() {
             (resolved, "decline".to_owned())
         }
         "acd_first" => {
-            let (result, resolved) = acd_answer(&mut ws, &request_id, "t3-live-answer", None).await;
+            let (result, resolved) = acd_answer(&mut ws, &request_id, &answer_id, None).await;
             assert_eq!(result["ok"], true, "acd answer failed: {result}");
             let raw = respond(&live, "decline", std::sync::Arc::new(Barrier::new(1))).await;
             assert!(
@@ -273,10 +275,17 @@ async fn acd_and_raw_client_race_in_both_orders() {
                 ),
                 "late raw respond must fail: {raw:?}"
             );
-            let raw_err = raw.expect_err("late raw respond should fail").to_string();
+            // classify gives RequestGone only for T3's exact "… is resolved." / "is cancelled." /
+            // "was not found." messages for this request id (the error's Display is a fixed string).
             assert!(
-                raw_err.ends_with(" is resolved."),
-                "unexpected late raw error: {raw_err}"
+                matches!(
+                    outcome::classify(&raw, Some(&live.request)),
+                    Outcome::NotDelivered {
+                        code: acd_protocol::ErrorCode::RequestGone,
+                        ..
+                    }
+                ),
+                "late raw respond must be classified request_gone: {raw:?}"
             );
             assert_eq!(resolved["by"], "inbox");
             assert_eq!(resolved["option_id"], "accept");
@@ -290,7 +299,7 @@ async fn acd_and_raw_client_race_in_both_orders() {
             let acd_start = gate.clone();
             let acd_task = tokio::spawn(async move {
                 let (result, resolved) =
-                    acd_answer(&mut ws, &request_id, "t3-live-answer", Some(acd_start)).await;
+                    acd_answer(&mut ws, &request_id, &answer_id, Some(acd_start)).await;
                 (result, resolved)
             });
             let raw = raw.await.unwrap();
