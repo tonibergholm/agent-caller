@@ -417,3 +417,406 @@ fn thread_events_are_pinned() {
     assert_eq!(event.payload["kind"], "approval_request");
     assert_eq!(event.payload["status"], "waiting");
 }
+
+use acd_adapters::t3::{detail::*, map::*};
+use acd_core::{Answer, CorrelationKey};
+use acd_protocol::*;
+use std::collections::HashSet;
+
+fn shell_thread(name: &str) -> ShellThread {
+    let ShellItem::ThreadUpdated { thread, .. } =
+        ShellItem::decode(&chunk_values(name)[0]).unwrap()
+    else {
+        panic!()
+    };
+    ShellThread::decode(&thread).unwrap()
+}
+fn pending_id(p: &Value) -> String {
+    p["runtimeRequests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["status"] == "pending")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn state_follows_the_pending_request_not_the_status() {
+    assert_eq!(state(Some("running"), true), (AgentState::NeedsYou, false));
+    assert_eq!(state(Some("waiting"), false), (AgentState::Working, false));
+    for s in ["running", "starting", "preparing", "queued"] {
+        assert_eq!(state(Some(s), false).0, AgentState::Working);
+    }
+    assert_eq!(state(Some("completed"), false), (AgentState::Done, false));
+    assert_eq!(state(Some("failed"), false), (AgentState::Done, true));
+    assert_eq!(state(Some("interrupted"), false), (AgentState::Done, true));
+    for s in ["idle", "cancelled", "rolled_back"] {
+        assert_eq!(state(Some(s), false).0, AgentState::Idle);
+    }
+    assert_eq!(state(Some("teleporting"), false).0, AgentState::Unknown);
+    assert_eq!(state(None, false).0, AgentState::Unknown);
+}
+
+#[test]
+fn agent_obs_from_recorded_shell_entries() {
+    let t = shell_thread("shell_chunk_thread_updated_running_pending_approval_claude.json");
+    let project = Project {
+        id: t.project_id.clone().unwrap(),
+        title: Some("acp4".into()),
+        workspace_root: Some("/tmp/acp4/proj".into()),
+    };
+    let o = agent_obs(&t, Some(&project), &HashSet::new());
+    assert_eq!(o.id, format!("t3:{}", t.id));
+    assert_eq!(
+        (o.source, o.kind, o.state),
+        (Source::T3, AgentKind::Claude, AgentState::NeedsYou)
+    );
+    assert_eq!(o.cwd.as_deref(), Some("/tmp/acp4/proj"));
+    assert_eq!(o.project.as_deref(), Some("acp4"));
+    assert_eq!(o.title, "Create Empty File");
+    assert!(o.can_send);
+    let hidden: HashSet<String> = [t.pending_runtime_request.clone().unwrap().id].into();
+    assert_eq!(
+        agent_obs(&t, Some(&project), &hidden).state,
+        AgentState::Working
+    );
+    let codex = shell_thread("shell_chunk_thread_updated_starting_codex.json");
+    assert_eq!(
+        agent_obs(&codex, None, &HashSet::new()).kind,
+        AgentKind::Codex
+    );
+}
+
+#[test]
+fn hostile_text_is_cleaned() {
+    let mut t = shell_thread("shell_chunk_thread_updated_running.json");
+    t.title = Some(format!(
+        "\u{1b}]0;evil\u{7}fix\u{202E}tests{}",
+        "x".repeat(300)
+    ));
+    t.latest_visible_message =
+        Some(serde_json::json!({"text": format!("done\u{1b}[31m{}", "y".repeat(600))}));
+    let o = agent_obs(&t, None, &HashSet::new());
+    assert!(!o.title.contains('\u{1b}') && !o.title.contains('\u{202E}'));
+    assert_eq!(o.title.chars().count(), 200);
+    let m = o.last_message.unwrap();
+    assert!(!m.contains('\u{1b}'));
+    assert_eq!(m.chars().count(), 500);
+}
+
+#[test]
+fn claude_approval_joins_the_command() {
+    let p = projection("thread_chunk_snapshot_waiting_approval_claude.json");
+    let (d, skipped) = ThreadDetail::from_projection(&p);
+    assert_eq!(skipped, 0);
+    assert_eq!(
+        d.native_session_id(),
+        Some("d67b7431-38fa-47ca-b40d-11d54f568263")
+    );
+    let id = pending_id(&p);
+    let view = d.pending_view(&id).unwrap();
+    let (obs, target) = request_obs("t3:x", "x", &view);
+    assert_eq!(obs.key, CorrelationKey(id.clone()));
+    assert!(!obs.reusable_key && obs.ready);
+    assert_eq!(
+        (obs.kind, obs.answer_path),
+        (RequestKind::Permission, AnswerPath::T3)
+    );
+    assert_eq!(
+        obs.detail,
+        "touch /tmp/acp4/proj/x.txt\nCreate empty file x.txt"
+    );
+    let opts: Vec<(&str, Effect)> = obs
+        .options
+        .iter()
+        .map(|o| (o.id.as_str(), o.effect))
+        .collect();
+    assert_eq!(
+        opts,
+        [
+            ("accept", Effect::Allow),
+            ("acceptForSession", Effect::AllowAlways),
+            ("decline", Effect::Deny)
+        ]
+    );
+    assert_eq!(target.answer, TargetAnswer::Decision);
+    assert_eq!(target.t3_request_id, id);
+}
+
+#[test]
+fn codex_approval_detail_is_the_command_once() {
+    let p = projection("thread_chunk_snapshot_waiting_approval_codex.json");
+    let (d, _) = ThreadDetail::from_projection(&p);
+    let (obs, _) = request_obs("t3:y", "y", &d.pending_view(&pending_id(&p)).unwrap());
+    assert!(!obs.detail.is_empty());
+    assert_eq!(
+        obs.detail.lines().count(),
+        1,
+        "prompt equals the command: {}",
+        obs.detail
+    );
+}
+
+#[test]
+fn claude_question_keeps_its_structure() {
+    let p = projection("thread_chunk_snapshot_waiting_question_claude.json");
+    let (d, _) = ThreadDetail::from_projection(&p);
+    let (obs, target) = request_obs("t3:x", "x", &d.pending_view(&pending_id(&p)).unwrap());
+    assert_eq!(obs.kind, RequestKind::Question);
+    let q = &obs.questions.as_ref().unwrap()[0];
+    assert_eq!(
+        (q.id.as_str(), q.header.as_deref(), q.multi_select),
+        ("Which color do you prefer?", Some("Color"), false)
+    );
+    assert_eq!(
+        obs.options
+            .iter()
+            .map(|o| (o.id.as_str(), o.label.as_str(), o.effect))
+            .collect::<Vec<_>>(),
+        [
+            ("o1", "red", Effect::Choose),
+            ("o2", "blue", Effect::Choose)
+        ]
+    );
+    assert!(!obs.free_text);
+    let TargetAnswer::Question {
+        question_id,
+        choices,
+    } = &target.answer
+    else {
+        panic!()
+    };
+    assert_eq!(question_id, "Which color do you prefer?");
+    assert_eq!(choices[1].value, "blue");
+}
+
+#[test]
+fn unknown_or_unmatched_requests_are_read_only() {
+    let p = projection("thread_chunk_snapshot_waiting_approval_claude.json");
+    let (mut d, _) = ThreadDetail::from_projection(&p);
+    let id = pending_id(&p);
+    let mut view = d.pending_view(&id).unwrap();
+    let TurnItem::ApprovalRequest { request_kind, .. } = view.item.as_mut().unwrap() else {
+        panic!()
+    };
+    *request_kind = Some("file_change".into());
+    let (obs, target) = request_obs("t3:x", "x", &view);
+    assert_eq!(obs.answer_path, AnswerPath::None);
+    assert_eq!(target.answer, TargetAnswer::ReadOnly);
+    view.item = None;
+    let (obs, _) = request_obs("t3:x", "x", &view);
+    assert_eq!(obs.answer_path, AnswerPath::None);
+    assert!(obs.detail.contains("T3"));
+    // A resolved request has no pending view.
+    d.requests.get_mut(&id).unwrap().status = "resolved".into();
+    assert!(d.pending_view(&id).is_none());
+}
+
+#[test]
+fn events_update_the_detail() {
+    let p = projection("thread_chunk_snapshot_waiting_approval_claude.json");
+    let (mut d, _) = ThreadDetail::from_projection(&p);
+    let id = pending_id(&p);
+    for v in chunk_values("thread_event_runtime_request_resolved_accept.json") {
+        let ThreadItem::Event { event, .. } = ThreadItem::decode(&v).unwrap() else {
+            panic!()
+        };
+        d.apply(&event).unwrap();
+    }
+    assert_eq!(d.request_status(&id), Some("resolved"));
+    assert!(d.pending_view(&id).is_none());
+
+    let mut fresh = ThreadDetail::default();
+    for v in
+        chunk_values("thread_event_provider_thread_updated_codex_native_id_null_before_start.json")
+    {
+        let ThreadItem::Event { event, .. } = ThreadItem::decode(&v).unwrap() else {
+            panic!()
+        };
+        fresh.apply(&event).unwrap();
+    }
+    assert_eq!(
+        fresh.native_session_id(),
+        None,
+        "null before the first turn"
+    );
+    for v in chunk_values("thread_event_provider_thread_updated_claude_native_id.json") {
+        let ThreadItem::Event { event, .. } = ThreadItem::decode(&v).unwrap() else {
+            panic!()
+        };
+        fresh.apply(&event).unwrap();
+    }
+    // The active provider thread is still null (the codex metadata event set it so).
+    assert_eq!(
+        fresh.native_session_id(),
+        None,
+        "only the active provider thread counts"
+    );
+    fresh.active_provider_thread = Some(
+        "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1".into());
+    assert_eq!(
+        fresh.native_session_id(),
+        Some("d67b7431-38fa-47ca-b40d-11d54f568263")
+    );
+}
+
+#[test]
+fn restart_snapshot_shows_the_request_cancelled() {
+    let p = projection("thread_chunk_snapshot_after_restart_not_resumable.json");
+    let (d, _) = ThreadDetail::from_projection(&p);
+    let cancelled = p["runtimeRequests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["status"] == "cancelled")
+        .unwrap();
+    assert_eq!(
+        d.request_status(cancelled["id"].as_str().unwrap()),
+        Some("cancelled")
+    );
+}
+
+#[test]
+fn prune_keeps_only_live_state() {
+    let p = projection("thread_chunk_snapshot_waiting_approval_claude.json");
+    let (mut d, _) = ThreadDetail::from_projection(&p);
+    let id = pending_id(&p);
+    for i in 0..500 {
+        for (status, n) in [("pending", 0), ("resolved", 1)] {
+            let ev = serde_json::json!({"kind": "event", "sequence": 1000 + 2 * i + n,
+                "event": {"type": "runtime-request.updated", "payload": {"id": format!("old-{i}"), "kind": "command", "status": status}}});
+            let ThreadItem::Event { event, .. } = ThreadItem::decode(&ev).unwrap() else {
+                panic!()
+            };
+            d.apply(&event).unwrap();
+        }
+        let ev = serde_json::json!({"kind": "event", "sequence": 5000 + i,
+            "event": {"type": "turn-item.updated", "payload": {"id": format!("cmd-{i}"), "type": "command_execution", "status": "completed", "input": "ls"}}});
+        let ThreadItem::Event { event, .. } = ThreadItem::decode(&ev).unwrap() else {
+            panic!()
+        };
+        d.apply(&event).unwrap();
+    }
+    d.prune(&[&id]);
+    let (requests, items) = d.retained();
+    assert!(requests <= 1, "{requests}");
+    assert!(items <= MAX_COMMAND_ITEMS + 2, "{items}");
+    // The live approval still joins its command after pruning.
+    let (obs, _) = request_obs("t3:x", "x", &d.pending_view(&id).unwrap());
+    assert!(obs.detail.starts_with("touch /tmp/acp4/proj/x.txt"));
+}
+
+#[test]
+fn a_live_approvals_command_survives_the_cap() {
+    // Sol round 2, finding 4: more than 64 non-terminal commands arrive
+    // after the live approval. The cap must not take its command.
+    let p = projection("thread_chunk_snapshot_waiting_approval_claude.json");
+    let (mut d, _) = ThreadDetail::from_projection(&p);
+    let id = pending_id(&p);
+    for i in 0..(MAX_COMMAND_ITEMS + 36) {
+        let ev = serde_json::json!({"kind": "event", "sequence": 9000 + i,
+            "event": {"type": "turn-item.updated", "payload": {"id": format!("run-{i}"), "type": "command_execution",
+                "status": "running", "input": format!("sleep {i}"), "nativeItemRef": {"nativeId": format!("n-{i}")}}}});
+        let ThreadItem::Event { event, .. } = ThreadItem::decode(&ev).unwrap() else {
+            panic!()
+        };
+        d.apply(&event).unwrap();
+        d.prune(&[&id]);
+    }
+    let (obs, _) = request_obs("t3:x", "x", &d.pending_view(&id).unwrap());
+    assert_eq!(
+        obs.detail,
+        "touch /tmp/acp4/proj/x.txt\nCreate empty file x.txt"
+    );
+    let (_, items) = d.retained();
+    assert!(
+        items <= MAX_COMMAND_ITEMS + 2,
+        "64 unreferenced + the approval + its command: {items}"
+    );
+}
+
+fn request_for(obs: &acd_core::RequestObs) -> Request {
+    Request {
+        id: "r1".into(),
+        agent_id: obs.agent_id.clone(),
+        kind: obs.kind,
+        status: RequestStatus::Answering,
+        answer_path: obs.answer_path,
+        title: obs.title.clone(),
+        detail: obs.detail.clone(),
+        options: obs.options.clone(),
+        questions: obs.questions.clone(),
+        free_text: false,
+        raw_screen: None,
+        opened_at: chrono::Utc::now(),
+    }
+}
+
+#[test]
+fn respond_payloads_match_the_recordings() {
+    let p = projection("thread_chunk_snapshot_waiting_approval_claude.json");
+    let (d, _) = ThreadDetail::from_projection(&p);
+    let (obs, target) = request_for_target(&d, &p);
+    let want: Value =
+        serde_json::from_str(&fx("cmd_request_respond_decision_accept.json")).unwrap();
+    let cmd = want["payload"]["commandId"].as_str().unwrap();
+    let mut target = target;
+    target.thread_id = want["payload"]["threadId"].as_str().unwrap().into();
+    let got = respond_payload(
+        cmd,
+        &target,
+        &request_for(&obs),
+        &Answer::Option("accept".into()),
+    )
+    .unwrap();
+    assert_eq!(got, want["payload"]);
+    assert!(
+        respond_payload(
+            cmd,
+            &target,
+            &request_for(&obs),
+            &Answer::Option("allow".into())
+        )
+        .is_err()
+    );
+
+    let p = projection("thread_chunk_snapshot_waiting_question_claude.json");
+    let (d, _) = ThreadDetail::from_projection(&p);
+    let (obs, mut target) = request_for_target(&d, &p);
+    let want: Value = serde_json::from_str(&fx("cmd_request_respond_answers.json")).unwrap();
+    target.thread_id = want["payload"]["threadId"].as_str().unwrap().into();
+    let cmd = want["payload"]["commandId"].as_str().unwrap();
+    let got = respond_payload(
+        cmd,
+        &target,
+        &request_for(&obs),
+        &Answer::Option("o2".into()),
+    )
+    .unwrap();
+    assert_eq!(got, want["payload"]);
+    // The frozen label must match the recorded choice.
+    let mut req = request_for(&obs);
+    req.options[1].label = "green".into();
+    assert!(respond_payload(cmd, &target, &req, &Answer::Option("o2".into())).is_err());
+}
+
+fn request_for_target(d: &ThreadDetail, p: &Value) -> (acd_core::RequestObs, Target) {
+    request_obs("t3:x", "x", &d.pending_view(&pending_id(p)).unwrap())
+}
+
+#[test]
+fn dispatch_payload_matches_the_recording() {
+    let want: Value =
+        serde_json::from_str(&fx("cmd_request_message_dispatch_followup_auto.json")).unwrap();
+    let w = &want["payload"];
+    let got = dispatch_payload(
+        w["commandId"].as_str().unwrap(),
+        w["messageId"].as_str().unwrap(),
+        w["threadId"].as_str().unwrap(),
+        w["text"].as_str().unwrap(),
+    );
+    assert_eq!(&got, w);
+}

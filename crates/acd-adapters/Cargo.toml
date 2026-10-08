@@ -29,3 +29,4 @@ acd-adapters = { path = ".", features = ["testing"] }
 acd-core = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 axum.workspace = true
+chrono.workspace = true
