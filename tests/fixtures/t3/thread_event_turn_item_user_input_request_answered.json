@@ -1,0 +1,140 @@
+{
+  "_tag": "Chunk",
+  "requestId": "1",
+  "values": [
+    {
+      "kind": "event",
+      "sequence": 64,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:command:6bdb2f39-3c21-4a97-a1c9-004b4bd6d894:d1ef72f0-9b1c-4eff-b143-7c937bc5c567",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+        "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+        "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:51:45.217Z",
+        "type": "runtime-request.updated",
+        "payload": {
+          "id": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A2%253Aattempt%253A1:native-request:toolu_01WKd3F9dadc4Nwe1HuSTJYM:528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A2%3Aattempt%3A1",
+          "nativeRequestRef": {
+            "driver": "claudeAgent",
+            "nativeId": "toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+            "strength": "strong"
+          },
+          "kind": "user_input",
+          "status": "resolved",
+          "responseCapability": {
+            "type": "live",
+            "providerSessionId": "provider-session:provider-instance:claudeAgent:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:917978a1-c683-4d0f-a7c1-bfd6a97d1254"
+          },
+          "createdAt": "2026-10-08T06:50:55.660Z",
+          "resolvedAt": "2026-10-08T06:51:45.217Z",
+          "answers": {
+            "Which color do you prefer?": "blue"
+          }
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 65,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:command:6bdb2f39-3c21-4a97-a1c9-004b4bd6d894:81b785e2-64ca-4f0f-907a-624cb63e0d34",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+        "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+        "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:51:45.217Z",
+        "type": "node.updated",
+        "payload": {
+          "id": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+          "parentNodeId": "node:provider:claudeAgent:native-item:toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+          "rootNodeId": "node:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A2:root",
+          "kind": "user_input_request",
+          "status": "completed",
+          "countsForRun": false,
+          "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+          "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A2%3Aattempt%3A1",
+          "nativeItemRef": {
+            "driver": "claudeAgent",
+            "nativeId": "toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+            "strength": "strong"
+          },
+          "runtimeRequestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A2%253Aattempt%253A1:native-request:toolu_01WKd3F9dadc4Nwe1HuSTJYM:528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "checkpointScopeId": null,
+          "startedAt": "2026-10-08T06:50:55.660Z",
+          "completedAt": "2026-10-08T06:51:45.217Z"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 66,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:command:6bdb2f39-3c21-4a97-a1c9-004b4bd6d894:ae474f5a-7674-42f8-93ce-59dbdd2da616",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+        "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+        "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:51:45.217Z",
+        "type": "turn-item.updated",
+        "payload": {
+          "id": "turn-item:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:2",
+          "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%2525253Aordinal%2525253A2%25253Aattempt%25253A1%3Anative-request%3Atoolu_01WKd3F9dadc4Nwe1HuSTJYM%3A528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+          "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%253Aordinal%253A2%3Aattempt%3A1",
+          "nativeItemRef": {
+            "driver": "claudeAgent",
+            "nativeId": "toolu_01WKd3F9dadc4Nwe1HuSTJYM",
+            "strength": "strong"
+          },
+          "parentItemId": null,
+          "ordinal": 2000003,
+          "status": "completed",
+          "title": null,
+          "startedAt": "2026-10-08T06:50:55.660Z",
+          "completedAt": "2026-10-08T06:51:45.217Z",
+          "updatedAt": "2026-10-08T06:51:45.217Z",
+          "type": "user_input_request",
+          "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A2%253Aattempt%253A1:native-request:toolu_01WKd3F9dadc4Nwe1HuSTJYM:528ad08b-923f-41ca-b173-e22ec5b97da4",
+          "questions": [
+            {
+              "id": "Which color do you prefer?",
+              "header": "Color",
+              "question": "Which color do you prefer?",
+              "options": [
+                {
+                  "label": "red",
+                  "description": "Choose red"
+                },
+                {
+                  "label": "blue",
+                  "description": "Choose blue"
+                }
+              ],
+              "multiSelect": false
+            }
+          ],
+          "questionAnswer": {
+            "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%25253Aordinal%25253A2%253Aattempt%253A1:native-request:toolu_01WKd3F9dadc4Nwe1HuSTJYM:528ad08b-923f-41ca-b173-e22ec5b97da4",
+            "questionTextById": {
+              "Which color do you prefer?": "Which color do you prefer?"
+            },
+            "answers": {
+              "Which color do you prefer?": "blue"
+            },
+            "attachmentsByQuestionId": {}
+          }
+        }
+      }
+    }
+  ]
+}

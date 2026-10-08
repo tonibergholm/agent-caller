@@ -1,0 +1,23 @@
+{
+  "_tag": "Request",
+  "id": "1",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+    "type": "thread.create",
+    "createdBy": "user",
+    "creationSource": "web",
+    "commandId": "8c16213d-98c7-4328-9674-717f795b9190",
+    "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+    "projectId": "110931a3-89c5-4530-8364-00d766b00026",
+    "title": "acp4 approval test",
+    "modelSelection": {
+      "instanceId": "claudeAgent",
+      "model": "claude-sonnet-5-5"
+    },
+    "runtimeMode": "approval-required",
+    "interactionMode": "default",
+    "branch": null,
+    "worktreePath": null
+  },
+  "headers": []
+}

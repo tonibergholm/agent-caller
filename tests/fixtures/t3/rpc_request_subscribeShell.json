@@ -1,0 +1,9 @@
+{
+  "_tag": "Request",
+  "id": "1",
+  "tag": "orchestration.subscribeShell",
+  "payload": {
+    "requestCompletionMarker": true
+  },
+  "headers": []
+}

@@ -1,0 +1,20 @@
+{
+  "_tag": "Request",
+  "id": "1",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+    "type": "message.dispatch",
+    "createdBy": "user",
+    "creationSource": "web",
+    "commandId": "ed3b9001-3065-4174-acba-262ae005ebba",
+    "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+    "messageId": "49789401-a554-4be9-8899-bd1adf064f6c",
+    "text": "Run exactly this shell command with the Bash tool and nothing else: touch /tmp/acp4/proj/x.txt",
+    "attachments": [],
+    "titleSeed": "Touch x.txt",
+    "dispatchMode": {
+      "type": "start_immediately"
+    }
+  },
+  "headers": []
+}

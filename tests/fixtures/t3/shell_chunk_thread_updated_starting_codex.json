@@ -1,0 +1,76 @@
+{
+  "_tag": "Chunk",
+  "requestId": "1",
+  "values": [
+    {
+      "kind": "thread.updated",
+      "sequence": 92,
+      "location": "active",
+      "thread": {
+        "createdBy": "user",
+        "creationSource": "web",
+        "id": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "projectId": "110931a3-89c5-4530-8364-00d766b00026",
+        "title": "Touch y.txt",
+        "providerInstanceId": "codex",
+        "modelSelection": {
+          "instanceId": "codex",
+          "model": "gpt-5.6-terra"
+        },
+        "runtimeMode": "approval-required",
+        "interactionMode": "default",
+        "branch": null,
+        "worktreePath": null,
+        "pullRequests": [],
+        "lineage": {
+          "parentThreadId": null,
+          "relationshipToParent": null,
+          "rootThreadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e"
+        },
+        "forkedFrom": null,
+        "activeProviderThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+        "latestRunId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "latestRunRequestedAt": "2026-10-08T06:52:41.162Z",
+        "latestRunStartedAt": null,
+        "latestRunCompletedAt": null,
+        "activeRunId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "activityRunStartedAt": "2026-10-08T06:52:41.162Z",
+        "activityRunStatus": "starting",
+        "status": "starting",
+        "lastError": null,
+        "lastErrorClass": null,
+        "usageLimitResetAt": null,
+        "pendingRuntimeRequest": null,
+        "latestVisibleMessage": null,
+        "latestUserMessageAt": "2026-10-08T06:52:41.162Z",
+        "latestUserAuthoredMessageAt": "2026-10-08T06:52:41.162Z",
+        "hasActionableProposedPlan": false,
+        "pendingBackgroundTasks": [],
+        "providerInstanceHistory": [
+          "codex"
+        ],
+        "goal": null,
+        "itemCount": 1,
+        "visibleItemCount": 1,
+        "createdAt": "2026-10-08T06:52:40.042Z",
+        "updatedAt": "2026-10-08T06:52:41.172Z",
+        "archivedAt": null,
+        "settledOverride": null,
+        "settledAt": null,
+        "unsettledAt": null,
+        "snoozedUntil": null,
+        "snoozedAt": null,
+        "limitRecovery": null,
+        "pinnedAt": null,
+        "autoSettleDisabledAt": null,
+        "pinOrderKey": null,
+        "lastVisitedAt": null,
+        "titleRegeneration": {
+          "requestId": "3ca916c6-f044-4b0b-bbc0-b8d5f194b1a9",
+          "startedAt": "2026-10-08T06:52:41.161Z"
+        },
+        "deletedAt": null
+      }
+    }
+  ]
+}

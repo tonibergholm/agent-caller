@@ -1,0 +1,13 @@
+{
+  "_tag": "Request",
+  "id": "1",
+  "tag": "orchestration.dispatchCommand",
+  "payload": {
+    "type": "runtime-request.respond",
+    "commandId": "7ffc85b1-677b-458f-a07a-3a418bc7f6d3",
+    "threadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+    "requestId": "runtime-request:provider:codex:provider-turn:provider-turn%3Aprovider%3Acodex%3Anative-turn%3A01a11a49-1e17-7920-971c-225a09738f97:native-request:exec-abbf31ed-16ae-4612-b59d-9312d4375ce9:0c122ac5-970c-4ca2-82b9-2acaa4078255",
+    "decision": "decline"
+  },
+  "headers": []
+}

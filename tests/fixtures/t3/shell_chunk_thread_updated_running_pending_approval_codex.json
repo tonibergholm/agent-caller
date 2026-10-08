@@ -1,0 +1,77 @@
+{
+  "_tag": "Chunk",
+  "requestId": "1",
+  "values": [
+    {
+      "kind": "thread.updated",
+      "sequence": 104,
+      "location": "active",
+      "thread": {
+        "createdBy": "user",
+        "creationSource": "web",
+        "id": "52bc8bd0-9b54-4481-a009-889be5b40a6e",
+        "projectId": "110931a3-89c5-4530-8364-00d766b00026",
+        "title": "Create y.txt in Project Directory",
+        "providerInstanceId": "codex",
+        "modelSelection": {
+          "instanceId": "codex",
+          "model": "gpt-5.6-terra"
+        },
+        "runtimeMode": "approval-required",
+        "interactionMode": "default",
+        "branch": null,
+        "worktreePath": null,
+        "pullRequests": [],
+        "lineage": {
+          "parentThreadId": null,
+          "relationshipToParent": null,
+          "rootThreadId": "52bc8bd0-9b54-4481-a009-889be5b40a6e"
+        },
+        "forkedFrom": null,
+        "activeProviderThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3A52bc8bd0-9b54-4481-a009-889be5b40a6e%3Aordinal%3A1",
+        "latestRunId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "latestRunRequestedAt": "2026-10-08T06:52:41.162Z",
+        "latestRunStartedAt": "2026-10-08T06:52:41.648Z",
+        "latestRunCompletedAt": null,
+        "activeRunId": "run:thread:52bc8bd0-9b54-4481-a009-889be5b40a6e:ordinal:1",
+        "activityRunStartedAt": "2026-10-08T06:52:41.648Z",
+        "activityRunStatus": "running",
+        "status": "running",
+        "lastError": null,
+        "lastErrorClass": null,
+        "usageLimitResetAt": null,
+        "pendingRuntimeRequest": {
+          "id": "runtime-request:provider:codex:provider-turn:provider-turn%3Aprovider%3Acodex%3Anative-turn%3A01a11a49-1e17-7920-971c-225a09738f97:native-request:exec-abbf31ed-16ae-4612-b59d-9312d4375ce9:0c122ac5-970c-4ca2-82b9-2acaa4078255",
+          "kind": "command",
+          "createdAt": "2026-10-08T06:52:47.521Z"
+        },
+        "latestVisibleMessage": null,
+        "latestUserMessageAt": "2026-10-08T06:52:41.162Z",
+        "latestUserAuthoredMessageAt": "2026-10-08T06:52:41.162Z",
+        "hasActionableProposedPlan": false,
+        "pendingBackgroundTasks": [],
+        "providerInstanceHistory": [
+          "codex"
+        ],
+        "goal": null,
+        "itemCount": 3,
+        "visibleItemCount": 3,
+        "createdAt": "2026-10-08T06:52:40.042Z",
+        "updatedAt": "2026-10-08T06:52:47.524Z",
+        "archivedAt": null,
+        "settledOverride": null,
+        "settledAt": null,
+        "unsettledAt": null,
+        "snoozedUntil": null,
+        "snoozedAt": null,
+        "limitRecovery": null,
+        "pinnedAt": null,
+        "autoSettleDisabledAt": null,
+        "pinOrderKey": null,
+        "lastVisitedAt": null,
+        "titleRegeneration": null,
+        "deletedAt": null
+      }
+    }
+  ]
+}

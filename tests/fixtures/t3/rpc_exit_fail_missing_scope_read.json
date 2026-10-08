@@ -1,0 +1,18 @@
+{
+  "_tag": "Exit",
+  "requestId": "1",
+  "exit": {
+    "_tag": "Failure",
+    "cause": [
+      {
+        "_tag": "Fail",
+        "error": {
+          "_tag": "EnvironmentAuthorizationError",
+          "message": "The authenticated token is missing required scope: orchestration:read.",
+          "requiredScope": "orchestration:read",
+          "requiredPermission": "orchestration:read"
+        }
+      }
+    ]
+  }
+}

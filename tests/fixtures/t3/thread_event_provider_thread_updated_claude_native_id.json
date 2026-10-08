@@ -1,0 +1,368 @@
+{
+  "_tag": "Chunk",
+  "requestId": "1",
+  "values": [
+    {
+      "kind": "event",
+      "sequence": 11,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:provider-session:provider-session%3Aprovider-instance%3AclaudeAgent%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3A917978a1-c683-4d0f-a7c1-bfd6a97d1254:1e4a991c-bcd6-41ba-bb82-d149bca11196",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:48:27.496Z",
+        "type": "provider-session.attached",
+        "payload": {
+          "id": "provider-session:provider-instance:claudeAgent:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:917978a1-c683-4d0f-a7c1-bfd6a97d1254",
+          "driver": "claudeAgent",
+          "providerInstanceId": "claudeAgent",
+          "status": "ready",
+          "cwd": "/tmp/acp4/proj",
+          "model": "claude-sonnet-5-5",
+          "capabilities": {
+            "sessions": {
+              "supportsMultipleProviderThreadsPerSession": false,
+              "supportsModelSwitchInSession": true,
+              "supportsProviderSwitchingViaHandoff": true,
+              "supportsRuntimeModeSwitchInSession": false,
+              "pendingRequestsSurviveRestart": false
+            },
+            "threads": {
+              "canCreateEmptyThread": true,
+              "canReadThreadSnapshot": false,
+              "canRollbackThread": true,
+              "canForkThread": true,
+              "canForkFromTurn": true,
+              "canForkFromSubagentThread": false,
+              "exposesNativeThreadId": true
+            },
+            "turns": {
+              "exposesNativeTurnId": false,
+              "emitsTurnStarted": true,
+              "emitsTurnCompleted": true,
+              "supportsInterrupt": true,
+              "supportsActiveSteering": true,
+              "activeSteeringInterruptsTools": true,
+              "supportsSteeringByInterruptRestart": false,
+              "supportsQueuedMessages": true,
+              "terminalStatusQuality": "strong"
+            },
+            "streaming": {
+              "streamsAssistantText": true,
+              "streamsReasoning": true,
+              "streamsToolOutput": false,
+              "streamsPlanText": false,
+              "emitsMessageCompleted": true
+            },
+            "tools": {
+              "exposesToolItemIds": true,
+              "emitsToolStarted": true,
+              "emitsToolCompleted": true,
+              "emitsToolOutput": true,
+              "supportsMcpTools": true,
+              "supportsDynamicToolCallbacks": true
+            },
+            "approvals": {
+              "supportsCommandApproval": true,
+              "supportsFileReadApproval": true,
+              "supportsFileChangeApproval": true,
+              "supportsApplyPatchApproval": false,
+              "approvalsHaveNativeRequestIds": true,
+              "approvalCallbacksAreLiveOnly": true,
+              "approvalsCanOriginateFromSubagents": false
+            },
+            "planning": {
+              "emitsPlanUpdated": true,
+              "emitsTodoList": true,
+              "emitsProposedPlan": true,
+              "supportsStructuredQuestions": true,
+              "planDeltasHaveItemIds": false
+            },
+            "subagents": {
+              "supportsSubagents": true,
+              "exposesSubagentThreadIds": false,
+              "emitsSubagentLifecycle": true,
+              "canWaitForSubagents": false,
+              "canCloseSubagents": false,
+              "canForkSubagentThread": false
+            },
+            "context": {
+              "acceptsSystemContext": true,
+              "acceptsDeveloperContext": true,
+              "acceptsSyntheticUserContext": true,
+              "canGenerateSummaries": true,
+              "canConsumeHandoffSummaries": true,
+              "supportsDeltaHandoff": true,
+              "supportsFullThreadHandoff": true,
+              "maxRecommendedHandoffChars": null
+            },
+            "checkpointing": {
+              "appCanCheckpointFilesystem": true,
+              "supportsNestedCheckpointScopes": true,
+              "providerCanRollbackConversation": true,
+              "providerRollbackReturnsSnapshot": true,
+              "providerCanReadConversationSnapshot": false
+            },
+            "identity": {
+              "nativeThreadIds": "strong",
+              "nativeTurnIds": "weak",
+              "nativeItemIds": "strong",
+              "nativeRequestIds": "strong"
+            },
+            "runtimePolicy": {
+              "enforcement": "native"
+            }
+          },
+          "createdAt": "2026-10-08T06:48:27.496Z",
+          "updatedAt": "2026-10-08T06:48:27.496Z",
+          "lastError": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 12,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:provider-session:provider-session%3Aprovider-instance%3AclaudeAgent%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3A917978a1-c683-4d0f-a7c1-bfd6a97d1254:65086a06-262f-4b4e-9675-5cdc6e1dc995",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:48:27.498Z",
+        "type": "provider-session.updated",
+        "payload": {
+          "id": "provider-session:provider-instance:claudeAgent:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:917978a1-c683-4d0f-a7c1-bfd6a97d1254",
+          "driver": "claudeAgent",
+          "providerInstanceId": "claudeAgent",
+          "status": "ready",
+          "cwd": "/tmp/acp4/proj",
+          "model": "claude-sonnet-5-5",
+          "capabilities": {
+            "sessions": {
+              "supportsMultipleProviderThreadsPerSession": false,
+              "supportsModelSwitchInSession": true,
+              "supportsProviderSwitchingViaHandoff": true,
+              "supportsRuntimeModeSwitchInSession": false,
+              "pendingRequestsSurviveRestart": false
+            },
+            "threads": {
+              "canCreateEmptyThread": true,
+              "canReadThreadSnapshot": false,
+              "canRollbackThread": true,
+              "canForkThread": true,
+              "canForkFromTurn": true,
+              "canForkFromSubagentThread": false,
+              "exposesNativeThreadId": true
+            },
+            "turns": {
+              "exposesNativeTurnId": false,
+              "emitsTurnStarted": true,
+              "emitsTurnCompleted": true,
+              "supportsInterrupt": true,
+              "supportsActiveSteering": true,
+              "activeSteeringInterruptsTools": true,
+              "supportsSteeringByInterruptRestart": false,
+              "supportsQueuedMessages": true,
+              "terminalStatusQuality": "strong"
+            },
+            "streaming": {
+              "streamsAssistantText": true,
+              "streamsReasoning": true,
+              "streamsToolOutput": false,
+              "streamsPlanText": false,
+              "emitsMessageCompleted": true
+            },
+            "tools": {
+              "exposesToolItemIds": true,
+              "emitsToolStarted": true,
+              "emitsToolCompleted": true,
+              "emitsToolOutput": true,
+              "supportsMcpTools": true,
+              "supportsDynamicToolCallbacks": true
+            },
+            "approvals": {
+              "supportsCommandApproval": true,
+              "supportsFileReadApproval": true,
+              "supportsFileChangeApproval": true,
+              "supportsApplyPatchApproval": false,
+              "approvalsHaveNativeRequestIds": true,
+              "approvalCallbacksAreLiveOnly": true,
+              "approvalsCanOriginateFromSubagents": false
+            },
+            "planning": {
+              "emitsPlanUpdated": true,
+              "emitsTodoList": true,
+              "emitsProposedPlan": true,
+              "supportsStructuredQuestions": true,
+              "planDeltasHaveItemIds": false
+            },
+            "subagents": {
+              "supportsSubagents": true,
+              "exposesSubagentThreadIds": false,
+              "emitsSubagentLifecycle": true,
+              "canWaitForSubagents": false,
+              "canCloseSubagents": false,
+              "canForkSubagentThread": false
+            },
+            "context": {
+              "acceptsSystemContext": true,
+              "acceptsDeveloperContext": true,
+              "acceptsSyntheticUserContext": true,
+              "canGenerateSummaries": true,
+              "canConsumeHandoffSummaries": true,
+              "supportsDeltaHandoff": true,
+              "supportsFullThreadHandoff": true,
+              "maxRecommendedHandoffChars": null
+            },
+            "checkpointing": {
+              "appCanCheckpointFilesystem": true,
+              "supportsNestedCheckpointScopes": true,
+              "providerCanRollbackConversation": true,
+              "providerRollbackReturnsSnapshot": true,
+              "providerCanReadConversationSnapshot": false
+            },
+            "identity": {
+              "nativeThreadIds": "strong",
+              "nativeTurnIds": "weak",
+              "nativeItemIds": "strong",
+              "nativeRequestIds": "strong"
+            },
+            "runtimePolicy": {
+              "enforcement": "native"
+            }
+          },
+          "createdAt": "2026-10-08T06:48:27.496Z",
+          "updatedAt": "2026-10-08T06:48:27.496Z",
+          "lastError": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 13,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:9c3e398c-5be6-4d8a-9642-c7e5fa1df51d",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:48:27.498Z",
+        "type": "provider-thread.updated",
+        "payload": {
+          "id": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+          "driver": "claudeAgent",
+          "providerInstanceId": "claudeAgent",
+          "providerSessionId": "provider-session:provider-instance:claudeAgent:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:917978a1-c683-4d0f-a7c1-bfd6a97d1254",
+          "appThreadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "ownerNodeId": null,
+          "nativeThreadRef": {
+            "driver": "claudeAgent",
+            "nativeId": "d67b7431-38fa-47ca-b40d-11d54f568263",
+            "strength": "strong"
+          },
+          "nativeConversationHeadRef": null,
+          "status": "active",
+          "firstRunOrdinal": 1,
+          "lastRunOrdinal": 1,
+          "handoffIds": [],
+          "forkedFrom": null,
+          "pendingBackgroundTasks": [],
+          "contextUsage": null,
+          "nativeMetadata": null,
+          "goal": null,
+          "createdAt": "2026-10-08T06:48:27.483Z",
+          "updatedAt": "2026-10-08T06:48:27.498Z"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 14,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:41baa69c-0f24-4b53-89fe-c26dc89434ed",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1:root",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:48:27.498Z",
+        "type": "run.updated",
+        "payload": {
+          "id": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "ordinal": 1,
+          "providerInstanceId": "claudeAgent",
+          "modelSelection": {
+            "instanceId": "claudeAgent",
+            "model": "claude-sonnet-5-5"
+          },
+          "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+          "userMessageId": "49789401-a554-4be9-8899-bd1adf064f6c",
+          "rootNodeId": "node:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1:root",
+          "activeAttemptId": "run-attempt:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1:attempt:1",
+          "status": "running",
+          "queuePosition": null,
+          "requestedAt": "2026-10-08T06:48:27.483Z",
+          "startedAt": "2026-10-08T06:48:27.498Z",
+          "completedAt": null,
+          "checkpointId": null,
+          "contextHandoffId": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 15,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:eab285f3-5117-43db-9767-f7920be020b4",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1:root",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:48:27.498Z",
+        "type": "run-attempt.updated",
+        "payload": {
+          "id": "run-attempt:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1:attempt:1",
+          "nativeThreadId": "d67b7431-38fa-47ca-b40d-11d54f568263",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+          "attemptOrdinal": 1,
+          "rootNodeId": "node:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1:root",
+          "providerInstanceId": "claudeAgent",
+          "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+          "providerTurnId": null,
+          "reason": "initial",
+          "status": "running",
+          "startedAt": "2026-10-08T06:48:27.498Z",
+          "completedAt": null
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "sequence": 16,
+      "event": {
+        "id": "event:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:006e8fd9-3017-4243-9d51-9917afd5f68e",
+        "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+        "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1:root",
+        "providerInstanceId": "claudeAgent",
+        "occurredAt": "2026-10-08T06:48:27.498Z",
+        "type": "node.updated",
+        "payload": {
+          "id": "node:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1:root",
+          "threadId": "d613fd68-3cc5-4231-a36d-2e6f9998e7c0",
+          "runId": "run:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:ordinal:1",
+          "parentNodeId": null,
+          "rootNodeId": "node:run:run%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1:root",
+          "kind": "root_turn",
+          "status": "running",
+          "countsForRun": true,
+          "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3Ad613fd68-3cc5-4231-a36d-2e6f9998e7c0%3Aordinal%3A1",
+          "providerTurnId": null,
+          "nativeItemRef": null,
+          "runtimeRequestId": null,
+          "checkpointScopeId": "checkpoint-scope:thread:d613fd68-3cc5-4231-a36d-2e6f9998e7c0:name:root",
+          "startedAt": "2026-10-08T06:48:27.498Z",
+          "completedAt": null
+        }
+      }
+    }
+  ]
+}

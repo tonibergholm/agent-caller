@@ -1,0 +1,24 @@
+{
+  "_tag": "Exit",
+  "requestId": "1",
+  "exit": {
+    "_tag": "Failure",
+    "cause": [
+      {
+        "_tag": "Fail",
+        "error": {
+          "_tag": "OrchestrationV2DispatchCommandError",
+          "commandId": "A3BE147B-8303-4B63-98AB-34A473F9974E",
+          "commandType": "runtime-request.respond",
+          "message": "Runtime request runtime-request:nope was not found.",
+          "detail": "Runtime request runtime-request:nope was not found.",
+          "cause": {
+            "name": "OrchestratorDispatchError",
+            "message": "Failed to dispatch orchestration command runtime-request.respond (A3BE147B-8303-4B63-98AB-34A473F9974E).",
+            "cause": "Runtime request runtime-request:nope was not found."
+          }
+        }
+      }
+    ]
+  }
+}

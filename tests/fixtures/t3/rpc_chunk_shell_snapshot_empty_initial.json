@@ -1,0 +1,16 @@
+{
+  "_tag": "Chunk",
+  "requestId": "1",
+  "values": [
+    {
+      "kind": "snapshot",
+      "snapshot": {
+        "schemaVersion": 2,
+        "snapshotSequence": 0,
+        "threads": [],
+        "archivedThreads": [],
+        "projects": []
+      }
+    }
+  ]
+}

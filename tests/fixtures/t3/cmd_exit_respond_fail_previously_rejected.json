@@ -1,0 +1,23 @@
+{
+  "_tag": "Exit",
+  "requestId": "1",
+  "exit": {
+    "_tag": "Failure",
+    "cause": [
+      {
+        "_tag": "Fail",
+        "error": {
+          "_tag": "OrchestrationV2DispatchCommandError",
+          "commandId": "6efd64a2-af4e-449a-a550-d9bdcb97dd21",
+          "commandType": "runtime-request.respond",
+          "message": "Command 6efd64a2-af4e-449a-a550-d9bdcb97dd21 was previously rejected: Failed to dispatch orchestration command runtime-request.respond (6efd64a2-af4e-449a-a550-d9bdcb97dd21).",
+          "detail": "Command 6efd64a2-af4e-449a-a550-d9bdcb97dd21 was previously rejected: Failed to dispatch orchestration command runtime-request.respond (6efd64a2-af4e-449a-a550-d9bdcb97dd21).",
+          "cause": {
+            "name": "OrchestratorCommandPreviouslyRejectedError",
+            "message": "Command 6efd64a2-af4e-449a-a550-d9bdcb97dd21 was previously rejected: Failed to dispatch orchestration command runtime-request.respond (6efd64a2-af4e-449a-a550-d9bdcb97dd21)."
+          }
+        }
+      }
+    ]
+  }
+}
