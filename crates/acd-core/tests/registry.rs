@@ -185,10 +185,22 @@ fn option_and_question_order_are_semantic() {
     let id = opened(&r.apply(Observation::RequestSeen(obs.clone())))[0]
         .id
         .clone();
+    // Each reordering on its own must bump, so neither comparison can hide
+    // behind the other.
     obs.options.reverse();
-    obs.questions.as_mut().unwrap()[0].options.reverse();
-    r.apply(Observation::RequestSeen(obs));
+    r.apply(Observation::RequestSeen(obs.clone()));
     assert_eq!(r.request(&id).unwrap().revision, 2);
+    obs.questions.as_mut().unwrap()[0].options.reverse();
+    r.apply(Observation::RequestSeen(obs.clone()));
+    assert_eq!(r.request(&id).unwrap().revision, 3);
+    let mut second = obs.questions.as_ref().unwrap()[0].clone();
+    second.id = "q2".into();
+    obs.questions.as_mut().unwrap().push(second);
+    r.apply(Observation::RequestSeen(obs.clone()));
+    assert_eq!(r.request(&id).unwrap().revision, 4);
+    obs.questions.as_mut().unwrap().reverse();
+    r.apply(Observation::RequestSeen(obs));
+    assert_eq!(r.request(&id).unwrap().revision, 5);
 }
 
 #[test]

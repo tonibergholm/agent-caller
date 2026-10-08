@@ -214,6 +214,14 @@ code 4408.
   `source_unavailable`, or any error the adapter reports as not delivered,
   such as `screen_mismatch`), its reservation is released, so the same id
   can be retried.
+- **`request_changed` is not cached either.** It means the answer's
+  `revision` no longer matches the request. Nothing was claimed or
+  delivered, and the reservation is released, so the same command id may
+  be sent again with the corrected revision after the user reviews the
+  request again.
+- **Revisions and older peers.** A `Request` without `revision` reads as
+  revision 0. A `request.answer` without `revision` is not checked
+  against the request (the behaviour before revisions).
 
 **Recovery after a lost result.** The cache does not survive an epoch
 change. After a reconnect into a new epoch, a client with commands in
