@@ -256,7 +256,9 @@ async fn next_server(ws: &mut Ws, deadline: Instant) -> Result<acd_protocol::Ser
                 Err(_) => return Err(End::Resync("undecodable frame")),
             },
             Message::Ping(v) => {
-                let _ = ws.send(Message::Pong(v)).await;
+                ws.send(Message::Pong(v))
+                    .await
+                    .map_err(|e| End::Offline(e.to_string()))?;
             }
             Message::Close(_) => return Err(End::Offline("closed".into())),
             _ => {}
