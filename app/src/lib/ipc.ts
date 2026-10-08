@@ -4,7 +4,7 @@ import type { InboxView } from "./bindings/InboxView";
 import type { MachineEntryView } from "./bindings/MachineEntryView";
 
 export interface Api {
-  pick(cardKey: string, requestId: string, optionId: string): Promise<string>;
+  pick(cardKey: string, requestId: string, optionId: string, revision: number): Promise<void>;
   reply(cardKey: string, text: string): Promise<string>;
   cancel(actionId: string): Promise<boolean>;
   /** Atomic backend cancel of the newest countdown (D9). */
@@ -26,8 +26,8 @@ export interface Api {
 }
 
 export const tauriApi: Api = {
-  pick: (cardKey, requestId, optionId) =>
-    invoke("pick_option", { cardKey, requestId, optionId }),
+  pick: (cardKey, requestId, optionId, revision) =>
+    invoke("pick_option", { cardKey, requestId, optionId, revision }),
   reply: (cardKey, text) => invoke("send_reply", { cardKey, text }),
   cancel: (actionId) => invoke("cancel_action", { actionId }),
   escape: () => invoke("escape"),

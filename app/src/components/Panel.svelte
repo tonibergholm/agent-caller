@@ -43,7 +43,7 @@
       case "none":
         return;
       case "pick":
-        await api.pick(effect.cardKey, effect.requestId, effect.optionId);
+        await api.pick(effect.cardKey, effect.requestId, effect.optionId, effect.revision);
         return;
       case "openReply":
         st = { ...st, selected: effect.cardKey, replyFor: effect.cardKey };
@@ -114,9 +114,9 @@
         card={c}
         selected={st.selected === c.key}
         {now}
-        onpick={(optionId) => {
-          const pending = c.agent.pending;
-          if (pending) act(run({ kind: "pick", cardKey: c.key, requestId: pending.id, optionId }));
+        onpick={(optionId, requestId, revision) => {
+          // Id and revision come from the request the card rendered at click time.
+          act(run({ kind: "pick", cardKey: c.key, requestId, optionId, revision }));
         }}
         oncancel={(actionId) => {
           act(api.cancel(actionId));

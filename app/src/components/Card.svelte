@@ -12,7 +12,7 @@
     card: CardView;
     selected: boolean;
     now: number;
-    onpick: (optionId: string) => void;
+    onpick: (optionId: string, requestId: string, revision: number) => void;
     oncancel: (actionId: string) => void;
   } = $props();
 
@@ -63,7 +63,7 @@
               class="option"
               disabled={!ok}
               title={ok ? undefined : "Not supported here"}
-              onclick={() => onpick(o.id)}
+              onclick={() => onpick(o.id, pending.id, pending.revision)}
             >
               {i + 1}. {o.label}{o.description ? ` (${o.description})` : ""}
             </button>

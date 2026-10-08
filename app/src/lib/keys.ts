@@ -14,7 +14,14 @@ export type KeyInput = {
 export type Effect =
   | { kind: "none" }
   | { kind: "select"; key: string }
-  | { kind: "pick"; cardKey: string; requestId: string; optionId: string }
+  | {
+      kind: "pick";
+      cardKey: string;
+      requestId: string;
+      optionId: string;
+      /** Revision of the request the user saw when the effect was created. */
+      revision: number;
+    }
   | { kind: "openReply"; cardKey: string }
   | { kind: "submitReply"; cardKey: string }
   | { kind: "markSeen"; cardKey: string }
@@ -88,7 +95,13 @@ export function onKey(
     if (!option || !card.selectable_options.includes(option.id)) return none;
     return {
       state: st,
-      effect: { kind: "pick", cardKey: card.key, requestId: pending.id, optionId: option.id },
+      effect: {
+        kind: "pick",
+        cardKey: card.key,
+        requestId: pending.id,
+        optionId: option.id,
+        revision: pending.revision,
+      },
     };
   }
   if (key === "r" && card.can_reply) {

@@ -31,7 +31,47 @@ test("1 on the selected answerable card calls pick with its request id", async (
   const c = card({ key: "m/a", answerable: true, selectable_options: ["allow", "deny"] });
   render(Panel, { view: view({ cards: [c] }), api });
   await userEvent.keyboard("1");
-  expect(api.calls).toEqual([["pick", "m/a", c.agent.pending!.id, "allow"]]);
+  expect(api.calls).toEqual([["pick", "m/a", c.agent.pending!.id, "allow", 1]]);
+});
+
+function atRevision(rev: number) {
+  const c = card({ key: "m/a", answerable: true, selectable_options: ["allow", "deny"] });
+  c.agent.pending = { ...c.agent.pending!, revision: rev };
+  return c;
+}
+
+test("a digit pick sends the revision on screen", async () => {
+  const api = fakeApi();
+  const c = atRevision(7);
+  render(Panel, { view: view({ cards: [c] }), api });
+  await userEvent.keyboard("2");
+  expect(api.calls).toEqual([["pick", "m/a", c.agent.pending!.id, "deny", 7]]);
+});
+
+test("a button pick sends the revision on screen", async () => {
+  const api = fakeApi();
+  const c = atRevision(7);
+  render(Panel, { view: view({ cards: [c] }), api });
+  await userEvent.click(screen.getByRole("button", { name: /2\. No/ }));
+  expect(api.calls).toEqual([["pick", "m/a", c.agent.pending!.id, "deny", 7]]);
+});
+
+test("a pick keeps the revision it was made on when the view moves on afterwards", async () => {
+  const api = fakeApi();
+  let release: () => void = () => {};
+  api.pick = ((...args: unknown[]) => {
+    api.calls.push(["pick", ...args]);
+    return new Promise<void>((r) => (release = r));
+  }) as typeof api.pick;
+  const { rerender } = render(Panel, { view: view({ cards: [atRevision(1)] }), api });
+  await userEvent.keyboard("1");
+  await rerender({ view: view({ cards: [atRevision(2)] }), api });
+  release();
+  // Effect built from revision 1 as rendered; later views do not rewrite it.
+  expect(api.calls).toEqual([["pick", "m/a", "req-a", "allow", 1]]);
+  // The next pick is made against what is now rendered.
+  await userEvent.click(screen.getByRole("button", { name: /1\. Yes/ }));
+  expect(api.calls[1]).toEqual(["pick", "m/a", "req-a", "allow", 2]);
 });
 
 test("composition Enter in the reply field does not submit", async () => {   // finding 8

@@ -104,7 +104,7 @@ export function fakeApi(
   };
   return {
     calls,
-    pick: rec("pick", "action-1"),
+    pick: rec("pick", undefined),
     reply: rec("reply", "action-2"),
     cancel: rec("cancel", true),
     escape: rec("escape", opts.escapeReturns ?? false),

@@ -10,6 +10,17 @@ describe("keyboard", () => {
   const b = card({ key: "m/b", can_reply: true, can_mark_seen: true });
   const v = view({ cards: [a, b] });
 
+  test("a pick effect is fixed to the revision of the view it was created from", () => {
+    const old = card({ key: "m/a", answerable: true, selectable_options: ["allow"] });
+    const newer = structuredClone(old);
+    newer.agent.pending!.revision = old.agent.pending!.revision + 1;
+    const st = { selected: "m/a", replyFor: null };
+    const e1 = onKey(view({ cards: [old] }), st, k("1")).effect;
+    const e2 = onKey(view({ cards: [newer] }), st, k("1")).effect;
+    expect(e1).toMatchObject({ kind: "pick", revision: 1 });
+    expect(e2).toMatchObject({ kind: "pick", revision: 2 });
+  });
+
   test("j/k move and clamp; first key selects the first card", () => {
     let st = normalize(v, { selected: null, replyFor: null });
     expect(st.selected).toBe("m/a");
@@ -20,7 +31,7 @@ describe("keyboard", () => {
 
   test("digits pick only selectable options of an answerable card", () => {
     const st = { selected: "m/a", replyFor: null };
-    expect(onKey(v, st, k("1")).effect).toEqual({ kind: "pick", cardKey: "m/a", requestId: a.agent.pending!.id, optionId: "allow" });
+    expect(onKey(v, st, k("1")).effect).toEqual({ kind: "pick", cardKey: "m/a", requestId: a.agent.pending!.id, optionId: "allow", revision: a.agent.pending!.revision });
     expect(onKey(v, st, k("4")).effect).toEqual({ kind: "none" });   // "weird": unknown effect
     expect(onKey(v, { selected: "m/b", replyFor: null }, k("1")).effect).toEqual({ kind: "none" });
   });

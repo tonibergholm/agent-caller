@@ -86,7 +86,7 @@ test("answerable cards show numbered option buttons; unsupported ones are disabl
   expect((buttons[2] as HTMLButtonElement).disabled).toBe(true);
   expect(buttons[3].getAttribute("title")).toBe("Not supported here");
   await userEvent.click(buttons[1]);
-  expect(onpick).toHaveBeenCalledWith("deny");
+  expect(onpick).toHaveBeenCalledWith("deny", c.agent.pending!.id, 1);
 });
 
 test("a question shows its first question text", () => {
