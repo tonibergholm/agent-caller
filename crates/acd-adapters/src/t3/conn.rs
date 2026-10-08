@@ -669,6 +669,7 @@ impl Conn {
             }
         }
         tokio::select! {
+            biased;
             r = timeout_at(deadline, exit_rx) => match r {
                 Ok(Ok(ExitValue::Success { value })) => Ok(value),
                 Ok(Ok(ExitValue::Failure { cause })) => Err(CallError::Failed(failure(&cause))),

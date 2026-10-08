@@ -80,7 +80,67 @@ async fn connects_with_the_bearer_header_and_acks_every_chunk() {
         "completed"
     );
     assert_eq!(fake.auth_headers(), vec![format!("Bearer {FAKE_TOKEN}")]);
+    // Every Chunk sent was acked, one at a time.
+    let mut settled = false;
+    for _ in 0..50 {
+        if fake.acks_received() == fake.chunks_sent() {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        settled,
+        "{} acks for {} chunks",
+        fake.acks_received(),
+        fake.chunks_sent()
+    );
+    assert_eq!(fake.chunks_sent(), 4);
     assert!(fake.unacked_peak() <= 1);
+}
+
+#[tokio::test]
+async fn the_initial_snapshots_arrive_in_one_chunk() {
+    let fake = FakeT3::start().await;
+    let (conn, mut rx) = open(&fake).await;
+    conn.subscribe(SUBSCRIBE_SHELL, json!({"requestCompletionMarker": true}))
+        .unwrap();
+    let first = next_chunk(&mut rx).await;
+    assert_eq!(first.len(), 2);
+    assert!(!is_project_only(&first[0]) && is_project_only(&first[1]));
+    assert_eq!(next_chunk(&mut rx).await[0]["kind"], "synchronized");
+}
+
+#[tokio::test]
+async fn a_queued_call_past_its_deadline_or_a_close_is_not_written() {
+    let fake = FakeT3::start().await;
+    let (conn, _rx) = open(&fake).await;
+    let gate = conn.pause_writer();
+    let e = conn
+        .call(
+            DISPATCH,
+            &dispatch("c1"),
+            Instant::now() + Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(e, CallError::NotWritten(_)), "{e:?}");
+    let c = conn.clone();
+    let call = tokio::spawn(async move {
+        c.call(
+            DISPATCH,
+            &dispatch("c2"),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    conn.close("test close");
+    let e = call.await.unwrap().unwrap_err();
+    assert!(matches!(e, CallError::NotWritten(_)), "{e:?}");
+    gate.release();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(fake.dispatched().is_empty());
 }
 
 #[tokio::test]
@@ -278,24 +338,33 @@ async fn a_peer_that_stops_reading_trips_the_write_timeout() {
     let fake = FakeT3::start().await;
     let (conn, _rx) = open(&fake).await;
     fake.stop_reading(true);
-    let big = json!({"type": "message.dispatch", "text": "x".repeat(1024 * 1024)});
-    let c = conn.clone();
-    let flood = tokio::spawn(async move {
-        for i in 0..64 {
-            let _ = c
-                .call(
-                    DISPATCH,
-                    &json!({"n": i, "p": big}),
-                    Instant::now() + Duration::from_secs(5),
-                )
-                .await;
-        }
-    });
-    let why = tokio::time::timeout(Duration::from_secs(3), conn.closed())
+    // Concurrent 8 MiB calls: the writer sends them back to back until the
+    // socket blocks, whatever the buffer sizes.
+    let big = "x".repeat(8 * 1024 * 1024);
+    let calls: Vec<_> = (0..6)
+        .map(|i| {
+            let c = conn.clone();
+            let payload = json!({"n": i, "p": big});
+            tokio::spawn(async move {
+                c.call(DISPATCH, &payload, Instant::now() + Duration::from_secs(10))
+                    .await
+            })
+        })
+        .collect();
+    let why = tokio::time::timeout(Duration::from_secs(5), conn.closed())
         .await
         .expect("bounded shutdown");
     assert!(why.contains("stalled"), "{why}");
-    flood.abort();
+    let mut no_reply = 0;
+    for call in calls {
+        match call.await.unwrap() {
+            // The frame whose write timed out may have reached T3.
+            Err(CallError::NoReply(_)) => no_reply += 1,
+            Err(CallError::NotWritten(_) | CallError::NotConnected) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(no_reply >= 1, "a write that timed out is NoReply");
 }
 
 #[tokio::test]

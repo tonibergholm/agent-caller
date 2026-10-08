@@ -155,7 +155,7 @@ enum Target {
 
 struct Stream {
     target: Target,
-    outbox: VecDeque<Value>,
+    outbox: VecDeque<Vec<Value>>,
     /// Chunks sent and not yet acked.
     outstanding: usize,
 }
@@ -204,6 +204,8 @@ struct Shared {
     stop_reading: watch::Sender<bool>,
     shutdown: watch::Sender<bool>,
     unacked_peak: AtomicUsize,
+    chunks_sent: AtomicUsize,
+    acks_received: AtomicUsize,
 }
 
 fn exit_frame(id: &str, exit: &Value) -> String {
@@ -266,7 +268,7 @@ impl State {
     fn emit(&mut self, to: impl Fn(&Target) -> bool, item: &Value) {
         for c in self.conns.values_mut() {
             for s in c.streams.values_mut().filter(|s| to(&s.target)) {
-                s.outbox.push_back(item.clone());
+                s.outbox.push_back(vec![item.clone()]);
             }
         }
         self.wake_all();
@@ -353,7 +355,7 @@ impl State {
         }
     }
 
-    fn open_stream(&mut self, conn: u64, id: &str, target: Target, items: VecDeque<Value>) {
+    fn open_stream(&mut self, conn: u64, id: &str, target: Target, items: VecDeque<Vec<Value>>) {
         if let Some(c) = self.conns.get_mut(&conn) {
             c.streams.insert(
                 id.to_owned(),
@@ -376,21 +378,21 @@ impl State {
         let mut items = VecDeque::new();
         match after {
             Some(n) if n < self.head => {
-                items.push_back(self.project_only_snapshot());
+                items.push_back(vec![self.project_only_snapshot()]);
                 items.extend(
                     self.shell_log
                         .iter()
                         .filter(|(s, _)| *s > n)
-                        .map(|(_, i)| i.clone()),
+                        .map(|(_, i)| vec![i.clone()]),
                 );
             }
             _ => {
-                items.push_back(self.full_snapshot());
-                items.push_back(self.project_only_snapshot());
+                // One Chunk with two values, as recorded.
+                items.push_back(vec![self.full_snapshot(), self.project_only_snapshot()]);
             }
         }
         if payload["requestCompletionMarker"] == true {
-            items.push_back(json!({"kind": "synchronized"}));
+            items.push_back(vec![json!({"kind": "synchronized"})]);
         }
         self.open_stream(conn, id, Target::Shell, items);
         None
@@ -415,13 +417,15 @@ impl State {
                     .into_iter()
                     .flatten()
                     .filter(|(s, _)| *s > n)
-                    .map(|(_, i)| i.clone()),
+                    .map(|(_, i)| vec![i.clone()]),
             ),
-            _ => items.push_back(json!({"kind": "snapshot", "snapshotSequence": self.head,
-                "projection": projection})),
+            _ => items.push_back(vec![
+                json!({"kind": "snapshot", "snapshotSequence": self.head,
+                "projection": projection}),
+            ]),
         }
         if payload["requestCompletionMarker"] == true {
-            items.push_back(json!({"kind": "synchronized"}));
+            items.push_back(vec![json!({"kind": "synchronized"})]);
         }
         self.open_stream(conn, id, Target::Thread(thread_id), items);
         None
@@ -547,9 +551,9 @@ impl Shared {
                 && let Some(item) = s.outbox.pop_front()
             {
                 s.outstanding += 1;
+                self.chunks_sent.fetch_add(1, Ordering::SeqCst);
                 self.unacked_peak.fetch_max(s.outstanding, Ordering::SeqCst);
-                frames
-                    .push(json!({"_tag": "Chunk", "requestId": id, "values": [item]}).to_string());
+                frames.push(json!({"_tag": "Chunk", "requestId": id, "values": item}).to_string());
             }
         }
         frames
@@ -577,6 +581,7 @@ impl Shared {
                     let id = f["requestId"].as_str().unwrap_or("");
                     if let Some(s) = st.conns.get_mut(&conn).and_then(|c| c.streams.get_mut(id)) {
                         s.outstanding = s.outstanding.saturating_sub(1);
+                        self.acks_received.fetch_add(1, Ordering::SeqCst);
                     }
                 }
                 Some("Interrupt") => {
@@ -752,14 +757,9 @@ impl Drop for FakeT3 {
 
 impl FakeT3 {
     pub async fn start() -> FakeT3 {
-        // A small receive buffer, inherited by accepted sockets, so that a
-        // peer which stops reading backs the client's writes up quickly.
-        let socket = tokio::net::TcpSocket::new_v4().expect("socket");
-        socket.set_recv_buffer_size(16 * 1024).expect("rcvbuf");
-        socket
-            .bind("127.0.0.1:0".parse().expect("addr"))
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
             .expect("bind fake T3");
-        let listener = socket.listen(1024).expect("listen fake T3");
         let addr = listener.local_addr().expect("addr");
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
@@ -786,6 +786,8 @@ impl FakeT3 {
             stop_reading: watch::channel(false).0,
             shutdown: watch::channel(false).0,
             unacked_peak: AtomicUsize::new(0),
+            chunks_sent: AtomicUsize::new(0),
+            acks_received: AtomicUsize::new(0),
         });
         let app = Router::new()
             .route("/ws", get(ws_handler))
@@ -976,6 +978,16 @@ impl FakeT3 {
     /// Most Chunks ever outstanding on one stream.
     pub fn unacked_peak(&self) -> usize {
         self.shared.unacked_peak.load(Ordering::SeqCst)
+    }
+
+    /// Chunks sent so far, over all streams.
+    pub fn chunks_sent(&self) -> usize {
+        self.shared.chunks_sent.load(Ordering::SeqCst)
+    }
+
+    /// Acks received for a stream that was waiting for one.
+    pub fn acks_received(&self) -> usize {
+        self.shared.acks_received.load(Ordering::SeqCst)
     }
 
     pub fn head(&self) -> u64 {
