@@ -269,6 +269,7 @@ pub struct TlsIo {
     deadline: Instant,
     sleep: Pin<Box<Sleep>>,
     killed: Option<KillFuture>,
+    dead: bool,
 }
 impl TlsIo {
     fn new(
@@ -287,16 +288,21 @@ impl TlsIo {
             deadline,
             sleep: Box::pin(tokio::time::sleep_until(deadline)),
             killed: Some(killed),
+            dead: false,
         }
     }
     pub fn admit(&self) -> Admit {
         self.admit.clone()
     }
     fn ended(&mut self, cx: &mut Context<'_>) -> bool {
+        if self.dead {
+            return true;
+        }
         if let Some(killed) = &mut self.killed {
             match killed.as_mut().poll(cx) {
                 Poll::Ready(Ok(())) => {
                     self.killed = None;
+                    self.dead = true;
                     return true;
                 }
                 Poll::Ready(Err(_)) => self.killed = None,
