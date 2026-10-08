@@ -149,6 +149,8 @@ impl Commands {
             let missing = !caps
                 .iter()
                 .any(|cap| cap == self.items[&id].cmd.capability());
+            let missing_revision = frame_requires_revision(&self.items[&id].msg)
+                && !caps.iter().any(|cap| cap == "answer.revision");
             if expired {
                 self.finish(
                     &id,
@@ -157,7 +159,7 @@ impl Commands {
                         message: ErrorCode::RequestNotReady.describe().into(),
                     },
                 );
-            } else if missing {
+            } else if missing || missing_revision {
                 self.finish(&id, Outcome::NotSent(NotSent::NotAdvertised));
             } else {
                 let i = self.items.get_mut(&id).unwrap();
@@ -195,6 +197,8 @@ impl Commands {
             }
             if now.saturating_duration_since(i.first_sent) > t.stale_inflight
                 || !caps.iter().any(|cap| cap == i.cmd.capability())
+                || (frame_requires_revision(&i.msg)
+                    && !caps.iter().any(|cap| cap == "answer.revision"))
             {
                 self.finish(&id, Outcome::Uncertain);
             } else {
@@ -218,7 +222,10 @@ impl Commands {
                     },
                 );
             } else if item.retry_at.is_none_or(|at| at <= now) {
-                if !caps.iter().any(|cap| cap == item.cmd.capability()) {
+                if !caps.iter().any(|cap| cap == item.cmd.capability())
+                    || (frame_requires_revision(&item.msg)
+                        && !caps.iter().any(|cap| cap == "answer.revision"))
+                {
                     self.finish(&id, Outcome::NotSent(NotSent::NotAdvertised));
                 } else {
                     let item = self.items.get_mut(&id).unwrap();
@@ -280,6 +287,16 @@ fn message(cmd: &Command, id: String) -> ClientMessage {
             agent_id: agent_id.clone(),
         },
     }
+}
+
+fn frame_requires_revision(msg: &ClientMessage) -> bool {
+    matches!(
+        msg,
+        ClientMessage::RequestAnswer {
+            revision: Some(_),
+            ..
+        }
+    )
 }
 
 #[cfg(test)]
@@ -553,6 +570,58 @@ mod tests {
             .is_empty()
         );
         assert_eq!(rx.try_recv().unwrap(), Outcome::Uncertain);
+    }
+
+    #[test]
+    fn revision_capability_lost_before_resend_finishes_without_rewriting() {
+        let t0 = Instant::now();
+        let mut c = Commands::default();
+        let revision_caps = ["answer".into(), "answer.revision".into()];
+        let answer_only = ["answer".into()];
+
+        let (tx, mut rx) = oneshot::channel();
+        let msg = c.begin(answer(), tx, &revision_caps, C1, t0).unwrap();
+        assert!(matches!(
+            msg,
+            ClientMessage::RequestAnswer {
+                revision: Some(7),
+                ..
+            }
+        ));
+        assert!(
+            c.on_welcome(crate::session::EpochChange::Same, &answer_only, t0, &t())
+                .is_empty()
+        );
+        assert_eq!(rx.try_recv().unwrap(), Outcome::Uncertain);
+
+        let (tx, mut rx) = oneshot::channel();
+        let msg = c.begin(answer(), tx, &revision_caps, C1, t0).unwrap();
+        c.on_result(&not_ready(&id_of(&msg)), t0, &t());
+        assert!(
+            c.on_welcome(
+                crate::session::EpochChange::Same,
+                &answer_only,
+                t0 + Duration::from_millis(250),
+                &t()
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Outcome::NotSent(NotSent::NotAdvertised)
+        );
+
+        let (tx, mut rx) = oneshot::channel();
+        let msg = c.begin(answer(), tx, &revision_caps, C1, t0).unwrap();
+        c.on_result(&not_ready(&id_of(&msg)), t0, &t());
+        assert!(
+            c.due(t0 + Duration::from_millis(250), &answer_only, &t())
+                .is_empty()
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Outcome::NotSent(NotSent::NotAdvertised)
+        );
     }
 
     #[test]
