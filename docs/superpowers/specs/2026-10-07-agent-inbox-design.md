@@ -1,8 +1,8 @@
 # Agent inbox v1: design spec
 
 Date: 2026-10-07
-Status: revision 4.3. It folds in the P0 findings and the P1 review
-rulings, plus Sol rounds 4 and 5 (see §15).
+Status: revision 4.4. It folds in the P0 findings, the P1 review rulings,
+Sol rounds 4 and 5, and gates 3 and 6 (see §15).
 Research: `docs/research/2026-10-07-landscape.md`, which includes the spike
 log.
 
@@ -248,8 +248,8 @@ enough. The evidence per answer path:
     `uncertain`: clients show "check the terminal", and acd sends nothing
     further.
   - Codex's transient `working` state while hooks run is not evidence.
-- **`t3`.** The T3 command is acknowledged and the thread's request
-  disappears from its projection.
+- **`t3`.** T3 acknowledges acd's command. T3 accepts one answer per
+  request, so the acknowledgement is the outcome evidence (§6.5).
 - **Terminal answer.**
   - For `keys`, `none` and herdr fallback requests: the fingerprint
     disappears from the screen without a claim from acd.
@@ -453,8 +453,8 @@ for hook payloads and for discovery alike, applied in this order:
    binding. The session is not shown. If rule 1 or 2 later applies, it is
    re-evaluated.
 
-Payloads from subagents (`agent_id` present) are always dropped. Whether
-T3 exposes the provider session id is gated by §11 item 3.
+Payloads from subagents (`agent_id` present) are always dropped. T3
+exposes the provider session id through thread detail (§6.5).
 
 **Permission requests** (`tool_name` ≠ `AskUserQuestion`):
 
@@ -679,59 +679,131 @@ fallback.
 
 ### 6.5 T3 adapter
 
-**Connection** (P0 item 3, from source).
+Evidence: gate 3, a live check on T3 `v0.0.46-nightly.20261008.2801`
+(`docs/research/2026-10-08-t3-gate3.md`, fixtures in `tests/fixtures/t3/`).
 
-- `POST /api/auth/websocket-ticket` with `Authorization: Bearer <t3.token>`
-  returns a ticket valid for 5 minutes. acd requests a fresh ticket for
-  every connect.
+**Connection.**
+
 - The WebSocket URL is
-  `ws://<host>:<port>/ws?orchestrationProtocol=2&wsTicket=<ticket>`.
-- Framing is effect/rpc JSON.
+  `ws://<host>:<port>/ws?orchestrationProtocol=2`. A wrong or missing
+  protocol gets HTTP 426.
+- acd sends `Authorization: Bearer <t3.token>` on the upgrade, and re-reads
+  `t3.token` on every connect. T3 also offers a 5-minute ticket from
+  `POST /api/auth/websocket-ticket`; acd does not need it.
 - The token comes from
-  `t3 auth session issue --scope orchestration:read --scope orchestration:operate`.
+  `t3 auth session issue --scope orchestration:read --scope orchestration:operate`
+  (30 days by default). Write it with a private umask, for example
+  `(umask 077; t3 auth session issue … > ~/.config/acd/t3.token)`.
+- `t3.url` must point at loopback or a Tailscale address, because the token
+  travels over plain `ws://`.
+
+**Framing** (effect/rpc JSON, one object or an array per text frame).
+
+- Requests: `{"_tag":"Request","id","tag","payload","headers":[]}`.
+- Streams reply with `Chunk {requestId, values}`. **The client must Ack
+  every Chunk** (`{"_tag":"Ack","requestId"}`), or no further chunks
+  arrive.
+- Calls and streams end with `Exit`: `Success {value}`, or `Failure` with
+  causes `Fail {error}` (typed), `Die {defect}` (decode errors, unknown
+  tags, bad literals) or `Interrupt`.
+- `Ping` gets `Pong`. The server never pings, so acd does. A server
+  shutdown closes sockets with code 1001.
 
 **Contract.**
 
 - Hand-written Rust types cover `subscribeShell`, `subscribeThread` and
   `dispatchCommand` (`message.dispatch` and `runtime-request.respond`).
-- Subscriptions resume with `afterSequence`.
-- The T3 version is pinned. Unknown fields are ignored. An unknown status
-  maps to `unknown`, and an unknown request kind becomes read-only.
+- The T3 version is pinned. Unknown fields, item kinds and event types are
+  ignored. An unknown status maps to `unknown`.
+- Required scopes: `orchestration:read` for subscriptions,
+  `orchestration:operate` for `dispatchCommand`. A missing scope gives
+  `Fail EnvironmentAuthorizationError`, and the source becomes `degraded`.
 
-**State mapping** is unchanged:
+**Sync.**
+
+- The shell stream lists threads with their status and
+  `pendingRuntimeRequest {id, kind}`. Request detail and the provider
+  session id exist only in a thread stream.
+- acd subscribes to a thread while it has a pending request or acd shows
+  one for it, while it is working (at most 32 such streams), and, one at a
+  time, to learn the session id of a recently active thread.
+- Resume uses `afterSequence`. Shell and thread events share one global
+  sequence. Resume never fails: past T3's replay limits, the server sends a
+  snapshot instead.
+- A shell snapshot that carries `resolvedRepositoryIdentityRoots` holds
+  project metadata only (`threads: []`). It arrives on every resume and
+  mid-stream. It never replaces thread state and never moves the cursor.
+  Any other snapshot replaces state. Events at or below the cursor are
+  dropped.
+- A dropped connection makes the source `degraded` and T3 agents
+  `unknown`. acd reconnects with backoff and resumes.
+
+**State mapping.** An agent is `needs_you` exactly when its shell entry has
+`pendingRuntimeRequest != null`. While a request is pending the status
+stays `running`. `waiting` without a request is the 140–200 ms drain after
+an answer. Otherwise:
 
 | T3 status | acd state |
 |---|---|
-| `running`, `starting`, `preparing`, `queued` | `working` |
-| `waiting` | `needs_you` |
+| `running`, `starting`, `preparing`, `queued`, `waiting` | `working` |
 | `completed` | `done` |
 | `failed`, `interrupted` | `done` with `failed: true` |
 | `idle`, `cancelled`, `rolled_back` | `idle` |
 
 **Requests.**
 
-- A waiting thread's shell entry carries `pendingRuntimeRequest {id, kind}`.
-- The detail comes from the `turnItems` of type `approval_request` or
-  `user_input_request` (same `requestId`) in `subscribeThread`.
-- The key is the request id, not reusable.
-- Approval options come from `options[].decision`. If there are none, acd
-  falls back to `accept`, `acceptForSession` and `decline`. Effects:
-  - `accept` → allow;
-  - `acceptAlways` and `acceptForSession` → allow_always;
-  - `decline` and `cancel` → deny.
-- Questions keep their full structure.
+- The shell's `pendingRuntimeRequest.id` decides which request is shown.
+  The thread stream decides when it ends: `runtimeRequests[].status`
+  `resolved` ends it `terminal` (unless acd answered it), and `cancelled`
+  ends it `lost`.
+- The key is the runtime request id, not reusable.
+- An approval is the `approval_request` turn item with the same
+  `requestId`. Neither provider sends `options[]`, so acd always offers
+  `accept` (allow), `acceptForSession` (allow_always) and `decline`
+  (deny). Only `requestKind: "command"` is answerable in v1; other kinds
+  are read-only.
+- For Claude, `prompt` is the tool's description. The command is in the
+  `command_execution` turn item with the same `nativeItemRef.nativeId`.
+  The detail is the command, then the description when it differs. For
+  Codex, `prompt` is already the command.
+- A question is the `user_input_request` turn item. It keeps its full
+  structure. For Claude, the question id is the question text, and options
+  have no `value`.
+- A pending request without a matching turn item is shown read-only.
+- **A T3 restart cancels a pending request.** It becomes `cancelled` with
+  `responseCapability: not_resumable`, and acd resolves it `lost`.
 
 **Answers.**
 
-- Answers use `runtime-request.respond` with `decision`, or with `answers`
-  as `Record<questionId, string | string[]>`. The value is
-  `option.value ?? option.label`.
-- Each claim uses one `commandId`.
-- T3 rejects stale answers ("Runtime request … is resolved") and serializes
-  dispatch per thread.
-- A T3 acknowledgement counts as delivery evidence (`by: "inbox"`).
+- `runtime-request.respond` with `decision` (one of `accept`,
+  `acceptForSession`, `acceptAlways`, `decline`, `cancel`), or with
+  `answers: {<question id>: option.value ?? option.label}`.
+- T3 accepts one answer per request. A second respond fails with
+  "Runtime request … is resolved." (or "is cancelled.", "was not found.").
+  acd reports that as `request_gone` and resolves the request `terminal`
+  (or `lost`).
+- T3 does **not** compare payloads when a `commandId` is reused: it returns
+  the stored receipt. acd therefore sends a fresh `commandId` with every
+  dispatch, never derived from a client command id, and relies on its own
+  idempotency cache (§7.4) for retries and `duplicate_mismatch`.
+- The `Success` acknowledgement of acd's respond is the outcome evidence:
+  the request resolves `by: "inbox"`.
+- A reply lost after the frame was written is `uncertain`. acd never
+  resends.
 
-**Follow-ups.** `message.dispatch`.
+**Follow-ups.** `message.dispatch` with `createdBy: "user"`,
+`creationSource: "web"`, a new `messageId`, `attachments: []`,
+`deliveryIntent: "auto"` and `dispatchMode: {"type":"start_immediately"}`.
+T3 queues a message sent while a run is active. Text follows the §6.4
+rules.
+
+**Ownership.** The provider session id is
+`providerThreads[].nativeThreadRef.nativeId` of the provider thread whose
+id equals `thread.activeProviderThreadId`. It equals the Claude Code
+session id and the Codex rollout id, is stable across runs, and is `null`
+until the first turn. The adapter publishes a map from session id to T3
+agent for §6.2 rule 1. T3's Claude sessions report the entrypoint
+`sdk-ts`.
 
 ## 7. Protocol acd/1
 
@@ -1042,16 +1114,13 @@ until it has been checked and the spec updated.
    - `allow_always` with `addRules`/`localSettings` persists across a new
      session (re-confirms P0 item 2);
    - a stalled endpoint bounded by the 1 s lifecycle timeout.
-3. **T3, live (blocks P4):**
-   - ticket issuance with `POST /api/auth/websocket-ticket`, then connect;
-   - the effect/rpc envelope;
-   - resume with `afterSequence`, including an expired-resume or
-     not-resumable recovery path;
-   - per-RPC scopes;
-   - how `prompt` is filled;
-   - **whether a thread exposes the provider (Claude/Codex) session id**,
-     which §6.2 ownership rule 1 needs. Without it, ownership falls back to
-     rules 2–4, and a live T3-plus-herdr test must show no duplicate agent.
+3. **T3: resolved 2026-10-08** (`docs/research/2026-10-08-t3-gate3.md`).
+   Auth, framing, resume, scopes, prompts and the provider session id are
+   folded into §6.5. Still unverified: multi-select questions, the
+   `acceptForSession` and `acceptAlways` decisions, the statuses
+   `preparing`, `queued`, `failed`, `interrupted` and `rolled_back`, replay
+   past T3's limits, and concurrent responds. The P4 smoke test checks
+   `acceptForSession`.
 4. **Codex binding (blocks P3):**
    - herdr's Codex integration reports `agent_session`;
    - the stale `HERDR_*` reproduction with a fresh `codex app-server`;
@@ -1102,7 +1171,7 @@ until it has been checked and the spec updated.
 **Contract tests:**
 - hook fixtures, both those recorded in the spike and new ones;
 - herdr fixtures for `agent.list`, events and `pane.read`;
-- T3 fixtures, generated from T3's TypeScript schemas;
+- T3 fixtures, recorded live in gate 3;
 - `acd/1` golden examples, validated against the generated JSON Schema.
 
 **Integration tests in CI:**
@@ -1253,3 +1322,16 @@ old attribution rule. Revision 4.3 aligns it with §5.1.
 frame names, the `target` parameter, which panes are shown, and the
 `agent_blocked` refusal. Sol reviewed the P2 plan (9 blocking findings, all
 accepted). §6.4 now lists the exact set of rejected follow-up characters.
+
+**Gate 3, 2026-10-08.** A live check on T3 `v0.0.46-nightly.20261008.2801`
+settled §11 item 3 (`docs/research/2026-10-08-t3-gate3.md`, fixtures in
+`tests/fixtures/t3/`). It contradicted the old §6.5 in nine places, and
+§6.5 is rewritten: needs-you comes from `pendingRuntimeRequest`, not
+`waiting`; every Chunk needs an Ack; resume never fails and project-only
+snapshots must not replace state; T3 does not check payloads on a reused
+`commandId`; a restart cancels a pending request; `message.dispatch` needs
+more fields; the provider session id is in thread detail; Claude's command
+comes from the sibling `command_execution` item; and neither provider sends
+approval options. acd authenticates with a Bearer header on the upgrade
+instead of a ticket, and an acknowledged T3 answer resolves `inbox`
+(§5.1).
