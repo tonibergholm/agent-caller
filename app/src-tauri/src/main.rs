@@ -1,6 +1,7 @@
 mod commands;
 mod hotkey;
 mod keychain;
+mod notify;
 mod pairing;
 mod panel;
 mod settings_window;
@@ -14,6 +15,7 @@ use acd_client::{
     settings::{DEFAULT_HOTKEY, Settings},
 };
 use tauri::{Emitter, Manager, RunEvent};
+use tauri_plugin_notification::NotificationExt;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -48,6 +50,7 @@ fn main() {
         ])
         .setup(|app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let _ = app.handle().notification().request_permission();
             let path = app.path().app_config_dir()?.join("settings.json");
             let settings = Settings::load_or_init(&path)?;
             let inbox = Inbox::new(
@@ -75,6 +78,9 @@ fn main() {
             }
 
             let handle = app.handle().clone();
+            let notifications = inbox.events();
+            let notification_handle = handle.clone();
+            tauri::async_runtime::spawn(notify::run(notification_handle, notifications));
             tauri::async_runtime::spawn(async move {
                 inbox.start();
                 let mut rx = inbox.view();

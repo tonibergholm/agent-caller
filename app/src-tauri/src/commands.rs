@@ -96,8 +96,20 @@ pub fn get_hotkey(state: State<'_, AppState>) -> String {
 }
 
 #[tauri::command]
-pub fn set_hotkey(state: State<'_, AppState>, hotkey: String) -> Result<(), String> {
-    state.inbox.set_hotkey(&hotkey)
+pub fn set_hotkey(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    hotkey: String,
+) -> Result<(), String> {
+    let previous = state.inbox.settings().hotkey;
+    crate::hotkey::apply(&app, &hotkey)?;
+    if let Err(error) = state.inbox.set_hotkey(&hotkey) {
+        if let Err(rollback_error) = crate::hotkey::apply(&app, &previous) {
+            tracing::error!(%rollback_error, "could not restore previous hotkey after settings save failed");
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[tauri::command]
