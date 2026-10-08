@@ -711,3 +711,32 @@ impl Conn {
         self.core().hooks.fail_after_write.store(true, SeqCst);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn server_json_ping_queues_client_pong() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let core = Core {
+            control_tx: tx,
+            close_tx: watch::channel(None).0,
+            calls: Mutex::new(HashMap::new()),
+            streams: Mutex::new(HashSet::new()),
+            next: AtomicU64::new(0),
+            last_rx: Mutex::new(Instant::now()),
+            hooks: Hooks {
+                paused: watch::channel(false).0,
+                fail_after_write: AtomicBool::new(false),
+            },
+        };
+        let (event_tx, _events) = mpsc::channel(1);
+        let (closed_tx, closed_rx) = watch::channel(None);
+        let mut closed = ClosedSignal(closed_rx);
+        assert!(handle_frame(&core, &event_tx, &mut closed, ServerFrame::Ping {}).await);
+        let queued = rx.recv().await.unwrap();
+        assert_eq!(queued.text, PONG_FRAME);
+        drop(closed_tx);
+    }
+}

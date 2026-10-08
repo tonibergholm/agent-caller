@@ -127,13 +127,18 @@ pub(crate) fn failure_json(f: &Failure) -> Value {
 /// One text frame holds an object or an array of objects. Elements that are
 /// client frames (`Request`, `Ack`, `Interrupt`) decode as `Other`. Elements
 /// decode one by one: a malformed element becomes `Other` and never drops
-/// its neighbours (a lost `Chunk` would go unacked). Only text that is not
-/// JSON at all is an error.
+/// its neighbours (a lost `Chunk` would go unacked). A malformed known Chunk
+/// envelope is rejected so the reader closes instead of leaving it unacked.
 pub fn parse_frames(text: &str) -> Result<Vec<ServerFrame>, serde_json::Error> {
-    let decode = |v: Value| serde_json::from_value(v).unwrap_or(ServerFrame::Other);
+    let decode = |v: Value| -> Result<ServerFrame, serde_json::Error> {
+        if v.get("_tag").and_then(Value::as_str) == Some("Chunk") {
+            return serde_json::from_value(v);
+        }
+        Ok(serde_json::from_value(v).unwrap_or(ServerFrame::Other))
+    };
     match serde_json::from_str::<Value>(text)? {
-        Value::Array(items) => Ok(items.into_iter().map(decode).collect()),
-        v => Ok(vec![decode(v)]),
+        Value::Array(items) => items.into_iter().map(decode).collect(),
+        v => Ok(vec![decode(v)?]),
     }
 }
 

@@ -94,11 +94,11 @@ static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
             .unwrap(),
             "${1}[REDACTED]",
         ),
-        (Regex::new(r"(wsTicket=)[^&\s]+").unwrap(), "${1}[REDACTED]"),
+        (Regex::new(r"(?i)(token|ticket|wsticket)=([^&\s]+)").unwrap(), "${1}=[REDACTED]"),
         (Regex::new(r"\bsk-[A-Za-z0-9_-]{6,}").unwrap(), "[REDACTED]"),
         (
-            Regex::new(r"\b([A-Z][A-Z0-9_]{2,}=)[^\s&]+").unwrap(),
-            "${1}[REDACTED]",
+            Regex::new(r#"(?i)\b([A-Z][A-Z0-9_]*(?:TOKEN|TICKET|SECRET|PASSWORD|PASS|KEY|AUTH)[A-Z0-9_]*)(=|:\s+)(?:"[^"]*"|'[^']*'|[^\s&]+)"#).unwrap(),
+            "${1}${2}[REDACTED]",
         ),
     ]
 });
@@ -107,7 +107,7 @@ static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 /// should log JSON via `serde_json::to_string` where possible; Debug and
 /// debug-escaped forms are covered too but are best effort.
 pub fn redact_log(s: &str) -> String {
-    let mut out = s.to_string();
+    let mut out: String = s.chars().filter(|&c| !is_forbidden_format(c)).collect();
     for (re, rep) in SECRETS.iter() {
         out = re.replace_all(&out, *rep).into_owned();
     }
@@ -228,5 +228,17 @@ mod tests {
             r.contains(r#""x":1"#),
             "text after the secret survives: {r}"
         );
+        for (s, secret) in [
+            ("token=abc&x=1", "abc"),
+            ("Ticket=abc", "abc"),
+            ("WSTICKET=abc", "abc"),
+            ("API_TOKEN=\"first second\"", "first second"),
+            ("AUTH_TOKEN: value here", "value"),
+        ] {
+            let redacted = redact_log(s);
+            assert!(!redacted.contains(secret), "{s} leaked: {redacted}");
+        }
+        let bidi = redact_log("safe\u{202e}text\u{2028}tail");
+        assert_eq!(bidi, "safetexttail");
     }
 }

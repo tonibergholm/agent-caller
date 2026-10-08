@@ -32,6 +32,21 @@ pub struct PendingView {
 }
 
 impl ThreadDetail {
+    /// Whether a snapshot has the containers and nullable identity fields
+    /// required to replace the current detail safely.
+    pub fn valid_projection(p: &Value) -> bool {
+        p.get("thread")
+            .and_then(Value::as_object)
+            .is_some_and(|thread| {
+                thread
+                    .get("activeProviderThreadId")
+                    .is_some_and(|v| v.is_null() || v.is_string())
+            })
+            && ["providerThreads", "runtimeRequests", "turnItems"]
+                .iter()
+                .all(|key| p.get(*key).is_some_and(Value::is_array))
+    }
+
     pub fn from_projection(p: &Value) -> (ThreadDetail, usize) {
         let mut d = ThreadDetail {
             active_provider_thread: p["thread"]["activeProviderThreadId"]

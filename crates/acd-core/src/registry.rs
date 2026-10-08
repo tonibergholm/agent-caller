@@ -240,7 +240,8 @@ impl Registry {
         let Some(agent) = self.agents.get(agent_id) else { return vec![] };
         let mut out = Vec::new();
         if let Some(p) = agent.pending.clone() {
-            out.extend(self.resolve_request(&p.id, ResolvedBy::Lost).into_iter()
+            let by = if p.status == RequestStatus::Answering { ResolvedBy::Uncertain } else { ResolvedBy::Lost };
+            out.extend(self.resolve_request(&p.id, by).into_iter()
                 .filter(|c| !matches!(c, Change::AgentUpdated(_))));
         }
         self.agents.remove(agent_id);
@@ -278,7 +279,8 @@ impl Registry {
         let mut out = Vec::new();
         // 4. A different request on the same agent supersedes the pending one.
         if let Some(p) = pending {
-            out.extend(self.resolve_request(&p.id, ResolvedBy::Superseded));
+            let by = if p.status == RequestStatus::Answering { ResolvedBy::Uncertain } else { ResolvedBy::Superseded };
+            out.extend(self.resolve_request(&p.id, by));
         }
         // 5. Open a new occurrence. A new request means the agent's next
         //    `done` is a new completion, so the seen marker no longer applies.

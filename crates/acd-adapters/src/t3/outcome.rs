@@ -67,6 +67,8 @@ pub fn classify(res: &Result<Value, CallError>, t3_request_id: Option<&str>) -> 
                 Outcome::Uncertain(REFUSED)
             }
         }
+        // A single Fail is summarized by its stable tag/classification; raw
+        // message context is retained only in the redacted debug diagnostic.
         Err(CallError::Failed(Failure::Fail { .. })) | Err(CallError::Failed(Failure::Unknown)) => {
             Outcome::Uncertain(REFUSED)
         }
@@ -243,5 +245,11 @@ mod tests {
         }
         let long = CallError::Failed(Failure::Die("x".repeat(10_000)));
         assert!(debug_detail(&long).len() <= crate::text::LOG_BYTES + '…'.len_utf8());
+        let formatted = debug_detail(&CallError::Failed(Failure::Fail {
+            tag: "Other".into(),
+            message: "TOKEN=\"first second\" WSTICKET=abc".into(),
+        }));
+        assert!(!formatted.contains("first second"), "{formatted}");
+        assert!(!formatted.contains("WSTICKET=abc"), "{formatted}");
     }
 }

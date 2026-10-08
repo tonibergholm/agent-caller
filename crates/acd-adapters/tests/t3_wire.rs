@@ -286,12 +286,18 @@ fn client_frames_match_the_recording() {
 #[test]
 fn a_bad_array_element_never_drops_a_chunk() {
     let text = r#"[{"_tag":"Chunk","requestId":"1","values":[]},{"_tag":"Chunk","values":[]},"junk",{"_tag":"Exit","requestId":"1","exit":{"_tag":"Success"}}]"#;
-    let f = parse_frames(text).unwrap();
-    assert_eq!(f.len(), 4);
+    let f = parse_frames(text);
+    assert!(
+        f.is_err(),
+        "malformed Chunk requestId closes the protocol read"
+    );
+    let f = parse_frames(r#"[{"_tag":"Chunk","requestId":"1","values":[]},"junk",{"_tag":"Exit","requestId":"1","exit":{"_tag":"Success"}}]"#).unwrap();
+    assert_eq!(f.len(), 3);
     assert!(matches!(&f[0], ServerFrame::Chunk { request_id, .. } if request_id == "1"));
     assert!(matches!(f[1], ServerFrame::Other));
-    assert!(matches!(f[2], ServerFrame::Other));
-    assert!(matches!(f[3], ServerFrame::Exit { .. }));
+    assert!(matches!(f[2], ServerFrame::Exit { .. }));
+    assert!(parse_frames(r#"{"_tag":"Chunk","values":[]}"#).is_err());
+    assert!(parse_frames(r#"{"_tag":"Chunk","requestId":42,"values":[]}"#).is_err());
     assert!(parse_frames("not json").is_err());
 }
 
@@ -864,6 +870,7 @@ fn approval_without_its_command_is_read_only() {
     let (d, _) = ThreadDetail::from_projection(&p);
     let (obs, target) = request_obs("t3:x", "x", &d.pending_view(&id).unwrap());
     assert_eq!(obs.answer_path, AnswerPath::T3);
+    assert_eq!(target.answer, TargetAnswer::Decision);
     assert!(obs.detail.starts_with("touch /tmp/acp4/proj/x.txt"));
     assert_eq!(target.answer, TargetAnswer::Decision);
     // A blank command counts as absent.

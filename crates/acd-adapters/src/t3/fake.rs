@@ -771,11 +771,16 @@ async fn serve(shared: Arc<Shared>, socket: WebSocket) {
                     break;
                 }
             },
-            late = late_rx.recv() => replies.extend(late),
+            late = late_rx.recv() => if !shared.lock().muted { replies.extend(late) },
             _ = wake.notified() => {}
             _ = stop_rx.changed() => {}
             msg = stream.next(), if !stopped => match msg {
-                Some(Ok(Message::Text(t))) => replies = shared.handle_text(conn, t.as_str(), &late_tx),
+                Some(Ok(Message::Text(t))) => {
+                    if serde_json::from_str::<Value>(t.as_str()).is_err() {
+                        panic!("fake T3 received a non-JSON client frame: {t}");
+                    }
+                    replies = shared.handle_text(conn, t.as_str(), &late_tx)
+                },
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => {}
             },

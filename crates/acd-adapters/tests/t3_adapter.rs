@@ -179,6 +179,96 @@ async fn source_terminal_end_waits_for_core_claim_release() {
 }
 
 #[tokio::test]
+async fn superseding_request_during_held_success_resolves_old_uncertain() {
+    let (r, req) = with_pending(approval_projection("a", "rq-1", None), "command").await;
+    let (_, mut rx) = r.core.attach(None);
+    let gate = r.fake.gate_next_dispatch();
+    let core = r.core.clone();
+    let id = req.id.clone();
+    let answer_task = tokio::spawn(async move {
+        core.handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "held".into(),
+                request_id: id,
+                option_id: Some("accept".into()),
+                text: None,
+            },
+        )
+        .await
+    });
+    until("answering", || {
+        (r.core.request(&req.id)?.status == RequestStatus::Answering).then_some(())
+    })
+    .await;
+    r.fake.push_thread_event("a", "runtime-request.updated", json!({"id":"rq-2","kind":"command","status":"pending","title":"new","responseCapability":{"type":"user_action"}}));
+    r.fake
+        .put_thread(shell_thread("a", "running", Some(("rq-2", "command"))));
+    gate.release();
+    assert_eq!(answer_task.await.unwrap().outcome, Some(Outcome::Delivered));
+    let mut saw_uncertain = false;
+    let mut saw_new = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !(saw_uncertain && saw_new) {
+            match rx.recv().await.unwrap() {
+                ServerMessage::RequestResolved { request_id, by, .. } if request_id == req.id => {
+                    assert_eq!(by, ResolvedBy::Uncertain);
+                    saw_uncertain = true;
+                }
+                ServerMessage::RequestOpened { request, .. }
+                    if request.agent_id == "t3:a" && request.id != req.id =>
+                {
+                    saw_new = true
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("old uncertain and new request opened");
+}
+
+#[tokio::test]
+async fn removing_thread_during_held_success_resolves_uncertain() {
+    let (r, req) = with_pending(approval_projection("a", "rq-1", None), "command").await;
+    let (_, mut rx) = r.core.attach(None);
+    let gate = r.fake.gate_next_dispatch();
+    let core = r.core.clone();
+    let id = req.id.clone();
+    let answer_task = tokio::spawn(async move {
+        core.handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "held-remove".into(),
+                request_id: id,
+                option_id: Some("accept".into()),
+                text: None,
+            },
+        )
+        .await
+    });
+    until("answering", || {
+        (r.core.request(&req.id)?.status == RequestStatus::Answering).then_some(())
+    })
+    .await;
+    r.fake.remove_thread("a");
+    gate.release();
+    assert_eq!(answer_task.await.unwrap().outcome, Some(Outcome::Delivered));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+                && request_id == req.id
+            {
+                assert_eq!(by, ResolvedBy::Uncertain);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("uncertain removal resolution");
+}
+
+#[tokio::test]
 async fn cancelled_request_ends_as_lost() {
     let (r, req) = with_pending(approval_projection("a", "rq-1", None), "command").await;
     let (_, mut rx) = r.core.attach(None);

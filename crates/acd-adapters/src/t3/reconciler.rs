@@ -650,8 +650,8 @@ impl Reconciler {
         let Some(thread_id) = self.streams.remove(stream) else {
             return;
         };
-        // T3 thread streams never end on their own (an unknown thread, for
-        // one): wait before trying again, like a sync timeout.
+        // `on_end` clears only the stream target and waits before retrying;
+        // policy eviction is what removes retained detail and its cursor.
         let stall = Instant::now() + self.timing.relearn_after;
         if let Some(t) = self.threads.get_mut(&thread_id) {
             t.stream = None;
@@ -999,7 +999,9 @@ impl Reconciler {
         match item {
             // A snapshot acd cannot read leaves nothing to keep the stream
             // for: stall and retry with a fresh one after `relearn_after`.
-            Ok(ThreadItem::Snapshot { projection, .. }) if !projection.is_object() => {
+            Ok(ThreadItem::Snapshot { projection, .. })
+                if !ThreadDetail::valid_projection(&projection) =>
+            {
                 return self.unreadable_snapshot(conn, thread_id, v);
             }
             Err(_) if v["kind"] == "snapshot" => {

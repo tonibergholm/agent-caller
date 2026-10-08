@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use acd_protocol::{RequestStatus, ResolvedBy};
 
 #[derive(Default)]
+/// Keeps ends while a request exists but is Answering; Open entries are
+/// returned on every tick until the caller resolves them, and missing IDs
+/// are discarded. The persistent Open entry closes the claim/status race.
 pub(super) struct DeferredEnds(HashMap<String, ResolvedBy>);
 
 impl DeferredEnds {

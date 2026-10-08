@@ -254,7 +254,6 @@ async fn end_seen_during_a_claim_is_applied_after_release() {
         RequestStatus::Answering,
         "an in-flight claim is not ended"
     );
-    fake_adapter.fail_next(DeliverError::NotDelivered(ErrorCode::SourceUnavailable));
     fake_adapter.open_gate();
     let result = claim.await.unwrap();
     assert_eq!(result.error_code(), Some(ErrorCode::SourceUnavailable));
@@ -368,7 +367,7 @@ async fn deferred_end_applies_under_a_steady_event_stream() {
 }
 
 #[tokio::test]
-async fn deferred_end_survives_claim_starting_after_tick_status_read() {
+async fn deferred_end_observed_during_claim_resolves_after_release() {
     let fake_adapter = FakeAdapter::gated();
     let r = rig_pending(
         |t, q| approval_projection(t, q, None),
@@ -410,12 +409,12 @@ async fn deferred_end_survives_claim_starting_after_tick_status_read() {
 }
 
 #[tokio::test]
-async fn open_deferred_end_is_attempted_on_tick() {
+async fn open_deferred_end_resolves_without_a_claim() {
     let r = rig_pending(|t, q| approval_projection(t, q, None), None, "command").await;
     let req = until("pending", || pending(&r, "a")).await;
     let (_, mut rx) = r.core.attach(None);
-    // End detail arrives while the acd request is Open. This guards the
-    // production enqueue condition: the reconciler must defer even in Open.
+    // End detail arrives while Open. The test covers the immediate end; R18
+    // limits the integration claim about the later tick enqueue path.
     r.fake.push_thread_event(
         "a",
         "runtime-request.updated",
@@ -1480,19 +1479,36 @@ async fn a_persistent_shell_detail_disagreement_keeps_the_relearn_bound() {
 }
 
 #[tokio::test]
-async fn an_unreadable_thread_snapshot_is_released_and_retried() {
-    let fake = FakeT3::start().await;
-    fake.put_thread(shell_thread("a", "running", None));
-    fake.set_projection("a", json!("not a projection"));
-    let r = rig(fake).await;
-    until("retried", || {
+async fn malformed_object_snapshots_preserve_detail_and_owner_until_retry() {
+    for malformed in [
+        json!({}),
+        json!({"thread":{"activeProviderThreadId":null},"providerThreads":{},"runtimeRequests":[],"turnItems":[]}),
+        json!({"thread":{"activeProviderThreadId":42},"providerThreads":[],"runtimeRequests":[],"turnItems":[]}),
+    ] {
+        let r = live_on_s1().await;
+        r.fake.set_projection("a", malformed);
+        r.fake.drop_connections();
+        until("retry after malformed snapshot", || {
+            (thread_subs(&r, "a").len() >= 2).then_some(())
+        })
+        .await;
+        assert_eq!(r.shared.sessions.owner("s1"), Some("t3:a".into()));
+        r.fake
+            .set_projection("a", approval_projection("a", "rq-unused", Some("s1")));
+        until("recovered snapshot", || {
+            (thread_subs(&r, "a").len() >= 3).then_some(())
+        })
+        .await;
+    }
+    let r = rig_pending(|t, q| approval_projection(t, q, None), None, "command").await;
+    let req = until("pending", || pending(&r, "a")).await;
+    r.fake.set_projection("a", json!({}));
+    r.fake.drop_connections();
+    until("retry after malformed detail snapshot", || {
         (thread_subs(&r, "a").len() >= 2).then_some(())
     })
     .await;
-    assert_eq!(t3_state(&r), SourceState::Degraded);
-    r.fake
-        .set_projection("a", approval_projection("a", "rq-unused", Some("s1")));
-    until("learned", || r.shared.sessions.owner("s1")).await;
+    assert_eq!(r.core.request(&req.id).unwrap().detail, req.detail);
 }
 
 #[tokio::test]

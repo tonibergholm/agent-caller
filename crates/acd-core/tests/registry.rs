@@ -405,3 +405,34 @@ fn end_if_open_leaves_a_claimed_request_alone() {
     assert_eq!(opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls")))).len(), 1);
     assert!(r.apply(Observation::RequestEndedIfOpen { request_id: rid, by: ResolvedBy::Terminal }).is_empty());
 }
+
+#[test]
+fn answering_request_superseded_is_uncertain_but_open_request_is_superseded() {
+    let mut r = reg_with_agent();
+    let old = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "old"))))[0].id.clone();
+    r.claim(&old, Answer::Option("allow".into())).unwrap();
+    let changes = r.apply(Observation::RequestSeen(perm("a1", "k2", "new")));
+    assert_eq!(resolved(&changes), vec![(old.clone(), ResolvedBy::Uncertain, None)]);
+    assert_eq!(r.request(&old), None);
+    assert_eq!(opened(&changes).len(), 1);
+    assert!(r.apply(Observation::RequestEndedById { request_id: old, by: ResolvedBy::Inbox }).is_empty());
+
+    let mut r = reg_with_agent();
+    let old = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "old"))))[0].id.clone();
+    let changes = r.apply(Observation::RequestSeen(perm("a1", "k2", "new")));
+    assert_eq!(resolved(&changes), vec![(old, ResolvedBy::Superseded, None)]);
+}
+
+#[test]
+fn answering_agent_gone_is_uncertain_but_open_agent_gone_is_lost() {
+    let mut r = reg_with_agent();
+    let id = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "old"))))[0].id.clone();
+    r.claim(&id, Answer::Option("allow".into())).unwrap();
+    let changes = r.apply(Observation::AgentGone { agent_id: "a1".into() });
+    assert_eq!(resolved(&changes), vec![(id.clone(), ResolvedBy::Uncertain, None)]);
+    assert!(r.apply(Observation::RequestEndedById { request_id: id, by: ResolvedBy::Inbox }).is_empty());
+
+    let mut r = reg_with_agent();
+    let id = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "old"))))[0].id.clone();
+    assert_eq!(resolved(&r.apply(Observation::AgentGone { agent_id: "a1".into() })), vec![(id, ResolvedBy::Lost, None)]);
+}
