@@ -213,7 +213,7 @@ pub fn request_obs(agent_id: &str, thread_id: &str, view: &PendingView) -> (Requ
             obs.title = qs[0].header.clone().unwrap_or_else(|| "Question".into());
             obs.detail = qs[0].text.clone();
             // Only a single single-select question can be answered.
-            if questions.len() == 1 && !q0.multi_select {
+            if questions.len() == 1 && !q0.multi_select && !q0.options.is_empty() {
                 answer = TargetAnswer::Question {
                     question_id: q0.id.clone(),
                     choices: q0
@@ -292,4 +292,27 @@ pub fn dispatch_payload(command_id: &str, message_id: &str, thread_id: &str, tex
         "text": text, "attachments": [], "deliveryIntent": "auto",
         "dispatchMode": {"type": "start_immediately"},
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::t3::{detail::ThreadDetail, fake::question_projection};
+
+    #[test]
+    fn single_select_question_without_options_is_read_only() {
+        let mut projection = question_projection("thread", "request");
+        let questions = projection["turnItems"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["type"] == "user_input_request")
+            .unwrap();
+        questions["questions"][0]["options"] = json!([]);
+        let (detail, _) = ThreadDetail::from_projection(&projection);
+        let view = detail.pending_view("request").unwrap();
+        let (obs, target) = request_obs("t3:thread", "thread", &view);
+        assert_eq!(obs.answer_path, AnswerPath::None);
+        assert!(matches!(target.answer, TargetAnswer::ReadOnly));
+    }
 }

@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use acd_core::{AgentObs, Core, Observation};
-use acd_protocol::{AgentKind, AgentState, Source, SourceState, SourceStatus};
+use acd_core::{AgentObs, Core, CorrelationKey, Observation};
+use acd_protocol::{
+    AgentKind, AgentState, RequestStatus, ResolvedBy, Source, SourceState, SourceStatus,
+};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
@@ -20,6 +22,7 @@ use super::conn::{self, Conn, ConnTiming, ConnectError, StreamMsg};
 use super::detail::ThreadDetail;
 use super::map;
 use super::sessions::SessionMap;
+use super::targets::Targets;
 use super::wire::{self, Failure, Project, ShellItem, ShellSnapshot, ShellThread, ThreadItem};
 use crate::text::redact_log;
 
@@ -129,6 +132,7 @@ pub struct Shared {
     pub threads: RwLock<HashMap<String, String>>,
     pub sessions: Arc<SessionMap>,
     pub mailbox: Mailbox,
+    pub targets: Targets,
     pub stats: Mutex<SyncStats>,
 }
 
@@ -311,6 +315,8 @@ struct ThreadState {
     checked_at: Option<Instant>,
     /// Answered request ids (D9).
     hidden: HashSet<String>,
+    /// Requests ended by thread detail while the shell still lags.
+    ended: HashSet<String>,
     /// Surfaced T3 request id (Task 6).
     open: Option<String>,
 }
@@ -332,6 +338,7 @@ impl ThreadState {
             discovery: Discovery::Unknown,
             checked_at: None,
             hidden: HashSet::new(),
+            ended: HashSet::new(),
             open: None,
         }
     }
@@ -385,6 +392,7 @@ struct Reconciler {
     overflow_streak: usize,
     peak_working: usize,
     peak_discovery: usize,
+    pending_ends: Vec<(String, ResolvedBy)>,
 }
 
 fn log_unreadable(what: &str, v: &Value) {
@@ -411,6 +419,7 @@ impl Reconciler {
             overflow_streak: 0,
             peak_working: 0,
             peak_discovery: 0,
+            pending_ends: Vec::new(),
         }
     }
 
@@ -537,8 +546,11 @@ impl Reconciler {
             if t.open.as_deref() == Some(request_id.as_str()) {
                 t.open = None;
             }
-            t.hidden.insert(request_id);
+            t.hidden.insert(request_id.clone());
+            t.ended.remove(&request_id);
+            self.shared.targets.remove(&request_id);
             self.upsert(&thread_id);
+            self.reconcile_requests(&thread_id);
         }
         if let Some(msg) = degraded {
             self.adapter_degraded = Some((msg, Instant::now()));
@@ -548,6 +560,18 @@ impl Reconciler {
 
     fn on_tick(&mut self, conn: &Conn) {
         let now = Instant::now();
+        self.pending_ends
+            .retain(|(rid, by)| match self.core.request(rid) {
+                None => false,
+                Some(r) if r.status == RequestStatus::Open => {
+                    self.core.observe(Observation::RequestEndedIfOpen {
+                        request_id: rid.clone(),
+                        by: *by,
+                    });
+                    false
+                }
+                Some(_) => true,
+            });
         if self.shell_deadline.is_some_and(|d| now >= d) {
             conn.close("T3 shell did not synchronize");
             return;
@@ -789,6 +813,7 @@ impl Reconciler {
         }
         t.shell = Some(shell);
         t.unreadable = false;
+        self.reconcile_requests(&id);
         self.upsert(&id);
         self.publish_owner(&id);
     }
@@ -848,6 +873,7 @@ impl Reconciler {
         let Some(t) = self.threads.remove(thread_id) else {
             return;
         };
+        self.shared.targets.retain_thread(thread_id, None);
         if let Some(s) = t.stream {
             conn.interrupt(&s);
             self.streams.remove(&s);
@@ -988,7 +1014,8 @@ impl Reconciler {
             self.count_unreadable("thread item", v, skipped);
         }
         self.publish_owner(thread_id);
-        // Request reconciliation: Task 6.
+        self.reconcile_requests(thread_id);
+        // Keep only the detail needed by the shell and surfaced request.
         if let Some(t) = self.threads.get_mut(thread_id) {
             let keep: Vec<String> = t
                 .shell
@@ -1004,6 +1031,88 @@ impl Reconciler {
         }
         if finish_discovery {
             self.finish_discovery(conn, thread_id);
+        }
+    }
+
+    fn reconcile_requests(&mut self, thread_id: &str) {
+        let Some(t) = self.threads.get(thread_id) else {
+            return;
+        };
+        let agent_id = map::agent_id(thread_id);
+        let shell_pending = t
+            .shell
+            .as_ref()
+            .and_then(|s| s.pending_runtime_request.as_ref())
+            .map(|p| p.id.clone());
+        let detail = t.detail.clone();
+        let open = t.open.clone();
+        let hidden: HashSet<String> = if let Some(t) = self.threads.get_mut(thread_id) {
+            t.hidden
+                .retain(|h| shell_pending.as_deref() == Some(h.as_str()));
+            t.ended
+                .retain(|h| shell_pending.as_deref() == Some(h.as_str()));
+            t.hidden.clone()
+        } else {
+            return;
+        };
+        let Some(detail) = detail else { return };
+
+        if let Some(open) = open
+            && let Some(status) = detail.request_status(&open).filter(|s| *s != "pending")
+        {
+            let by = if status == "resolved" {
+                ResolvedBy::Terminal
+            } else {
+                ResolvedBy::Lost
+            };
+            if let Some(t) = self.threads.get_mut(thread_id) {
+                t.open = None;
+                t.ended.insert(open.clone());
+            }
+            self.shared.targets.remove(&open);
+            if let Some(rid) = self.core.request_id_for(&agent_id, &CorrelationKey(open)) {
+                self.core.observe(Observation::RequestEndedIfOpen {
+                    request_id: rid.clone(),
+                    by,
+                });
+                if self
+                    .core
+                    .request(&rid)
+                    .is_some_and(|r| r.status == RequestStatus::Answering)
+                {
+                    self.pending_ends.push((rid, by));
+                }
+            }
+        }
+
+        let ended = self
+            .threads
+            .get(thread_id)
+            .map(|t| t.ended.clone())
+            .unwrap_or_default();
+        if let Some(p) = shell_pending.filter(|p| !hidden.contains(p) && !ended.contains(p))
+            && let Some(view) = detail.pending_view(&p)
+        {
+            let (obs, target) = map::request_obs(&agent_id, thread_id, &view);
+            self.shared.targets.retain_thread(thread_id, Some(&p));
+            self.shared.targets.insert(target);
+            self.core.observe(Observation::RequestSeen(obs));
+            if let Some(t) = self.threads.get_mut(thread_id) {
+                t.open = Some(p);
+            }
+        }
+        if let Some(t) = self.threads.get_mut(thread_id) {
+            let keep: Vec<String> = t
+                .shell
+                .as_ref()
+                .and_then(|s| s.pending_runtime_request.as_ref())
+                .map(|p| p.id.clone())
+                .into_iter()
+                .chain(t.open.clone())
+                .collect();
+            if let Some(detail) = t.detail.as_mut() {
+                detail.prune(&keep.iter().map(String::as_str).collect::<Vec<_>>());
+            }
         }
     }
 

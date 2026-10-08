@@ -7,4 +7,5 @@ pub mod map;
 pub mod outcome;
 pub mod reconciler;
 pub mod sessions;
+pub mod targets;
 pub mod wire;

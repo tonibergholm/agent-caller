@@ -1,6 +1,6 @@
 use acd_adapters::t3::{conn::*, fake::*, reconciler::*};
 use acd_core::{
-    Core,
+    Core, CorrelationKey, DeliverError, Observation,
     testing::{FakeAdapter, test_machine},
 };
 use acd_protocol::*;
@@ -86,6 +86,288 @@ fn t3_state(r: &Rig) -> SourceState {
 }
 fn agent(r: &Rig, thread: &str) -> Option<Agent> {
     r.core.agent(&format!("t3:{thread}"))
+}
+
+fn pending(r: &Rig, thread: &str) -> Option<Request> {
+    agent(r, thread)?.pending
+}
+
+async fn rig_pending(
+    projection: impl Fn(&str, &str) -> serde_json::Value,
+    adapter: Option<Arc<FakeAdapter>>,
+    kind: &str,
+) -> Rig {
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread("a", "running", Some(("rq-1", kind))));
+    fake.set_projection("a", projection("a", "rq-1"));
+    rig_with(fake, adapter, fast_timing()).await
+}
+
+#[tokio::test]
+async fn approval_opens_an_answerable_request() {
+    let r = rig_pending(|t, q| approval_projection(t, q, None), None, "command").await;
+    let req = until("pending", || pending(&r, "a")).await;
+    assert_eq!(
+        (req.kind, req.answer_path, req.status),
+        (RequestKind::Permission, AnswerPath::T3, RequestStatus::Open)
+    );
+    assert_eq!(
+        req.detail,
+        "touch /tmp/acp4/proj/x.txt\nCreate empty file x.txt"
+    );
+    assert_eq!(agent(&r, "a").unwrap().state, AgentState::NeedsYou);
+    assert!(r.shared.targets.find(&r.core, &req).is_some());
+    assert_eq!(
+        r.core
+            .request_id_for("t3:a", &CorrelationKey("rq-1".into())),
+        Some(req.id.clone())
+    );
+}
+
+#[tokio::test]
+async fn question_opens_a_single_select_question() {
+    let r = rig_pending(question_projection, None, "user_input").await;
+    let req = until("pending", || pending(&r, "a")).await;
+    assert_eq!(req.kind, RequestKind::Question);
+    assert!(req.is_answerable());
+    assert_eq!(
+        req.options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect::<Vec<_>>(),
+        ["red", "blue"]
+    );
+}
+
+async fn until_resolved(
+    rx: &mut tokio::sync::broadcast::Receiver<ServerMessage>,
+    id: &str,
+) -> ResolvedBy {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("resolution")
+            .unwrap()
+        {
+            ServerMessage::RequestResolved { request_id, by, .. } if request_id == id => return by,
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn answered_in_t3_resolves_terminal() {
+    let r = rig_pending(|t, q| approval_projection(t, q, None), None, "command").await;
+    let req = until("pending", || pending(&r, "a")).await;
+    let (_, mut rx) = r.core.attach(None);
+    r.fake.push_thread_event(
+        "a",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "resolved", "decision": "decline"}),
+    );
+    r.fake.put_thread(shell_thread("a", "running", None));
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Terminal);
+    until("working", || {
+        (agent(&r, "a")?.state == AgentState::Working).then_some(())
+    })
+    .await;
+    assert!(r.shared.targets.find(&r.core, &req).is_none());
+}
+
+#[tokio::test]
+async fn terminal_detail_does_not_reopen_while_shell_lags() {
+    let r = rig_pending(|t, q| approval_projection(t, q, None), None, "command").await;
+    let req = until("pending", || pending(&r, "a")).await;
+    r.fake.push_thread_event(
+        "a",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "resolved", "decision": "decline"}),
+    );
+    until("ended", || r.core.request(&req.id).is_none().then_some(())).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(pending(&r, "a").is_none());
+}
+
+#[tokio::test]
+async fn restart_cancels_the_pending_request_as_lost() {
+    let r = rig_pending(|t, q| approval_projection(t, q, None), None, "command").await;
+    let req = until("pending", || pending(&r, "a")).await;
+    let (_, mut rx) = r.core.attach(None);
+    r.fake.restart();
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Lost);
+    until("idle", || {
+        (agent(&r, "a")?.state == AgentState::Idle).then_some(())
+    })
+    .await;
+    let res = r
+        .core
+        .handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "x1".into(),
+                request_id: req.id.clone(),
+                option_id: Some("accept".into()),
+                text: None,
+            },
+        )
+        .await;
+    assert_eq!(res.error_code(), Some(ErrorCode::RequestGone));
+}
+
+#[tokio::test]
+async fn end_seen_during_a_claim_is_applied_after_release() {
+    let fake_adapter = FakeAdapter::gated();
+    let r = rig_pending(
+        |t, q| approval_projection(t, q, None),
+        Some(fake_adapter.clone()),
+        "command",
+    )
+    .await;
+    let req = until("pending", || pending(&r, "a")).await;
+    let core = r.core.clone();
+    let id = req.id.clone();
+    let claim = tokio::spawn(async move {
+        core.handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "x1".into(),
+                request_id: id,
+                option_id: Some("accept".into()),
+                text: None,
+            },
+        )
+        .await
+    });
+    until("answering", || {
+        (r.core.request(&req.id)?.status == RequestStatus::Answering).then_some(())
+    })
+    .await;
+    r.fake.push_thread_event(
+        "a",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "resolved", "decision": "decline"}),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        r.core.request(&req.id).unwrap().status,
+        RequestStatus::Answering,
+        "an in-flight claim is not ended"
+    );
+    fake_adapter.fail_next(DeliverError::NotDelivered(ErrorCode::SourceUnavailable));
+    fake_adapter.open_gate();
+    claim.await.unwrap();
+    until("ended", || r.core.request(&req.id).is_none().then_some(())).await;
+}
+
+#[tokio::test]
+async fn deferred_end_applies_under_a_steady_event_stream() {
+    let fake_adapter = FakeAdapter::gated();
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread("a", "running", Some(("rq-1", "command"))));
+    fake.set_projection("a", approval_projection("a", "rq-1", None));
+    fake.put_thread(shell_thread("busy", "running", None));
+    fake.set_projection("busy", approval_projection("busy", "rq-unused", None));
+    let r = rig_with(fake, Some(fake_adapter.clone()), fast_timing()).await;
+    let req = until("pending", || pending(&r, "a")).await;
+    let f = r.fake.clone();
+    let noise = tokio::spawn(async move {
+        loop {
+            f.push_thread_event(
+                "busy",
+                "turn-item.updated",
+                json!({"id": "n", "type": "assistant_message"}),
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    let core = r.core.clone();
+    let id = req.id.clone();
+    let claim = tokio::spawn(async move {
+        core.handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "x1".into(),
+                request_id: id,
+                option_id: Some("accept".into()),
+                text: None,
+            },
+        )
+        .await
+    });
+    until("answering", || {
+        (r.core.request(&req.id)?.status == RequestStatus::Answering).then_some(())
+    })
+    .await;
+    r.fake.push_thread_event(
+        "a",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "resolved", "decision": "decline"}),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fake_adapter.fail_next(DeliverError::NotDelivered(ErrorCode::SourceUnavailable));
+    fake_adapter.open_gate();
+    claim.await.unwrap();
+    let released = std::time::Instant::now();
+    until("ended", || r.core.request(&req.id).is_none().then_some(())).await;
+    assert!(
+        released.elapsed() < Duration::from_secs(2),
+        "spec §14.4: resolved within 2 s"
+    );
+    noise.abort();
+}
+
+#[tokio::test]
+async fn many_pending_threads_do_not_stall_the_reconciler() {
+    let fake = FakeT3::start().await;
+    for i in 0..200 {
+        let t = format!("p{i}");
+        let rq = format!("rq-{i}");
+        fake.put_thread(shell_thread(&t, "running", Some((&rq, "command"))));
+        fake.set_projection(&t, approval_projection(&t, &rq, None));
+    }
+    let r = rig(fake).await;
+    until("all requests", || {
+        (0..200)
+            .all(|i| pending(&r, &format!("p{i}")).is_some())
+            .then_some(())
+    })
+    .await;
+    assert_eq!(t3_state(&r), SourceState::Ok);
+    r.fake.put_thread(shell_thread("p0", "completed", None));
+    until("still serving", || {
+        (agent(&r, "p0")?.state == AgentState::Done).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn answered_request_stays_hidden_while_the_shell_lags() {
+    let r = rig_pending(|t, q| approval_projection(t, q, None), None, "command").await;
+    let req = until("pending", || pending(&r, "a")).await;
+    r.core.observe(Observation::RequestEndedById {
+        request_id: req.id.clone(),
+        by: ResolvedBy::Inbox,
+    });
+    r.shared.mailbox.answered("a", "rq-1");
+    until("working", || {
+        (agent(&r, "a")?.state == AgentState::Working).then_some(())
+    })
+    .await;
+    assert!(pending(&r, "a").is_none());
+}
+
+#[test]
+fn mailbox_never_drops_and_coalesces() {
+    let m = Mailbox::default();
+    for i in 0..10_000 {
+        m.answered(&format!("t{}", i % 100), "rq");
+    }
+    m.degraded("first");
+    m.degraded("second");
+    let (answered, degraded) = m.take();
+    assert_eq!(answered.len(), 100);
+    assert_eq!(degraded, Some("second"));
+    assert_eq!(m.take(), (vec![], None));
 }
 
 #[tokio::test]
