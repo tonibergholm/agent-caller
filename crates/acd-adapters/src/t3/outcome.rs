@@ -5,7 +5,7 @@ use acd_protocol::{ErrorCode, ResolvedBy};
 use serde_json::{Value, json};
 
 use super::conn::CallError;
-use super::wire::{Cause, Failure};
+use super::wire::{Failure, failure_json};
 use crate::text::redact_log;
 
 pub const NO_REPLY: &str = "T3 did not confirm the command";
@@ -34,25 +34,10 @@ const SCOPE_ERROR: &str = "EnvironmentAuthorizationError";
 /// The debug-log text for a failed call: JSON, redacted and capped.
 fn debug_detail(e: &CallError) -> String {
     let raw = match e {
-        CallError::Failed(Failure::Mixed(causes)) => {
-            let causes: Vec<Value> = causes
-                .iter()
-                .map(|c| match c {
-                    Cause::Fail { error } => json!({"fail": error}),
-                    Cause::Die { defect } => json!({"die": defect}),
-                    Cause::Interrupt {} => json!("interrupt"),
-                    Cause::Other => json!("other"),
-                })
-                .collect();
-            Value::Array(causes).to_string()
-        }
-        CallError::Failed(Failure::Fail { tag, message }) => {
-            json!({"fail": {"tag": tag, "message": message}}).to_string()
-        }
-        CallError::Failed(Failure::Die(d)) => json!({"die": d}).to_string(),
-        other => json!({"error": other.to_string()}).to_string(),
+        CallError::Failed(f) => failure_json(f),
+        other => json!({"error": other.to_string()}),
     };
-    redact_log(&raw)
+    redact_log(&raw.to_string())
 }
 
 pub fn classify(res: &Result<Value, CallError>, t3_request_id: Option<&str>) -> Outcome {

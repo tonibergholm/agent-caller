@@ -106,6 +106,24 @@ pub fn failure(causes: &[Cause]) -> Failure {
     }
 }
 
+/// A failure as plain JSON for the debug log, which callers pass through
+/// `redact_log`. Never log a `Failure` with `{:?}`.
+pub(crate) fn failure_json(f: &Failure) -> Value {
+    let cause = |c: &Cause| match c {
+        Cause::Fail { error } => json!({"fail": error}),
+        Cause::Die { defect } => json!({"die": defect}),
+        Cause::Interrupt {} => json!("interrupt"),
+        Cause::Other => json!("other"),
+    };
+    match f {
+        Failure::Fail { tag, message } => json!({"fail": {"tag": tag, "message": message}}),
+        Failure::Die(d) => json!({"die": d}),
+        Failure::Interrupted => json!("interrupted"),
+        Failure::Mixed(causes) => Value::Array(causes.iter().map(cause).collect()),
+        Failure::Unknown => json!("unknown"),
+    }
+}
+
 /// One text frame holds an object or an array of objects. Elements that are
 /// client frames (`Request`, `Ack`, `Interrupt`) decode as `Other`. Elements
 /// decode one by one: a malformed element becomes `Other` and never drops

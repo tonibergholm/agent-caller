@@ -42,6 +42,7 @@ pub fn fast_timing() -> T3Timing {
         learn_window: Duration::from_secs(86_400),
         relearn_after: Duration::from_millis(200),
         sync_timeout: Duration::from_millis(500),
+        degraded_for: Duration::from_secs(600),
     }
 }
 
@@ -837,4 +838,241 @@ async fn a_churning_null_overflow_thread_is_retried_once_per_relearn_after() {
         .count();
     let bound = 1 + started.elapsed().as_millis() as usize / 200;
     assert!(w_subs <= bound, "{w_subs} subscriptions, at most {bound}");
+}
+
+fn thread_subs(r: &Rig, id: &str) -> Vec<serde_json::Value> {
+    r.fake
+        .subscriptions()
+        .into_iter()
+        .filter(|(t, p)| t == "orchestration.subscribeThread" && p["threadId"] == id)
+        .map(|(_, p)| p)
+        .collect()
+}
+
+#[tokio::test]
+async fn an_unreadable_shell_entry_keeps_owner_stream_and_detail() {
+    // R10: an unreadable entry is neither identity evidence nor a reason
+    // to drop the thread's request stream.
+    let fake = FakeT3::start().await;
+    let entry = || shell_thread("a", "running", Some(("rq-1", "command")));
+    fake.put_thread(entry());
+    fake.set_projection("a", approval_projection("a", "rq-1", Some("s1")));
+    let r = rig(fake).await;
+    until("owner", || r.shared.sessions.owner("s1")).await;
+    until("request stream", || {
+        (r.shared.stats().request_streams == 1).then_some(())
+    })
+    .await;
+    let before = thread_subs(&r, "a").len();
+    let mut bad = entry();
+    bad["status"] = json!(42);
+    r.fake.put_thread(bad);
+    until("a unknown", || {
+        (agent(&r, "a")?.state == AgentState::Unknown).then_some(())
+    })
+    .await;
+    // Longer than release_after: an unneeded stream would be gone by now.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(r.shared.sessions.owner("s1").as_deref(), Some("t3:a"));
+    let st = r.shared.stats();
+    assert_eq!(st.request_streams, 1, "{st:?}");
+    assert!(st.details >= 1, "{st:?}");
+    assert_eq!(r.fake.live_thread_streams(), vec!["a".to_string()]);
+    r.fake.put_thread(entry());
+    until("needs you", || {
+        (agent(&r, "a")?.state == AgentState::NeedsYou).then_some(())
+    })
+    .await;
+    assert_eq!(r.shared.sessions.owner("s1").as_deref(), Some("t3:a"));
+    assert_eq!(
+        thread_subs(&r, "a").len(),
+        before,
+        "the same stream throughout"
+    );
+}
+
+#[tokio::test]
+async fn decode_degradation_clears_after_degraded_for() {
+    // R12: one unreadable item does not degrade the source until restart.
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread("a", "idle", None));
+    fake.put_thread(shell_thread("b", "idle", None));
+    let timing = T3Timing {
+        degraded_for: Duration::from_millis(400),
+        ..fast_timing()
+    };
+    let r = rig_with(fake, None, timing).await;
+    until("ok", || (t3_state(&r) == SourceState::Ok).then_some(())).await;
+    let mut bad = shell_thread("b", "idle", None);
+    bad["status"] = json!(42);
+    r.fake.put_thread(bad);
+    until("degraded", || {
+        (t3_state(&r) == SourceState::Degraded).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        t3_state(&r),
+        SourceState::Degraded,
+        "not before degraded_for"
+    );
+    until("ok again", || {
+        (t3_state(&r) == SourceState::Ok).then_some(())
+    })
+    .await;
+}
+
+fn t3_message(r: &Rig) -> Option<String> {
+    let ServerMessage::Welcome { machine, .. } = r.core.welcome() else {
+        panic!()
+    };
+    machine.sources.t3.message
+}
+
+#[tokio::test]
+async fn an_adapter_reported_problem_clears_after_degraded_for() {
+    let fake = FakeT3::start().await;
+    let timing = T3Timing {
+        degraded_for: Duration::from_millis(400),
+        ..fast_timing()
+    };
+    let r = rig_with(fake, None, timing).await;
+    until("ok", || (t3_state(&r) == SourceState::Ok).then_some(())).await;
+    r.shared
+        .mailbox
+        .degraded("the T3 token lacks the orchestration:operate scope");
+    until("degraded", || {
+        t3_message(&r).filter(|m| m.contains("operate scope"))
+    })
+    .await;
+    until("ok again", || {
+        (t3_state(&r) == SourceState::Ok).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_adapter_reported_problem_clears_on_reconnect() {
+    let fake = FakeT3::start().await;
+    let r = rig(fake).await; // degraded_for: 10 minutes
+    until("ok", || (t3_state(&r) == SourceState::Ok).then_some(())).await;
+    r.shared
+        .mailbox
+        .degraded("the T3 token lacks the orchestration:operate scope");
+    until("degraded", || {
+        t3_message(&r).filter(|m| m.contains("operate scope"))
+    })
+    .await;
+    r.fake.drop_connections();
+    until("lost", || {
+        t3_message(&r).filter(|m| m.contains("connection to T3 lost"))
+    })
+    .await;
+    until("ok again", || {
+        (t3_state(&r) == SourceState::Ok).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_recent_group_gets_a_pick_after_an_overflow_burst() {
+    // Every working thread is over the cap and stays null; the recent
+    // thread is discovered within OVERFLOW_BURST + 1 discovery rounds.
+    let fake = FakeT3::start().await;
+    for i in 0..8 {
+        let t = format!("w{i}");
+        fake.put_thread(shell_thread(&t, "running", None));
+        fake.set_projection(&t, approval_projection(&t, "rq-unused", None));
+    }
+    fake.put_thread(recent(shell_thread("i", "idle", None)));
+    fake.set_projection("i", approval_projection("i", "rq-unused", Some("s-i")));
+    let r = rig_with(
+        fake,
+        None,
+        T3Timing {
+            max_live: 0,
+            ..fast_timing()
+        },
+    )
+    .await;
+    until("recent learned", || r.shared.sessions.owner("s-i")).await;
+    let order: Vec<String> = r
+        .fake
+        .subscriptions()
+        .into_iter()
+        .filter(|(t, _)| t == "orchestration.subscribeThread")
+        .map(|(_, p)| p["threadId"].as_str().unwrap().to_owned())
+        .collect();
+    let pos = order.iter().position(|t| t == "i").unwrap();
+    assert!(pos <= OVERFLOW_BURST, "{order:?}");
+}
+
+#[tokio::test]
+async fn a_persistent_shell_detail_disagreement_keeps_the_relearn_bound() {
+    // R9, compared like with like: the shell keeps naming pt-1 while the
+    // detail names pt-2, and the entry churns.
+    let fake = FakeT3::start().await;
+    fake.put_thread(running_on("w", "pt-1"));
+    fake.set_projection(
+        "w",
+        with_provider(
+            approval_projection("w", "rq-unused", None),
+            "pt-2",
+            Some("s-x"),
+        ),
+    );
+    let r = rig_with(
+        fake,
+        None,
+        T3Timing {
+            max_live: 0,
+            ..fast_timing()
+        },
+    )
+    .await;
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        r.fake.put_thread(recent(running_on("w", "pt-1")));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let w_subs = thread_subs(&r, "w").len();
+    let bound = 1 + started.elapsed().as_millis() as usize / 200;
+    assert!(w_subs <= bound, "{w_subs} subscriptions, at most {bound}");
+    assert!(
+        r.shared.sessions.owner("s-x").is_none(),
+        "shell and detail never agreed"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_thread_snapshot_is_released_and_retried() {
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread("a", "running", None));
+    fake.set_projection("a", json!("not a projection"));
+    let r = rig(fake).await;
+    until("retried", || {
+        (thread_subs(&r, "a").len() >= 2).then_some(())
+    })
+    .await;
+    assert_eq!(t3_state(&r), SourceState::Degraded);
+    r.fake
+        .set_projection("a", approval_projection("a", "rq-unused", Some("s1")));
+    until("learned", || r.shared.sessions.owner("s1")).await;
+}
+
+#[tokio::test]
+async fn detail_and_cursor_survive_a_reconnect() {
+    // The resumed stream continues from the cursor with no new snapshot;
+    // only the kept detail can turn its event into the new owner.
+    let r = live_on_s1().await;
+    let before = thread_subs(&r, "a").len();
+    r.fake.drop_connections();
+    r.fake.push_thread_event(
+        "a",
+        "provider-thread.updated",
+        provider_event("pt-1", Some("s2")),
+    );
+    until("s2", || r.shared.sessions.owner("s2")).await;
+    let resumed = &thread_subs(&r, "a")[before];
+    assert!(resumed.get("afterSequence").is_some(), "{resumed}");
 }

@@ -20,9 +20,7 @@ use super::conn::{self, Conn, ConnTiming, ConnectError, StreamMsg};
 use super::detail::ThreadDetail;
 use super::map;
 use super::sessions::SessionMap;
-use super::wire::{
-    self, Cause, Failure, Project, ShellItem, ShellSnapshot, ShellThread, ThreadItem,
-};
+use super::wire::{self, Failure, Project, ShellItem, ShellSnapshot, ShellThread, ThreadItem};
 use crate::text::redact_log;
 
 /// Most consecutive discovery picks from the overflow group while the recent
@@ -47,6 +45,9 @@ pub struct T3Timing {
     pub relearn_after: Duration,
     /// Every stream's first `synchronized` is due this long after it opens.
     pub sync_timeout: Duration,
+    /// Unreadable items, or a problem the adapter reported, keep the source
+    /// `degraded` until this long passes without a new one.
+    pub degraded_for: Duration,
 }
 
 impl Default for T3Timing {
@@ -61,6 +62,7 @@ impl Default for T3Timing {
             learn_window: Duration::from_secs(24 * 60 * 60),
             relearn_after: Duration::from_secs(60),
             sync_timeout: Duration::from_secs(15),
+            degraded_for: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -188,7 +190,7 @@ async fn run(cfg: SyncConfig, core: Arc<Core>, shared: Arc<Shared>) {
             Ok(u) => u.clone(),
             Err(why) => {
                 // `why` is acd's own text (`conn::ws_url`).
-                s.status(SourceState::Unconfigured, Some(format!("t3.url: {why}")));
+                s.status(SourceState::Unconfigured, Some(why.clone()));
                 return;
             }
         };
@@ -270,8 +272,10 @@ enum Class {
 enum Discovery {
     /// Never looked, or the shell's `activeProviderThreadId` changed since.
     Unknown,
-    /// Looked while that provider thread had no native id yet. Retried
-    /// after `relearn_after`, or at once when the shell entry changes.
+    /// Looked while no native id could be published. `provider_thread` is
+    /// the shell's active provider thread at that time. Retried after
+    /// `relearn_after`, or at once when the entry of an idle thread changes
+    /// or the shell names another provider thread.
     NotLoaded {
         provider_thread: Option<String>,
         at: Instant,
@@ -282,8 +286,11 @@ enum Discovery {
 }
 
 struct ThreadState {
-    /// `None`: the last entry did not decode.
+    /// The last entry that decoded. An unreadable entry leaves it in place
+    /// (it is not identity evidence and does not change the stream class).
     shell: Option<ShellThread>,
+    /// The last entry did not decode: the agent shows `unknown`.
+    unreadable: bool,
     /// The last observation sent, for `connection_lost` and bad entries.
     last_obs: Option<AgentObs>,
     detail: Option<ThreadDetail>,
@@ -312,6 +319,7 @@ impl ThreadState {
     fn new() -> ThreadState {
         ThreadState {
             shell: None,
+            unreadable: false,
             last_obs: None,
             detail: None,
             cursor: None,
@@ -369,28 +377,14 @@ struct Reconciler {
     threads: HashMap<String, ThreadState>,
     /// Stream id -> thread id.
     streams: HashMap<String, String>,
+    /// Unreadable items since the source was last clear of them.
     decode_errors: usize,
+    last_decode_error: Option<Instant>,
+    /// A problem the adapter reported through the mailbox, and when.
+    adapter_degraded: Option<(&'static str, Instant)>,
     overflow_streak: usize,
     peak_working: usize,
     peak_discovery: usize,
-}
-
-/// Plain JSON for `redact_log`, never `{:?}` (see `wire::Failure`).
-fn failure_log(f: &Failure) -> String {
-    let cause = |c: &Cause| match c {
-        Cause::Fail { error } => json!({"fail": error}),
-        Cause::Die { defect } => json!({"die": defect}),
-        Cause::Interrupt {} => json!("interrupt"),
-        Cause::Other => json!("other"),
-    };
-    let v = match f {
-        Failure::Fail { tag, message } => json!({"fail": {"tag": tag, "message": message}}),
-        Failure::Die(d) => json!({"die": d}),
-        Failure::Interrupted => json!("interrupted"),
-        Failure::Mixed(causes) => Value::Array(causes.iter().map(cause).collect()),
-        Failure::Unknown => json!("unknown"),
-    };
-    redact_log(&v.to_string())
 }
 
 fn log_unreadable(what: &str, v: &Value) {
@@ -412,6 +406,8 @@ impl Reconciler {
             threads: HashMap::new(),
             streams: HashMap::new(),
             decode_errors: 0,
+            last_decode_error: None,
+            adapter_degraded: None,
             overflow_streak: 0,
             peak_working: 0,
             peak_discovery: 0,
@@ -423,10 +419,15 @@ impl Reconciler {
             .set_source_status(Source::T3, SourceStatus { state, message });
     }
 
-    fn decode_status(&self) {
-        if self.decode_errors == 0 {
-            self.status(SourceState::Ok, None);
-        } else {
+    /// The status of a synchronized connection. Until the shell
+    /// synchronizes, the connection status set by `run` stands.
+    fn refresh_status(&self) {
+        if !self.shell_synced {
+            return;
+        }
+        if let Some((msg, _)) = self.adapter_degraded {
+            self.status(SourceState::Degraded, Some(msg.to_owned()));
+        } else if self.decode_errors > 0 {
             self.status(
                 SourceState::Degraded,
                 Some(format!(
@@ -434,6 +435,26 @@ impl Reconciler {
                     self.decode_errors
                 )),
             );
+        } else {
+            self.status(SourceState::Ok, None);
+        }
+    }
+
+    /// Clears degradations that did not recur within `degraded_for`.
+    fn expire_degradations(&mut self, now: Instant) {
+        let old = |at: Instant| now.duration_since(at) >= self.timing.degraded_for;
+        let mut changed = false;
+        if self.last_decode_error.is_some_and(old) {
+            self.decode_errors = 0;
+            self.last_decode_error = None;
+            changed = true;
+        }
+        if self.adapter_degraded.is_some_and(|(_, at)| old(at)) {
+            self.adapter_degraded = None;
+            changed = true;
+        }
+        if changed {
+            self.refresh_status();
         }
     }
 
@@ -486,6 +507,9 @@ impl Reconciler {
         );
         self.shell_stream = None;
         self.shell_deadline = None;
+        self.shell_synced = false;
+        // An adapter-reported problem lasts until the next reconnect.
+        self.adapter_degraded = None;
         self.streams.clear();
         for t in self.threads.values_mut() {
             if t.class == Some(Class::Discovery) {
@@ -517,7 +541,8 @@ impl Reconciler {
             self.upsert(&thread_id);
         }
         if let Some(msg) = degraded {
-            self.status(SourceState::Degraded, Some(msg.to_owned()));
+            self.adapter_degraded = Some((msg, Instant::now()));
+            self.refresh_status();
         }
     }
 
@@ -527,6 +552,7 @@ impl Reconciler {
             conn.close("T3 shell did not synchronize");
             return;
         }
+        self.expire_degradations(now);
         let expired: Vec<String> = self
             .threads
             .iter()
@@ -534,7 +560,7 @@ impl Reconciler {
             .map(|(id, _)| id.clone())
             .collect();
         for id in expired {
-            self.sync_timed_out(conn, &id, now);
+            self.stall(conn, &id, now);
         }
         self.policy(conn);
         self.write_stats();
@@ -566,7 +592,7 @@ impl Reconciler {
 
     fn on_end(&mut self, conn: &Conn, stream: &str, failure: Option<Failure>) {
         if let Some(f) = &failure {
-            tracing::debug!(failure = %failure_log(f), "T3 stream ended");
+            tracing::debug!(failure = %redact_log(&wire::failure_json(f).to_string()), "T3 stream ended");
         }
         if self.shell_stream.as_deref() == Some(stream) {
             // The shell must never end.
@@ -611,7 +637,7 @@ impl Reconciler {
             Ok(ShellItem::Synchronized {}) => {
                 self.shell_deadline = None;
                 self.shell_synced = true;
-                self.decode_status();
+                self.refresh_status();
                 // Restores agents that went unknown on a connection loss.
                 let ids: Vec<String> = self.threads.keys().cloned().collect();
                 for id in ids {
@@ -717,18 +743,24 @@ impl Reconciler {
     /// Counts and logs an unreadable value and degrades the source. With a
     /// thread id, that thread's agent becomes `unknown` (D12).
     fn decode_error(&mut self, what: &str, v: &Value, thread_id: Option<&str>) {
-        self.decode_errors += 1;
-        log_unreadable(what, v);
-        self.decode_status();
+        self.count_unreadable(what, v, 1);
         if let Some(id) = thread_id {
             let t = self
                 .threads
                 .entry(id.to_owned())
                 .or_insert_with(ThreadState::new);
-            t.shell = None;
+            // The last good entry stays: owner, stream class and detail are
+            // unchanged until a readable entry replaces it (R10).
+            t.unreadable = true;
             self.upsert(id);
-            self.publish_owner(id);
         }
+    }
+
+    fn count_unreadable(&mut self, what: &str, v: &Value, n: usize) {
+        self.decode_errors += n;
+        self.last_decode_error = Some(Instant::now());
+        log_unreadable(what, v);
+        self.refresh_status();
     }
 
     fn put_shell(&mut self, shell: ShellThread) {
@@ -756,6 +788,7 @@ impl Reconciler {
             }
         }
         t.shell = Some(shell);
+        t.unreadable = false;
         self.upsert(&id);
         self.publish_owner(&id);
     }
@@ -781,11 +814,11 @@ impl Reconciler {
             return;
         };
         let obs = match &t.shell {
-            Some(s) => {
+            Some(s) if !t.unreadable => {
                 let project = s.project_id.as_ref().and_then(|p| self.projects.get(p));
                 map::agent_obs(s, project, &t.hidden)
             }
-            None => unknown_obs(thread_id, t.last_obs.as_ref()),
+            _ => unknown_obs(thread_id, t.last_obs.as_ref()),
         };
         self.observe(thread_id, obs);
     }
@@ -873,7 +906,7 @@ impl Reconciler {
             return;
         };
         let detail_pt = detail.active_provider_thread.clone();
-        match (shell_pt, detail_pt) {
+        match (shell_pt.clone(), detail_pt) {
             (Some(s), Some(d)) if s == d => match detail.native_session_id().map(str::to_owned) {
                 Some(n) => {
                     // After step 1, an existing owner here is the same one.
@@ -891,10 +924,12 @@ impl Reconciler {
                 }
             },
             // Disagreement, or a null on either side: nothing to publish.
-            (_, d) => {
+            // The shell's side is recorded, so later shell entries compare
+            // like with like.
+            _ => {
                 if t.owner.is_none() {
                     t.discovery = Discovery::NotLoaded {
-                        provider_thread: d,
+                        provider_thread: shell_pt,
                         at: Instant::now(),
                     };
                 }
@@ -912,6 +947,14 @@ impl Reconciler {
         let mut skipped = 0;
         let mut finish_discovery = false;
         match item {
+            // A snapshot acd cannot read leaves nothing to keep the stream
+            // for: stall and retry with a fresh one after `relearn_after`.
+            Ok(ThreadItem::Snapshot { projection, .. }) if !projection.is_object() => {
+                return self.unreadable_snapshot(conn, thread_id, v);
+            }
+            Err(_) if v["kind"] == "snapshot" => {
+                return self.unreadable_snapshot(conn, thread_id, v);
+            }
             Ok(ThreadItem::Snapshot {
                 snapshot_sequence,
                 projection,
@@ -942,9 +985,7 @@ impl Reconciler {
             Err(_) => skipped = 1,
         }
         if skipped > 0 {
-            self.decode_errors += skipped;
-            log_unreadable("thread item", v);
-            self.decode_status();
+            self.count_unreadable("thread item", v, skipped);
         }
         self.publish_owner(thread_id);
         // Request reconciliation: Task 6.
@@ -975,9 +1016,9 @@ impl Reconciler {
             // No snapshot reached the owner rule: looked, found nothing.
             t.discovery = Discovery::NotLoaded {
                 provider_thread: t
-                    .detail
+                    .shell
                     .as_ref()
-                    .and_then(|d| d.active_provider_thread.clone()),
+                    .and_then(|s| s.active_provider_thread_id.clone()),
                 at: Instant::now(),
             };
         }
@@ -1003,10 +1044,16 @@ impl Reconciler {
         t.cursor = None;
     }
 
-    /// The first `synchronized` did not arrive in time. The owner stays
-    /// (a timeout is not identity evidence); discovery starts over after
-    /// the stall, which is how acd gets the thread's live updates again.
-    fn sync_timed_out(&mut self, conn: &Conn, thread_id: &str, now: Instant) {
+    fn unreadable_snapshot(&mut self, conn: &Conn, thread_id: &str, v: &Value) {
+        self.count_unreadable("thread snapshot", v, 1);
+        self.stall(conn, thread_id, Instant::now());
+    }
+
+    /// The first `synchronized` did not arrive in time, or the snapshot
+    /// could not be read. The owner stays (neither is identity evidence);
+    /// discovery starts over after the stall, which is how acd gets the
+    /// thread's live updates again.
+    fn stall(&mut self, conn: &Conn, thread_id: &str, now: Instant) {
         self.release(conn, thread_id);
         if let Some(t) = self.threads.get_mut(thread_id) {
             t.stalled_until = Some(now + self.timing.relearn_after);
