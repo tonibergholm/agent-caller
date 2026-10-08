@@ -22,7 +22,7 @@ pub fn socket_path(dir: &Path) -> PathBuf {
 pub async fn run(dir: &Path) -> Result<()> {
     crate::preflight(dir)?;
     let cfg = Config::load(dir)?;
-    let (key_files, _) = crate::tls::load(dir)?;
+    let (key_files, installed_pin) = crate::tls::load(dir)?;
     let server_config = core_tls::server_config(&key_files)?;
     let (tls_tx, tls_rx) = tokio::sync::watch::channel(server_config);
     let admission_limit = {
@@ -132,7 +132,7 @@ pub async fn run(dir: &Path) -> Result<()> {
             }
         });
     }
-    let tls_watch = tokio::spawn(crate::tls::watch(dir.to_path_buf(), tls_tx));
+    let tls_watch = tokio::spawn(crate::tls::watch(dir.to_path_buf(), installed_pin, tls_tx));
     // The same router (and so the same limits) on the Unix socket. Hello and
     // token auth still apply; the Origin check passes trivially because no
     // browser can reach a Unix socket, and there is no address to allowlist.

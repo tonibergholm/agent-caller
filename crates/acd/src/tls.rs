@@ -99,16 +99,19 @@ fn remove_old_temps(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn watch(dir: std::path::PathBuf, tx: watch::Sender<Arc<rustls::ServerConfig>>) {
-    let mut pin = load(&dir).map(|(_, pin)| pin).ok();
+pub async fn watch(
+    dir: std::path::PathBuf,
+    mut pin: String,
+    tx: watch::Sender<Arc<rustls::ServerConfig>>,
+) {
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         match load(&dir) {
-            Ok((files, next_pin)) if pin.as_deref() != Some(&next_pin) => {
+            Ok((files, next_pin)) if pin != next_pin => {
                 match server_config(&files) {
                     Ok(config) => {
                         tx.send_replace(config);
-                        pin = Some(next_pin);
+                        pin = next_pin;
                         tracing::info!("TLS key rotated; new connections use the new certificate");
                     }
                     Err(e) => tracing::error!(error = %e, "cannot configure reloaded TLS key"),
@@ -119,5 +122,26 @@ pub async fn watch(dir: std::path::PathBuf, tx: watch::Sender<Arc<rustls::Server
                 tracing::error!(error = %e, "cannot reload TLS bundle; keeping current certificate")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn watcher_applies_rotation_that_precedes_its_first_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        publish(dir.path(), &acd_core::tls::generate("generation A")).unwrap();
+        let (installed, installed_pin) = load(dir.path()).unwrap();
+        let (tx, mut rx) = watch::channel(server_config(&installed).unwrap());
+        publish(dir.path(), &acd_core::tls::generate("generation B")).unwrap();
+        let watcher = tokio::spawn(watch(dir.path().to_path_buf(), installed_pin.clone(), tx));
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        let (_, latest_pin) = load(dir.path()).unwrap();
+        assert_ne!(latest_pin, installed_pin);
+        assert!(rx.has_changed().unwrap(), "watcher should publish the rotated config");
+        let _current = rx.borrow_and_update().clone();
+        watcher.abort();
     }
 }

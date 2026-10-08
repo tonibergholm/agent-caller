@@ -73,6 +73,16 @@ fn tls_rotate_changes_the_pin_and_advises_token_rotation_on_compromise() {
 }
 
 #[test]
+fn tls_rotate_replaces_a_corrupt_existing_bundle() {
+    let dir = initialized();
+    std::fs::write(dir.path().join("tls.pem"), b"corrupt").unwrap();
+    let out = acd(dir.path()).args(["tls", "rotate"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stdout.starts_with(b"TLS key replaced."));
+    pin_of(dir.path());
+}
+
+#[test]
 fn concurrent_rotations_leave_one_coherent_bundle() {
     let dir = initialized();
     let kids: Vec<_> = (0..8)

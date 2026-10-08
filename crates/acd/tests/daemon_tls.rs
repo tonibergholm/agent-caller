@@ -178,10 +178,15 @@ async fn hello(
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Some(Ok(Message::Text(text))) = ws.next().await
-                && let Some(message) = acd_protocol::decode_server(&text).unwrap()
-            {
-                return message;
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    if let Some(message) = acd_protocol::decode_server(&text).unwrap() {
+                        return message;
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(error)) => panic!("websocket read failed while awaiting welcome: {error}"),
+                None => panic!("websocket closed while awaiting welcome"),
             }
         }
     })
@@ -215,11 +220,16 @@ async fn wrong_pin_fails_before_hello_and_rotation_keeps_open_sessions() {
     let old = pin_of(&dir);
     let wrong = acd_core::tls::check_pair(&acd_core::tls::generate("wrong")).unwrap();
     assert!(ws_with_pin(port, &wrong).await.is_err());
+    let log_after_wrong_pin = std::fs::read_to_string(&log).unwrap();
+    assert!(log_after_wrong_pin.contains("decided upon suite"), "TLS handshake log is the positive control: {log_after_wrong_pin}");
+    assert!(!log_after_wrong_pin.contains("welcome"), "wrong-pin handshake must not reach hello handling: {log_after_wrong_pin}");
     let mut open = ws_with_pin(port, &old).await.unwrap();
     assert!(matches!(
         hello(&mut open, token.trim()).await,
         acd_protocol::ServerMessage::Welcome { .. }
     ));
+    let log_after_valid_hello = std::fs::read_to_string(&log).unwrap();
+    assert!(log_after_valid_hello.contains("decided upon suite"), "valid-pin handshake is logged: {log_after_valid_hello}");
     let out = acd(&dir).args(["tls", "rotate"]).output().unwrap();
     assert!(
         out.status.success(),
@@ -253,8 +263,6 @@ async fn wrong_pin_fails_before_hello_and_rotation_keeps_open_sessions() {
         .unwrap()
     );
     drop(open);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(!std::fs::read_to_string(log).unwrap().contains("hello"));
 }
 
 #[tokio::test]

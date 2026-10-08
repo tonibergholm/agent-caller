@@ -124,7 +124,7 @@ fn real_main() -> Result<()> {
             if !dir.is_dir() {
                 bail!("{} not initialized; run `acd init`", dir.display());
             }
-            preflight(&dir)?;
+            preflight_prerequisites(&dir)?;
             tls::rotate(&dir)?;
             println!(
                 "TLS key replaced. Re-pair every app with `acd pair`. If you rotated because the key may be compromised, also run `acd token rotate client`."
@@ -144,6 +144,12 @@ fn real_main() -> Result<()> {
 
 /// Checks file modes before the daemon reads anything.
 pub(crate) fn preflight(dir: &Path) -> Result<()> {
+    preflight_prerequisites(dir)?;
+    tls::load(dir).context("TLS bundle is invalid or unsafe; run `acd init` to repair it")?;
+    Ok(())
+}
+
+fn preflight_prerequisites(dir: &Path) -> Result<()> {
     secrets::check_mode(dir, 0o700)?;
     for f in ["client.token", "hook.token", "t3.token", "config.toml"] {
         let p = dir.join(f);
@@ -151,7 +157,6 @@ pub(crate) fn preflight(dir: &Path) -> Result<()> {
             secrets::check_mode(&p, 0o600)?;
         }
     }
-    tls::load(dir).context("TLS bundle is invalid or unsafe; run `acd init` to repair it")?;
     Ok(())
 }
 
