@@ -8,7 +8,7 @@ mod status;
 
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -43,7 +43,10 @@ enum TokenCmd {
 }
 
 #[derive(clap::ValueEnum, Clone, Copy)]
-enum TokenKind { Client, Hook }
+enum TokenKind {
+    Client,
+    Hook,
+}
 
 /// Targets that log WebSocket frames, including `hello.token`, at debug and
 /// trace level.
@@ -54,14 +57,17 @@ const FRAME_LOGGING_TARGETS: [&str; 3] = ["tungstenite", "tokio_tungstenite", "a
 fn below_frame_logging(meta: &tracing::Metadata<'_>) -> bool {
     let target = meta.target();
     let frames = FRAME_LOGGING_TARGETS.iter().any(|p| {
-        target.strip_prefix(p).is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+        target
+            .strip_prefix(p)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
     });
     !frames || *meta.level() <= tracing::Level::INFO
 }
 
 fn main() {
     use tracing_subscriber::prelude::*;
-    let env = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let env =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .with(env)
@@ -78,12 +84,17 @@ fn real_main() -> Result<()> {
     let dir = paths::config_dir()?;
     match cli.cmd {
         Cmd::Init { force } => init(&dir, force),
-        Cmd::Token { cmd: TokenCmd::Rotate { which } } => {
+        Cmd::Token {
+            cmd: TokenCmd::Rotate { which },
+        } => {
             if !dir.is_dir() {
                 bail!("{} not initialized; run `acd init`", dir.display());
             }
             preflight(&dir)?;
-            let file = match which { TokenKind::Client => "client.token", TokenKind::Hook => "hook.token" };
+            let file = match which {
+                TokenKind::Client => "client.token",
+                TokenKind::Hook => "hook.token",
+            };
             let token = secrets::new_token();
             secrets::write_secret(&dir.join(file), &token)?;
             println!("{token}");
@@ -97,9 +108,11 @@ fn real_main() -> Result<()> {
 /// Checks file modes before the daemon reads anything.
 pub(crate) fn preflight(dir: &Path) -> Result<()> {
     secrets::check_mode(dir, 0o700)?;
-    for f in ["client.token", "hook.token", "config.toml"] {
+    for f in ["client.token", "hook.token", "t3.token", "config.toml"] {
         let p = dir.join(f);
-        if p.exists() { secrets::check_mode(&p, 0o600)?; }
+        if p.exists() {
+            secrets::check_mode(&p, 0o600)?;
+        }
     }
     Ok(())
 }
@@ -107,7 +120,10 @@ pub(crate) fn preflight(dir: &Path) -> Result<()> {
 fn init(dir: &Path, force: bool) -> Result<()> {
     const FILES: [&str; 4] = ["client.token", "hook.token", "machine-id", "config.toml"];
     if FILES.iter().all(|f| dir.join(f).exists()) && !force {
-        bail!("{} is already initialized; use --force to regenerate tokens", dir.display());
+        bail!(
+            "{} is already initialized; use --force to regenerate tokens",
+            dir.display()
+        );
     }
     secrets::ensure_private_dir(dir)?;
     let mut created = Vec::new();
@@ -118,7 +134,9 @@ fn init(dir: &Path, force: bool) -> Result<()> {
             let token = secrets::new_token();
             secrets::write_secret(&path, &token)?;
             created.push(file);
-            if is_client { client = Some(token); }
+            if is_client {
+                client = Some(token);
+            }
         }
     }
     let id_path = dir.join("machine-id");
@@ -140,4 +158,21 @@ fn init(dir: &Path, force: bool) -> Result<()> {
         println!("client token (add it to the Mac app): {client}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn preflight_rejects_a_t3_token_looser_than_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let token = dir.path().join("t3.token");
+        std::fs::write(&token, "token").unwrap();
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let err = preflight(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("t3.token"), "{err}");
+    }
 }

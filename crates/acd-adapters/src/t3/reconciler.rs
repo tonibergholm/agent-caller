@@ -80,6 +80,7 @@ pub struct Mailbox {
 #[derive(Default)]
 struct MailboxInner {
     answered: HashSet<(String, String)>,
+    ended: Vec<(String, ResolvedBy)>,
     degraded: Option<&'static str>,
 }
 
@@ -98,10 +99,23 @@ impl Mailbox {
         self.notify.notify_one();
     }
 
+    pub fn request_ended(&self, request_id: String, by: ResolvedBy) {
+        self.inner
+            .lock()
+            .expect("mailbox")
+            .ended
+            .push((request_id, by));
+        self.notify.notify_one();
+    }
+
     #[doc(hidden)]
     pub fn take(&self) -> (Vec<(String, String)>, Option<&'static str>) {
         let mut inner = self.inner.lock().expect("mailbox");
         (inner.answered.drain().collect(), inner.degraded.take())
+    }
+
+    fn take_ended(&self) -> Vec<(String, ResolvedBy)> {
+        std::mem::take(&mut self.inner.lock().expect("mailbox").ended)
     }
 
     /// A notification sent before this is awaited is kept as a permit.
@@ -538,6 +552,9 @@ impl Reconciler {
 
     fn drain_mailbox(&mut self) {
         let (answered, degraded) = self.shared.mailbox.take();
+        for (request_id, by) in self.shared.mailbox.take_ended() {
+            self.pending_ends.enqueue(request_id, by);
+        }
         for (thread_id, request_id) in answered {
             let Some(t) = self.threads.get_mut(&thread_id) else {
                 continue;
