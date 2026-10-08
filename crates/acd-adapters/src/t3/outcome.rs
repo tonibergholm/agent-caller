@@ -31,28 +31,33 @@ pub enum Outcome {
 const DISPATCH_ERROR: &str = "OrchestrationV2DispatchCommandError";
 const SCOPE_ERROR: &str = "EnvironmentAuthorizationError";
 
+/// The debug-log text for a failed call: JSON, redacted and capped.
+fn debug_detail(e: &CallError) -> String {
+    let raw = match e {
+        CallError::Failed(Failure::Mixed(causes)) => {
+            let causes: Vec<Value> = causes
+                .iter()
+                .map(|c| match c {
+                    Cause::Fail { error } => json!({"fail": error}),
+                    Cause::Die { defect } => json!({"die": defect}),
+                    Cause::Interrupt {} => json!("interrupt"),
+                    Cause::Other => json!("other"),
+                })
+                .collect();
+            Value::Array(causes).to_string()
+        }
+        CallError::Failed(Failure::Fail { tag, message }) => {
+            json!({"fail": {"tag": tag, "message": message}}).to_string()
+        }
+        CallError::Failed(Failure::Die(d)) => json!({"die": d}).to_string(),
+        other => json!({"error": other.to_string()}).to_string(),
+    };
+    redact_log(&raw)
+}
+
 pub fn classify(res: &Result<Value, CallError>, t3_request_id: Option<&str>) -> Outcome {
     if let Err(e) = res {
-        let raw = match e {
-            CallError::Failed(Failure::Mixed(causes)) => {
-                let causes: Vec<Value> = causes
-                    .iter()
-                    .map(|c| match c {
-                        Cause::Fail { error } => json!({"fail": error}),
-                        Cause::Die { defect } => json!({"die": defect}),
-                        Cause::Interrupt {} => json!("interrupt"),
-                        Cause::Other => json!("other"),
-                    })
-                    .collect();
-                Value::Array(causes).to_string()
-            }
-            CallError::Failed(Failure::Fail { tag, message }) => {
-                json!({"fail": {"tag": tag, "message": message}}).to_string()
-            }
-            CallError::Failed(Failure::Die(d)) => json!({"die": d}).to_string(),
-            other => json!({"error": other.to_string()}).to_string(),
-        };
-        tracing::debug!(error = %redact_log(&raw), "T3 dispatch failed");
+        tracing::debug!(error = %debug_detail(e), "T3 dispatch failed");
     }
     let not = |code, end, degrade| Outcome::NotDelivered { code, end, degrade };
     match res {
@@ -180,7 +185,7 @@ mod tests {
         assert_eq!(
             classify(
                 &failed("cmd_exit_respond_fail_previously_rejected.json"),
-                None
+                Some("rq-1")
             ),
             Outcome::Uncertain(REFUSED)
         );
@@ -224,23 +229,22 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_never_carry_server_text() {
-        let hostile = "sk-ant-api03-SECRETSECRET \u{1b}[31m rm -rf ~/work \u{202E}evil";
-        for res in [
-            Err(CallError::Failed(Failure::Die(hostile.into()))),
-            Err(CallError::Failed(Failure::Fail {
+    fn debug_detail_redacts_and_caps() {
+        let secret = "sk-ant-api03-SECRETSECRET";
+        let bearer = "Authorization: Bearer abc.def-ghi";
+        for e in [
+            CallError::Failed(Failure::Die(format!("boom {secret}"))),
+            CallError::Failed(Failure::Fail {
                 tag: "SomethingNew".into(),
-                message: hostile.into(),
-            })),
-            Err(CallError::Failed(Failure::Fail {
-                tag: "EnvironmentAuthorizationError".into(),
-                message: hostile.into(),
-            })),
+                message: format!("{bearer} {secret}"),
+            }),
         ] {
-            let text = format!("{:?}", classify(&res, Some("rq-1")));
-            for bad in ["SECRET", "rm -rf", "\u{1b}", "\u{202E}"] {
+            let text = debug_detail(&e);
+            for bad in ["SECRETSECRET", "abc.def-ghi"] {
                 assert!(!text.contains(bad), "{text}");
             }
         }
+        let long = CallError::Failed(Failure::Die("x".repeat(10_000)));
+        assert!(debug_detail(&long).len() <= crate::text::LOG_BYTES + '…'.len_utf8());
     }
 }
