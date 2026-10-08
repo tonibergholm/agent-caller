@@ -20,7 +20,9 @@ use super::conn::{self, Conn, ConnTiming, ConnectError, StreamMsg};
 use super::detail::ThreadDetail;
 use super::map;
 use super::sessions::SessionMap;
-use super::wire::{self, Failure, Project, ShellItem, ShellSnapshot, ShellThread, ThreadItem};
+use super::wire::{
+    self, Cause, Failure, Project, ShellItem, ShellSnapshot, ShellThread, ThreadItem,
+};
 use crate::text::redact_log;
 
 /// Most consecutive discovery picks from the overflow group while the recent
@@ -373,6 +375,24 @@ struct Reconciler {
     peak_discovery: usize,
 }
 
+/// Plain JSON for `redact_log`, never `{:?}` (see `wire::Failure`).
+fn failure_log(f: &Failure) -> String {
+    let cause = |c: &Cause| match c {
+        Cause::Fail { error } => json!({"fail": error}),
+        Cause::Die { defect } => json!({"die": defect}),
+        Cause::Interrupt {} => json!("interrupt"),
+        Cause::Other => json!("other"),
+    };
+    let v = match f {
+        Failure::Fail { tag, message } => json!({"fail": {"tag": tag, "message": message}}),
+        Failure::Die(d) => json!({"die": d}),
+        Failure::Interrupted => json!("interrupted"),
+        Failure::Mixed(causes) => Value::Array(causes.iter().map(cause).collect()),
+        Failure::Unknown => json!("unknown"),
+    };
+    redact_log(&v.to_string())
+}
+
 fn log_unreadable(what: &str, v: &Value) {
     tracing::debug!(item = %redact_log(&v.to_string()), "T3 {what} cannot be read");
 }
@@ -546,7 +566,7 @@ impl Reconciler {
 
     fn on_end(&mut self, conn: &Conn, stream: &str, failure: Option<Failure>) {
         if let Some(f) = &failure {
-            tracing::debug!(failure = %redact_log(&format!("{f:?}")), "T3 stream ended");
+            tracing::debug!(failure = %failure_log(f), "T3 stream ended");
         }
         if self.shell_stream.as_deref() == Some(stream) {
             // The shell must never end.
@@ -718,8 +738,14 @@ impl Reconciler {
             .entry(id.clone())
             .or_insert_with(ThreadState::new);
         if t.shell.as_ref() != Some(&shell) {
+            // A changed entry retries a null idle thread at once. A working
+            // thread's entry changes all the time, so an overflow thread
+            // waits for `relearn_after` unless its provider thread changes.
+            let working = map::state(shell.status.as_deref(), false).0 == AgentState::Working;
             let reset = match &t.discovery {
-                Discovery::NotLoaded { .. } => true,
+                Discovery::NotLoaded {
+                    provider_thread, ..
+                } => !working || shell.active_provider_thread_id != *provider_thread,
                 Discovery::Known { provider_thread } => {
                     shell.active_provider_thread_id.as_deref() != Some(provider_thread.as_str())
                 }

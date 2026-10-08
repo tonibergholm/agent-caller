@@ -806,3 +806,35 @@ async fn retained_detail_is_bounded() {
     );
     assert!(st.discovery_streams <= 1, "{st:?}");
 }
+
+#[tokio::test]
+async fn a_churning_null_overflow_thread_is_retried_once_per_relearn_after() {
+    // Step 6: a running thread's shell entry changes all the time; that must
+    // not bypass `relearn_after` for a null overflow thread.
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread("w", "running", None));
+    fake.set_projection("w", approval_projection("w", "rq-unused", None));
+    let r = rig_with(
+        fake,
+        None,
+        T3Timing {
+            max_live: 0,
+            ..fast_timing()
+        },
+    )
+    .await;
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        r.fake
+            .put_thread(recent(shell_thread("w", "running", None)));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let w_subs = r
+        .fake
+        .subscriptions()
+        .iter()
+        .filter(|(t, p)| t == "orchestration.subscribeThread" && p["threadId"] == "w")
+        .count();
+    let bound = 1 + started.elapsed().as_millis() as usize / 200;
+    assert!(w_subs <= bound, "{w_subs} subscriptions, at most {bound}");
+}
