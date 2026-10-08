@@ -29,7 +29,10 @@ pub async fn run(dir: &Path) -> Result<()> {
         acd_version: env!("CARGO_PKG_VERSION").into(),
         sources: Sources { hooks: SourceStatus::unconfigured(), herdr: SourceStatus::unconfigured(), t3: SourceStatus::unconfigured() },
     };
-    let core = Core::new(machine, vec![]);
+    let extra = cfg.herdr.extra_sockets.iter().map(|s| crate::config::expand_home(s)).collect();
+    let herdr = acd_adapters::herdr::HerdrAdapter::new(acd_adapters::herdr::HerdrConfig::from_env(cfg.herdr.enabled, extra));
+    let core = Core::new(machine, vec![herdr.clone()]);
+    herdr.start(core.clone());
     let auth = Arc::new(Auth::new(token.clone()));
     let app = router(core, auth.clone(), ServerOptions { allowed_origins: cfg.allowed_origins.clone(), ..Default::default() });
 

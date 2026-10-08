@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use crate::adapter::{Adapter, DeliverError};
 use crate::idem::{Begin, IdemCache};
 use crate::log::EventLog;
-use crate::registry::{Answer, Change, Observation, Registry};
+use crate::registry::{Answer, Change, CorrelationKey, Observation, Registry};
 
 pub const RING_CAPACITY: usize = 1000;
 pub const IDEM_TTL: Duration = Duration::from_secs(900);
@@ -47,6 +47,12 @@ impl Core {
     }
 
     pub fn epoch(&self) -> String { self.inner.lock().unwrap().log.epoch().to_string() }
+
+    pub fn agent(&self, agent_id: &str) -> Option<Agent> { self.inner.lock().unwrap().registry.agent(agent_id).cloned() }
+    pub fn request(&self, request_id: &str) -> Option<Request> { self.inner.lock().unwrap().registry.request(request_id).cloned() }
+    pub fn request_id_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String> {
+        self.inner.lock().unwrap().registry.request_id_for(agent_id, key)
+    }
 
     pub fn observe(&self, obs: Observation) {
         let mut st = self.inner.lock().unwrap();
@@ -141,10 +147,21 @@ impl Core {
                     (None, Some(t)) => Answer::Text(t),
                     _ => return (CommandResult::err(id, ErrorCode::BadRequest, "exactly one of option_id or text is required"), Delivery::Attempted),
                 };
+                // Route first, outside the lock: adapter callbacks may panic, and a
+                // panic here (Phase::Start) must leave nothing claimed.
+                let Some(path) = self.inner.lock().unwrap().registry.request(&request_id).map(|r| r.answer_path) else {
+                    return (CommandResult::err(id, ErrorCode::RequestGone, ErrorCode::RequestGone.describe()), Delivery::Attempted);
+                };
+                let adapter = self.adapters.iter().find(|a| a.answer_paths().contains(&path)).cloned();
                 let request = {
                     let mut st = self.inner.lock().unwrap();
                     match st.registry.claim(&request_id, answer.clone()) {
                         Ok((req, changes)) => {
+                            if adapter.is_none() || req.answer_path != path {
+                                // Undo without publishing: clients never see answering -> open churn.
+                                let _ = st.registry.release(&request_id);
+                                return (CommandResult::err(id, ErrorCode::SourceUnavailable, ErrorCode::SourceUnavailable.describe()), Delivery::Attempted);
+                            }
                             *phase.lock().unwrap() = Phase::Claimed(request_id.clone());
                             self.publish(&mut st, changes);
                             req
@@ -152,10 +169,7 @@ impl Core {
                         Err(code) => return (CommandResult::err(id, code, code.describe()), Delivery::Attempted),
                     }
                 };
-                let Some(adapter) = self.adapters.iter().find(|a| a.answer_paths().contains(&request.answer_path)).cloned() else {
-                    self.release(&request_id);
-                    return (CommandResult::err(id, ErrorCode::SourceUnavailable, ErrorCode::SourceUnavailable.describe()), Delivery::Attempted);
-                };
+                let adapter = adapter.expect("checked under the lock");
                 *phase.lock().unwrap() = Phase::Delivering(Some(request_id.clone()));
                 match adapter.deliver(&request, &answer).await {
                     Ok(()) => CommandResult::delivered(id),
@@ -207,9 +221,7 @@ impl Core {
                     }
                 CommandResult::ok(id)
             }
-            ClientMessage::Hello { .. } | ClientMessage::Ping { .. } => {
-                CommandResult::err(id, ErrorCode::BadRequest, "not a command")
-            }
+            ClientMessage::Hello { .. } | ClientMessage::Ping { .. } => unreachable!("rejected in Core::handle"),
         };
         (result, Delivery::Attempted)
     }

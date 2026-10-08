@@ -6,6 +6,7 @@ version = 4
 name = "acd"
 version = "0.1.0"
 dependencies = [
+ "acd-adapters",
  "acd-core",
  "acd-protocol",
  "anyhow",
@@ -23,6 +24,26 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "acd-adapters"
+version = "0.1.0"
+dependencies = [
+ "acd-adapters",
+ "acd-core",
+ "acd-protocol",
+ "async-trait",
+ "axum",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
 ]
 
 [[package]]

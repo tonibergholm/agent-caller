@@ -266,3 +266,23 @@ async fn rejected_oversized_command_does_not_reserve_its_id() {
     let small = ClientMessage::AgentSend { id: "x".into(), agent_id: "a1".into(), text: "run tests".into() };
     assert_eq!(core.handle("cl", small).await, CommandResult::delivered("x"));
 }
+
+#[tokio::test]
+async fn missing_adapter_publishes_no_churn() {
+    let core = Core::new(test_machine(), vec![]);
+    let rid = open_request(&core);
+    let (_, mut rx) = core.attach(None);
+    assert_eq!(core.handle("cl", answer("c1", &rid)).await.error_code(), Some(ErrorCode::SourceUnavailable));
+    assert!(rx.try_recv().is_err(), "no answering/open churn may be published");
+    assert_eq!(core.request(&rid).unwrap().status, RequestStatus::Open);
+}
+
+#[tokio::test]
+async fn accessors_return_current_state() {
+    let core = Core::new(test_machine(), vec![]);
+    let rid = open_request(&core);
+    assert_eq!(core.agent("a1").unwrap().pending.unwrap().id, rid);
+    assert_eq!(core.request_id_for("a1", &CorrelationKey("k1".into())), Some(rid.clone()));
+    core.observe(Observation::RequestEndedById { request_id: rid.clone(), by: ResolvedBy::Terminal });
+    assert!(core.request(&rid).is_none());
+}

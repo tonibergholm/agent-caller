@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+acd-adapters.workspace = true
 acd-core.workspace = true
 acd-protocol.workspace = true
 anyhow.workspace = true
