@@ -235,6 +235,26 @@ fn schema_enforces_answer_one_of() {
 }
 
 #[test]
+fn schema_accepts_and_decodes_text_answers() {
+    let v = validator(schema::client_schema());
+    for answer in [
+        serde_json::json!({"type":"request.answer","id":"1","request_id":"r","text":"x"}),
+        serde_json::json!({"type":"request.answer","id":"1","request_id":"r","option_id":null,"text":"x"}),
+    ] {
+        assert!(v.is_valid(&answer));
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(answer).unwrap(),
+            ClientMessage::RequestAnswer {
+                id: "1".into(),
+                request_id: "r".into(),
+                option_id: None,
+                text: Some("x".into()),
+            }
+        );
+    }
+}
+
+#[test]
 fn schema_enforces_result_shape() {
     let v = validator(schema::server_schema());
     let good_ok = serde_json::json!({"type":"result","id":"1","ok":true,"outcome":"delivered"});
