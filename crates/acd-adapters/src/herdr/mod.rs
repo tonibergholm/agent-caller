@@ -37,11 +37,18 @@ pub struct HerdrConfig {
 impl HerdrConfig {
     /// Reads `$HOME` and `$HERDR_SOCKET_PATH`; default timing, 30 s scan.
     pub fn from_env(enabled: bool, extra_sockets: Vec<PathBuf>) -> HerdrConfig {
+        let home = std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "HOME is not set; the default herdr socket and sessions are not discovered"
+                );
+                PathBuf::new()
+            });
         HerdrConfig {
             enabled,
-            home: std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default(),
+            home,
             env_socket: std::env::var_os("HERDR_SOCKET_PATH")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
