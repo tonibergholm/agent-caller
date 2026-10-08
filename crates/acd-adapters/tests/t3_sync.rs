@@ -260,6 +260,53 @@ async fn end_seen_during_a_claim_is_applied_after_release() {
 }
 
 #[tokio::test]
+async fn end_between_claim_check_and_end_observation_is_retried() {
+    let fake_adapter = FakeAdapter::gated();
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread("a", "running", Some(("rq-1", "command"))));
+    fake.set_projection("a", approval_projection("a", "rq-1", None));
+    let r = rig_with(fake, Some(fake_adapter.clone()), fast_timing()).await;
+    let req = until("pending", || pending(&r, "a")).await;
+    let (_, mut rx) = r.core.attach(None);
+    let core = r.core.clone();
+    let id = req.id.clone();
+    let claim = tokio::spawn(async move {
+        core.handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "x1".into(),
+                request_id: id,
+                option_id: Some("accept".into()),
+                text: None,
+            },
+        )
+        .await
+    });
+    until("answering", || {
+        (r.core.request(&req.id)?.status == RequestStatus::Answering).then_some(())
+    })
+    .await;
+    r.fake.push_thread_event(
+        "a",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "resolved", "decision": "decline"}),
+    );
+    until("detail end", || {
+        r.shared.targets.find(&r.core, &req).is_none().then_some(())
+    })
+    .await;
+    assert_eq!(
+        r.core.request(&req.id).unwrap().status,
+        RequestStatus::Answering
+    );
+    fake_adapter.fail_next(DeliverError::NotDelivered(ErrorCode::SourceUnavailable));
+    fake_adapter.open_gate();
+    claim.await.unwrap();
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Terminal);
+    until("ended", || r.core.request(&req.id).is_none().then_some(())).await;
+}
+
+#[tokio::test]
 async fn deferred_end_applies_under_a_steady_event_stream() {
     let fake_adapter = FakeAdapter::gated();
     let fake = FakeT3::start().await;
@@ -269,6 +316,7 @@ async fn deferred_end_applies_under_a_steady_event_stream() {
     fake.set_projection("busy", approval_projection("busy", "rq-unused", None));
     let r = rig_with(fake, Some(fake_adapter.clone()), fast_timing()).await;
     let req = until("pending", || pending(&r, "a")).await;
+    let (_, mut rx) = r.core.attach(None);
     let f = r.fake.clone();
     let noise = tokio::spawn(async move {
         loop {
@@ -307,6 +355,7 @@ async fn deferred_end_applies_under_a_steady_event_stream() {
     fake_adapter.fail_next(DeliverError::NotDelivered(ErrorCode::SourceUnavailable));
     fake_adapter.open_gate();
     claim.await.unwrap();
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Terminal);
     let released = std::time::Instant::now();
     until("ended", || r.core.request(&req.id).is_none().then_some(())).await;
     assert!(
@@ -314,6 +363,51 @@ async fn deferred_end_applies_under_a_steady_event_stream() {
         "spec §14.4: resolved within 2 s"
     );
     noise.abort();
+}
+
+#[tokio::test]
+async fn cancelled_request_during_claim_resolves_as_lost() {
+    let fake_adapter = FakeAdapter::gated();
+    let r = rig_pending(
+        |t, q| approval_projection(t, q, None),
+        Some(fake_adapter.clone()),
+        "command",
+    )
+    .await;
+    let req = until("pending", || pending(&r, "a")).await;
+    let (_, mut rx) = r.core.attach(None);
+    let core = r.core.clone();
+    let id = req.id.clone();
+    let claim = tokio::spawn(async move {
+        core.handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "x1".into(),
+                request_id: id,
+                option_id: Some("accept".into()),
+                text: None,
+            },
+        )
+        .await
+    });
+    until("answering", || {
+        (r.core.request(&req.id)?.status == RequestStatus::Answering).then_some(())
+    })
+    .await;
+    r.fake.push_thread_event(
+        "a",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "cancelled"}),
+    );
+    until("detail cancellation", || {
+        r.shared.targets.find(&r.core, &req).is_none().then_some(())
+    })
+    .await;
+    fake_adapter.fail_next(DeliverError::NotDelivered(ErrorCode::SourceUnavailable));
+    fake_adapter.open_gate();
+    claim.await.unwrap();
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Lost);
+    until("ended", || r.core.request(&req.id).is_none().then_some(())).await;
 }
 
 #[tokio::test]

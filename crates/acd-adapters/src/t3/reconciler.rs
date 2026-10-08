@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use acd_core::{AgentObs, Core, CorrelationKey, Observation};
-use acd_protocol::{
-    AgentKind, AgentState, RequestStatus, ResolvedBy, Source, SourceState, SourceStatus,
-};
+use acd_protocol::{AgentKind, AgentState, ResolvedBy, Source, SourceState, SourceStatus};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
@@ -560,18 +558,16 @@ impl Reconciler {
 
     fn on_tick(&mut self, conn: &Conn) {
         let now = Instant::now();
-        self.pending_ends
-            .retain(|(rid, by)| match self.core.request(rid) {
-                None => false,
-                Some(r) if r.status == RequestStatus::Open => {
-                    self.core.observe(Observation::RequestEndedIfOpen {
-                        request_id: rid.clone(),
-                        by: *by,
-                    });
-                    false
-                }
-                Some(_) => true,
+        self.pending_ends.retain(|(rid, by)| {
+            if self.core.request(rid).is_none() {
+                return false;
+            }
+            self.core.observe(Observation::RequestEndedIfOpen {
+                request_id: rid.clone(),
+                by: *by,
             });
+            self.core.request(rid).is_some()
+        });
         if self.shell_deadline.is_some_and(|d| now >= d) {
             conn.close("T3 shell did not synchronize");
             return;
@@ -1015,20 +1011,6 @@ impl Reconciler {
         }
         self.publish_owner(thread_id);
         self.reconcile_requests(thread_id);
-        // Keep only the detail needed by the shell and surfaced request.
-        if let Some(t) = self.threads.get_mut(thread_id) {
-            let keep: Vec<String> = t
-                .shell
-                .as_ref()
-                .and_then(|s| s.pending_runtime_request.as_ref())
-                .map(|p| p.id.clone())
-                .into_iter()
-                .chain(t.open.clone())
-                .collect();
-            if let Some(d) = t.detail.as_mut() {
-                d.prune(&keep.iter().map(String::as_str).collect::<Vec<_>>());
-            }
-        }
         if finish_discovery {
             self.finish_discovery(conn, thread_id);
         }
@@ -1071,17 +1053,13 @@ impl Reconciler {
             }
             self.shared.targets.remove(&open);
             if let Some(rid) = self.core.request_id_for(&agent_id, &CorrelationKey(open)) {
+                // Queue independently of the current status: a claim can win
+                // between the detail observation and RequestEndedIfOpen.
+                self.pending_ends.push((rid.clone(), by));
                 self.core.observe(Observation::RequestEndedIfOpen {
                     request_id: rid.clone(),
                     by,
                 });
-                if self
-                    .core
-                    .request(&rid)
-                    .is_some_and(|r| r.status == RequestStatus::Answering)
-                {
-                    self.pending_ends.push((rid, by));
-                }
             }
         }
 
