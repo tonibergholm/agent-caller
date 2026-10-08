@@ -26,6 +26,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "acd-adapters"
+version = "0.1.0"
+dependencies = [
+ "acd-adapters",
+ "acd-core",
+ "acd-protocol",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "acd-core"
 version = "0.1.0"
 dependencies = [
