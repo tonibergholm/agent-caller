@@ -662,9 +662,14 @@ fallback.
 
 - `agent.send` uses `agent.prompt`. herdr refuses a blocked agent with
   `agent_blocked`, which acd reports as `agent_busy`.
-- Text containing control characters (except `\n` and `\t`), Unicode
-  format characters (bidi overrides, U+2028/2029) or more than 16 KiB is
-  rejected with `bad_request`.
+- Text is rejected with `bad_request` when it:
+  - contains control characters other than `\n` and `\t`;
+  - contains bidi controls (U+061C, U+200E, U+200F, U+202A–U+202E,
+    U+2066–U+2069) or U+2028/U+2029;
+  - is longer than 16 KiB.
+
+  Other format characters, such as ZWJ, ZWNJ and variation selectors,
+  are allowed because ordinary emoji use them.
 
 **Seen state** (P0 item 4). herdr has no mark-seen method.
 
@@ -1245,4 +1250,5 @@ old attribution rule. Revision 4.3 aligns it with §5.1.
 (`docs/research/2026-10-08-herdr-gate6.md`, fixtures in
 `tests/fixtures/herdr/api/`). §6.4 now states the issue-order rule, the
 frame names, the `target` parameter, which panes are shown, and the
-`agent_blocked` refusal.
+`agent_blocked` refusal. Sol reviewed the P2 plan (9 blocking findings, all
+accepted). §6.4 now lists the exact set of rejected follow-up characters.

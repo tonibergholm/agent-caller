@@ -87,10 +87,12 @@ These apply to every task.
   - `deliver`, `send` and `mark_seen` finish within 10 s (adapter contract).
 - **Delivery classification** (acceptance §14.5, "exactly once").
   - `NotDelivered`: the connect failed, the request line was not fully
-    written, or herdr answered with an `error` object. In these cases
-    nothing reached the agent.
-  - `Uncertain`: the write succeeded but no reply came (timeout, EOF or
-    garbage).
+    written, or herdr refused with a known pre-action error code
+    (`client::KNOWN_REFUSALS`). In these cases nothing reached the agent.
+  - `Uncertain`: the write succeeded, and then one of these happened:
+    - no reply came (timeout or EOF);
+    - the reply was malformed or had the wrong id or type;
+    - herdr returned an unknown error code.
 - **Ids.**
   - Agent id: `herdr:<12 hex of sha256(socket path)>:<pane_id>`.
   - Pane ids contain colons (`w1:p2`), so an id is **never parsed back**.
@@ -151,8 +153,10 @@ happy path covers. Each has a pinned test in the task named.
 4. **The screen changes between the guard read and the key.** A changed
    fingerprint gives `screen_mismatch` and sends no key. A key that lands
    after the dialog closed is caught by the prompt-line check and reported
-   `uncertain`. Tests: Task 9 (`mismatch_sends_nothing` and
-   `stray_digit_in_prompt_is_uncertain`).
+   `uncertain`. A request superseded during the guard read sends no key.
+   Tests: Task 9 (`mismatch_sends_nothing`,
+   `stray_digit_in_prompt_is_uncertain` and
+   `superseded_during_the_guard_read_sends_nothing`).
 5. **Malformed or unexpected herdr output:**
    - an unknown event name or a non-JSON line on the subscription;
    - an `agent.list` entry with unknown fields or an unknown status;
@@ -227,14 +231,36 @@ P2 owns these `acd-core` edits. P4 runs in parallel and must not touch
 `engine.rs` or `registry.rs` until this task has merged.
 
 **Files:**
-- Modify: `crates/acd-core/src/engine.rs` (dead arms, adapter check, accessors)
-- Modify: `crates/acd-core/src/registry.rs` (no behaviour change expected; fix only if a new test fails)
-- Test: `crates/acd-core/tests/registry.rs`, `crates/acd-core/tests/claims.rs`
+- Modify: `crates/acd-core/src/engine.rs` (routing outside the lock, accessors, dead arm)
+- Modify: `crates/acd-core/src/registry.rs` (`RequestEndedById`, `request_id_for`)
+- Test: `crates/acd-core/tests/registry.rs`, `crates/acd-core/tests/core.rs`
 
 **Interfaces:**
-- Produces:
-  - `Core::agent(&self, agent_id: &str) -> Option<acd_protocol::Agent>`: a clone of the registry entry, taken under the core lock. The herdr fallback (Task 6) uses it to ask "does this agent already have a pending request?".
-  - `Core::request_answer` routing is unchanged, but a claim on a request whose `answer_path` has no adapter now fails with `source_unavailable` **before** the claim, so no `answering` → `open` churn is published.
+- Produces (Tasks 6 and 9 and P3 use these exact names):
+  - `Observation::RequestEndedById { request_id: String, by: ResolvedBy }`
+    - Resolves exactly that request if it is still unresolved. Otherwise it
+      is a no-op.
+    - When `by` is `Inbox`, `Terminal` or `Agent`, it first marks
+      `confirmed_gone` on the key, or alias, whose `open_request` is that
+      request id.
+    - It never touches a later occurrence of the same reusable key. This is
+      how adapters end one specific occurrence.
+  - `Registry::request_id_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String>`:
+    the public form of `primary_request_for`.
+  - `Core::agent(&self, agent_id: &str) -> Option<Agent>`
+  - `Core::request(&self, request_id: &str) -> Option<Request>`: `None`
+    once resolved, because resolved requests leave the registry.
+  - `Core::request_id_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String>`
+  - **`request.answer` routing.**
+    - The adapter for the request's `answer_path` is found **before** the
+      claim and **outside** the core lock. A panicking `answer_paths()`
+      therefore happens in `Phase::Start`, before anything is claimed.
+    - The claim then checks under the lock that the request's
+      `answer_path` still equals the routed path. If it doesn't, the claim
+      is undone without publishing and the command gets
+      `source_unavailable`, uncached.
+    - With no adapter for the path, nothing is claimed and nothing is
+      published.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -266,113 +292,158 @@ fn removed_then_readded_agent_starts_clean() {
     let mut r = reg_with_agent();
     let rid = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0].id.clone();
     r.apply(Observation::AgentGone { agent_id: "a1".into() });
-    assert!(r.request(&rid).is_none_or(|q| q.status == RequestStatus::Resolved));
+    assert!(r.request(&rid).is_none());
     r.apply(Observation::AgentUpsert(agent("a1")));
-    let a = r.agent("a1").unwrap();
-    assert!(a.pending.is_none(), "a re-added agent has no pending request");
-    // The old key is forgotten, so the same key opens a fresh request.
+    assert!(r.agent("a1").unwrap().pending.is_none());
     let again = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))));
     assert_eq!(again.len(), 1);
     assert_ne!(again[0].id, rid);
 }
-```
 
-Add to `crates/acd-core/tests/claims.rs` (reuse that file's existing helpers for building a `Core` with a `FakeAdapter`, a WS-free `handle` call and an event receiver; read the top of the file first):
+#[test]
+fn end_by_id_touches_only_that_occurrence() {
+    let mut r = reg_with_agent();
+    let k = CorrelationKey("k".into());
+    let first = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0].id.clone();
+    assert_eq!(r.request_id_for("a1", &k), Some(first.clone()));
+    let ended = r.apply(Observation::RequestEndedById { request_id: first.clone(), by: ResolvedBy::Terminal });
+    assert_eq!(resolved(&ended), vec![(first.clone(), ResolvedBy::Terminal, None)]);
+    // Confirmed gone, so the reusable key opens a second occurrence.
+    let second = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0].id.clone();
+    assert_ne!(second, first);
+    // A late end for the first occurrence must not resolve the second.
+    assert!(r.apply(Observation::RequestEndedById { request_id: first, by: ResolvedBy::Terminal }).is_empty());
+    assert_eq!(r.request(&second).unwrap().status, RequestStatus::Open);
+}
 
-```rust
-#[tokio::test]
-async fn answer_without_an_adapter_for_the_path_does_not_claim() {
-    // No adapter at all, so no adapter serves the request's Hook path.
-    let core = Core::new(test_machine(), vec![]);
-    let (_, mut rx) = core.attach(None);
-    core.observe(Observation::AgentUpsert(agent_obs("a1")));
-    let obs = permission_obs("a1", "k"); // answer_path: Hook, ready: true
-    core.observe(Observation::RequestSeen(obs));
-    while rx.try_recv().is_ok() {}
-    let rid = core.agent("a1").unwrap().pending.unwrap().id;
-    let res = core.handle("c1", ClientMessage::RequestAnswer {
-        id: "x1".into(), request_id: rid.clone(), option_id: Some("allow".into()), text: None,
-    }).await;
-    assert_eq!(res.error_code(), Some(ErrorCode::SourceUnavailable));
-    assert!(rx.try_recv().is_err(), "no answering/open churn may be published");
-    assert_eq!(core.agent("a1").unwrap().pending.unwrap().status, RequestStatus::Open);
+#[test]
+fn end_by_id_after_upgrade_uses_the_upgraded_request() {
+    let mut r = reg_with_agent();
+    let mut fb = perm("a1", "fb", "");
+    fb.kind = RequestKind::BlockedUnparsed; fb.answer_path = AnswerPath::None; fb.options = vec![];
+    let rid = opened(&r.apply(Observation::RequestSeen(fb)))[0].id.clone();
+    let mut up = perm("a1", "hook", "ls");
+    up.upgrade_from = Some(CorrelationKey("fb".into()));
+    r.apply(Observation::RequestSeen(up));
+    assert_eq!(r.request(&rid).unwrap().kind, RequestKind::Permission, "upgraded in place, same id");
+    assert_eq!(r.request_id_for("a1", &CorrelationKey("fb".into())), None, "the alias is not a primary key");
 }
 ```
 
-Read the top of `claims.rs` first and match its imports.
+Add to `crates/acd-core/tests/core.rs` (it already has `answer`,
+`open_request` and the `panicking_adapter_releases_id_and_claim` test, which
+must keep passing unchanged):
 
-- [ ] **Step 2: Run the tests and confirm which fail**
+```rust
+#[tokio::test]
+async fn missing_adapter_publishes_no_churn() {
+    let core = Core::new(test_machine(), vec![]);
+    let rid = open_request(&core);
+    let (_, mut rx) = core.attach(None);
+    assert_eq!(core.handle("cl", answer("c1", &rid)).await.error_code(), Some(ErrorCode::SourceUnavailable));
+    assert!(rx.try_recv().is_err(), "no answering/open churn may be published");
+    assert_eq!(core.request(&rid).unwrap().status, RequestStatus::Open);
+}
 
-Run: `cargo test -p acd-core --test registry --test claims`
-Expected: `answer_without_an_adapter_for_the_path_does_not_claim` fails to
-compile (`Core::agent` does not exist). The three registry tests may already
-pass; if one fails, fix `registry.rs` minimally so it passes and say so in
-the commit message.
+#[tokio::test]
+async fn accessors_return_current_state() {
+    let core = Core::new(test_machine(), vec![]);
+    let rid = open_request(&core);
+    assert_eq!(core.agent("a1").unwrap().pending.unwrap().id, rid);
+    assert_eq!(core.request_id_for("a1", &CorrelationKey("k1".into())), Some(rid.clone()));
+    core.observe(Observation::RequestEndedById { request_id: rid.clone(), by: ResolvedBy::Terminal });
+    assert!(core.request(&rid).is_none());
+}
+```
+
+- [ ] **Step 2: Run the tests and see them fail**
+
+Run: `cargo test -p acd-core --test registry --test core`
+Expected: compile errors (`RequestEndedById`, `request_id_for`,
+`Core::request` and friends are missing). `missing_adapter_publishes_no_churn`
+fails because the current code claims first and then releases.
 
 - [ ] **Step 3: Implement**
 
-In `engine.rs`:
+`registry.rs`:
 
 ```rust
-    /// A copy of one agent's current state (adapters use it to see whether
-    /// the agent already has a pending request).
-    pub fn agent(&self, agent_id: &str) -> Option<Agent> {
-        self.inner.lock().unwrap().registry.agent(agent_id).cloned()
+            Observation::RequestEndedById { request_id, by } => {
+                if !self.requests.contains_key(&request_id) { return vec![]; }
+                if matches!(by, ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent) {
+                    for k in self.keys.values_mut() {
+                        if k.open_request.as_deref() == Some(request_id.as_str()) { k.confirmed_gone = true; }
+                    }
+                }
+                self.resolve_request(&request_id, by)
+            }
+```
+
+Rename `primary_request_for` to `pub fn request_id_for`, and update its
+callers.
+
+`engine.rs`:
+
+```rust
+    pub fn agent(&self, agent_id: &str) -> Option<Agent> { self.inner.lock().unwrap().registry.agent(agent_id).cloned() }
+    pub fn request(&self, request_id: &str) -> Option<Request> { self.inner.lock().unwrap().registry.request(request_id).cloned() }
+    pub fn request_id_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String> {
+        self.inner.lock().unwrap().registry.request_id_for(agent_id, key)
     }
 ```
 
-In `execute`, for `RequestAnswer`, pick the adapter inside the same lock
-as the claim, and undo the claim without publishing it when there is none:
+In `execute`, for `RequestAnswer`, replace the claim and adapter lookup
+with:
 
 ```rust
-                let (request, adapter) = {
+                // Route first, outside the lock: adapter callbacks may panic, and a
+                // panic here (Phase::Start) must leave nothing claimed.
+                let Some(path) = self.inner.lock().unwrap().registry.request(&request_id).map(|r| r.answer_path) else {
+                    return (CommandResult::err(id, ErrorCode::RequestGone, ErrorCode::RequestGone.describe()), Delivery::Attempted);
+                };
+                let adapter = self.adapters.iter().find(|a| a.answer_paths().contains(&path)).cloned();
+                let request = {
                     let mut st = self.inner.lock().unwrap();
                     match st.registry.claim(&request_id, answer.clone()) {
                         Ok((req, changes)) => {
-                            let Some(adapter) = self.adapters.iter().find(|a| a.answer_paths().contains(&req.answer_path)).cloned() else {
-                                // Nothing was published, so clients never see answering -> open churn.
-                                st.registry.release_quiet(&request_id);
+                            if adapter.is_none() || req.answer_path != path {
+                                // Undo without publishing: clients never see answering -> open churn.
+                                let _ = st.registry.release(&request_id);
                                 return (CommandResult::err(id, ErrorCode::SourceUnavailable, ErrorCode::SourceUnavailable.describe()), Delivery::Attempted);
-                            };
+                            }
                             *phase.lock().unwrap() = Phase::Claimed(request_id.clone());
                             self.publish(&mut st, changes);
-                            (req, adapter)
+                            req
                         }
                         Err(code) => return (CommandResult::err(id, code, code.describe()), Delivery::Attempted),
                     }
                 };
+                let adapter = adapter.expect("checked under the lock");
 ```
 
 Delete the old `let Some(adapter) = ... else { self.release(...) }` block
 that followed the claim.
 
-`claim` keeps its error precedence (`request_gone`, `request_busy`,
-`not_answerable`, `request_not_ready`, `bad_request`), which is why the
-adapter check runs after a successful claim, inside the same lock. Add to `registry.rs`:
+- `claim`'s own errors still take precedence, so a resolved request still
+  gets `request_gone`.
+- `source_unavailable` is never cached (existing rule).
 
-```rust
-    /// Undoes a claim whose changes were never published (no adapter).
-    pub(crate) fn release_quiet(&mut self, request_id: &str) {
-        let _ = self.release(request_id);
-    }
-```
-
-Remove the dead `ClientMessage::Hello { .. } | ClientMessage::Ping { .. }`
-arm at the end of `execute` by matching it as
+Replace the dead
+`ClientMessage::Hello { .. } | ClientMessage::Ping { .. }` arm at the end of
+`execute` with
 `ClientMessage::Hello { .. } | ClientMessage::Ping { .. } => unreachable!("rejected in Core::handle")`.
-The `AbandonGuard` already turns a panic into an uncached
-`source_unavailable`, so this cannot hang a client.
 
 - [ ] **Step 4: Run the whole crate**
 
 Run: `cargo test -p acd-core && cargo clippy -p acd-core --all-targets -- -D warnings`
-Expected: all pass.
+Expected: all pass, including `panicking_adapter_releases_id_and_claim`
+and `missing_adapter_returns_source_unavailable_and_reopens`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/acd-core
-git commit -m "acd-core: check the adapter before claiming, add Core::agent, registry tests"
+git commit -m "acd-core: route answers outside the lock, end requests by id, accessors"
 ```
 
 ---
@@ -393,8 +464,12 @@ git commit -m "acd-core: check the adapter before claiming, add Core::agent, reg
   - `wire::Pong { version: String, protocol: u32 }`.
   - `wire::Event` enum, produced by `wire::parse_event(line: &str) -> Event`:
     `Created { pane_id }`, `Closed { pane_id }`, `AgentDetected { pane_id }`, `AgentReleased { pane_id }`, `Updated { pane_id }`, `StatusChanged { pane_id, status: AgentStatus }`, `Other` (anything unknown or malformed).
-  - `client::CallError` enum: `Connect(io::Error)`, `Write(io::Error)`, `NoReply(String)` (written, then timeout/EOF/garbage), `Server { code: String, message: String }`.
-    - `CallError::reached_agent(&self) -> bool`: `true` only for `NoReply`.
+  - `client::CallError` enum: `Connect(io::Error)`, `Write(io::Error)`, `NoReply(String)` (written, then timeout, EOF, a malformed reply, a reply with the wrong `id`, or an unexpected `result.type`), `Server { code: String, message: String }`.
+    - `client::KNOWN_REFUSALS: &[&str] = &["agent_blocked", "agent_not_found", "invalid_request", "invalid_key", "invalid_params"]`: error codes herdr returns before acting.
+    - `CallError::reached_agent(&self) -> bool`:
+      - `true` for `NoReply`;
+      - `true` for a `Server` error whose code is not in `KNOWN_REFUSALS`, because acd cannot prove nothing happened;
+      - `false` otherwise.
   - `client::Herdr` (cheap `Clone`, holds the socket `PathBuf`):
     - `Herdr::new(path: PathBuf) -> Herdr`, `path(&self) -> &Path`
     - `async fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, CallError>`: returns the `result` object.
@@ -407,6 +482,12 @@ git commit -m "acd-core: check the adapter before claiming, add Core::agent, reg
     - `async fn subscribe(&self, panes: &[String]) -> Result<Subscription, CallError>`: subscribes to `pane.created`, `pane.closed`, `pane.agent_detected`, `pane.updated`, plus `pane.agent_status_changed` for each pane.
   - `client::Subscription { async fn next(&mut self) -> Option<Event> }`: `None` on EOF or an I/O error.
   - `client::CONNECT_TIMEOUT = 1 s`, `client::CALL_TIMEOUT = 3 s`.
+    - `CALL_TIMEOUT` is **one absolute deadline** for the whole call:
+      connect, write and reply.
+    - Connect may use at most `min(CONNECT_TIMEOUT, remaining)`.
+  - `Herdr::call_until(&self, method, params, deadline: tokio::time::Instant)`:
+    the same as `call`, but with the caller's absolute deadline when that is
+    earlier. The keys engine uses it to stay inside its delivery budget.
   - `fake::FakeHerdr` (behind `feature = "testing"`; see Step 5 for its API).
 
 - [ ] **Step 1: Skeleton**
@@ -470,7 +551,7 @@ workspace root:
 `concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/herdr/api/")`.
 
 ```rust
-use acd_adapters::herdr::{client::*, fake::FakeHerdr, wire::*};
+use acd_adapters::herdr::{client::*, fake::{FakeHerdr, fake_agent}, wire::*};
 
 fn fixture(name: &str) -> serde_json::Value {
     let p = format!("{}/../../tests/fixtures/herdr/api/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -535,6 +616,24 @@ async fn connect_failure_did_not_reach_the_agent() {
     let err = h.prompt("w1:p2", "hi").await.unwrap_err();
     assert!(matches!(err, CallError::Connect(_)));
     assert!(!err.reached_agent());
+}
+
+#[test]
+fn only_known_refusals_count_as_not_reached() {
+    let e = |code: &str| CallError::Server { code: code.into(), message: String::new() };
+    assert!(!e("agent_blocked").reached_agent());
+    assert!(!e("invalid_key").reached_agent());
+    assert!(e("internal_error").reached_agent(), "an unknown error after the write may have acted");
+}
+
+#[tokio::test]
+async fn whole_call_shares_one_deadline() {
+    let fake = FakeHerdr::start().await;
+    fake.hang_next("agent.list");
+    let h = Herdr::new(fake.path().to_path_buf());
+    let t = std::time::Instant::now();
+    let _ = h.list().await;
+    assert!(t.elapsed() < std::time::Duration::from_millis(3500), "connect + write + reply share CALL_TIMEOUT");
 }
 
 #[tokio::test]
@@ -628,22 +727,30 @@ pub const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl Herdr {
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, CallError> {
-        let stream = timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.path)).await
+        self.call_until(method, params, Instant::now() + CALL_TIMEOUT).await
+    }
+
+    pub async fn call_until(&self, method: &str, params: Value, deadline: Instant) -> Result<Value, CallError> {
+        let deadline = deadline.min(Instant::now() + CALL_TIMEOUT);
+        let connect_by = deadline.min(Instant::now() + CONNECT_TIMEOUT);
+        let id = next_request_id(); // e.g. "acd-<counter>"
+        let stream = timeout_at(connect_by, UnixStream::connect(&self.path)).await
             .map_err(|_| CallError::Connect(io::Error::new(io::ErrorKind::TimedOut, "connect timed out")))?
             .map_err(CallError::Connect)?;
         let (r, mut w) = stream.into_split();
-        let mut line = serde_json::to_vec(&json!({"id": "acd", "method": method, "params": params})).expect("json");
+        let mut line = serde_json::to_vec(&json!({"id": id, "method": method, "params": params})).expect("json");
         line.push(b'\n');
         // Until write_all and flush return, nothing has reached herdr.
-        timeout(CALL_TIMEOUT, async { w.write_all(&line).await?; w.flush().await }).await
+        timeout_at(deadline, async { w.write_all(&line).await?; w.flush().await }).await
             .map_err(|_| CallError::Write(io::Error::new(io::ErrorKind::TimedOut, "write timed out")))?
             .map_err(CallError::Write)?;
         let mut reply = String::new();
-        let n = timeout(CALL_TIMEOUT, BufReader::new(r).read_line(&mut reply)).await
+        let n = timeout_at(deadline, BufReader::new(r).read_line(&mut reply)).await
             .map_err(|_| CallError::NoReply("timed out".into()))?
             .map_err(|e| CallError::NoReply(e.to_string()))?;
         if n == 0 { return Err(CallError::NoReply("connection closed".into())); }
         let v: Value = serde_json::from_str(&reply).map_err(|e| CallError::NoReply(format!("bad reply: {e}")))?;
+        if v["id"].as_str() != Some(id.as_str()) { return Err(CallError::NoReply("reply id does not match".into())); }
         if let Some(err) = v.get("error") {
             return Err(CallError::Server {
                 code: err["code"].as_str().unwrap_or("unknown").into(),
@@ -658,7 +765,11 @@ impl Herdr {
 Implement the typed helpers on top of `call`.
 
 - `get` maps `Server { code: "agent_not_found" }` to `Ok(None)`.
-- `prompt` and `send_keys` ignore the result body.
+- `prompt` requires `result.type == "agent_prompted"`. Anything else is
+  `NoReply`, because the write happened and the outcome is unknown.
+- `send_keys` accepts any `result` object. Gate 6 did not record its
+  result type: record it in `tests/fixtures/herdr/api/` during the Task 9
+  smoke test.
 - `subscribe` writes the subscription request and waits up to
   `CALL_TIMEOUT` for the `subscription_started` reply. `Subscription`
   then owns the read half and returns `parse_event(line)` for each line.
@@ -701,6 +812,10 @@ pub fn fake_agent(pane_id: &str, agent: &str, status: &str) -> Value;
 
 Behaviour:
 
+- `FakeHerdr::start` creates its socket under a short directory in `/tmp`
+  (`tempfile::Builder::new().prefix("acd").tempdir_in("/tmp")`). macOS
+  limits Unix socket paths to 104 bytes, and the default macOS temp dir
+  is long.
 - `agent.prompt` on a `blocked` agent replies `agent_blocked`. Otherwise it
   records the prompt and sets the status to `working`.
 - Unknown methods reply `invalid_request`.
@@ -828,7 +943,7 @@ fn maps_states_kinds_and_titles() {
 
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `cargo test -p acd-adapters text:: map::`
+Run: `cargo test -p acd-adapters text::` and `cargo test -p acd-adapters map::`
 Expected: compile errors (functions missing).
 
 - [ ] **Step 3: Implement**
@@ -1112,14 +1227,26 @@ git commit -m "acd-adapters: herdr dialog parsing, fingerprints and prompt line"
      - emit `Observation::AgentUpsert(obs)` only when `obs` differs from
        the last one emitted for that pane (keep a
        `HashMap<pane_id, AgentObs>`).
+   - The "last emitted" cache is updated by **every** upsert the reconciler
+     emits, including the synthetic `Unknown` ones from step 7. After a
+     reconnect, the restored state therefore always differs from the cache
+     and is emitted.
    - `None`, or no detected agent: if the pane was known, emit
      `Observation::AgentGone` and remove it from `PaneMap` and from the
      subscription set.
    - A list result applies each entry, then treats every known pane that
      is absent from the list as gone.
 3. **Hints.** A separate subscription task reads `Subscription::next()`
-   and forwards hints into the reconciler's `mpsc` channel (capacity 256;
-   if it is full, send `Hint::Resync` with `try_send` and drop the event).
+   and forwards hints into the reconciler's `mpsc` channel (capacity 256).
+   - If the channel is full, the reader drops the event and sets a shared
+     sticky `resync_needed: Arc<AtomicBool>`. The reconciler checks the
+     flag on every loop turn and runs a full `agent.list` when it is set.
+   - Each subscription carries a generation number. Its reader reports EOF
+     as `Disconnected(generation)`.
+   - The reconciler ignores a `Disconnected` from any generation other
+     than the current one. An intentionally replaced subscription is
+     dropped, which aborts its reader task, and never counts as a
+     connection loss.
    - `StatusChanged`, `AgentDetected` and `Updated` become `Hint::Pane`.
    - `Created` becomes `Hint::Pane`. `agent.get` then returns `None` for a
      plain shell, which is fine.
@@ -1127,10 +1254,24 @@ git commit -m "acd-adapters: herdr dialog parsing, fingerprints and prompt line"
    - `Other` becomes `Hint::Resync`.
    - When the stream ends, the task sends the internal `Disconnected`
      message.
-4. **One task makes every call.** The reconciler loop handles one message
-   or timer at a time and `await`s each `agent.list`, `agent.get` and
-   `agent.read` call before taking the next, so results apply in issue
-   order. Never `spawn` these calls.
+4. **One task makes every call, and stays responsive.**
+   - The reconciler loop handles one unit of work per turn and `await`s
+     each `agent.list`, `agent.get` and `agent.read` call before taking the
+     next, so results apply in issue order. Never `spawn` these calls.
+   - A unit of work is a single call: one `get`, one `list`, or one
+     fallback `read`. Never a batch.
+   - The loop's `tokio::select!` is `biased` in this order:
+     1. stop;
+     2. `Disconnected` for the current generation;
+     3. the sticky resync flag;
+     4. pending pane hints;
+     5. the list timer;
+     6. the fallback poll.
+   - **Coalescing.** Pane hints go into a `BTreeSet<String>` of dirty panes
+     (drain the channel into the set each turn), and one dirty pane is
+     fetched per turn. A burst of events for one pane costs one `get`.
+   - **Bound.** Every call already has the 3 s `CALL_TIMEOUT`, so stop and
+     disconnect are handled within one call's deadline.
 5. **Re-subscribe.** When the set of known panes changes, open a new
    subscription with the full set, then drop the old one. Events in the
    overlap only cause extra `agent.get` calls.
@@ -1311,6 +1452,40 @@ async fn state_calls_are_serial() {
 }
 
 #[tokio::test]
+async fn reconnect_with_unchanged_state_restores_it() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "working"));
+    let path = fake.path().to_path_buf();
+    let r = rig(fake).await;
+    until("agent", || r.state("w1:p1")).await;
+    let Rig { fake, core, hash, handle: _handle, .. } = r;
+    fake.stop().await;
+    let id = map::agent_id(&hash, "w1:p1");
+    until("unknown", || (core.agent(&id).map(|a| a.state) == Some(AgentState::Unknown)).then_some(())).await;
+    let fake2 = FakeHerdr::start_at(&path).await;
+    fake2.set_agent(fake_agent("w1:p1", "claude", "working")); // exactly as before the loss
+    until("restored", || (core.agent(&id).map(|a| a.state) == Some(AgentState::Working)).then_some(())).await;
+}
+
+#[tokio::test]
+async fn event_burst_is_coalesced_and_stop_stays_prompt() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "working"));
+    let r = rig(fake).await;
+    until("agent", || r.state("w1:p1")).await;
+    let gets_before = r.fake.calls().iter().filter(|(m, _)| m == "agent.get").count();
+    for _ in 0..200 {
+        r.fake.push_event(serde_json::json!({"event":"pane.agent_status_changed","data":{"agent":"claude","agent_status":"working","pane_id":"w1:p1","workspace_id":"w1"}}));
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let gets = r.fake.calls().iter().filter(|(m, _)| m == "agent.get").count() - gets_before;
+    assert!(gets < 50, "200 events for one pane must coalesce, got {gets} gets");
+    let t = std::time::Instant::now();
+    r.handle.shutdown(false).await;
+    assert!(t.elapsed() < Duration::from_secs(4), "stop is handled within one call deadline");
+}
+
+#[tokio::test]
 async fn shutdown_with_removal_emits_gone() {
     let fake = FakeHerdr::start().await;
     fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
@@ -1432,9 +1607,19 @@ git commit -m "acd-adapters: herdr reconciler with serial state calls and resync
     - `raw_screen: Some(raw_screen)`, `ready: false`,
       `reusable_key: true`, `upgrade_from: None`;
     - `key: fallback::key(..)`.
-  - `End` becomes `Observation::RequestEnded { by: Terminal }`, then
-    `Observation::DialogGone`. These requests never have an acd delivery,
-    so §5.1 says `terminal`.
+  - After emitting the `RequestSeen` for `Open`, the reconciler records
+    `request_id = core.request_id_for(agent_id, &key)` alongside the open
+    fingerprint.
+  - `End` is handled in two steps:
+    1. **Only when** `core.request(request_id)` is still
+       `kind == BlockedUnparsed && answer_path == None`, emit
+       `Observation::RequestEndedById { request_id, by: Terminal }`. Such a
+       request never has an acd delivery, so §5.1 says `terminal`.
+    2. Then always emit `Observation::DialogGone` for the fallback key.
+  - If P3 upgraded the request in place (same id, structured kind), the
+    fallback must **not** resolve it. The upgraded request's owner
+    attributes it (Task 9 or P3). This prevents the alias rule in
+    `registry.rs` from turning an inbox answer into `terminal`.
   - `apply` calls `on_state` for every result.
   - A gone pane calls `forget`.
 
@@ -1528,9 +1713,32 @@ async fn structured_request_suppresses_the_fallback() {
     obs.answer_path = AnswerPath::Hook;
     r.core.observe(acd_core::Observation::RequestSeen(obs));
     r.fake.set_status("w1:p1", "blocked");
-    tokio::time::sleep(Duration::from_millis(600)).await; // > fallback_after + several polls
+    // Wait for evidence that the fallback ran (several detection reads), not for a fixed time.
+    until("fallback reads", || (r.fake.calls().iter().filter(|(m, p)| m == "agent.read" && p["source"] == "detection").count() >= 3).then_some(())).await;
     let p = r.core.agent(&r.id("w1:p1")).unwrap().pending.unwrap();
     assert_eq!(p.kind, RequestKind::Permission, "no blocked_unparsed may replace a structured request");
+}
+
+#[tokio::test]
+async fn upgraded_fallback_is_not_resolved_terminal_by_the_fallback() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "blocked"));
+    let dialog = screen("claude-permission-bash.txt");
+    fake.set_screen("w1:p1", "detection", &dialog);
+    let r = rig(fake).await;
+    let fb = until("fallback", || r.core.agent(&r.id("w1:p1")).and_then(|a| a.pending)).await;
+    // P3 upgrades it in place (same id).
+    let fp = acd_adapters::herdr::screen::fallback_fingerprint(&dialog);
+    let mut up = acd_core::testing::permission_obs(&r.id("w1:p1"), "hook-key");
+    up.upgrade_from = Some(acd_adapters::herdr::fallback::key(&r.hash, "w1:p1", &fp));
+    r.core.observe(acd_core::Observation::RequestSeen(up));
+    assert_eq!(r.core.request(&fb.id).unwrap().kind, RequestKind::Permission);
+    // The dialog closes (as after an inbox answer); the fallback must leave attribution alone.
+    r.fake.set_screen("w1:p1", "detection", &screen("claude-idle-detection.txt"));
+    r.fake.set_status("w1:p1", "working");
+    until("fallback reads", || (r.fake.calls().iter().filter(|(m, p)| m == "agent.read" && p["source"] == "detection").count() >= 4).then_some(())).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(r.core.request(&fb.id).is_some(), "only the structured request's owner may resolve it");
 }
 
 #[tokio::test]
@@ -1648,7 +1856,7 @@ a fake at `<home>/.config/herdr/sessions/x/herdr.sock`):
 ```rust
 #[tokio::test]
 async fn discovery_finds_sessions_and_reports_status() {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::Builder::new().prefix("acd").tempdir_in("/tmp").unwrap(); // short: macOS socket paths max 104 bytes
     let sock = home.path().join(".config/herdr/sessions/x/herdr.sock");
     std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
     let fake = FakeHerdr::start_at(&sock).await;
@@ -1663,7 +1871,7 @@ async fn discovery_finds_sessions_and_reports_status() {
 
 #[tokio::test]
 async fn socket_missing_twice_removes_its_agents() {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::Builder::new().prefix("acd").tempdir_in("/tmp").unwrap(); // short: macOS socket paths max 104 bytes
     let sock = home.path().join(".config/herdr/sessions/x/herdr.sock");
     std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
     let fake = FakeHerdr::start_at(&sock).await;
@@ -1733,7 +1941,8 @@ git commit -m "acd-adapters: herdr socket discovery and source status"
          | `Ok` | `Ok(())` |
          | `Server{agent_blocked}` | `NotDelivered(AgentBusy)` |
          | `Server{agent_not_found}` | `NotDelivered(AgentGone)` |
-         | any other `Server` | `NotDelivered(SourceUnavailable)` |
+         | any other `Server` code in `KNOWN_REFUSALS` | `NotDelivered(SourceUnavailable)` |
+         | a `Server` code not in `KNOWN_REFUSALS` | `Uncertain` |
          | `Connect` or `Write` | `NotDelivered(SourceUnavailable)` |
          | `NoReply` | `Uncertain("herdr did not confirm the prompt")` |
 
@@ -1766,7 +1975,7 @@ async fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 struct Rig { fake: FakeHerdr, core: Arc<Core>, adapter: Arc<HerdrAdapter>, _home: tempfile::TempDir }
 
 async fn rig(agents: &[(&str, &str, &str)]) -> Rig {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::Builder::new().prefix("acd").tempdir_in("/tmp").unwrap(); // short: macOS socket paths max 104 bytes
     let sock = home.path().join(".config/herdr/herdr.sock");
     std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
     let fake = FakeHerdr::start_at(&sock).await;
@@ -1913,44 +2122,53 @@ git commit -m "acd: run the herdr adapter; herdr follow-ups through agent.prompt
 
 This is the shared contract with P3. P3 creates `keys` requests, which are
 Claude and Codex requests with a captured fingerprint. It registers a
-`KeysTarget` for each and provides `Evidence`. P2 builds and tests the
-engine with test doubles.
+`KeysTarget` for each and provides `Evidence`. P2 builds the engine, the
+terminal-first observer and the tests, using test doubles.
 
 **Files:**
 - Create: `crates/acd-adapters/src/herdr/keys.rs`
 - Modify: `crates/acd-adapters/src/herdr/mod.rs` (`answer_paths`, `deliver`, `keys_targets()`, `set_evidence()`)
+- Modify: `crates/acd-adapters/src/herdr/reconciler.rs` (target watch in the poll)
+- Modify: `crates/acd-adapters/src/herdr/fake.rs` (`delay_next`)
 - Test: add to `crates/acd-adapters/tests/herdr_adapter.rs`
 
 **Interfaces:**
 - Consumes:
   - `screen::{Fingerprint, fallback_fingerprint, prompt_line}` (Task 4);
   - `PaneMap` and `Hint` (Task 5);
-  - `HerdrAdapter` (Task 8).
+  - `HerdrAdapter` (Task 8);
+  - `Core::{request, request_id_for}` and `Observation::RequestEndedById` (Task 1);
+  - `Herdr::call_until` (Task 2).
 - Produces (P3 depends on these exact names):
 
 ```rust
-/// One keys-answerable dialog on one agent. Registered by whoever opened
-/// the request (P3); one per agent, because a request has one answer path.
+/// One keys-answerable dialog occurrence. P3 registers it right after
+/// opening the request: `request_id = core.request_id_for(agent_id, &key)`.
+/// The request id is unique per occurrence, so a later occurrence of the
+/// same reusable key can never be served or removed by mistake.
 #[derive(Clone, Debug)]
 pub struct KeysTarget {
-    pub key: CorrelationKey,                 // the request's correlation key
-    pub fingerprint: Fingerprint,            // captured from the detection snapshot
+    pub request_id: String,
+    pub agent_id: String,
+    pub key: CorrelationKey,
+    pub fingerprint: Fingerprint,             // captured from the detection snapshot
     pub option_keys: HashMap<String, String>, // option id -> herdr key name ("1".."9", "esc")
 }
 
 #[derive(Default)]
-pub struct KeysTargets(Mutex<HashMap<String, KeysTarget>>); // agent_id -> target
+pub struct KeysTargets(Mutex<HashMap<String, KeysTarget>>); // request_id -> target
 impl KeysTargets {
-    pub fn set(&self, agent_id: &str, t: KeysTarget);
-    pub fn remove(&self, agent_id: &str);
-    pub fn get(&self, agent_id: &str) -> Option<KeysTarget>;
+    pub fn set(&self, t: KeysTarget);
+    pub fn get(&self, request_id: &str) -> Option<KeysTarget>;
+    pub fn remove(&self, request_id: &str) -> Option<KeysTarget>;
+    pub fn for_agent(&self, agent_id: &str) -> Vec<KeysTarget>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict { Consistent, Contradicts, NoEvidence }
 
 /// Correlated outcome evidence (spec §5.1, §6.2 Attribution, §6.3 Completion).
-/// Implementations may wait (P3 waits up to 30 s for PostToolUse/Stop).
+/// The engine bounds the wait with `KeysTiming::evidence_timeout`.
 #[async_trait]
 pub trait Evidence: Send + Sync {
     async fn outcome(&self, agent_id: &str, key: &CorrelationKey, option_id: &str) -> Verdict;
@@ -1958,80 +2176,125 @@ pub trait Evidence: Send + Sync {
 
 /// P2's default: no evidence source exists yet, so nothing is ever `inbox`.
 pub struct NoEvidence;
+
+pub struct KeysTiming {
+    pub deliver_budget: Duration,    // 8 s: guard read + send must finish inside it (adapter contract: 10 s)
+    pub poll: Duration,              // 150 ms
+    pub window: Duration,            // 3 s after the send
+    pub prompt_checks: [Duration; 3],// 300 ms, 1 s, 3 s after the send
+    pub evidence_timeout: Duration,  // 35 s (P3's hook correlation window is 30 s)
+}
 ```
 
+- `HerdrConfig` gains `keys: KeysTiming` (with `Default`).
 - `HerdrAdapter::keys_targets(&self) -> Arc<KeysTargets>`
 - `HerdrAdapter::set_evidence(&self, e: Arc<dyn Evidence>)`: replaces `NoEvidence`.
-- `KeysTiming { poll: Duration /*150 ms*/, window: Duration /*3 s*/, prompt_checks: [Duration; 3] /*300 ms, 1 s, 3 s*/ }` lives on `HerdrConfig` as `keys: KeysTiming`, with `Default`.
+- `answer_paths()` is now `&[AnswerPath::Keys]`.
+- `FakeHerdr::delay_next(&self, method: &str, d: Duration)`: the next call to `method` replies only after `d`. The side effect, such as recording keys, happens at once.
 
-**`deliver(request, answer)`** runs inline. Nothing may be sent from a
-spawned task, so a dropped future can never complete a send later.
+**`deliver(request, answer)`** runs inline. Nothing is sent from a spawned
+task, so a dropped future can never complete a send later. Every herdr call
+uses `call_until(deadline)` with `deadline = start + deliver_budget`.
 
-1. An `Answer::Text` gives `NotDelivered(NotSupported)`. Free text on
-   `keys` is deferred (§11 item 1).
-2. Look up the target with `targets.get(request.agent_id)`.
-   - No target, or `target.key` not registered, gives
+1. `Answer::Text` gives `NotDelivered(NotSupported)`. Free text on `keys`
+   is deferred (§11 item 1).
+2. Look up the target with `targets.get(&request.id)`.
+   - No target gives `NotDelivered(RequestNotReady)`.
+   - A target whose `agent_id` differs from `request.agent_id` also gives
      `NotDelivered(RequestNotReady)`.
    - Look up `option_keys[option_id]`. A missing entry gives
      `NotDelivered(BadRequest)`.
 3. Look up the pane with `PaneMap.get(agent_id)`. A missing pane gives
    `NotDelivered(AgentGone)`.
 4. **Guard.**
-   - Read `text = herdr.read(pane, "detection", None)`. An error gives
+   - Read `text = read(pane, "detection")`. An error gives
      `NotDelivered(SourceUnavailable)`.
    - `fallback_fingerprint(&text) != target.fingerprint` gives
      `NotDelivered(ScreenMismatch)`.
-   - Record `baseline = screen::prompt_line(kind, &text)`.
-5. Call `herdr.send_keys(pane, &[key_name])`. This is the only
-   `send_keys` call site in the crate.
+   - Record `baseline = prompt_line(kind, &text)`.
+5. **Lease check**, immediately before the send:
+   - the request must still exist with `status == Answering` and
+     `answer_path == Keys` (`core.request(&request.id)`);
+   - `targets.get(&request.id)` must still be present.
+
+   Otherwise give `NotDelivered(RequestGone)`. This catches a request that
+   was superseded, resolved, or switched to another path while the guard
+   read was in flight. A residual race remains between this check and the
+   key, and it is the one spec §4 invariant 2 accepts.
+6. `t_send = Instant::now()`, then call `send_keys(pane, [key])`. This is
+   the only `send_keys` call site in the crate.
 
    | Result | Returns |
    |---|---|
-   | `Connect`, `Write` or `Server` | `NotDelivered(SourceUnavailable)`, nothing sent |
-   | `NoReply` | `Uncertain`, no confirmation task (the core resolves `uncertain` itself) |
+   | Error with `!reached_agent()` | `NotDelivered(SourceUnavailable)` |
+   | Error with `reached_agent()` | Remove the target, then `Uncertain`. The core resolves `uncertain`. No confirmation task. |
+   | `Ok` | Spawn the confirmation task with `t_send`, then `Ok(())` |
 
-6. Spawn the confirmation task and return `Ok(())`.
-
-**Confirmation task** (`t0` = the moment the key was sent):
+**Confirmation task.** Every time is absolute, measured from `t_send`. The
+reply may arrive late, but the schedule stays tied to the send.
 
 1. **Poll.**
-   - Every `poll`, until `window`, read `detection`.
+   - Until `t_send + window`, read `detection` every `poll`. Each read
+     uses `call_until(next_tick)`, so a slow read cannot stretch the
+     window.
    - The dialog is **closed** after two consecutive reads whose
-     `fallback_fingerprint` differs from the target's.
-   - A read error counts as neither present nor absent.
+     fingerprint differs from the target's.
+   - A failed read resets nothing and counts as neither present nor
+     absent.
 2. **Stray check.**
-   - This only applies when the key is a single digit. `esc` types nothing
-     (§6.2).
-   - At each `prompt_checks` offset, read `visible` and compute
-     `p = prompt_line(kind, text)`.
-   - It is a **stray** if `p` ends with the digit and `p != baseline`.
-3. **Result.**
-   - Remove the target from `KeysTargets`.
-   - Pick `by`:
-     - a stray gives `Uncertain`;
-     - otherwise, a dialog that is not closed gives `Uncertain`;
-     - otherwise ask `evidence.outcome(...)`: `Consistent` gives `Inbox`,
-       `Contradicts` gives `Terminal`, and `NoEvidence` gives `Uncertain`.
-   - Emit `Observation::RequestEnded { agent_id, key, by }`, and, if
-     closed, `Observation::DialogGone`.
+   - Only for single-digit keys. `esc` types nothing (§6.2).
+   - At each `t_send + prompt_checks[i]`, read `visible` with
+     `call_until(check_time + 500 ms)`.
+   - It is a **stray** if `prompt_line(kind, text)` ends with the digit and
+     differs from `baseline`.
+   - If any required check's read fails, the check is **unavailable**,
+     which counts like a stray.
+3. **Verdict.**
+   - A stray or an unavailable check gives `Uncertain`.
+   - Otherwise, a dialog that is not closed gives `Uncertain`.
+   - Otherwise, take
+     `timeout(evidence_timeout, evidence.outcome(...))`:
+     - `Consistent` gives `Inbox`;
+     - `Contradicts` gives `Terminal`;
+     - `NoEvidence` or a timeout gives `Uncertain`.
+4. **Report.**
+   - `targets.remove(&request_id)`.
+   - Emit `Observation::RequestEndedById { request_id, by }`. It is a no-op
+     if the request was already resolved, for example by a terminal-first
+     race.
+   - If closed, emit `Observation::DialogGone { agent_id, key }`.
    - Then send `Hint::Pane(pane)` so the reconciler emits the agent's new
      state (adapter contract: an upsert after a resolution).
    - **Never** send another key.
-4. **Lifetime.** Hold the core through the `Weak<Core>` from Task 8. If it
-   is gone, exit quietly.
+5. **Lifetime.** Hold the core through the `Weak<Core>` from Task 8. Exit
+   quietly if it is gone.
+
+**Target watch (terminal-first, §5.1).** A `keys` request can be answered
+in the terminal before anyone claims it. In the reconciler's poll (Task 6):
+
+- For every registered target on this socket's panes, read the pane's
+  `detection` **once per poll**. The read is shared with the fallback when
+  both need the pane.
+- Skip targets whose request is `Answering`; the confirmation task owns
+  those.
+- Drop targets whose request no longer exists, which cleans up after P3's
+  other resolution paths.
+- After two consecutive absent reads on an `Open` request:
+  - emit `RequestEndedById { request_id, by: Terminal }`, then
+    `DialogGone`;
+  - remove the target.
+- Calls stay serial on the reconciler, one read per turn (Task 5, rule 4).
 
 - [ ] **Step 1: Write the failing tests**
 
 Add to `tests/herdr_adapter.rs`.
 
-- Each test opens a `keys` request on the rig's agent through
-  `core.observe(RequestSeen(...))`, using
-  `acd_core::testing::permission_obs` with `answer_path: Keys`,
-  `ready: true` and `key: "k1"`.
-- It registers a `KeysTarget` whose `fingerprint` is
-  `fallback_fingerprint` of the screen it set.
-- It answers through `core.handle(RequestAnswer)`, so the core's
-  claim/delivered/uncertain path is exercised too.
+- Each test opens a `keys` request on the rig's agent, registers a
+  `KeysTarget` for its request id, and answers through
+  `core.handle(RequestAnswer)`.
+- The rig uses a test `KeysTiming` that is the default except
+  `evidence_timeout: 500 ms`.
+- Add `keys: KeysTiming` to the `rig` helper's `HerdrConfig` from Task 8.
 
 ```rust
 use acd_adapters::herdr::{keys::*, screen::fallback_fingerprint};
@@ -2046,11 +2309,16 @@ struct Fixed(Verdict);
 impl Evidence for Fixed {
     async fn outcome(&self, _: &str, _: &CorrelationKey, _: &str) -> Verdict { self.0 }
 }
+struct Never;
+#[async_trait::async_trait]
+impl Evidence for Never {
+    async fn outcome(&self, _: &str, _: &CorrelationKey, _: &str) -> Verdict { std::future::pending().await }
+}
 
-/// Opens a keys request whose dialog is `dialog`; when "1" (or esc) arrives the
-/// screens switch to `after_detection` / `after_visible`.
+/// Opens a keys request showing the Claude permission dialog. When a key
+/// arrives, the screens switch to `after_detection` / `after_visible`.
 async fn keys_rig(after_detection: &'static str, after_visible: &'static str) -> (Rig, String) {
-    let r = rig(&[("w1:p1", "claude", "blocked")]).await;
+    let r = rig(&[("w1:p1", "claude", "working")]).await;
     let dialog = screen("claude-permission-bash.txt");
     r.fake.set_screen("w1:p1", "detection", &dialog);
     r.fake.set_screen("w1:p1", "visible", &dialog);
@@ -2063,22 +2331,24 @@ async fn keys_rig(after_detection: &'static str, after_visible: &'static str) ->
     let mut obs = permission_obs(&id, "k1");
     obs.answer_path = AnswerPath::Keys;
     r.core.observe(Observation::RequestSeen(obs));
-    r.adapter.keys_targets().set(&id, KeysTarget {
-        key: CorrelationKey("k1".into()),
+    r.fake.set_status("w1:p1", "blocked");
+    let key = CorrelationKey("k1".into());
+    let rid = r.core.request_id_for(&id, &key).unwrap();
+    r.adapter.keys_targets().set(KeysTarget {
+        request_id: rid.clone(), agent_id: id, key,
         fingerprint: fallback_fingerprint(&dialog),
         option_keys: [("allow".to_string(), "1".to_string()), ("deny".to_string(), "esc".to_string())].into(),
     });
-    let rid = r.core.agent(&id).unwrap().pending.unwrap().id;
     (r, rid)
 }
 
-async fn answer(r: &Rig, rid: &str, option: &str) -> CommandResult {
-    r.core.handle("c", ClientMessage::RequestAnswer { id: format!("a-{option}"), request_id: rid.into(), option_id: Some(option.into()), text: None }).await
+async fn answer(r: &Rig, cmd: &str, rid: &str, option: &str) -> CommandResult {
+    r.core.handle("c", ClientMessage::RequestAnswer { id: cmd.into(), request_id: rid.into(), option_id: Some(option.into()), text: None }).await
 }
 
 /// The first `request.resolved` on `rx` (attach before answering).
 async fn resolution(rx: &mut tokio::sync::broadcast::Receiver<ServerMessage>) -> (ResolvedBy, Option<String>) {
-    tokio::time::timeout(Duration::from_secs(6), async {
+    tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             match rx.recv().await {
                 Ok(ServerMessage::RequestResolved { by, option_id, .. }) => return (by, option_id),
@@ -2086,37 +2356,46 @@ async fn resolution(rx: &mut tokio::sync::broadcast::Receiver<ServerMessage>) ->
                 Err(e) => panic!("event stream ended: {e}"),
             }
         }
-    }).await.expect("no request.resolved within 6 s")
+    }).await.expect("no request.resolved within 8 s")
 }
 
 fn delivered(res: &CommandResult) -> bool { res.ok && res.outcome == Some(Outcome::Delivered) }
-```
 
-The tests:
-
-```rust
 #[tokio::test]
 async fn closed_dialog_without_evidence_is_uncertain() {
     let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
     let (_, mut rx) = r.core.attach(None);
-    assert!(delivered(&answer(&r, &rid, "allow").await));
+    assert!(delivered(&answer(&r, "a1", &rid, "allow").await));
     assert_eq!(resolution(&mut rx).await, (ResolvedBy::Uncertain, None));
     assert_eq!(r.fake.keys_sent(), vec![("w1:p1".to_string(), vec!["1".to_string()])]);
+    assert!(r.adapter.keys_targets().get(&rid).is_none());
 }
 
 #[tokio::test]
-async fn consistent_evidence_is_inbox_and_contradicting_is_terminal() {
+async fn consistent_evidence_is_inbox() {
     let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
     r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
     let (_, mut rx) = r.core.attach(None);
-    answer(&r, &rid, "allow").await;
+    answer(&r, "a1", &rid, "allow").await;
     assert_eq!(resolution(&mut rx).await, (ResolvedBy::Inbox, Some("allow".into())));
+}
 
+#[tokio::test]
+async fn contradicting_evidence_is_terminal() {
     let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
     r.adapter.set_evidence(Arc::new(Fixed(Verdict::Contradicts)));
     let (_, mut rx) = r.core.attach(None);
-    answer(&r, &rid, "allow").await;
+    answer(&r, "a1", &rid, "allow").await;
     assert_eq!(resolution(&mut rx).await, (ResolvedBy::Terminal, None));
+}
+
+#[tokio::test]
+async fn hanging_evidence_is_bounded() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.adapter.set_evidence(Arc::new(Never));
+    let (_, mut rx) = r.core.attach(None);
+    answer(&r, "a1", &rid, "allow").await;
+    assert_eq!(resolution(&mut rx).await.0, ResolvedBy::Uncertain);
 }
 
 #[tokio::test]
@@ -2124,10 +2403,24 @@ async fn mismatch_sends_nothing() {
     let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
     let changed = screen("claude-permission-bash.txt").replace("touch /tmp/acp0/t1.txt", "rm -rf /tmp/acp0");
     r.fake.set_screen("w1:p1", "detection", &changed);
-    let res = answer(&r, &rid, "allow").await;
-    assert_eq!(res.error_code(), Some(ErrorCode::ScreenMismatch));
+    assert_eq!(answer(&r, "a1", &rid, "allow").await.error_code(), Some(ErrorCode::ScreenMismatch));
     assert!(r.fake.keys_sent().is_empty());
-    assert_eq!(agent(&r).pending.unwrap().status, RequestStatus::Open, "nothing reached the agent: back to open");
+    assert_eq!(r.core.request(&rid).unwrap().status, RequestStatus::Open, "nothing reached the agent: back to open");
+}
+
+#[tokio::test]
+async fn superseded_during_the_guard_read_sends_nothing() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.fake.delay_next("agent.read", Duration::from_millis(500));
+    let core = r.core.clone();
+    let agent_id = agent(&r).id;
+    let pending = tokio::spawn({ let core = core.clone(); let rid = rid.clone();
+        async move { core.handle("c", ClientMessage::RequestAnswer { id: "a1".into(), request_id: rid, option_id: Some("allow".into()), text: None }).await } });
+    tokio::time::sleep(Duration::from_millis(100)).await; // the guard read is in flight
+    core.observe(Observation::RequestSeen(permission_obs(&agent_id, "another-dialog")));
+    let res = pending.await.unwrap();
+    assert!(res.error_code().is_some(), "{res:?}");
+    assert!(r.fake.keys_sent().is_empty(), "a superseded request must never send a key");
 }
 
 #[tokio::test]
@@ -2135,9 +2428,19 @@ async fn stray_digit_in_prompt_is_uncertain() {
     let (r, rid) = keys_rig("claude-idle-detection-stray-1.txt", "claude-idle-prompt-stray-1.txt").await;
     r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
     let (_, mut rx) = r.core.attach(None);
-    answer(&r, &rid, "allow").await;
+    answer(&r, "a1", &rid, "allow").await;
     assert_eq!(resolution(&mut rx).await.0, ResolvedBy::Uncertain, "a stray key beats consistent evidence");
     assert_eq!(r.fake.keys_sent().len(), 1, "never a corrective key");
+}
+
+#[tokio::test]
+async fn late_send_ack_keeps_the_schedule_tied_to_the_send() {
+    let (r, rid) = keys_rig("claude-idle-detection-stray-1.txt", "claude-idle-prompt-stray-1.txt").await;
+    r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
+    r.fake.delay_next("agent.send_keys", Duration::from_millis(1500));
+    let (_, mut rx) = r.core.attach(None);
+    answer(&r, "a1", &rid, "allow").await;
+    assert_eq!(resolution(&mut rx).await.0, ResolvedBy::Uncertain, "the 3 s prompt check still sees the stray key");
 }
 
 #[tokio::test]
@@ -2145,7 +2448,7 @@ async fn esc_gets_no_prompt_check() {
     let (r, rid) = keys_rig("claude-idle-detection-stray-1.txt", "claude-idle-prompt-stray-1.txt").await;
     r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
     let (_, mut rx) = r.core.attach(None);
-    answer(&r, &rid, "deny").await;
+    answer(&r, "a1", &rid, "deny").await;
     assert_eq!(resolution(&mut rx).await, (ResolvedBy::Inbox, Some("deny".into())));
     assert_eq!(r.fake.keys_sent(), vec![("w1:p1".to_string(), vec!["esc".to_string()])]);
 }
@@ -2155,15 +2458,15 @@ async fn dialog_that_never_closes_is_uncertain() {
     let (r, rid) = keys_rig("claude-permission-bash.txt", "claude-permission-bash.txt").await;
     r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
     let (_, mut rx) = r.core.attach(None);
-    answer(&r, &rid, "allow").await;
+    answer(&r, "a1", &rid, "allow").await;
     assert_eq!(resolution(&mut rx).await.0, ResolvedBy::Uncertain);
 }
 
 #[tokio::test]
-async fn no_target_is_not_ready_and_text_is_not_supported() {
+async fn no_target_is_not_ready_and_text_sends_nothing() {
     let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
-    r.adapter.keys_targets().remove(&agent(&r).id);
-    assert_eq!(answer(&r, &rid, "allow").await.error_code(), Some(ErrorCode::RequestNotReady));
+    r.adapter.keys_targets().remove(&rid);
+    assert_eq!(answer(&r, "a1", &rid, "allow").await.error_code(), Some(ErrorCode::RequestNotReady));
     let res = r.core.handle("c", ClientMessage::RequestAnswer { id: "t1".into(), request_id: rid.clone(), option_id: None, text: Some("hi".into()) }).await;
     assert!(res.error_code().is_some());
     assert!(r.fake.keys_sent().is_empty());
@@ -2174,44 +2477,57 @@ async fn send_keys_reply_lost_is_uncertain_and_sends_once() {
     let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
     r.fake.hang_next("agent.send_keys");
     let (_, mut rx) = r.core.attach(None);
-    assert!(delivered(&answer(&r, &rid, "allow").await));
+    assert!(delivered(&answer(&r, "a1", &rid, "allow").await));
     assert_eq!(resolution(&mut rx).await.0, ResolvedBy::Uncertain);
-    assert_eq!(answer(&r, &rid, "allow").await.error_code(), Some(ErrorCode::RequestGone));
+    // The identical command is answered from the idempotency cache...
+    assert!(delivered(&answer(&r, "a1", &rid, "allow").await));
+    // ...and a new command finds the request gone.
+    assert_eq!(answer(&r, "a2", &rid, "allow").await.error_code(), Some(ErrorCode::RequestGone));
     assert_eq!(r.fake.keys_sent().len(), 1);
 }
+
+#[tokio::test]
+async fn unclaimed_request_answered_in_the_terminal_resolves_terminal() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    let (_, mut rx) = r.core.attach(None);
+    r.fake.set_screen("w1:p1", "detection", &screen("claude-idle-detection.txt")); // user answered at the terminal
+    assert_eq!(resolution(&mut rx).await, (ResolvedBy::Terminal, None));
+    assert!(r.adapter.keys_targets().get(&rid).is_none());
+    assert!(r.fake.keys_sent().is_empty());
+}
 ```
-
-`CommandResult` has public `ok` and `outcome` fields and an `error_code()`
-method (`crates/acd-protocol/src/messages.rs`). If a name differs, adapt
-the helper without changing what the assertions mean.
-
-The answer-rejected-for-text case may come back as `not_supported` from
-the adapter, or as `bad_request` from the core if it rejects text for
-permission requests first. Either is acceptable, as long as no key is sent.
-
-The tests use the default `KeysTiming`, which keeps the `window` at 3 s.
-They therefore take about 3 s each, which is acceptable.
 
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `cargo test -p acd-adapters --test herdr_adapter`
 Expected: compile errors.
 
-- [ ] **Step 3: Implement** `keys.rs` and the adapter changes as described
-under **Produces**. Then check the single call site:
-`grep -rn "send_keys" crates/acd-adapters/src` must show only `client.rs`
-(the definition) and `keys.rs`.
+- [ ] **Step 3: Implement**
+
+Write `keys.rs`, the adapter changes, the target watch in the reconciler
+and `FakeHerdr::delay_next`, all as described above. Then check that there
+is a single call site: `grep -rn "send_keys" crates/acd-adapters/src` must
+show only `client.rs` (the definition) and `keys.rs`.
 
 - [ ] **Step 4: Run the tests**
 
 Run: `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`.
-Then run `herdr_adapter` 5 times. Expected: PASS.
+Then run `herdr_adapter` 5 times. Expected: PASS. Each keys test takes
+about 3 s, the confirmation window.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Smoke test against real herdr**
+
+Repeat the Task 8 smoke setup. This time, record the real
+`agent.send_keys` reply in
+`tests/fixtures/herdr/api/agent.send_keys.response.json`: send `esc` to a
+Claude pane sitting at its permission dialog, which is harmless. Then clean
+up as in Task 8.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add crates/acd-adapters
-git commit -m "acd-adapters: fingerprint-guarded keys delivery engine with outcome evidence hook"
+git add crates/acd-adapters tests/fixtures/herdr/api
+git commit -m "acd-adapters: fingerprint-guarded keys engine with lease check, bounded evidence and terminal-first watch"
 ```
 
 ---
@@ -2281,12 +2597,18 @@ task that closed it:
 Add these new items under "P3":
 
 - Implement `Evidence`: correlation with PostToolUse, Stop and
-  UserPromptSubmit.
-- Register a `KeysTarget` for every keys-answerable request, and remove it
-  when the request ends without a delivery.
-- Bind Codex sessions with `agent_session.value` (now present in
-  `AgentInfo`).
-- Upgrade `blocked_unparsed` in place (`upgrade_from` = the fallback key).
+  UserPromptSubmit, finishing within `evidence_timeout`.
+- After opening each keys-answerable request, register a `KeysTarget`
+  with `request_id = core.request_id_for(agent_id, &key)`. Targets of
+  resolved requests are dropped by the P2 target watch.
+- Never switch a held hook's request to `keys` while the hook is still
+  held. The P2 lease check only covers `Answering` status, path and
+  target presence.
+- Bind Codex sessions with `agent_session.value`, which `AgentInfo` now
+  carries.
+- Upgrade `blocked_unparsed` in place with `upgrade_from` set to the
+  fallback key (`herdr::fallback::key`). After an upgrade, the fallback
+  only emits `DialogGone` and never resolves the request.
 
 - [ ] **Step 4: Commit, push, PR, CI**
 
@@ -2299,3 +2621,27 @@ gh workflow run CI --ref p2-herdr
 
 Then open the PR against `main`, and confirm that CI passes on both
 operating systems for the exact head commit.
+
+---
+
+## Review log
+
+**Round 1, Sol (`gpt-6.1-sol`, read-only), 2026-10-08.** 9 blocking, 3
+non-blocking, 2 questions. All accepted.
+
+| # | Finding | Resolution |
+|---|---|---|
+| B1 | Keys targets lacked occurrence identity | Targets are keyed by request id. Ends go through `RequestEndedById` (Tasks 1, 9). |
+| B2 | Supersession during the guard read | Lease check right before the send. Test `superseded_during_the_guard_read_sends_nothing`. The residual race is the one §4 accepts (Task 9). |
+| B3 | The fallback resolved an upgraded request as `terminal` through the alias | The fallback ends by id and only while the request is still `blocked_unparsed`. Otherwise it only emits `DialogGone` (Task 6). |
+| B4 | A panic in `answer_paths()` under the lock left a claim | Routing happens outside the lock before the claim, and the path is re-checked under the lock (Task 1). |
+| B5 | Deadlines were not absolute | One deadline per call (`call_until`) and an 8 s delivery budget (Tasks 2, 9). |
+| B6 | Confirmation was unbounded and not tied to the send time | The schedule runs from `t_send`, the evidence wait is bounded, and an unavailable prompt check gives `uncertain` (Task 9). |
+| B7 | The retry test contradicted the idempotency cache | The identical id gets the cached result. A new id gets `request_gone` (Task 9). |
+| B8 | A reconnect could leave agents `unknown` | The upsert cache includes the synthetic `Unknown` upserts. Test `reconnect_with_unchanged_state_restores_it` (Task 5). |
+| B9 | Serial reads could starve stop and disconnect | One call per loop turn, a biased select, and coalesced hints. Test `event_burst_is_coalesced_and_stop_stays_prompt` (Task 5). |
+| NB10 | Overflow and resubscription lifetime | Sticky resync flag and subscription generations (Task 5). |
+| NB11 | Reply validation, and which errors are certain | Reply id and type are checked. Only `KNOWN_REFUSALS` count as not delivered (Task 2). |
+| NB12 | Mechanical test issues | Fixed imports and filters, replaced sleeps with counters, used short socket dirs. |
+| Q13 | Who observes unclaimed keys requests | P2 does, through the target watch (Task 9). |
+| Q14 | The text rule narrowed the spec | Spec §6.4 now lists the exact rejected set. ZWJ, ZWNJ and variation selectors are allowed. |
