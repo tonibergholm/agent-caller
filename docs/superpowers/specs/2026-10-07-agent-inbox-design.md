@@ -96,8 +96,9 @@ It is built for two audiences, in this order:
    - **`hook` and `t3`: atomic at the source.** The agent or T3 accepts
      exactly one answer. A late answer is rejected (`request_gone`).
    - **`keys`: best effort, with a guard.**
-     - herdr has no conditional input, so a terminal answer can land
-       between acd's screen check and its keystroke.
+     - herdr has no conditional input, so a terminal answer, or a new
+       dialog replacing the checked one, can land between acd's screen
+       check and its keystroke.
      - acd keeps that window small: it re-reads the screen and compares the
        fingerprint immediately before sending one key.
      - If the outcome cannot be confirmed, acd reports it as uncertain.
