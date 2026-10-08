@@ -29,10 +29,6 @@ its name.
 
 ## P2 deferred
 
-- The guard fingerprint is a 64-bit truncated sha256. Decide whether to use
-  the full width.
-- `is_live` uses a blocking connect and can leak a blocking thread per scan
-  on a hung socket.
 - The idle poll timer wakes every 1 s with nothing due.
 - `clean_display` joins words across stripped tabs and newlines.
 
@@ -63,10 +59,11 @@ its name.
 - Build keys targets only with `KeysTarget::from_screen` (its fields are
   sealed). Register only after `core.agent(agent_id)` is Some.
 - Option keys may only be "1".."9" or "esc", never Enter. The guard
-  fingerprint blanks the cursor, so it cannot tell which option Enter picks.
-- Never decide an approval from `Dialog::text`. Forged rule lines in command
-  text can shorten it. The guard fingerprint covers the whole screen through
-  the footer and is the only security-relevant value.
+  digest blanks the cursor, so it cannot tell which option Enter picks.
+- Never decide an approval from `Dialog::text` or `Dialog::identity`. Forged
+  rule lines in command text can shorten the text, and the identity folds
+  whitespace. The guard digest (full sha256 of the whole screen through the
+  footer) is the only security-relevant value.
 - Never switch a held hook's request to `keys` while the hook is still held.
 - When a hook request belongs to the dialog already shown as a
   `blocked_unparsed` fallback, upgrade it in place (`upgrade_from` =
@@ -76,7 +73,19 @@ its name.
 - If a dialog with the same identity reappears within about 2 polls after a
   terminal answer, the old occurrence stays open (answers get
   `screen_mismatch`). Re-register with `from_screen` when the hook reports a
-  new request.
+  new request. Identity is whitespace-folded (region text and labels with
+  their continuation lines), so a dialog that differs from the old one only
+  in whitespace or line breaks also counts as the same identity.
+- A pane id that is closed and re-detected before its `agent.get` keeps the
+  old agent: its agent id, pending request and key state carry over, and an
+  old structured request resolves `terminal` through the watch instead of
+  `lost`. A kind change under the same pane id behaves the same way. Track
+  `Hint::Closed` per pane and emit `AgentGone` before re-adding; also track
+  `terminal_id` / `agent_session.value` per pane and treat a change as a new
+  agent.
+- Spec §6.4 counts a pane whose `state_change_seq` rose without an event as
+  a missed change. The reconciler only compares states, and only logs it.
+  The periodic list applies every pane anyway, so this affects the log only.
 - A dialog is recognized only when its footer is the last non-empty screen
   line. If a future Claude or Codex version draws a status line below the
   footer, update `screen::find_dialog`. It fails closed until then.
