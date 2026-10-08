@@ -63,6 +63,28 @@ pub async fn serve_on(
         config_tx,
     }
 }
+
+/// Restarts acd on the same port with the same TLS key and token, creating a
+/// fresh Core and epoch after `delay`.
+pub async fn restart_after(d: &mut Daemon, delay: Duration) {
+    d.kill.kill();
+    d.task.abort();
+    let _ = (&mut d.task).await;
+    tokio::time::sleep(delay).await;
+    let tcp = tokio::net::TcpListener::bind(("127.0.0.1", d.port))
+        .await
+        .unwrap();
+    let files = tls::KeyFiles {
+        key_pem: d.files.key_pem.clone(),
+        cert_pem: d.files.cert_pem.clone(),
+    };
+    *d = serve_on(tcp, d.port, FakeAdapter::new(), files).await;
+}
+
+pub async fn restart(d: &mut Daemon) {
+    restart_after(d, Duration::ZERO).await;
+}
+
 pub fn fast() -> Timing {
     let ms = Duration::from_millis;
     Timing {

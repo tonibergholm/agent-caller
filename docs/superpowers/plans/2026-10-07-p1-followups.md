@@ -142,6 +142,9 @@ its name.
   `acd-protocol` and its schema, so coordinate it with P5.
 - Bind Codex sessions with `agent_session.value`, which `AgentInfo` now
   carries.
+- When adding `reason` to `request.resolved`, map it in
+  `acd_client::view::resolution_notice`. `stray_keystroke` maps to "A stray
+  keystroke may be in the input box". Regenerate the bindings.
 
 ## P5: Mac app
 
@@ -150,17 +153,30 @@ its name.
 
 - Add `serde(other)` to `Source`, `AgentKind`, `RequestStatus`,
   `ResolvedBy` and `SourceState`, if the Tauri backend reuses the Rust
-  types.
+  types. **Done, Task 1.**
 - Express the one-of rules in the schema (`request.answer` takes
   `option_id` xor `text`; a result carries `ok` with `outcome` or `error`).
   Unknown variants currently serialize as `"unknown"`, and timestamps have
-  no `format: date-time`.
+  no `format: date-time`. **Done, Task 1; null cases included.**
 - Clients must validate that a MagicDNS name resolves into the Tailscale
   ranges. TCP clients have no way to authenticate the server: decide this
   at the protocol level before P5 freezes the client. Local tools use
-  `acd.sock`.
+  `acd.sock`. **Done, Tasks 2–3: pinned TLS (D1), by controller ruling
+  after Sol round 1. Tasks 1–3 PR review: Round 3 approved; findings
+  resolved (see P5 plan review log).**
 - Authenticated sessions per token are uncapped, and the idempotency table
-  cap (16384 entries) is shared by all clients.
+  cap (16384 entries) is shared by all clients. **Accepted, D13.**
+
+### P5 deferred
+
+- Optional `tailscale whois` node validation hardening.
+- Keychain prompts after rebuilds of unsigned builds.
+- The panel is centered; its position is not remembered.
+- The `acd pair` output remains in the user's clipboard after import.
+- Confirm manually that repeated notifications all show.
+- Test the hotkey failed-registration path; it requires a live shortcut manager.
+- `mark_seen` has no test outside a runtime.
+- Concurrent `set_hotkey` calls can race.
 
 ## Process
 
