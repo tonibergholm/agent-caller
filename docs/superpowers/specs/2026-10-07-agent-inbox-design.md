@@ -810,8 +810,11 @@ rules.
 
 **Ownership.** The provider session id is
 `providerThreads[].nativeThreadRef.nativeId` of the provider thread whose
-id equals `thread.activeProviderThreadId`. acd publishes it only while
-the shell and the thread detail name the same active provider thread. It
+id equals `thread.activeProviderThreadId`. acd publishes it once a
+synchronized thread stream shows the shell and the thread detail naming
+the same active provider thread. It removes it only on identity evidence:
+another active provider thread, a null or different native id, or the
+thread's removal. A stalled stream is not evidence. It
 equals the Claude Code
 session id and the Codex rollout id, is stable across runs, and is `null`
 until the first turn. The adapter publishes a map from session id to T3
