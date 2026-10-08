@@ -257,8 +257,8 @@ struct Reconciler {
     subscribed: HashSet<String>,
     generation: u64,
     subs_changed: bool,
-    /// Sticky: set by a full hint channel, an overflowing dirty queue or
-    /// `Hint::Resync`; cleared when a full list starts.
+    /// Sticky: set by a full hint channel, an overflowing dirty queue,
+    /// `Hint::Resync` or a resubscribe; cleared when a full list starts.
     resync: Arc<AtomicBool>,
     dirty: VecDeque<String>,
     dirty_set: HashSet<String>,
@@ -391,15 +391,17 @@ impl Reconciler {
             }
             self.drain_hints();
             self.enqueue_due();
-            let result = match self.pick() {
-                Some(Class::Hint) => self.hint_unit().await,
-                Some(Class::List) => self.list_unit(true).await,
-                Some(Class::Poll) => self.poll_unit().await,
-                None => self.wait().await,
-            };
-            let result = match result {
-                Ok(()) if self.subs_changed => self.resubscribe(false).await,
-                other => other,
+            // Resubscription is a unit of its own, so stop and loss are
+            // checked between it and any other call.
+            let result = if self.subs_changed {
+                self.resubscribe(false).await
+            } else {
+                match self.pick() {
+                    Some(Class::Hint) => self.hint_unit().await,
+                    Some(Class::List) => self.list_unit(true).await,
+                    Some(Class::Poll) => self.poll_unit().await,
+                    None => self.wait().await,
+                }
             };
             if let Err(flow) = result {
                 return flow;
@@ -799,7 +801,10 @@ impl Reconciler {
     }
 
     /// Opens a subscription for every known pane, then drops the old one.
-    /// Events in the overlap only cause extra `agent.get` calls.
+    /// Events in the overlap only cause extra `agent.get` calls. The old
+    /// stream may have ended while the new one was opening, and that loss is
+    /// then ignored as a stale generation, so every resubscribe also asks for
+    /// one full list.
     async fn resubscribe(&mut self, connect: bool) -> Result<(), Flow> {
         self.subs_changed = false;
         let panes: Vec<String> = self.known.keys().cloned().collect();
@@ -814,10 +819,10 @@ impl Reconciler {
             .cloned()
             .collect();
         self.subscribed = panes.into_iter().collect();
-        if connect {
-            // Changes before the stream went live are only visible to a list.
-            self.resync.store(true, Ordering::Relaxed);
-        } else {
+        // Changes before the stream went live are only visible to a list.
+        self.resync.store(true, Ordering::Relaxed);
+        if !connect {
+            // New panes are fetched at once, without waiting for the list.
             for pane_id in added {
                 self.mark_dirty(pane_id);
             }

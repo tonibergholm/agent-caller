@@ -382,7 +382,7 @@ async fn shutdown_with_removal_emits_gone() {
 }
 
 #[tokio::test]
-async fn status_change_before_resubscribe_is_caught_without_a_list() {
+async fn status_change_before_resubscribe_is_caught() {
     let fake = FakeHerdr::start().await;
     let hour = Duration::from_secs(3600);
     let r = rig_with(
@@ -398,16 +398,6 @@ async fn status_change_before_resubscribe_is_caught_without_a_list() {
         (*r.handle.health().borrow() == Health::Connected).then_some(())
     })
     .await;
-    // Let the connect-time resync list finish so a later list would be a bug.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let lists = || {
-        r.fake
-            .calls()
-            .iter()
-            .filter(|(m, _)| m == "agent.list")
-            .count()
-    };
-    let lists_before = lists();
     r.fake.set_agent(fake_agent("w1:p5", "claude", "working"));
     r.fake.push_event(serde_json::json!({"event":"pane_agent_detected","data":{"agent":"claude","pane_id":"w1:p5","type":"pane_agent_detected","workspace_id":"w1"}}));
     // Spin (no sleeping) until the first get is applied: the reconciler is
@@ -423,7 +413,58 @@ async fn status_change_before_resubscribe_is_caught_without_a_list() {
         (r.state("w1:p5") == Some(AgentState::NeedsYou)).then_some(())
     })
     .await;
-    assert_eq!(lists(), lists_before, "found by agent.get, not a list");
+    // Every resubscribe also runs one full list (it would catch this too),
+    // but the new pane is still fetched with its own agent.get.
+    let calls = r.fake.calls();
+    let subscribed = calls
+        .iter()
+        .rposition(|(m, _)| m == "events.subscribe")
+        .unwrap();
+    assert!(
+        calls[subscribed..]
+            .iter()
+            .any(|(m, p)| m == "agent.get" && p["target"] == "w1:p5"),
+        "the new pane gets an agent.get after its subscription"
+    );
+}
+
+#[tokio::test]
+async fn stream_loss_during_a_resubscribe_still_resyncs_existing_panes() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "working"));
+    let hour = Duration::from_secs(3600);
+    let r = rig_with(
+        fake,
+        Timing {
+            list_idle: hour,
+            list_blocked: hour,
+            ..fast()
+        },
+    )
+    .await;
+    until("connected", || {
+        (*r.handle.health().borrow() == Health::Connected
+            && r.state("w1:p1") == Some(AgentState::Working))
+        .then_some(())
+    })
+    .await;
+    // Let the connect-time resync list finish.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // A new pane makes the reconciler resubscribe; hold that subscribe.
+    let gate = r.fake.block_next("events.subscribe");
+    r.fake.set_agent(fake_agent("w1:p5", "claude", "idle"));
+    r.fake.push_event(serde_json::json!({"event":"pane_agent_detected","data":{"agent":"claude","pane_id":"w1:p5","type":"pane_agent_detected","workspace_id":"w1"}}));
+    gate.arrived().await;
+    // The old stream ends while the new one is not yet open, and an existing
+    // pane changes in that gap with no event anyone could see.
+    r.fake.drop_subscribers();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    r.fake.set_agent(fake_agent("w1:p1", "claude", "blocked"));
+    gate.release();
+    until("needs_you without a periodic list", || {
+        (r.state("w1:p1") == Some(AgentState::NeedsYou)).then_some(())
+    })
+    .await;
 }
 
 #[tokio::test]
