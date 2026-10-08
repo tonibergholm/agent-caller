@@ -457,3 +457,164 @@ async fn failed_connect_list_is_retried_promptly() {
     .await;
     assert_eq!(*handle.health().borrow(), Health::Connected);
 }
+
+fn screen(name: &str) -> String {
+    std::fs::read_to_string(format!(
+        "{}/../../tests/fixtures/herdr/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn blocked_pane_gets_a_read_only_request_then_terminal() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "other-agent", "blocked"));
+    fake.set_screen(
+        "w1:p1",
+        "detection",
+        &screen("codex-trust-dialog-detection.txt"),
+    );
+    let r = rig(fake).await;
+    let req = until("fallback", || {
+        r.core.agent(&r.id("w1:p1")).and_then(|a| a.pending)
+    })
+    .await;
+    assert_eq!(
+        (req.kind, req.answer_path),
+        (RequestKind::BlockedUnparsed, AnswerPath::None)
+    );
+    assert!(!req.is_answerable());
+    assert!(req.raw_screen.as_ref().unwrap().lines().count() <= 40);
+    let res = r
+        .core
+        .handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "a1".into(),
+                request_id: req.id.clone(),
+                option_id: Some("x".into()),
+                text: None,
+            },
+        )
+        .await;
+    assert_eq!(res.error_code(), Some(ErrorCode::NotAnswerable));
+    // Answered in the terminal.
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("codex-idle-detection.txt"));
+    r.fake.set_status("w1:p1", "idle");
+    until("cleared", || {
+        r.core
+            .agent(&r.id("w1:p1"))
+            .is_some_and(|a| a.pending.is_none())
+            .then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn structured_request_suppresses_the_fallback() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "working"));
+    fake.set_screen("w1:p1", "detection", &screen("claude-permission-bash.txt"));
+    let r = rig(fake).await;
+    until("agent", || r.state("w1:p1")).await;
+    let mut obs = acd_core::testing::permission_obs(&r.id("w1:p1"), "hook-key");
+    obs.answer_path = AnswerPath::Hook;
+    r.core.observe(acd_core::Observation::RequestSeen(obs));
+    r.fake.set_status("w1:p1", "blocked");
+    // Wait for evidence that the fallback ran (several detection reads), not for a fixed time.
+    until("fallback reads", || {
+        (r.fake
+            .calls()
+            .iter()
+            .filter(|(m, p)| m == "agent.read" && p["source"] == "detection")
+            .count()
+            >= 3)
+            .then_some(())
+    })
+    .await;
+    let p = r.core.agent(&r.id("w1:p1")).unwrap().pending.unwrap();
+    assert_eq!(
+        p.kind,
+        RequestKind::Permission,
+        "no blocked_unparsed may replace a structured request"
+    );
+}
+
+#[tokio::test]
+async fn upgraded_fallback_is_not_resolved_terminal_by_the_fallback() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "blocked"));
+    let dialog = screen("claude-permission-bash.txt");
+    fake.set_screen("w1:p1", "detection", &dialog);
+    let r = rig(fake).await;
+    let fb = until("fallback", || {
+        r.core.agent(&r.id("w1:p1")).and_then(|a| a.pending)
+    })
+    .await;
+    // P3 upgrades it in place (same id).
+    let fp = acd_adapters::herdr::screen::fallback_fingerprint(&dialog);
+    let mut up = acd_core::testing::permission_obs(&r.id("w1:p1"), "hook-key");
+    up.upgrade_from = Some(acd_adapters::herdr::fallback::key(&r.hash, "w1:p1", &fp));
+    r.core.observe(acd_core::Observation::RequestSeen(up));
+    assert_eq!(
+        r.core.request(&fb.id).unwrap().kind,
+        RequestKind::Permission
+    );
+    // The dialog closes (as after an inbox answer); the fallback must leave attribution alone.
+    let reads = || {
+        r.fake
+            .calls()
+            .iter()
+            .filter(|(m, p)| m == "agent.read" && p["source"] == "detection")
+            .count()
+    };
+    let before = reads();
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("claude-idle-detection.txt"));
+    r.fake.set_status("w1:p1", "working");
+    // Two absent reads end the fallback and polling stops, so a third read
+    // never comes: wait for two, then check that reads have stopped.
+    until("two reads after the change", || {
+        (reads() >= before + 2).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let settled = reads();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(reads(), settled, "polling stops once the fallback ended");
+    // The task is serial: an agent.get from here runs after FallbackEnded.
+    let gets = || {
+        r.fake
+            .calls()
+            .iter()
+            .filter(|(m, _)| m == "agent.get")
+            .count()
+    };
+    let g = gets();
+    r.handle
+        .hints()
+        .send(Hint::Pane("w1:p1".into()))
+        .await
+        .unwrap();
+    until("a later turn", || (gets() > g).then_some(())).await;
+    assert!(
+        r.core.request(&fb.id).is_some(),
+        "only the structured request's owner may resolve it"
+    );
+}
+
+#[tokio::test]
+async fn restart_with_a_blocked_pane_reopens_the_request() {
+    // Spec §12 / §14.8: after an acd restart, requests still on screen reappear.
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "blocked"));
+    fake.set_screen("w1:p1", "detection", &screen("claude-permission-bash.txt"));
+    let r = rig(fake).await; // a fresh Core is a restarted acd
+    let req = until("reopened", || {
+        r.core.agent(&r.id("w1:p1")).and_then(|a| a.pending)
+    })
+    .await;
+    assert_eq!(req.kind, RequestKind::BlockedUnparsed);
+}

@@ -46,6 +46,14 @@ pub fn clean_display(s: &str, max_chars: usize) -> String {
     cap_chars(cleaned.trim(), max_chars)
 }
 
+/// Screen text for display: keeps newlines, drops every other control
+/// character and the bidi/separator set.
+pub fn clean_screen(s: &str) -> String {
+    s.chars()
+        .filter(|&c| c == '\n' || !(c.is_control() || is_forbidden_format(c)))
+        .collect()
+}
+
 /// Keeps the first `max` chars, ending in `…` when cut.
 pub fn cap_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -99,6 +107,15 @@ mod tests {
             clean_display("/Users/u/src/app", usize::MAX),
             "/Users/u/src/app"
         );
+    }
+
+    #[test]
+    fn clean_screen_keeps_newlines_and_strips_the_rest() {
+        assert_eq!(
+            clean_screen("a\u{1b}[31mb\n\u{202E}c\td\r\ne\u{2028}"),
+            "a[31mb\ncd\ne"
+        );
+        assert_eq!(clean_screen("👩‍💻\nok"), "👩‍💻\nok");
     }
 
     #[test]

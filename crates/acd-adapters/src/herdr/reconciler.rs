@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use acd_core::{AgentObs, Core, Observation};
-use acd_protocol::{AgentKind, AgentState};
+use acd_core::{AgentObs, Core, CorrelationKey, Observation, RequestObs};
+use acd_protocol::{AgentKind, AgentState, AnswerPath, RequestKind};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until};
 
 use super::client::{CallError, Herdr, Subscription};
+use super::fallback::{self, Fallback, FbOut};
 use super::map;
 use super::wire::{AgentInfo, Event};
 
@@ -149,6 +150,7 @@ pub fn spawn(
     let (health_tx, health_rx) = watch::channel(Health::Connecting);
     let (stop_tx, stop_rx) = oneshot::channel();
     let hash = map::socket_hash(herdr.path());
+    let timing_after = timing.fallback_after;
     let reconciler = Reconciler {
         herdr,
         core: core.clone(),
@@ -171,6 +173,9 @@ pub fn spawn(
         dirty: VecDeque::new(),
         dirty_set: HashSet::new(),
         poll_queue: VecDeque::new(),
+        next_poll: Instant::now(),
+        fallback: Fallback::new(timing_after),
+        fb_open: HashMap::new(),
         next_class: Class::Hint,
         last_list: Instant::now(),
     };
@@ -245,8 +250,12 @@ struct Reconciler {
     resync: Arc<AtomicBool>,
     dirty: VecDeque<String>,
     dirty_set: HashSet<String>,
-    /// Round-robin of due screen reads; the fallback (Task 6) fills it.
+    /// Round-robin of due screen reads, filled from `fallback.due` every poll.
     poll_queue: VecDeque<String>,
+    next_poll: Instant,
+    fallback: Fallback,
+    /// Pane -> (key, request id) of the fallback request this task opened.
+    fb_open: HashMap<String, (CorrelationKey, String)>,
     next_class: Class,
     last_list: Instant,
 }
@@ -366,14 +375,11 @@ impl Reconciler {
                 return flow;
             }
             self.drain_hints();
+            self.enqueue_due();
             let result = match self.pick() {
                 Some(Class::Hint) => self.hint_unit().await,
                 Some(Class::List) => self.list_unit(true).await,
-                Some(Class::Poll) => {
-                    // Task 6 reads the screen of the front pane here.
-                    self.poll_queue.pop_front();
-                    Ok(())
-                }
+                Some(Class::Poll) => self.poll_unit().await,
                 None => self.wait().await,
             };
             let result = match result {
@@ -465,6 +471,7 @@ impl Reconciler {
     /// Every class is empty: wait for control, a hint or the list timer.
     async fn wait(&mut self) -> Result<(), Flow> {
         let due = self.last_list + self.list_interval();
+        let poll_due = self.next_poll;
         enum Woke {
             Stop,
             Down(u64),
@@ -477,6 +484,7 @@ impl Reconciler {
             Some(g) = self.down_rx.recv() => Woke::Down(g),
             Some(h) = self.hint_rx.recv() => Woke::Hint(h),
             _ = sleep_until(due) => Woke::Idle,
+            _ = sleep_until(poll_due) => Woke::Idle,
         };
         match woke {
             Woke::Stop => Err(Flow::Stop),
@@ -506,6 +514,95 @@ impl Reconciler {
                 Ok(())
             }
             Err(e) => Err(Flow::Lost(e.to_string())),
+        }
+    }
+
+    /// Every `poll`, queues the panes the fallback wants read, skipping any
+    /// already queued.
+    fn enqueue_due(&mut self) {
+        let now = Instant::now();
+        if now < self.next_poll {
+            return;
+        }
+        self.next_poll = now + self.timing.poll;
+        for pane_id in self.fallback.due(now.into_std()) {
+            if self.known.contains_key(&pane_id) && !self.poll_queue.contains(&pane_id) {
+                self.poll_queue.push_back(pane_id);
+            }
+        }
+    }
+
+    /// One `agent.read source=detection` for the front of the poll queue.
+    async fn poll_unit(&mut self) -> Result<(), Flow> {
+        let Some(pane_id) = self.poll_queue.pop_front() else {
+            return Ok(());
+        };
+        if !self.known.contains_key(&pane_id) {
+            return Ok(());
+        }
+        match self.herdr.read(&pane_id, "detection", None).await {
+            Ok(text) => {
+                self.apply_read(&pane_id, &text);
+                Ok(())
+            }
+            Err(e) if is_server(&e) => {
+                tracing::debug!(error = %e, "herdr agent.read failed");
+                Ok(())
+            }
+            Err(e) => Err(Flow::Lost(e.to_string())),
+        }
+    }
+
+    fn apply_read(&mut self, pane_id: &str, text: &str) {
+        let agent_id = map::agent_id(&self.hash, pane_id);
+        let other_pending = self
+            .core
+            .agent(&agent_id)
+            .and_then(|a| a.pending)
+            .is_some_and(|p| p.kind != RequestKind::BlockedUnparsed);
+        let outs = self
+            .fallback
+            .on_read(pane_id, text, other_pending, Instant::now().into_std());
+        for out in outs {
+            match out {
+                FbOut::Open {
+                    fingerprint,
+                    raw_screen,
+                } => {
+                    let key = fallback::key(&self.hash, pane_id, &fingerprint);
+                    self.core.observe(Observation::FallbackSeen(RequestObs {
+                        agent_id: agent_id.clone(),
+                        key: key.clone(),
+                        upgrade_from: None,
+                        kind: RequestKind::BlockedUnparsed,
+                        answer_path: AnswerPath::None,
+                        title: "Waiting for input in the terminal".into(),
+                        detail: String::new(),
+                        options: vec![],
+                        questions: None,
+                        free_text: false,
+                        raw_screen: Some(raw_screen),
+                        ready: false,
+                        reusable_key: true,
+                    }));
+                    match self.core.request_id_for(&agent_id, &key) {
+                        Some(request_id) => {
+                            self.fb_open.insert(pane_id.to_owned(), (key, request_id));
+                        }
+                        // A structured request won the race.
+                        None => self.fallback.discard_open(pane_id),
+                    }
+                }
+                FbOut::End { .. } => {
+                    if let Some((key, request_id)) = self.fb_open.remove(pane_id) {
+                        self.core.observe(Observation::FallbackEnded {
+                            agent_id: agent_id.clone(),
+                            key,
+                            request_id,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -579,9 +676,16 @@ impl Reconciler {
                         hints: self.hints_tx.clone(),
                     },
                 );
+                self.fallback.on_state(
+                    pane_id,
+                    obs.state == AgentState::NeedsYou,
+                    Instant::now().into_std(),
+                );
                 self.core.observe(Observation::AgentUpsert(obs));
             }
             None => {
+                self.fallback.forget(pane_id);
+                self.fb_open.remove(pane_id);
                 if self.known.remove(pane_id).is_some() {
                     self.subs_changed = true;
                     self.blocked.remove(pane_id);
