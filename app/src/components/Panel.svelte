@@ -3,6 +3,7 @@
   import type { InboxView } from "../lib/bindings/InboxView";
   import type { Api } from "../lib/ipc";
   import { fromEvent, normalize, onKey, type Effect, type KeyState } from "../lib/keys";
+  import Card from "./Card.svelte";
   import ReplyBox from "./ReplyBox.svelte";
 
   import { MAX_REPLY_BYTES, byteLength } from "../lib/limits";
@@ -19,10 +20,8 @@
   let now = $state(Date.now());
   let error = $state<string | null>(null);
 
-  $effect(() => {
-    void view;
-    error = null;
-  });
+  // The error is cleared only by the next user key or click, never by a
+  // view push, so a rejection stays visible until the user acts again.
 
   $effect(() => {
     const next = normalize(view, st);
@@ -77,13 +76,15 @@
     st = state;
     if (effect.kind === "none") return;
     event.preventDefault();
-    run(effect).catch((e) => {
-      error = `Could not send: ${e instanceof Error ? e.message : String(e)}`;
-    });
+    act(run(effect), false);
   }
 
-  function remaining(firesAt: number): string {
-    return (Math.max(0, firesAt - now) / 1000).toFixed(1);
+  /** Click-driven calls: clear the old message, then show any rejection. */
+  function act(p: Promise<unknown>, clear = true) {
+    if (clear) error = null;
+    p.catch((e) => {
+      error = `Could not send: ${e instanceof Error ? e.message : String(e)}`;
+    });
   }
 
   const statusText = (s: InboxView["machines"][number]["status"]) => s.kind.replace(/_/g, " ");
@@ -108,27 +109,19 @@
   {/if}
 
   {#each view.cards as c (c.key)}
-    <div class="card" data-key={c.key} class:selected={st.selected === c.key} aria-busy={c.busy}>
-      <div class="title">{c.agent.title}</div>
-      <div class="meta">{c.machine_name}{c.agent.project ? ` / ${c.agent.project}` : ""}</div>
-      {#if c.agent.pending}
-        <div class="request">{c.agent.pending.title}</div>
-        <ol class="options">
-          {#each c.agent.pending.options as o, i (o.id)}
-            <li class:disabled={!c.selectable_options.includes(o.id)}>
-              {i + 1}. {o.label}{o.description ? ` (${o.description})` : ""}
-            </li>
-          {/each}
-        </ol>
-      {/if}
-      {#if c.action}
-        <button class="undo" onclick={() => api.cancel(c.action!.id)}>
-          {c.action.label} in {remaining(c.action.fires_at_ms)}s. Click or Esc to cancel
-        </button>
-      {/if}
-      {#if c.notice}
-        <div class="notice" data-tone={c.notice.tone}>{c.notice.text}</div>
-      {/if}
+    <div class="slot">
+      <Card
+        card={c}
+        selected={st.selected === c.key}
+        {now}
+        onpick={(optionId) => {
+          const pending = c.agent.pending;
+          if (pending) act(run({ kind: "pick", cardKey: c.key, requestId: pending.id, optionId }));
+        }}
+        oncancel={(actionId) => {
+          act(api.cancel(actionId));
+        }}
+      />
       {#if st.replyFor === c.key}
         <ReplyBox bind:value={replyText} />
       {/if}
@@ -137,11 +130,11 @@
 
   <footer>
     {#if view.show_idle}
-      <button onclick={() => api.setShowIdle(false)}>Hide idle</button>
+      <button onclick={() => act(api.setShowIdle(false))}>Hide idle</button>
     {:else if view.hidden_idle > 0}
-      <button onclick={() => api.setShowIdle(true)}>Show {view.hidden_idle} idle</button>
+      <button onclick={() => act(api.setShowIdle(true))}>Show {view.hidden_idle} idle</button>
     {/if}
-    <button onclick={() => api.openSettings()}>Settings</button>
+    <button onclick={() => act(api.openSettings())}>Settings</button>
   </footer>
 </main>
 
@@ -158,27 +151,8 @@
     font-size: 11px;
     opacity: 0.8;
   }
-  .card {
-    border: 1px solid transparent;
-    border-radius: 6px;
-    padding: 6px;
-  }
-  .card.selected {
-    border-color: #48f;
-  }
-  .options {
-    list-style: none;
-    margin: 4px 0;
-    padding: 0;
-  }
-  .disabled {
-    opacity: 0.5;
-  }
   .error {
     color: #c00;
-  }
-  .notice[data-tone="warning"] {
-    color: #b60;
   }
   footer {
     display: flex;

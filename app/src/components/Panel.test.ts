@@ -1,8 +1,9 @@
-import { cleanup, render, screen } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test } from "vitest";
 import Panel from "./Panel.svelte";
 import { card, view, fakeApi } from "../lib/fixtures";
+import { MAX_REPLY_BYTES } from "../lib/limits";
 
 afterEach(cleanup);
 
@@ -93,4 +94,88 @@ test("a rejected markSeen is shown, and the next key clears it", async () => {
 test("the empty-state hint uses the given hotkey", () => {
   render(Panel, { view: view(), api: fakeApi(), hotkey: "Command+Shift+K" });
   expect(screen.getByText(/Command\+Shift\+K/)).toBeTruthy();
+});
+
+test("a rejected reply is shown and the field stays open", async () => {
+  const api = fakeApi();
+  api.reply = async () => {
+    throw "agent gone";
+  };
+  render(Panel, { view: view({ cards: [card({ key: "m/b", can_reply: true })] }), api });
+  await userEvent.keyboard("r");
+  await userEvent.keyboard("hello");
+  await userEvent.keyboard("{Enter}");
+  expect((await screen.findByRole("alert")).textContent).toContain("agent gone");
+  expect(screen.getByRole("textbox")).toBeTruthy();
+});
+
+test("an over-limit reply is not sent and the field stays open", async () => {
+  const api = fakeApi();
+  render(Panel, { view: view({ cards: [card({ key: "m/b", can_reply: true })] }), api });
+  await userEvent.keyboard("r");
+  const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+  await fireEvent.input(box, { target: { value: "x".repeat(MAX_REPLY_BYTES + 1) } });
+  await userEvent.keyboard("{Enter}");
+  expect(api.calls.filter((c) => c[0] === "reply")).toEqual([]);
+  expect(screen.getByRole("textbox")).toBeTruthy();
+});
+
+test("a whitespace-only reply is not sent", async () => {
+  const api = fakeApi();
+  render(Panel, { view: view({ cards: [card({ key: "m/b", can_reply: true })] }), api });
+  await userEvent.keyboard("r");
+  await userEvent.keyboard("   {Enter}");
+  expect(api.calls.filter((c) => c[0] === "reply")).toEqual([]);
+});
+
+test("a view push does not clear a rejection; the next key does", async () => {
+  const api = fakeApi();
+  api.markSeen = async () => {
+    throw "boom";
+  };
+  const c = card({ key: "m/b", can_mark_seen: true });
+  const { rerender } = render(Panel, { view: view({ cards: [c] }), api });
+  await userEvent.keyboard("e");
+  expect((await screen.findByRole("alert")).textContent).toContain("boom");
+  await rerender({ view: view({ cards: [c], hidden_idle: 1 }), api });
+  expect(screen.getByRole("alert").textContent).toContain("boom");
+  await userEvent.keyboard("x");
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("rejected footer, card-button and countdown-cancel calls are shown", async () => {
+  const boom = async () => {
+    throw "denied";
+  };
+  let api = fakeApi();
+  api.setShowIdle = boom;
+  const r1 = render(Panel, { view: view({ hidden_idle: 2 }), api });
+  await userEvent.click(screen.getByRole("button", { name: /show 2 idle/i }));
+  expect((await screen.findByRole("alert")).textContent).toContain("denied");
+  r1.unmount();
+
+  api = fakeApi();
+  api.openSettings = boom;
+  const r2 = render(Panel, { view: view(), api });
+  await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("denied");
+  r2.unmount();
+
+  api = fakeApi();
+  api.pick = boom;
+  const c = card({ key: "m/a", answerable: true, selectable_options: ["allow"] });
+  const r3 = render(Panel, { view: view({ cards: [c] }), api });
+  await userEvent.click(screen.getByRole("button", { name: /1\. Yes/ }));
+  expect((await screen.findByRole("alert")).textContent).toContain("denied");
+  r3.unmount();
+
+  api = fakeApi();
+  api.cancel = boom;
+  const a = card({
+    key: "m/a",
+    action: { id: "a1", card_key: "m/a", label: "Yes", detail: null, fires_at_ms: Date.now() + 2000 },
+  });
+  render(Panel, { view: view({ cards: [a] }), api });
+  await userEvent.click(screen.getByRole("button", { name: /sending yes/i }));
+  expect((await screen.findByRole("alert")).textContent).toContain("denied");
 });
