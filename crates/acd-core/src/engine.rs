@@ -66,6 +66,7 @@ impl Core {
             Source::Hooks => &mut st.machine.sources.hooks,
             Source::Herdr => &mut st.machine.sources.herdr,
             Source::T3 => &mut st.machine.sources.t3,
+            Source::Unknown => return,
         };
         if *slot == status { return; }
         *slot = status;

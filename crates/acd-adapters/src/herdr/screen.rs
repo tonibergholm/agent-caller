@@ -584,7 +584,7 @@ pub fn prompt_line(kind: AgentKind, text: &str) -> Option<String> {
                 .is_none()
                 .then(|| content.to_string())
         }
-        AgentKind::Other => None,
+        AgentKind::Other | AgentKind::Unknown => None,
     }
 }
 

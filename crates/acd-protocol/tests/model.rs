@@ -7,7 +7,12 @@ fn opened_at() -> Timestamp {
 }
 
 fn opt(id: &str, label: &str, effect: Effect) -> RequestOption {
-    RequestOption { id: id.into(), label: label.into(), description: None, effect }
+    RequestOption {
+        id: id.into(),
+        label: label.into(),
+        description: None,
+        effect,
+    }
 }
 
 fn permission() -> Request {
@@ -19,7 +24,10 @@ fn permission() -> Request {
         answer_path: AnswerPath::Hook,
         title: "Bash".into(),
         detail: "touch x".into(),
-        options: vec![opt("allow", "Yes", Effect::Allow), opt("deny", "No", Effect::Deny)],
+        options: vec![
+            opt("allow", "Yes", Effect::Allow),
+            opt("deny", "No", Effect::Deny),
+        ],
         questions: None,
         free_text: false,
         raw_screen: None,
@@ -28,11 +36,22 @@ fn permission() -> Request {
 }
 
 fn question(questions: Vec<Question>) -> Request {
-    Request { kind: RequestKind::Question, answer_path: AnswerPath::Keys, questions: Some(questions), ..permission() }
+    Request {
+        kind: RequestKind::Question,
+        answer_path: AnswerPath::Keys,
+        questions: Some(questions),
+        ..permission()
+    }
 }
 
 fn q(multi_select: bool) -> Question {
-    Question { id: "q1".into(), header: None, text: "Color?".into(), multi_select, options: vec![opt("red", "Red", Effect::Choose)] }
+    Question {
+        id: "q1".into(),
+        header: None,
+        text: "Color?".into(),
+        multi_select,
+        options: vec![opt("red", "Red", Effect::Choose)],
+    }
 }
 
 #[test]
@@ -70,18 +89,39 @@ fn unknown_enum_values_and_fields_are_tolerated() {
 fn unknown_agent_state_maps_to_unknown() {
     let s: AgentState = serde_json::from_value(json!("hibernating")).unwrap();
     assert_eq!(s, AgentState::Unknown);
-    assert_eq!(serde_json::to_value(AgentState::NeedsYou).unwrap(), json!("needs_you"));
+    assert_eq!(
+        serde_json::to_value(AgentState::NeedsYou).unwrap(),
+        json!("needs_you")
+    );
 }
 
 #[test]
 fn answerability_rules() {
     assert!(permission().is_answerable());
-    assert!(!Request { answer_path: AnswerPath::None, ..permission() }.is_answerable());
-    assert!(!Request { kind: RequestKind::BlockedUnparsed, ..permission() }.is_answerable());
+    assert!(
+        !Request {
+            answer_path: AnswerPath::None,
+            ..permission()
+        }
+        .is_answerable()
+    );
+    assert!(
+        !Request {
+            kind: RequestKind::BlockedUnparsed,
+            ..permission()
+        }
+        .is_answerable()
+    );
     assert!(question(vec![q(false)]).is_answerable());
     assert!(!question(vec![q(true)]).is_answerable());
     assert!(!question(vec![q(false), q(false)]).is_answerable());
-    assert!(!Request { questions: None, ..question(vec![]) }.is_answerable());
+    assert!(
+        !Request {
+            questions: None,
+            ..question(vec![])
+        }
+        .is_answerable()
+    );
 }
 
 #[test]
@@ -97,47 +137,82 @@ fn unknown_answer_path_alone_makes_a_request_read_only() {
     let mut v = serde_json::to_value(permission()).unwrap();
     v["answer_path"] = json!("carrier_pigeon");
     let r: Request = serde_json::from_value(v).unwrap();
-    assert_eq!((r.kind, r.answer_path), (RequestKind::Permission, AnswerPath::Unknown));
+    assert_eq!(
+        (r.kind, r.answer_path),
+        (RequestKind::Permission, AnswerPath::Unknown)
+    );
     assert!(!r.is_answerable());
 }
 
 #[test]
 fn source_status_omits_an_absent_message() {
-    assert_eq!(serde_json::to_value(SourceStatus::unconfigured()).unwrap(), json!({"state": "unconfigured"}));
-    let degraded = SourceStatus { state: SourceState::Degraded, message: Some("t3 unreachable".into()) };
-    assert_eq!(serde_json::to_value(&degraded).unwrap(), json!({"state": "degraded", "message": "t3 unreachable"}));
+    assert_eq!(
+        serde_json::to_value(SourceStatus::unconfigured()).unwrap(),
+        json!({"state": "unconfigured"})
+    );
+    let degraded = SourceStatus {
+        state: SourceState::Degraded,
+        message: Some("t3 unreachable".into()),
+    };
+    assert_eq!(
+        serde_json::to_value(&degraded).unwrap(),
+        json!({"state": "degraded", "message": "t3 unreachable"})
+    );
 }
 
 #[test]
 fn machine_serializes_to_wire_shape() {
     let m = Machine {
-        id: "mac-1a2b3c4d".into(), name: "Mac".into(), acd_version: "0.1.0".into(),
+        id: "mac-1a2b3c4d".into(),
+        name: "Mac".into(),
+        acd_version: "0.1.0".into(),
         sources: Sources {
             hooks: SourceStatus::unconfigured(),
-            herdr: SourceStatus { state: SourceState::Ok, message: None },
-            t3: SourceStatus { state: SourceState::Disabled, message: None },
+            herdr: SourceStatus {
+                state: SourceState::Ok,
+                message: None,
+            },
+            t3: SourceStatus {
+                state: SourceState::Disabled,
+                message: None,
+            },
         },
     };
-    assert_eq!(serde_json::to_value(&m).unwrap(), json!({
-        "id": "mac-1a2b3c4d", "name": "Mac", "acd_version": "0.1.0",
-        "sources": {"hooks": {"state": "unconfigured"}, "herdr": {"state": "ok"}, "t3": {"state": "disabled"}}
-    }));
+    assert_eq!(
+        serde_json::to_value(&m).unwrap(),
+        json!({
+            "id": "mac-1a2b3c4d", "name": "Mac", "acd_version": "0.1.0",
+            "sources": {"hooks": {"state": "unconfigured"}, "herdr": {"state": "ok"}, "t3": {"state": "disabled"}}
+        })
+    );
 }
 
 #[test]
 fn agent_serializes_to_wire_shape() {
     let a = Agent {
-        id: "t3:th_1".into(), machine_id: "m".into(), source: Source::T3, kind: AgentKind::Codex,
-        title: "fix bug".into(), cwd: None, project: Some("app".into()), state: AgentState::NeedsYou,
-        state_since: opened_at(), failed: false, last_message: Some("done?".into()),
-        pending: Some(permission()), can_send: true,
+        id: "t3:th_1".into(),
+        machine_id: "m".into(),
+        source: Source::T3,
+        kind: AgentKind::Codex,
+        title: "fix bug".into(),
+        cwd: None,
+        project: Some("app".into()),
+        state: AgentState::NeedsYou,
+        state_since: opened_at(),
+        failed: false,
+        last_message: Some("done?".into()),
+        pending: Some(permission()),
+        can_send: true,
     };
     let v = serde_json::to_value(&a).unwrap();
-    assert_eq!(v, json!({
-        "id": "t3:th_1", "machine_id": "m", "source": "t3", "kind": "codex", "title": "fix bug",
-        "cwd": null, "project": "app", "state": "needs_you", "state_since": "2026-10-07T12:00:00.000Z",
-        "failed": false, "last_message": "done?", "pending": serde_json::to_value(permission()).unwrap(),
-        "can_send": true
-    }));
+    assert_eq!(
+        v,
+        json!({
+            "id": "t3:th_1", "machine_id": "m", "source": "t3", "kind": "codex", "title": "fix bug",
+            "cwd": null, "project": "app", "state": "needs_you", "state_since": "2026-10-07T12:00:00.000Z",
+            "failed": false, "last_message": "done?", "pending": serde_json::to_value(permission()).unwrap(),
+            "can_send": true
+        })
+    );
     assert_eq!(serde_json::from_value::<Agent>(v).unwrap(), a);
 }

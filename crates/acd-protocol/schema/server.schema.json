@@ -1,275 +1,6 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ServerMessage",
-  "oneOf": [
-    {
-      "type": "object",
-      "properties": {
-        "capabilities": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "epoch": {
-          "type": "string"
-        },
-        "machine": {
-          "$ref": "#/$defs/Machine"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "type": {
-          "type": "string",
-          "const": "welcome"
-        }
-      },
-      "required": [
-        "type",
-        "machine",
-        "capabilities",
-        "epoch",
-        "seq"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "agents": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Agent"
-          }
-        },
-        "epoch": {
-          "type": "string"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "type": {
-          "type": "string",
-          "const": "snapshot"
-        }
-      },
-      "required": [
-        "type",
-        "epoch",
-        "seq",
-        "agents"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "agent": {
-          "$ref": "#/$defs/Agent"
-        },
-        "epoch": {
-          "type": "string"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "type": {
-          "type": "string",
-          "const": "agent.updated"
-        }
-      },
-      "required": [
-        "type",
-        "epoch",
-        "seq",
-        "agent"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "agent_id": {
-          "type": "string"
-        },
-        "epoch": {
-          "type": "string"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "type": {
-          "type": "string",
-          "const": "agent.removed"
-        }
-      },
-      "required": [
-        "type",
-        "epoch",
-        "seq",
-        "agent_id"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "string"
-        },
-        "request": {
-          "$ref": "#/$defs/Request"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "type": {
-          "type": "string",
-          "const": "request.opened"
-        }
-      },
-      "required": [
-        "type",
-        "epoch",
-        "seq",
-        "request"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "agent_id": {
-          "type": "string"
-        },
-        "by": {
-          "$ref": "#/$defs/ResolvedBy"
-        },
-        "epoch": {
-          "type": "string"
-        },
-        "option_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "request_id": {
-          "type": "string"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "type": {
-          "type": "string",
-          "const": "request.resolved"
-        }
-      },
-      "required": [
-        "type",
-        "epoch",
-        "seq",
-        "request_id",
-        "agent_id",
-        "by"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "string"
-        },
-        "machine": {
-          "$ref": "#/$defs/Machine"
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "type": {
-          "type": "string",
-          "const": "machine.updated"
-        }
-      },
-      "required": [
-        "type",
-        "epoch",
-        "seq",
-        "machine"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "type": {
-          "type": "string",
-          "const": "result"
-        }
-      },
-      "$ref": "#/$defs/CommandResult",
-      "required": [
-        "type"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "pong"
-        }
-      },
-      "required": [
-        "type",
-        "id"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "code": {
-          "$ref": "#/$defs/ErrorCode"
-        },
-        "message": {
-          "type": "string"
-        },
-        "supported": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "type": "string"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "error"
-        }
-      },
-      "required": [
-        "type",
-        "code",
-        "message"
-      ]
-    }
-  ],
   "$defs": {
     "Agent": {
-      "type": "object",
       "properties": {
         "can_send": {
           "type": "boolean"
@@ -321,6 +52,7 @@
           "$ref": "#/$defs/AgentState"
         },
         "state_since": {
+          "format": "date-time",
           "type": "string"
         },
         "title": {
@@ -337,38 +69,39 @@
         "state_since",
         "failed",
         "can_send"
-      ]
+      ],
+      "type": "object"
     },
     "AgentKind": {
-      "type": "string",
       "enum": [
         "claude",
         "codex",
-        "other"
-      ]
+        "other",
+        "unknown"
+      ],
+      "type": "string"
     },
     "AgentState": {
-      "type": "string",
       "enum": [
         "working",
         "needs_you",
         "done",
         "idle",
         "unknown"
-      ]
+      ],
+      "type": "string"
     },
     "AnswerPath": {
-      "type": "string",
       "enum": [
         "hook",
         "keys",
         "t3",
         "none",
         "unknown"
-      ]
+      ],
+      "type": "string"
     },
     "CommandResult": {
-      "type": "object",
       "properties": {
         "error": {
           "anyOf": [
@@ -400,20 +133,20 @@
       "required": [
         "id",
         "ok"
-      ]
+      ],
+      "type": "object"
     },
     "Effect": {
-      "type": "string",
       "enum": [
         "allow",
         "allow_always",
         "deny",
         "choose",
         "unknown"
-      ]
+      ],
+      "type": "string"
     },
     "ErrorBody": {
-      "type": "object",
       "properties": {
         "code": {
           "$ref": "#/$defs/ErrorCode"
@@ -425,12 +158,12 @@
       "required": [
         "code",
         "message"
-      ]
+      ],
+      "type": "object"
     },
     "ErrorCode": {
       "oneOf": [
         {
-          "type": "string",
           "enum": [
             "request_gone",
             "request_busy",
@@ -445,17 +178,17 @@
             "source_unavailable",
             "unauthorized",
             "unsupported_protocol"
-          ]
+          ],
+          "type": "string"
         },
         {
+          "const": "unknown",
           "description": "A code this version does not know (spec §7.2: tolerate unknown input).",
-          "type": "string",
-          "const": "unknown"
+          "type": "string"
         }
       ]
     },
     "Machine": {
-      "type": "object",
       "properties": {
         "acd_version": {
           "type": "string"
@@ -475,16 +208,16 @@
         "name",
         "acd_version",
         "sources"
-      ]
+      ],
+      "type": "object"
     },
     "Outcome": {
-      "type": "string",
       "enum": [
         "delivered"
-      ]
+      ],
+      "type": "string"
     },
     "Question": {
-      "type": "object",
       "properties": {
         "header": {
           "type": [
@@ -499,10 +232,10 @@
           "type": "boolean"
         },
         "options": {
-          "type": "array",
           "items": {
             "$ref": "#/$defs/RequestOption"
-          }
+          },
+          "type": "array"
         },
         "text": {
           "type": "string"
@@ -513,10 +246,10 @@
         "text",
         "multi_select",
         "options"
-      ]
+      ],
+      "type": "object"
     },
     "Request": {
-      "type": "object",
       "properties": {
         "agent_id": {
           "type": "string"
@@ -537,22 +270,23 @@
           "$ref": "#/$defs/RequestKind"
         },
         "opened_at": {
+          "format": "date-time",
           "type": "string"
         },
         "options": {
-          "type": "array",
           "items": {
             "$ref": "#/$defs/RequestOption"
-          }
+          },
+          "type": "array"
         },
         "questions": {
+          "items": {
+            "$ref": "#/$defs/Question"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "$ref": "#/$defs/Question"
-          }
+          ]
         },
         "raw_screen": {
           "type": [
@@ -578,19 +312,19 @@
         "options",
         "free_text",
         "opened_at"
-      ]
+      ],
+      "type": "object"
     },
     "RequestKind": {
-      "type": "string",
       "enum": [
         "permission",
         "question",
         "blocked_unparsed",
         "unknown"
-      ]
+      ],
+      "type": "string"
     },
     "RequestOption": {
-      "type": "object",
       "properties": {
         "description": {
           "type": [
@@ -612,46 +346,50 @@
         "id",
         "label",
         "effect"
-      ]
+      ],
+      "type": "object"
     },
     "RequestStatus": {
-      "type": "string",
       "enum": [
         "open",
         "answering",
-        "resolved"
-      ]
+        "resolved",
+        "unknown"
+      ],
+      "type": "string"
     },
     "ResolvedBy": {
-      "type": "string",
       "enum": [
         "inbox",
         "terminal",
         "agent",
         "superseded",
         "uncertain",
-        "lost"
-      ]
+        "lost",
+        "unknown"
+      ],
+      "type": "string"
     },
     "Source": {
-      "type": "string",
       "enum": [
         "herdr",
         "t3",
-        "hooks"
-      ]
+        "hooks",
+        "unknown"
+      ],
+      "type": "string"
     },
     "SourceState": {
-      "type": "string",
       "enum": [
         "ok",
         "degraded",
         "disabled",
-        "unconfigured"
-      ]
+        "unconfigured",
+        "unknown"
+      ],
+      "type": "string"
     },
     "SourceStatus": {
-      "type": "object",
       "properties": {
         "message": {
           "type": [
@@ -665,10 +403,10 @@
       },
       "required": [
         "state"
-      ]
+      ],
+      "type": "object"
     },
     "Sources": {
-      "type": "object",
       "properties": {
         "herdr": {
           "$ref": "#/$defs/SourceStatus"
@@ -684,7 +422,308 @@
         "hooks",
         "herdr",
         "t3"
-      ]
+      ],
+      "type": "object"
     }
-  }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "machine": {
+          "$ref": "#/$defs/Machine"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "welcome",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "machine",
+        "capabilities",
+        "epoch",
+        "seq"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/Agent"
+          },
+          "type": "array"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "snapshot",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "agents"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/Agent"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "agent.updated",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "agent"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "agent.removed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "agent_id"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/Request"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "request.opened",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "request"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "by": {
+          "$ref": "#/$defs/ResolvedBy"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "option_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "request.resolved",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "request_id",
+        "agent_id",
+        "by"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "machine": {
+          "$ref": "#/$defs/Machine"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "machine.updated",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "epoch",
+        "seq",
+        "machine"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CommandResult",
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "error": {
+                  "type": "null"
+                },
+                "ok": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "properties": {
+                "error": {
+                  "type": "object"
+                },
+                "ok": {
+                  "const": false
+                },
+                "outcome": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "error"
+              ]
+            }
+          ]
+        }
+      ],
+      "properties": {
+        "type": {
+          "const": "result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "pong",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "supported": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "error",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "code",
+        "message"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ServerMessage"
 }

@@ -2,15 +2,15 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use acd_protocol::*;
+use axum::Router;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
-use axum::http::{header::ORIGIN, HeaderMap, StatusCode};
+use axum::extract::{ConnectInfo, Extension, State};
+use axum::http::{HeaderMap, StatusCode, header::ORIGIN};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use subtle::ConstantTimeEq;
-use tokio::sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 use crate::engine::{Core, MAX_ID_BYTES, RING_CAPACITY};
@@ -28,19 +28,28 @@ pub struct Auth {
 
 impl Auth {
     pub fn new(token: String) -> Self {
-        Self { token: RwLock::new(token), generation: watch::channel(0).0 }
+        Self {
+            token: RwLock::new(token),
+            generation: watch::channel(0).0,
+        }
     }
     pub fn rotate(&self, token: String) {
         let mut g = self.token.write().unwrap();
         *g = token;
         self.generation.send_modify(|n| *n += 1);
     }
-    pub fn generation(&self) -> u64 { *self.generation.borrow() }
-    fn subscribe(&self) -> watch::Receiver<u64> { self.generation.subscribe() }
+    pub fn generation(&self) -> u64 {
+        *self.generation.borrow()
+    }
+    fn subscribe(&self) -> watch::Receiver<u64> {
+        self.generation.subscribe()
+    }
     fn check(&self, presented: &str) -> Option<u64> {
         let g = self.token.read().unwrap();
         // An empty stored token must never authenticate (ct_eq("", "") is true).
-        if g.is_empty() { return None; }
+        if g.is_empty() {
+            return None;
+        }
         bool::from(g.as_bytes().ct_eq(presented.as_bytes())).then(|| self.generation())
     }
 }
@@ -85,19 +94,37 @@ struct AppState {
 pub fn router(core: Arc<Core>, auth: Arc<Auth>, opts: ServerOptions) -> Router {
     let preauth = Arc::new(Semaphore::new(opts.max_preauth));
     let inflight_total = Arc::new(Semaphore::new(opts.max_inflight_total));
-    Router::new().route("/", get(upgrade)).with_state(AppState { core, auth, opts, preauth, inflight_total })
+    Router::new().route("/", get(upgrade)).with_state(AppState {
+        core,
+        auth,
+        opts,
+        preauth,
+        inflight_total,
+    })
 }
 
-async fn upgrade(State(st): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+async fn upgrade(
+    State(st): State<AppState>,
+    admit: Option<Extension<ConnectInfo<crate::tls::Admit>>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let admit = admit.map(|Extension(info)| info);
     if let Some(origin) = headers.get(ORIGIN) {
-        let allowed = origin.to_str().is_ok_and(|o| st.opts.allowed_origins.iter().any(|a| a == o));
-        if !allowed { return StatusCode::FORBIDDEN.into_response(); }
+        let allowed = origin
+            .to_str()
+            .is_ok_and(|o| st.opts.allowed_origins.iter().any(|a| a == o));
+        if !allowed {
+            return StatusCode::FORBIDDEN.into_response();
+        }
     }
     let Ok(permit) = st.preauth.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let max = st.opts.max_frame;
-    ws.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| session(st, socket, permit))
+    ws.max_message_size(max)
+        .max_frame_size(max)
+        .on_upgrade(move |socket| session(st, socket, permit, admit.map(|ConnectInfo(a)| a)))
 }
 
 fn text(msg: &ServerMessage) -> Message {
@@ -105,11 +132,18 @@ fn text(msg: &ServerMessage) -> Message {
 }
 
 fn close_msg(code: u16, reason: &str) -> Message {
-    Message::Close(Some(CloseFrame { code, reason: reason.to_string().into() }))
+    Message::Close(Some(CloseFrame {
+        code,
+        reason: reason.to_string().into(),
+    }))
 }
 
 fn error(code: ErrorCode, message: &str) -> ServerMessage {
-    ServerMessage::Error { code, message: message.into(), supported: None }
+    ServerMessage::Error {
+        code,
+        message: message.into(),
+        supported: None,
+    }
 }
 
 const PREAUTH_SEND_TIMEOUT: Duration = Duration::from_secs(2);
@@ -133,12 +167,23 @@ async fn reply(out: &mpsc::Sender<Message>, msg: &ServerMessage) -> Result<(), C
     }
 }
 
-async fn session(st: AppState, mut socket: WebSocket, permit: OwnedSemaphorePermit) {
+async fn session(
+    st: AppState,
+    mut socket: WebSocket,
+    permit: OwnedSemaphorePermit,
+    admit: Option<crate::tls::Admit>,
+) {
     let hello = match tokio::time::timeout(st.opts.hello_timeout, socket.recv()).await {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<ClientMessage>(t.as_str()).ok(),
         _ => None,
     };
-    let Some(ClientMessage::Hello { protocol, token, client, resume }) = hello else {
+    let Some(ClientMessage::Hello {
+        protocol,
+        token,
+        client,
+        resume,
+    }) = hello
+    else {
         preauth_send(&mut socket, close_msg(CLOSE_UNAUTHORIZED, "hello required")).await;
         return;
     };
@@ -149,21 +194,39 @@ async fn session(st: AppState, mut socket: WebSocket, permit: OwnedSemaphorePerm
             supported: Some(vec![PROTOCOL.to_string()]),
         };
         preauth_send(&mut socket, text(&msg)).await;
-        preauth_send(&mut socket, close_msg(CLOSE_BAD_PROTOCOL, "unsupported protocol")).await;
+        preauth_send(
+            &mut socket,
+            close_msg(CLOSE_BAD_PROTOCOL, "unsupported protocol"),
+        )
+        .await;
         return;
     }
     let mut gen_rx = st.auth.subscribe();
     let Some(generation) = st.auth.check(&token) else {
-        preauth_send(&mut socket, text(&error(ErrorCode::Unauthorized, "invalid token"))).await;
+        preauth_send(
+            &mut socket,
+            text(&error(ErrorCode::Unauthorized, "invalid token")),
+        )
+        .await;
         preauth_send(&mut socket, close_msg(CLOSE_UNAUTHORIZED, "unauthorized")).await;
         return;
     };
     if client.id.len() > MAX_ID_BYTES {
-        preauth_send(&mut socket, text(&error(ErrorCode::BadRequest, "client.id longer than 128 bytes"))).await;
+        preauth_send(
+            &mut socket,
+            text(&error(
+                ErrorCode::BadRequest,
+                "client.id longer than 128 bytes",
+            )),
+        )
+        .await;
         preauth_send(&mut socket, close_msg(CLOSE_UNAUTHORIZED, "invalid hello")).await;
         return;
     }
     drop(permit);
+    if let Some(admit) = admit {
+        admit.authenticated();
+    }
 
     let (mut sink, mut stream) = socket.split();
     let (out, mut out_rx) = mpsc::channel::<Message>(RING_CAPACITY);
@@ -182,7 +245,18 @@ async fn session(st: AppState, mut socket: WebSocket, permit: OwnedSemaphorePerm
 
     let inflight = Arc::new(Semaphore::new(st.opts.max_inflight));
     let mut tasks: JoinSet<()> = JoinSet::new();
-    let closing = run(&st, &client.id, resume, generation, &mut gen_rx, &mut stream, &out, &inflight, &mut tasks).await;
+    let closing = run(
+        &st,
+        &client.id,
+        resume,
+        generation,
+        &mut gen_rx,
+        &mut stream,
+        &out,
+        &inflight,
+        &mut tasks,
+    )
+    .await;
 
     // Detach, not abort: an in-flight delivery must finish so a retry sees its
     // cached result. Each task cancels itself if the token is rotated.
@@ -191,7 +265,10 @@ async fn session(st: AppState, mut socket: WebSocket, permit: OwnedSemaphorePerm
     if let Err(closing) = closing {
         let _ = close_tx.send(closing);
     }
-    if tokio::time::timeout(WRITER_GRACE, &mut writer).await.is_err() {
+    if tokio::time::timeout(WRITER_GRACE, &mut writer)
+        .await
+        .is_err()
+    {
         writer.abort();
     }
 }
@@ -266,7 +343,11 @@ async fn on_frame(
         Ok(m) => m,
         Err(e) => {
             let r = match id {
-                Some(id) => ServerMessage::Result(CommandResult::err(&id, ErrorCode::BadRequest, &e.to_string())),
+                Some(id) => ServerMessage::Result(CommandResult::err(
+                    &id,
+                    ErrorCode::BadRequest,
+                    &e.to_string(),
+                )),
                 None => error(ErrorCode::BadRequest, &e.to_string()),
             };
             return reply(out, &r).await;
@@ -274,13 +355,23 @@ async fn on_frame(
     };
     match msg {
         ClientMessage::Ping { id } => reply(out, &ServerMessage::Pong { id }).await,
-        ClientMessage::Hello { .. } => reply(out, &error(ErrorCode::BadRequest, "already authenticated")).await,
+        ClientMessage::Hello { .. } => {
+            reply(out, &error(ErrorCode::BadRequest, "already authenticated")).await
+        }
         command => {
-            let permits = inflight.clone().try_acquire_owned()
-                .and_then(|session| st.inflight_total.clone().try_acquire_owned().map(|total| (session, total)));
+            let permits = inflight.clone().try_acquire_owned().and_then(|session| {
+                st.inflight_total
+                    .clone()
+                    .try_acquire_owned()
+                    .map(|total| (session, total))
+            });
             let Ok(permits) = permits else {
                 let r = match command.command_id() {
-                    Some(id) => ServerMessage::Result(CommandResult::err(id, ErrorCode::BadRequest, "too many in-flight commands")),
+                    Some(id) => ServerMessage::Result(CommandResult::err(
+                        id,
+                        ErrorCode::BadRequest,
+                        "too many in-flight commands",
+                    )),
                     None => error(ErrorCode::BadRequest, "too many in-flight commands"),
                 };
                 return reply(out, &r).await;
@@ -289,7 +380,9 @@ async fn on_frame(
             let out = out.clone();
             let client = client_id.to_owned();
             let gen_rx = st.auth.subscribe();
-            tasks.spawn(run_command(core, client, command, generation, gen_rx, out, permits));
+            tasks.spawn(run_command(
+                core, client, command, generation, gen_rx, out, permits,
+            ));
             Ok(())
         }
     }
@@ -310,7 +403,9 @@ async fn run_command<P: Send>(
     permits: P,
 ) {
     // Revoked before it ever ran: do not touch the core at all.
-    if *gen_rx.borrow_and_update() != generation { return; }
+    if *gen_rx.borrow_and_update() != generation {
+        return;
+    }
     tokio::select! {
         // Revocation wins whenever both are ready, so a delivery that becomes
         // ready in the same instant as a rotation is dropped, not completed.
@@ -359,17 +454,31 @@ mod revocation_tests {
         let core = Core::new(test_machine(), vec![fake]);
         core.observe(Observation::AgentUpsert(agent_obs("a1")));
         core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
-        let rid = core.attach(None).0.iter().find_map(|m| match m {
-            ServerMessage::Snapshot { agents, .. } => agents[0].pending.as_ref().map(|p| p.id.clone()),
-            _ => None,
-        }).unwrap();
-        let cmd = ClientMessage::RequestAnswer { id: "c".into(), request_id: rid, option_id: Some("allow".into()), text: None };
+        let rid = core
+            .attach(None)
+            .0
+            .iter()
+            .find_map(|m| match m {
+                ServerMessage::Snapshot { agents, .. } => {
+                    agents[0].pending.as_ref().map(|p| p.id.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        let cmd = ClientMessage::RequestAnswer {
+            id: "c".into(),
+            request_id: rid,
+            option_id: Some("allow".into()),
+            text: None,
+        };
         (core, cmd)
     }
 
     fn pending(core: &Core) -> Option<RequestStatus> {
         let (initial, _) = core.attach(None);
-        let ServerMessage::Snapshot { agents, .. } = &initial[0] else { panic!("expected snapshot") };
+        let ServerMessage::Snapshot { agents, .. } = &initial[0] else {
+            panic!("expected snapshot")
+        };
         agents[0].pending.as_ref().map(|p| p.status)
     }
 
@@ -390,7 +499,10 @@ mod revocation_tests {
             auth.rotate("new".into()); // spawned but not yet polled
             task.await;
             assert!(fake.delivered().is_empty(), "delivered after revocation");
-            assert!(out_rx.try_recv().is_err(), "no result for a revoked command");
+            assert!(
+                out_rx.try_recv().is_err(),
+                "no result for a revoked command"
+            );
             assert_eq!(pending(&core), Some(RequestStatus::Open), "never claimed");
         }
     }
@@ -404,14 +516,28 @@ mod revocation_tests {
             let generation = auth.generation();
             let gen_rx = auth.subscribe();
             let (out, _out_rx) = mpsc::channel(8);
-            let task = tokio::spawn(run_command(core.clone(), "cl".into(), cmd, generation, gen_rx, out, ()));
-            while pending(&core) != Some(RequestStatus::Answering) { tokio::task::yield_now().await; }
+            let task = tokio::spawn(run_command(
+                core.clone(),
+                "cl".into(),
+                cmd,
+                generation,
+                gen_rx,
+                out,
+                (),
+            ));
+            while pending(&core) != Some(RequestStatus::Answering) {
+                tokio::task::yield_now().await;
+            }
             // Both wake-ups land before the task runs again (current-thread runtime).
             fake.open_gate();
             auth.rotate("new".into());
             task.await.unwrap();
             assert!(fake.delivered().is_empty(), "delivered after revocation");
-            assert_eq!(pending(&core), None, "resolved uncertain by the abandon guard");
+            assert_eq!(
+                pending(&core),
+                None,
+                "resolved uncertain by the abandon guard"
+            );
         }
     }
 }

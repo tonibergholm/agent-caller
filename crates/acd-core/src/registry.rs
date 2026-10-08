@@ -359,6 +359,7 @@ impl Registry {
             RequestStatus::Answering => return Err(ErrorCode::RequestBusy),
             RequestStatus::Resolved => return Err(ErrorCode::RequestGone),
             RequestStatus::Open => {}
+            RequestStatus::Unknown => return Err(ErrorCode::NotAnswerable),
         }
         if !e.req.is_answerable() { return Err(ErrorCode::NotAnswerable); }
         if !e.ready { return Err(ErrorCode::RequestNotReady); }
@@ -402,5 +403,44 @@ impl Registry {
         a.state_since = Utc::now();
         self.seen.insert(agent_id.to_string());
         Ok(vec![Change::AgentUpdated(a.clone())])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claim_of_unknown_status_is_not_answerable_and_remains_unclaimed() {
+        let mut registry = Registry::new("machine".into());
+        registry.requests.insert(
+            "request".into(),
+            ReqEntry {
+                req: Request {
+                    id: "request".into(),
+                    agent_id: "agent".into(),
+                    kind: RequestKind::Permission,
+                    status: RequestStatus::Unknown,
+                    answer_path: AnswerPath::Hook,
+                    title: "title".into(),
+                    detail: "detail".into(),
+                    options: vec![],
+                    questions: None,
+                    free_text: false,
+                    raw_screen: None,
+                    opened_at: Utc::now(),
+                },
+                key: CorrelationKey("key".into()),
+                ready: true,
+                claimed: None,
+            },
+        );
+
+        assert_eq!(
+            registry.claim("request", Answer::Option("allow".into())),
+            Err(ErrorCode::NotAnswerable)
+        );
+        assert_eq!(registry.request("request").unwrap().status, RequestStatus::Unknown);
+        assert!(registry.requests["request"].claimed.is_none());
     }
 }
