@@ -699,8 +699,9 @@ impl Reconciler {
                 request_id: t.request_id.clone(),
             });
             if status == Some(RequestStatus::Open) {
-                // Ended without any acd delivery.
-                self.core.observe(Observation::RequestEndedById {
+                // Ended without any acd delivery. A claim may land after the
+                // status read above, so end it only while still open.
+                self.core.observe(Observation::RequestEndedIfOpen {
                     request_id: t.request_id,
                     by: ResolvedBy::Terminal,
                 });
