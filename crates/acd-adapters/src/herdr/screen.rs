@@ -34,8 +34,10 @@ pub struct DialogOption {
 pub struct Dialog {
     pub kind: DialogKind,
     pub options: Vec<DialogOption>,
-    /// The normalized region.
+    /// Readable normalized region, for display and P3 hook matching only.
+    /// Not security-relevant: use `fingerprint` to identify a dialog.
     pub text: String,
+    /// Hash of the whole screen through the footer (see `screen_fingerprint`).
     /// `None` for `CodexCollapsed`: the command text is hidden, so the
     /// dialog can never be matched (spec §6.3).
     pub fingerprint: Option<Fingerprint>,
@@ -114,62 +116,52 @@ fn path_normalized(s: &str) -> String {
     )
 }
 
-/// Dialog normalization (fingerprints and `Dialog::text`). Strict on purpose,
-/// so two visibly different dialogs never share a result:
-/// - the region's common leading indent is removed and nothing else:
-///   relative indentation and internal whitespace are content;
-/// - empty lines are dropped; rule lines become a fixed token (`--` for `─`,
-///   `~~` for `╌`), so moving text across a rule changes the result;
-/// - a leading cursor marker is blanked on option lines only;
-/// - only `tip_idx`, the line right under the dialog title of a Claude
-///   permission dialog, is dropped when it is a `Tip:` line;
-/// - lines are joined with `\n`, so a re-wrap changes the result (a safe
-///   mismatch);
-/// - directory paths are normalized at path starts only.
-fn normalize_dialog(region: &[&str], option_idx: &[usize], tip_idx: Option<usize>) -> String {
-    enum Line {
-        Rule(&'static str),
-        Text(String),
-    }
-    let mut lines = Vec::new();
-    for (i, raw) in region.iter().enumerate() {
-        let line = if option_idx.contains(&i) {
-            blank_cursor(raw)
-        } else {
-            raw.to_string()
-        };
-        let line = line.trim_end().to_string();
-        let t = line.trim();
-        if t.is_empty() {
-            continue;
-        }
-        if is_rule(t) {
-            lines.push(Line::Rule(if t.contains('╌') { "~~" } else { "--" }));
-        } else if tip_idx == Some(i) && t.starts_with("Tip:") {
-            continue;
-        } else {
-            lines.push(Line::Text(line));
-        }
-    }
-    let common = lines
+/// Readable text of a dialog region, for display and P3 hook matching only.
+/// NOT security-relevant: the fingerprint is not derived from it. Empty
+/// lines, rule lines and `Tip:` lines are dropped, whitespace is collapsed,
+/// cursor markers are stripped from option lines, and directory paths are
+/// normalized at path starts (spec §6.2).
+fn normalize_text(region: &[&str], option_idx: &[usize]) -> String {
+    let lines: Vec<String> = region
         .iter()
-        .filter_map(|l| {
-            if let Line::Text(t) = l {
-                Some(indent(t))
+        .enumerate()
+        .filter_map(|(i, raw)| {
+            let t = raw.trim();
+            let t = if option_idx.contains(&i) {
+                strip_cursor(t)
             } else {
-                None
-            }
-        })
-        .min()
-        .unwrap_or(0);
-    let out: Vec<String> = lines
-        .into_iter()
-        .map(|l| match l {
-            Line::Rule(tok) => tok.to_string(),
-            Line::Text(t) => t.chars().skip(common).collect(),
+                t
+            };
+            let collapsed = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!collapsed.is_empty() && !is_rule(&collapsed) && !collapsed.starts_with("Tip:"))
+                .then_some(collapsed)
         })
         .collect();
-    path_normalized(&out.join("\n"))
+    path_normalized(&lines.join("\n"))
+}
+
+/// The dialog fingerprint: sha256 over every screen line from the first
+/// through the footer, joined with `\n`. Only trailing whitespace is trimmed
+/// and the cursor marker is blanked on the verified option lines, so arrow
+/// key movement does not change it. Nothing else is normalized: any marker
+/// above the options (rules, titles, tips) can be forged by command text, so
+/// no located region top is trusted. Changing anything on screen above the
+/// dialog therefore changes the fingerprint; that is an accepted safe
+/// mismatch.
+fn screen_fingerprint(lines: &[&str], option_idx: &[usize]) -> Fingerprint {
+    let out: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let l = if option_idx.contains(&i) {
+                blank_cursor(l)
+            } else {
+                l.to_string()
+            };
+            l.trim_end().to_string()
+        })
+        .collect();
+    fingerprint_of(&out.join("\n"))
 }
 
 /// Tolerant normalization for the generic read-only fingerprint only: it keys
@@ -323,19 +315,17 @@ pub fn find_dialog(text: &str) -> Option<Dialog> {
 fn make_dialog(
     kind: DialogKind,
     block: Vec<(usize, DialogOption)>,
-    region: &[&str],
+    lines: &[&str],
+    start: usize,
+    end: usize,
     fingerprint: bool,
 ) -> Dialog {
     let option_idx: Vec<usize> = block.iter().map(|(i, _)| *i).collect();
-    let tip_idx = (kind == DialogKind::ClaudePermission)
-        .then(|| {
-            (1..region.len())
-                .find(|&i| !region[i].trim().is_empty())
-                .map(|t| t + 1)
-        })
-        .flatten();
-    let text = normalize_dialog(region, &option_idx, tip_idx);
-    let fingerprint = fingerprint.then(|| fingerprint_of(&text));
+    let text = normalize_text(&lines[start..=end], &option_idx);
+    let fingerprint = fingerprint.then(|| {
+        let abs: Vec<usize> = option_idx.iter().map(|i| start + i).collect();
+        screen_fingerprint(&lines[..=end], &abs)
+    });
     let options = block.into_iter().map(|(_, o)| o).collect();
     Dialog {
         kind,
@@ -349,24 +339,13 @@ fn make_dialog(
 /// from it, at most 60 lines, and stop at a line starting with `⏺` or `✻`,
 /// or with `❯` followed by anything but `N.` (the user's earlier prompt).
 /// The region runs from the topmost solid `─` rule seen before the stop
-/// (outside the content block)
 /// through the footer. No rule or no well-formed options block means no
 /// dialog.
 fn find_claude(lines: &[&str]) -> Option<Dialog> {
     let footer = lines.iter().rposition(|l| l.contains(CLAUDE_FOOTER))?;
     let mut top = None;
-    // Lines between a pair of `╌` rules are the command/content block: stop
-    // markers and solid rules there are content, not structure.
-    let mut in_block = false;
     for i in (footer.saturating_sub(CLAUDE_SCAN_LIMIT)..footer).rev() {
         let t = lines[i].trim();
-        if is_rule(t) && t.contains('╌') {
-            in_block = !in_block;
-            continue;
-        }
-        if in_block {
-            continue;
-        }
         if t.starts_with('⏺')
             || t.starts_with('✻')
             || (t.starts_with('❯') && claude_option(t).is_none())
@@ -377,7 +356,8 @@ fn find_claude(lines: &[&str]) -> Option<Dialog> {
             top = Some(i);
         }
     }
-    let region = &lines[top?..=footer];
+    let top = top?;
+    let region = &lines[top..=footer];
     let block = options_block(region, claude_option);
     if block.is_empty() {
         return None;
@@ -389,7 +369,7 @@ fn find_claude(lines: &[&str]) -> Option<Dialog> {
         },
         None => DialogKind::ClaudePermission,
     };
-    Some(make_dialog(kind, block, region, true))
+    Some(make_dialog(kind, block, lines, top, footer, true))
 }
 
 /// Codex: the footer is the last line containing `Press enter to confirm or
@@ -409,7 +389,9 @@ fn find_codex(lines: &[&str]) -> Option<Dialog> {
         return Some(make_dialog(
             DialogKind::CodexPermission,
             block,
-            region,
+            lines,
+            start,
+            footer,
             true,
         ));
     }
@@ -428,7 +410,9 @@ fn find_codex(lines: &[&str]) -> Option<Dialog> {
     Some(make_dialog(
         DialogKind::CodexCollapsed,
         block,
-        &lines[marker..=marker + last],
+        lines,
+        marker,
+        marker + last,
         false,
     ))
 }
@@ -529,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_ignores_cursor_tip_and_wrapping_but_not_content() {
+    fn fingerprint_ignores_only_cursor_and_trailing_whitespace() {
         let s = fx("claude-permission-bash.txt");
         let fp = find_dialog(&s).unwrap().fingerprint.unwrap();
         let moved = s
@@ -540,29 +524,49 @@ mod tests {
             fp,
             "cursor position is not content"
         );
+        let trailing = s.replace(" Bash command\n", " Bash command   \n");
+        assert_eq!(
+            find_dialog(&trailing).unwrap().fingerprint.unwrap(),
+            fp,
+            "trailing whitespace"
+        );
         let tip = s.replace(
             "Tip: auto mode handles these prompts for you",
             "Tip: press ? for shortcuts",
         );
-        assert_eq!(
+        assert_ne!(
             find_dialog(&tip).unwrap().fingerprint.unwrap(),
             fp,
-            "tips rotate"
+            "nothing else is normalized"
         );
         let private = s.replace(
             "always allow access to /tmp/acp0",
             "always allow access to /private/tmp/acp0",
         );
-        assert_eq!(
+        assert_ne!(
             find_dialog(&private).unwrap().fingerprint.unwrap(),
             fp,
-            "§6.2 path normalization"
+            "no path normalization in the fingerprint"
+        );
+        assert_eq!(
+            find_dialog(&private).unwrap().text,
+            find_dialog(&s).unwrap().text,
+            "text still normalizes paths"
         );
         let other = s.replace("touch /tmp/acp0/t1.txt", "rm -rf /tmp/acp0");
         assert_ne!(
             find_dialog(&other).unwrap().fingerprint.unwrap(),
             fp,
             "the command is content"
+        );
+        let transcript = s.replace(
+            "Run exactly this bash command",
+            "Run exactly that bash command",
+        );
+        assert_ne!(
+            find_dialog(&transcript).unwrap().fingerprint.unwrap(),
+            fp,
+            "whole screen is covered"
         );
     }
 
@@ -663,7 +667,7 @@ mod tests {
         );
     }
 
-    const CMD: &str = " touch /tmp/acp0/t1.txt\n";
+    const CMD: &str = "\n touch /tmp/acp0/t1.txt\n";
 
     #[test]
     fn guard_fingerprint_never_falls_back_to_the_generic_hash() {
@@ -704,8 +708,8 @@ mod tests {
     fn dialog_normalization_is_strict_about_content() {
         let s = fx("claude-permission-bash.txt");
         let fp = |t: &str| find_dialog(t).unwrap().fingerprint.unwrap();
-        let a = s.replace(CMD, " touch /tmp/a  b\n");
-        let b = s.replace(CMD, " touch /tmp/a b\n");
+        let a = s.replace(CMD, "\n touch /tmp/a  b\n");
+        let b = s.replace(CMD, "\n touch /tmp/a b\n");
         assert_ne!(fp(&a), fp(&b), "internal whitespace is content");
         let tip = s.replace(CMD, &format!("{CMD} Tip: run rm -rf /\n"));
         assert_ne!(fp(&tip), fp(&s), "a Tip line in the detail is content");
@@ -762,8 +766,8 @@ mod tests {
     #[test]
     fn relative_indentation_is_content() {
         let s = fx("claude-permission-bash.txt");
-        let a = s.replace(CMD, " if x:\n     a\n  b\n");
-        let b = s.replace(CMD, " if x:\n     a\n     b\n");
+        let a = s.replace(CMD, "\n if x:\n     a\n  b\n");
+        let b = s.replace(CMD, "\n if x:\n     a\n     b\n");
         assert_ne!(fp(&a), fp(&b));
     }
 
@@ -778,13 +782,33 @@ mod tests {
     #[test]
     fn stop_markers_and_rules_inside_the_command_block_are_content() {
         let s = fx("claude-permission-bash.txt");
-        let v = s.replace(
-            "\n touch /tmp/acp0/t1.txt\n",
-            "\n touch /tmp/acp0/t1.txt\n ⏺ fake\n ──────────\n",
-        );
+        let v = s.replace(CMD, &format!("{CMD} ⏺ fake\n ──────────\n"));
         let d = find_dialog(&v).unwrap();
-        assert!(d.text.starts_with("--\nBash command"), "{}", d.text);
+        // The region (display text) may shrink; the fingerprint still covers the whole screen.
         assert_ne!(d.fingerprint.unwrap(), fp(&s));
+    }
+
+    #[test]
+    fn forged_rules_cannot_hide_earlier_command_text() {
+        let s = fx("claude-permission-bash.txt");
+        let with = |hidden: &str| {
+            s.replace(
+                CMD,
+                &format!("\n {hidden}\n ──────────\n ╌╌╌╌╌╌╌╌╌╌\n echo hi\n"),
+            )
+        };
+        let (a, b) = (with("rm -rf ~"), with("rm -rf /"));
+        assert!(find_dialog(&a).is_some());
+        assert_ne!(fp(&a), fp(&b));
+    }
+
+    #[test]
+    fn literal_dashes_differ_from_a_rule() {
+        let s = fx("claude-permission-bash.txt");
+        assert_ne!(
+            fp(&s.replace(CMD, "\n --\n")),
+            fp(&s.replace(CMD, "\n ──────────\n"))
+        );
     }
 
     #[test]
@@ -806,12 +830,13 @@ mod tests {
     #[test]
     fn private_paths_are_normalized_only_at_a_path_start() {
         let s = fx("claude-permission-bash.txt");
-        let a = s.replace(CMD, " rm -rf /data/private/tmp/x\n");
-        let b = s.replace(CMD, " rm -rf /data/tmp/x\n");
+        let a = s.replace(CMD, "\n rm -rf /data/private/tmp/x\n");
+        let b = s.replace(CMD, "\n rm -rf /data/tmp/x\n");
         assert_ne!(fp(&a), fp(&b));
-        let c = s.replace(CMD, " rm -rf /private/tmp/x\n");
-        let d = s.replace(CMD, " rm -rf /tmp/x\n");
-        assert_eq!(fp(&c), fp(&d));
+        let c = s.replace(CMD, "\n rm -rf /private/tmp/x\n");
+        let d = s.replace(CMD, "\n rm -rf /tmp/x\n");
+        assert_ne!(fp(&c), fp(&d), "the fingerprint does not normalize paths");
+        assert_eq!(find_dialog(&c).unwrap().text, find_dialog(&d).unwrap().text);
     }
 
     #[test]
@@ -853,6 +878,8 @@ mod tests {
             ),
             ("codex-trust-dialog-detection.txt", None, &[]),
             ("claude-idle-prompt.txt", None, &[]),
+            ("claude-idle-detection.txt", None, &[]),
+            ("codex-idle-detection.txt", None, &[]),
             ("claude-idle-prompt-stray-1.txt", None, &[]),
             ("codex-idle-prompt.txt", None, &[]),
         ];
