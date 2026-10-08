@@ -107,16 +107,14 @@ pub async fn watch(
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         match load(&dir) {
-            Ok((files, next_pin)) if pin != next_pin => {
-                match server_config(&files) {
-                    Ok(config) => {
-                        tx.send_replace(config);
-                        pin = next_pin;
-                        tracing::info!("TLS key rotated; new connections use the new certificate");
-                    }
-                    Err(e) => tracing::error!(error = %e, "cannot configure reloaded TLS key"),
+            Ok((files, next_pin)) if pin != next_pin => match server_config(&files) {
+                Ok(config) => {
+                    tx.send_replace(config);
+                    pin = next_pin;
+                    tracing::info!("TLS key rotated; new connections use the new certificate");
                 }
-            }
+                Err(e) => tracing::error!(error = %e, "cannot configure reloaded TLS key"),
+            },
             Ok(_) => {}
             Err(e) => {
                 tracing::error!(error = %e, "cannot reload TLS bundle; keeping current certificate")
@@ -137,10 +135,12 @@ mod tests {
         let (tx, mut rx) = watch::channel(server_config(&installed).unwrap());
         publish(dir.path(), &acd_core::tls::generate("generation B")).unwrap();
         let watcher = tokio::spawn(watch(dir.path().to_path_buf(), installed_pin.clone(), tx));
-        tokio::time::sleep(Duration::from_millis(2100)).await;
+        tokio::time::timeout(Duration::from_secs(10), rx.changed())
+            .await
+            .expect("watcher should publish rotation within 10 seconds")
+            .expect("watch channel remains open");
         let (_, latest_pin) = load(dir.path()).unwrap();
         assert_ne!(latest_pin, installed_pin);
-        assert!(rx.has_changed().unwrap(), "watcher should publish the rotated config");
         let _current = rx.borrow_and_update().clone();
         watcher.abort();
     }

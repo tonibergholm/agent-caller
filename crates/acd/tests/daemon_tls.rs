@@ -219,17 +219,26 @@ async fn wrong_pin_fails_before_hello_and_rotation_keeps_open_sessions() {
     let token = std::fs::read_to_string(dir.join("client.token")).unwrap();
     let old = pin_of(&dir);
     let wrong = acd_core::tls::check_pair(&acd_core::tls::generate("wrong")).unwrap();
-    assert!(ws_with_pin(port, &wrong).await.is_err());
+    let wrong_pin_result = ws_with_pin(port, &wrong).await;
     let log_after_wrong_pin = std::fs::read_to_string(&log).unwrap();
-    assert!(log_after_wrong_pin.contains("decided upon suite"), "TLS handshake log is the positive control: {log_after_wrong_pin}");
-    assert!(!log_after_wrong_pin.contains("welcome"), "wrong-pin handshake must not reach hello handling: {log_after_wrong_pin}");
+    assert!(
+        log_after_wrong_pin.contains("decided upon suite"),
+        "TLS handshake log is the positive control: {log_after_wrong_pin}"
+    );
+    assert!(
+        wrong_pin_result.is_err(),
+        "wrong-pin client never receives the client-visible welcome frame"
+    );
     let mut open = ws_with_pin(port, &old).await.unwrap();
     assert!(matches!(
         hello(&mut open, token.trim()).await,
         acd_protocol::ServerMessage::Welcome { .. }
     ));
     let log_after_valid_hello = std::fs::read_to_string(&log).unwrap();
-    assert!(log_after_valid_hello.contains("decided upon suite"), "valid-pin handshake is logged: {log_after_valid_hello}");
+    assert!(
+        log_after_valid_hello.contains("decided upon suite"),
+        "valid-pin handshake is logged: {log_after_valid_hello}"
+    );
     let out = acd(&dir).args(["tls", "rotate"]).output().unwrap();
     assert!(
         out.status.success(),

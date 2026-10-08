@@ -445,3 +445,114 @@ impl fmt::Debug for TlsListener {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod io_tests {
+    use super::*;
+    use rustls::{
+        SignatureScheme,
+        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        pki_types::{CertificateDer, ServerName, UnixTime},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Debug)]
+    struct AcceptAnyCert;
+    impl ServerCertVerifier for AcceptAnyCert {
+        fn verify_server_cert(
+            &self,
+            _: &CertificateDer<'_>,
+            _: &[CertificateDer<'_>],
+            _: &ServerName<'_>,
+            _: &[u8],
+            _: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::RSA_PKCS1_SHA256,
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SignatureScheme::ED25519,
+            ]
+        }
+    }
+
+    #[tokio::test]
+    async fn kill_latch_keeps_reads_at_eof_and_rejects_writes_and_flushes() {
+        let files = generate("kill-latch");
+        let config = server_config(&files).unwrap();
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let (stream, _) = tcp.accept().await.unwrap();
+            TlsAcceptor::from(config).accept(stream).await.unwrap()
+        });
+        let client_config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+            .with_no_client_auth();
+        let client = tokio_rustls::TlsConnector::from(Arc::new(client_config))
+            .connect(
+                "localhost".try_into().unwrap(),
+                TcpStream::connect(addr).await.unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut client = client;
+        let stream = accept.await.unwrap();
+        // Pending peer data: without the latch, a later read would return it.
+        client.write_all(b"pending").await.unwrap();
+        client.flush().await.unwrap();
+
+        let admission = Admission::new(1);
+        let admit = Admit::new(admission.semaphore.clone().try_acquire_owned().unwrap());
+        admit.authenticated();
+        let (kill_tx, kill_rx) = watch::channel(false);
+        let kill = KillSwitch { tx: kill_tx };
+        let mut io = TlsIo::new(
+            stream,
+            admit,
+            Instant::now() + Duration::from_secs(30),
+            kill_rx,
+        );
+
+        kill.kill();
+        let mut buf = [0u8; 1];
+        for _ in 0..3 {
+            assert_eq!(
+                io.read(&mut buf).await.unwrap(),
+                0,
+                "killed read stays at EOF"
+            );
+        }
+        for _ in 0..3 {
+            assert_eq!(
+                io.write(b"x").await.unwrap_err().kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(
+                io.flush().await.unwrap_err().kind(),
+                io::ErrorKind::BrokenPipe
+            );
+        }
+        drop(client);
+    }
+}

@@ -33,10 +33,10 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
 
 | Stage | Bound |
 |---|---|
-| A. TCP accept → TLS finished | At most 16 handshakes at once. 5 s each, then the socket is dropped. |
+| A. TCP accept → TLS finished | At most 16 handshakes at once per listener. 5 s each, then the socket is dropped. |
 | B. TLS finished → HTTP upgrade request complete | Covered by the 10 s pre-authentication deadline; silent or trickling HTTP clients are cut when it passes. |
 | C. Upgrade → `hello` authenticated | At most 8 at once; `hello` within 5 s. |
-| A + B + C | At most 32 unauthenticated TCP connections daemon-wide across all TCP listeners. Each must authenticate within 10 s of TCP accept. |
+| A + B + C | At most 32 unauthenticated TCP connections shared by the daemon across all TCP listeners. Each must authenticate within 10 s of TCP accept. |
 
 **Limits.**
 - `hello` must arrive within 5 s.
