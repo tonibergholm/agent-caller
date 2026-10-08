@@ -41,11 +41,14 @@ its name.
 
 - P3 ownership rule 1: read `T3Adapter::sessions()` (`SessionMap`). For each
   Claude session, if `SessionMap::owner(session_id)` is `Some`, drop the
-  hook-side and discovery state for that session. Re-evaluate unknown or
-  ignored sessions on every `SessionMap::changes()` tick. The map publishes
-  ownership when shell and detail agree and the native id is set; invalidate
-  only on identity evidence.
-- `project.removed` uses an inferred `projectId` field until confirmed live.
+  hook-side and discovery state for that session. Re-evaluate sessions whose
+  ownership is unknown (spec §6.2 rule 4) on every `SessionMap::changes()`
+  tick. The map publishes ownership when shell and detail agree and the
+  native id is set, the first claim for a session id wins, and ownership is
+  invalidated only by identity evidence.
+- `project.removed` uses an inferred `projectId` field; the live runs could not
+  produce one (`t3 project remove` returned `invalid_command`), so it is still
+  unconfirmed.
 - T3 decode-error degradation clears after 10 minutes without new errors.
 - Reuse `text::redact_log` for hook payload logging so secret patterns stay
   consistent.
