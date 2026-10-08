@@ -144,6 +144,23 @@ async fn result(ws: &mut Ws, id: &str) -> Value {
     .await
 }
 
+async fn wait_for_dispatch(fake: &FakeT3) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if fake
+                .dispatched()
+                .iter()
+                .any(|d| d["type"] == "message.dispatch")
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dispatch did not reach fake T3");
+}
+
 #[tokio::test]
 async fn t3_agent_appears_over_the_protocol() {
     let fake = FakeT3::start().await;
@@ -181,24 +198,31 @@ async fn t3_agent_appears_over_the_protocol() {
 async fn approval_and_question_answered_over_the_protocol() {
     let fake = FakeT3::start().await;
     fake.put_thread(shell_thread(
-        "approve",
-        "running",
-        Some(("rq-approve", "command")),
-    ));
-    fake.set_projection(
-        "approve",
-        approval_projection("approve", "rq-approve", None),
-    );
-    fake.put_thread(shell_thread(
         "question",
         "running",
         Some(("rq-question", "user_input")),
     ));
     fake.set_projection("question", question_projection("question", "rq-question"));
     let r = start(fake).await;
-    let (mut ws, _, snap) = with_agent_count(&r.url, 2).await;
+    let (mut ws, _, _) = authed(&r.url, "c1").await;
+    r.fake.put_thread(shell_thread(
+        "approve",
+        "running",
+        Some(("rq-approve", "command")),
+    ));
+    r.fake.set_projection(
+        "approve",
+        approval_projection("approve", "rq-approve", None),
+    );
+    let approval_event = next_matching(&mut ws, Duration::from_secs(2), |v| {
+        v["type"] == "agent.updated"
+            && v["agent"]["id"] == "t3:approve"
+            && v["agent"]["pending"]["answer_path"] == "t3"
+    })
+    .await;
+    let approval = approval_event["agent"]["pending"].clone();
+    let (_, _, snap) = with_agent_count(&r.url, 2).await;
     let agents = snap["agents"].as_array().unwrap();
-    let approval = agents.iter().find(|a| a["id"] == "t3:approve").unwrap()["pending"].clone();
     let question = agents.iter().find(|a| a["id"] == "t3:question").unwrap()["pending"].clone();
     assert_eq!(
         (&approval["kind"], &approval["answer_path"]),
@@ -253,20 +277,29 @@ async fn answered_in_t3_resolves_the_card_within_2_s() {
         .unwrap()
         .to_owned();
     drop(waiter);
-    let mut clients = vec![authed(&r.url, "c2").await.0, authed(&r.url, "c3").await.0];
+    let mut clients = [authed(&r.url, "c2").await.0, authed(&r.url, "c3").await.0];
     r.fake.push_thread_event(
         "approve",
         "runtime-request.updated",
         json!({"id":"rq-approve","kind":"command","status":"resolved","decision":"accept"}),
     );
     r.fake.put_thread(shell_thread("approve", "running", None));
-    for ws in &mut clients {
-        let resolved = next_matching(ws, Duration::from_secs(2), |v| {
-            v["type"] == "request.resolved" && v["request_id"] == request_id
-        })
-        .await;
-        assert_eq!(resolved["by"], "terminal");
-    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let (left_clients, right_clients) = clients.split_at_mut(1);
+    let (left, right) = tokio::join!(
+        next_matching(
+            &mut left_clients[0],
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            |v| v["type"] == "request.resolved" && v["request_id"] == request_id,
+        ),
+        next_matching(
+            &mut right_clients[0],
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            |v| v["type"] == "request.resolved" && v["request_id"] == request_id,
+        ),
+    );
+    assert_eq!(left["by"], "terminal");
+    assert_eq!(right["by"], "terminal");
     send(
         &mut clients[0],
         json!({"type":"request.answer","id":"late","request_id":request_id,"option_id":"accept"}),
@@ -293,8 +326,11 @@ async fn follow_up_retry_sends_once() {
     let agent_id = snap["agents"][0]["id"].clone();
     let resume = json!({"epoch":welcome["epoch"],"seq":snap["seq"]});
     let cmd = json!({"type":"agent.send","id":"f1","agent_id":agent_id,"text":"run tests"});
+    let gate = r.fake.gate_next_dispatch();
     send(&mut ws, cmd.clone()).await;
+    wait_for_dispatch(&r.fake).await;
     drop(ws);
+    gate.release();
     let mut retry = connect(&r.url).await;
     send(&mut retry, hello("secret", Some(resume), "c1")).await;
     assert_eq!(next(&mut retry).await["type"], "welcome");
@@ -349,9 +385,19 @@ async fn in_flight_duplicate_waits_for_the_first() {
     let (mut a, _, _) = authed(&r.url, "same-client").await;
     let (mut b, _, _) = authed(&r.url, "same-client").await;
     send(&mut a, cmd.clone()).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_dispatch(&r.fake).await;
     send(&mut b, cmd).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let a_result = result(&mut a, "f1");
+        let b_result = result(&mut b, "f1");
+        tokio::pin!(a_result, b_result);
+        tokio::select! {
+            r = &mut a_result => panic!("first client received result while dispatch held: {r:?}"),
+            r = &mut b_result => panic!("duplicate client received result while dispatch held: {r:?}"),
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
+    }
     gate.release();
     assert_eq!(result(&mut a, "f1").await["outcome"], "delivered");
     assert_eq!(result(&mut b, "f1").await["outcome"], "delivered");

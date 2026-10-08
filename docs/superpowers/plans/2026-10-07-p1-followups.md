@@ -39,8 +39,11 @@ its name.
 
 ## P3: hooks and service
 
-- `SessionMap` is the P3 input for ownership rule 1: first claim wins; publish
-  the owner when shell and detail agree and the native id is set; invalidate
+- P3 ownership rule 1: read `T3Adapter::sessions()` (`SessionMap`). For each
+  Claude session, if `SessionMap::owner(session_id)` is `Some`, drop the
+  hook-side and discovery state for that session. Re-evaluate unknown or
+  ignored sessions on every `SessionMap::changes()` tick. The map publishes
+  ownership when shell and detail agree and the native id is set; invalidate
   only on identity evidence.
 - `project.removed` uses an inferred `projectId` field until confirmed live.
 - T3 decode-error degradation clears after 10 minutes without new errors.
