@@ -455,6 +455,7 @@ impl Inbox {
             let cmd = match action.kind {
                 ActionKind::Answer(s) => Command::Answer {
                     request_id: s.request_id,
+                    revision: s.revision,
                     option_id: s.option.id,
                 },
                 ActionKind::Reply { text } => Command::Send {

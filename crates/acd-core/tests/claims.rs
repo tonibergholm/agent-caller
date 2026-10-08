@@ -56,14 +56,78 @@ fn setup(obs: RequestObs) -> (Registry, String) {
 #[test]
 fn claim_moves_to_answering_and_second_claim_is_busy() {
     let (mut r, id) = setup(perm("k"));
-    let (req, ch) = r.claim(&id, Answer::Option("allow".into())).unwrap();
+    let (req, ch) = r.claim(&id, Answer::Option("allow".into()), None).unwrap();
     assert_eq!(req.status, RequestStatus::Answering);
     assert!(
         matches!(&ch[0], Change::AgentUpdated(a) if a.pending.as_ref().unwrap().status == RequestStatus::Answering)
     );
     assert_eq!(
-        r.claim(&id, Answer::Option("allow".into())).unwrap_err(),
+        r.claim(&id, Answer::Option("allow".into()), None)
+            .unwrap_err(),
         ErrorCode::RequestBusy
+    );
+}
+
+#[test]
+fn claim_checks_revision_after_lifecycle_before_answer_validation() {
+    let (mut r, id) = setup(perm("k"));
+    assert_eq!(r.request(&id).unwrap().revision, 1);
+    assert_eq!(
+        r.claim(&id, Answer::Option("removed-option".into()), Some(0))
+            .unwrap_err(),
+        ErrorCode::RequestChanged
+    );
+    assert_eq!(r.request(&id).unwrap().status, RequestStatus::Open);
+    assert_eq!(r.request(&id).unwrap().revision, 1);
+    assert_eq!(
+        r.claim(&id, Answer::Option("allow".into()), Some(1))
+            .unwrap()
+            .0
+            .status,
+        RequestStatus::Answering
+    );
+
+    let (mut legacy, legacy_id) = setup(perm("legacy"));
+    assert_eq!(
+        legacy
+            .claim(&legacy_id, Answer::Option("allow".into()), None)
+            .unwrap()
+            .0
+            .status,
+        RequestStatus::Answering
+    );
+}
+
+#[test]
+fn claim_lifecycle_errors_precede_revision_mismatch() {
+    let (mut r, id) = setup(perm("k"));
+    r.claim(&id, Answer::Option("allow".into()), None).unwrap();
+    assert_eq!(
+        r.claim(&id, Answer::Option("allow".into()), Some(999))
+            .unwrap_err(),
+        ErrorCode::RequestBusy
+    );
+
+    let (mut not_ready, not_ready_id) = setup(RequestObs {
+        ready: false,
+        ..perm("not-ready")
+    });
+    assert_eq!(
+        not_ready
+            .claim(&not_ready_id, Answer::Option("removed".into()), Some(999))
+            .unwrap_err(),
+        ErrorCode::RequestNotReady
+    );
+
+    let (mut blocked, blocked_id) = setup(RequestObs {
+        answer_path: AnswerPath::None,
+        ..perm("blocked")
+    });
+    assert_eq!(
+        blocked
+            .claim(&blocked_id, Answer::Option("removed".into()), Some(999))
+            .unwrap_err(),
+        ErrorCode::NotAnswerable
     );
 }
 
@@ -71,15 +135,17 @@ fn claim_moves_to_answering_and_second_claim_is_busy() {
 fn claim_error_cases() {
     let (mut r, id) = setup(perm("k"));
     assert_eq!(
-        r.claim("nope", Answer::Option("allow".into())).unwrap_err(),
+        r.claim("nope", Answer::Option("allow".into()), None)
+            .unwrap_err(),
         ErrorCode::RequestGone
     );
     assert_eq!(
-        r.claim(&id, Answer::Option("maybe".into())).unwrap_err(),
+        r.claim(&id, Answer::Option("maybe".into()), None)
+            .unwrap_err(),
         ErrorCode::BadRequest
     );
     assert_eq!(
-        r.claim(&id, Answer::Text("hi".into())).unwrap_err(),
+        r.claim(&id, Answer::Text("hi".into()), None).unwrap_err(),
         ErrorCode::BadRequest
     );
 
@@ -88,7 +154,8 @@ fn claim_error_cases() {
         ..perm("k")
     });
     assert_eq!(
-        r2.claim(&id2, Answer::Option("allow".into())).unwrap_err(),
+        r2.claim(&id2, Answer::Option("allow".into()), None)
+            .unwrap_err(),
         ErrorCode::NotAnswerable
     );
 
@@ -97,7 +164,8 @@ fn claim_error_cases() {
         ..perm("k")
     });
     assert_eq!(
-        r3.claim(&id3, Answer::Option("allow".into())).unwrap_err(),
+        r3.claim(&id3, Answer::Option("allow".into()), None)
+            .unwrap_err(),
         ErrorCode::RequestNotReady
     );
 }
@@ -121,20 +189,24 @@ fn free_text_answers_reject_control_characters() {
     };
     let (mut r, id) = setup(obs);
     assert_eq!(
-        r.claim(&id, Answer::Text("a\u{1b}[2J".into())).unwrap_err(),
+        r.claim(&id, Answer::Text("a\u{1b}[2J".into()), None)
+            .unwrap_err(),
         ErrorCode::BadRequest
     );
     assert_eq!(
-        r.claim(&id, Answer::Text("   ".into())).unwrap_err(),
+        r.claim(&id, Answer::Text("   ".into()), None).unwrap_err(),
         ErrorCode::BadRequest
     );
-    assert!(r.claim(&id, Answer::Text("Ada\nLovelace".into())).is_ok());
+    assert!(
+        r.claim(&id, Answer::Text("Ada\nLovelace".into()), None)
+            .is_ok()
+    );
 }
 
 #[test]
 fn release_returns_to_open() {
     let (mut r, id) = setup(perm("k"));
-    r.claim(&id, Answer::Option("allow".into())).unwrap();
+    r.claim(&id, Answer::Option("allow".into()), None).unwrap();
     assert_eq!(r.release(&id).len(), 1);
     assert_eq!(r.request(&id).unwrap().status, RequestStatus::Open);
     assert!(
@@ -146,7 +218,7 @@ fn release_returns_to_open() {
 #[test]
 fn inbox_end_after_claim_carries_the_claimed_option() {
     let (mut r, id) = setup(perm("k"));
-    r.claim(&id, Answer::Option("allow".into())).unwrap();
+    r.claim(&id, Answer::Option("allow".into()), None).unwrap();
     let ch = r.apply(Observation::RequestEnded {
         agent_id: "a1".into(),
         key: CorrelationKey("k".into()),
@@ -163,7 +235,7 @@ fn inbox_end_after_claim_carries_the_claimed_option() {
 #[test]
 fn terminal_end_after_claim_stays_terminal() {
     let (mut r, id) = setup(perm("k"));
-    r.claim(&id, Answer::Option("allow".into())).unwrap();
+    r.claim(&id, Answer::Option("allow".into()), None).unwrap();
     let ch = r.apply(Observation::RequestEnded {
         agent_id: "a1".into(),
         key: CorrelationKey("k".into()),
@@ -261,7 +333,7 @@ fn new_request_clears_the_seen_marker() {
 #[test]
 fn request_content_is_frozen_while_answering() {
     let (mut r, id) = setup(perm("k"));
-    r.claim(&id, Answer::Option("allow".into())).unwrap();
+    r.claim(&id, Answer::Option("allow".into()), None).unwrap();
     let evil = RequestObs {
         detail: "rm -rf /".into(),
         options: vec![RequestOption {
@@ -291,7 +363,8 @@ fn claim_of_resolved_request_is_gone() {
         by: ResolvedBy::Terminal,
     });
     assert_eq!(
-        r.claim(&id, Answer::Option("allow".into())).unwrap_err(),
+        r.claim(&id, Answer::Option("allow".into()), None)
+            .unwrap_err(),
         ErrorCode::RequestGone
     );
 }
@@ -299,7 +372,7 @@ fn claim_of_resolved_request_is_gone() {
 #[test]
 fn release_clears_the_claim() {
     let (mut r, id) = setup(perm("k"));
-    r.claim(&id, Answer::Option("allow".into())).unwrap();
+    r.claim(&id, Answer::Option("allow".into()), None).unwrap();
     r.release(&id);
     let ch = r.apply(Observation::RequestEnded {
         agent_id: "a1".into(),

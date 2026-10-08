@@ -588,6 +588,7 @@ async fn blocked_pane_gets_a_read_only_request_then_terminal() {
             ClientMessage::RequestAnswer {
                 id: "a1".into(),
                 request_id: req.id.clone(),
+                revision: None,
                 option_id: Some("x".into()),
                 text: None,
             },

@@ -10,4 +10,4 @@ pub use model::*;
 /// The protocol identifier clients send in `hello`.
 pub const PROTOCOL: &str = "acd/1";
 /// Capabilities advertised by a v1 daemon.
-pub const CAPABILITIES: [&str; 3] = ["answer", "send", "mark_seen"];
+pub const CAPABILITIES: [&str; 4] = ["answer", "send", "mark_seen", "answer.revision"];

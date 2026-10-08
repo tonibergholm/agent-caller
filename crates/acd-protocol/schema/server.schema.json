@@ -166,6 +166,7 @@
         {
           "enum": [
             "request_gone",
+            "request_changed",
             "request_busy",
             "request_not_ready",
             "not_answerable",
@@ -293,6 +294,12 @@
             "string",
             "null"
           ]
+        },
+        "revision": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "status": {
           "$ref": "#/$defs/RequestStatus"

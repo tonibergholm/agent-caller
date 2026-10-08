@@ -5,4 +5,4 @@ import type { RequestKind } from "./RequestKind";
 import type { RequestOption } from "./RequestOption";
 import type { RequestStatus } from "./RequestStatus";
 
-export type Request = { id: string, agent_id: string, kind: RequestKind, status: RequestStatus, answer_path: AnswerPath, title: string, detail: string, options: Array<RequestOption>, questions: Array<Question> | null, free_text: boolean, raw_screen: string | null, opened_at: string, };
+export type Request = { id: string, revision: number, agent_id: string, kind: RequestKind, status: RequestStatus, answer_path: AnswerPath, title: string, detail: string, options: Array<RequestOption>, questions: Array<Question> | null, free_text: boolean, raw_screen: string | null, opened_at: string, };

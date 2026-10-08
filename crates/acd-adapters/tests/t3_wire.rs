@@ -749,6 +749,7 @@ fn a_live_approvals_command_survives_the_cap() {
 fn request_for(obs: &acd_core::RequestObs) -> Request {
     Request {
         id: "r1".into(),
+        revision: 1,
         agent_id: obs.agent_id.clone(),
         kind: obs.kind,
         status: RequestStatus::Answering,

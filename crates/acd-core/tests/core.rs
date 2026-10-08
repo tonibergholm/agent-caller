@@ -8,6 +8,7 @@ fn answer(id: &str, request_id: &str) -> ClientMessage {
     ClientMessage::RequestAnswer {
         id: id.into(),
         request_id: request_id.into(),
+        revision: None,
         option_id: Some("allow".into()),
         text: None,
     }
@@ -78,6 +79,63 @@ async fn pre_delivery_error_releases_and_is_not_cached() {
         core2.handle("cl", answer("same", &rid2)).await,
         CommandResult::delivered("same")
     );
+}
+
+#[tokio::test]
+async fn stale_revision_rejects_before_delivery_and_same_id_retries_corrected_revision() {
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    let rid = open_request(&core);
+    let current = core.request(&rid).unwrap().revision;
+    core.observe(Observation::RequestSeen(RequestObs {
+        options: vec![RequestOption {
+            id: "deny".into(),
+            label: "No".into(),
+            description: None,
+            effect: Effect::Deny,
+        }],
+        ..permission_obs("a1", "k1")
+    }));
+    let changed = core.request(&rid).unwrap().revision;
+    assert!(changed > current);
+    let stale = ClientMessage::RequestAnswer {
+        id: "same".into(),
+        request_id: rid.clone(),
+        revision: Some(current),
+        option_id: Some("allow".into()),
+        text: None,
+    };
+    assert_eq!(
+        core.handle("cl", stale).await.error_code(),
+        Some(ErrorCode::RequestChanged)
+    );
+    assert!(fake.delivered().is_empty());
+    assert_eq!(core.request(&rid).unwrap().status, RequestStatus::Open);
+
+    let corrected = ClientMessage::RequestAnswer {
+        id: "same".into(),
+        request_id: rid,
+        revision: Some(changed),
+        option_id: Some("deny".into()),
+        text: None,
+    };
+    assert_eq!(
+        core.handle("cl", corrected).await,
+        CommandResult::delivered("same")
+    );
+    assert_eq!(fake.delivered().len(), 1);
+}
+
+#[tokio::test]
+async fn old_style_answer_without_revision_still_delivers() {
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    let rid = open_request(&core);
+    assert_eq!(
+        core.handle("cl", answer("legacy", &rid)).await,
+        CommandResult::delivered("legacy")
+    );
+    assert_eq!(fake.delivered().len(), 1);
 }
 
 #[tokio::test]
@@ -226,7 +284,10 @@ fn welcome_lists_v1_capabilities() {
     let ServerMessage::Welcome { capabilities, .. } = core.welcome() else {
         panic!()
     };
-    assert_eq!(capabilities, vec!["answer", "send", "mark_seen"]);
+    assert_eq!(
+        capabilities,
+        vec!["answer", "send", "mark_seen", "answer.revision"]
+    );
     let _: Arc<Core> = core;
 }
 
@@ -354,12 +415,14 @@ async fn oversized_ids_and_texts_are_bad_requests() {
         ClientMessage::RequestAnswer {
             id: "a".into(),
             request_id: long.clone(),
+            revision: None,
             option_id: Some("allow".into()),
             text: None,
         },
         ClientMessage::RequestAnswer {
             id: "b".into(),
             request_id: "r1".into(),
+            revision: None,
             option_id: None,
             text: Some(text.clone()),
         },

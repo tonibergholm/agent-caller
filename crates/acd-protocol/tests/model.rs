@@ -18,6 +18,7 @@ fn opt(id: &str, label: &str, effect: Effect) -> RequestOption {
 fn permission() -> Request {
     Request {
         id: "r1".into(),
+        revision: 1,
         agent_id: "herdr:abc:w1:p1".into(),
         kind: RequestKind::Permission,
         status: RequestStatus::Open,
@@ -65,7 +66,7 @@ fn request_serializes_to_wire_shape() {
                 {"id": "allow", "label": "Yes", "description": null, "effect": "allow"},
                 {"id": "deny", "label": "No", "description": null, "effect": "deny"}
             ],
-            "questions": null, "free_text": false, "raw_screen": null,
+            "questions": null, "free_text": false, "raw_screen": null, "revision": 1,
             "opened_at": "2026-10-07T12:00:00.000Z"
         })
     );
@@ -83,6 +84,14 @@ fn unknown_enum_values_and_fields_are_tolerated() {
     assert_eq!(r.answer_path, AnswerPath::Unknown);
     assert_eq!(r.options[0].effect, Effect::Unknown);
     assert!(!r.is_answerable());
+}
+
+#[test]
+fn request_decodes_without_revision_as_zero() {
+    let mut value = serde_json::to_value(permission()).unwrap();
+    value.as_object_mut().unwrap().remove("revision");
+    let decoded: Request = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.revision, 0);
 }
 
 #[test]

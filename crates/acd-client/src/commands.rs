@@ -7,6 +7,7 @@ use tokio::{sync::oneshot, time::Instant};
 pub enum Command {
     Answer {
         request_id: String,
+        revision: u64,
         option_id: String,
     },
     Send {
@@ -78,7 +79,12 @@ impl Commands {
             return None;
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let msg = message(&cmd, id.clone());
+        let mut msg = message(&cmd, id.clone());
+        if !caps.iter().any(|cap| cap == "answer.revision")
+            && let ClientMessage::RequestAnswer { revision, .. } = &mut msg
+        {
+            *revision = None;
+        }
         self.items.insert(
             id.clone(),
             Inflight {
@@ -256,9 +262,11 @@ fn message(cmd: &Command, id: String) -> ClientMessage {
         Command::Answer {
             request_id,
             option_id,
+            revision,
         } => ClientMessage::RequestAnswer {
             id,
             request_id: request_id.clone(),
+            revision: Some(*revision),
             option_id: Some(option_id.clone()),
             text: None,
         },
@@ -288,6 +296,7 @@ mod tests {
     fn answer() -> Command {
         Command::Answer {
             request_id: "r".into(),
+            revision: 7,
             option_id: "o".into(),
         }
     }
@@ -325,6 +334,75 @@ mod tests {
             vec![m]
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn answer_frame_includes_revision_only_for_advertising_servers() {
+        let t0 = Instant::now();
+        let mut c = Commands::default();
+        let (tx, _rx) = oneshot::channel();
+        let frame = c
+            .begin(
+                answer(),
+                tx,
+                &["answer".into(), "answer.revision".into()],
+                C1,
+                t0,
+            )
+            .unwrap();
+        assert!(matches!(
+            frame,
+            ClientMessage::RequestAnswer {
+                revision: Some(7),
+                ..
+            }
+        ));
+        let (tx, _rx) = oneshot::channel();
+        let legacy = c.begin(answer(), tx, &["answer".into()], C1, t0).unwrap();
+        assert!(matches!(
+            legacy,
+            ClientMessage::RequestAnswer { revision: None, .. }
+        ));
+    }
+
+    #[test]
+    fn request_changed_finishes_without_retry() {
+        let t0 = Instant::now();
+        let mut c = Commands::default();
+        let (tx, mut rx) = oneshot::channel();
+        let msg = c
+            .begin(
+                answer(),
+                tx,
+                &["answer".into(), "answer.revision".into()],
+                C1,
+                t0,
+            )
+            .unwrap();
+        c.on_result(
+            &CommandResult::err(
+                &id_of(&msg),
+                ErrorCode::RequestChanged,
+                ErrorCode::RequestChanged.describe(),
+            ),
+            t0,
+            &t(),
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Outcome::Failed {
+                code: ErrorCode::RequestChanged,
+                message: ErrorCode::RequestChanged.describe().into()
+            }
+        );
+        assert!(
+            c.due(
+                t0 + Duration::from_secs(1),
+                &["answer".into(), "answer.revision".into()],
+                &t()
+            )
+            .is_empty()
+        );
     }
 
     #[test]

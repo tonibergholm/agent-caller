@@ -468,6 +468,7 @@ mod revocation_tests {
         let cmd = ClientMessage::RequestAnswer {
             id: "c".into(),
             request_id: rid,
+            revision: None,
             option_id: Some("allow".into()),
             text: None,
         };

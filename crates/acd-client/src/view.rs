@@ -197,6 +197,10 @@ pub fn notice_for_error(code: ErrorCode, message: &str) -> Notice {
     use ErrorCode::*;
     let (text, tone) = match code {
         RequestGone => (NOTICE_ANSWERED_ELSEWHERE.to_owned(), NoticeTone::Info),
+        RequestChanged => (
+            "The request changed. Nothing was sent.".into(),
+            NoticeTone::Warning,
+        ),
         RequestNotReady => (
             "Not ready yet. Enlarge the pane to answer here.".into(),
             NoticeTone::Warning,
@@ -861,6 +865,7 @@ mod tests {
         use ErrorCode::*;
         let t = |c| notice_for_error(c, "srv").text;
         assert_eq!(t(RequestGone), "Answered elsewhere");
+        assert_eq!(t(RequestChanged), "The request changed. Nothing was sent.");
         assert_eq!(
             t(RequestNotReady),
             "Not ready yet. Enlarge the pane to answer here."
@@ -884,6 +889,21 @@ mod tests {
         assert_eq!(t(BadRequest), "Could not send: srv");
         assert_eq!(t(Unknown), "Could not send: srv");
         assert_eq!(notice_for_error(RequestGone, "").tone, NoticeTone::Info);
+        assert_eq!(
+            notice_for_error(RequestChanged, "").tone,
+            NoticeTone::Warning
+        );
+        assert_eq!(
+            notice_for_outcome(&super::Outcome::Failed {
+                code: RequestChanged,
+                message: ErrorCode::RequestChanged.describe().into(),
+            })
+            .unwrap(),
+            Notice {
+                text: "The request changed. Nothing was sent.".into(),
+                tone: NoticeTone::Warning
+            }
+        );
         assert_eq!(
             notice_for_error(RequestNotReady, "").tone,
             NoticeTone::Warning

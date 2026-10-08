@@ -181,7 +181,7 @@ async fn hello_returns_welcome_then_snapshot_then_live_events() {
     assert_eq!(welcome["type"], "welcome");
     assert_eq!(
         welcome["capabilities"],
-        json!(["answer", "send", "mark_seen"])
+        json!(["answer", "send", "mark_seen", "answer.revision"])
     );
     assert_eq!(initial["type"], "snapshot");
     s.core.observe(Observation::AgentUpsert(agent_obs("a1")));

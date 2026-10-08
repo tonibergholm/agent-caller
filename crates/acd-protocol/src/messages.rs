@@ -31,6 +31,8 @@ pub enum ClientMessage {
         id: String,
         request_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         option_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
@@ -63,6 +65,7 @@ impl ClientMessage {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     RequestGone,
+    RequestChanged,
     RequestBusy,
     RequestNotReady,
     NotAnswerable,
@@ -84,6 +87,7 @@ impl ErrorCode {
     pub fn describe(&self) -> &'static str {
         match self {
             ErrorCode::RequestGone => "the request was already resolved",
+            ErrorCode::RequestChanged => "the request changed; review it again",
             ErrorCode::RequestBusy => "another answer is in flight",
             ErrorCode::RequestNotReady => "the dialog is not yet confirmed on screen",
             ErrorCode::NotAnswerable => "this request can only be answered in the terminal",

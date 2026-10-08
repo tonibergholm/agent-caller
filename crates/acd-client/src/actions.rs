@@ -11,6 +11,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Semantics {
     pub request_id: String,
+    pub revision: u64,
     pub kind: RequestKind,
     pub answer_path: AnswerPath,
     pub title: String,
@@ -23,6 +24,7 @@ impl Semantics {
         let option = req.options.iter().find(|o| o.id == option_id)?.clone();
         Some(Self {
             request_id: req.id.clone(),
+            revision: req.revision,
             kind: req.kind,
             answer_path: req.answer_path,
             title: req.title.clone(),

@@ -197,6 +197,11 @@ impl Registry {
                 if e.req.status != RequestStatus::Open || e.req.answer_path == answer_path {
                     return vec![];
                 }
+                e.req.revision = e
+                    .req
+                    .revision
+                    .checked_add(1)
+                    .expect("request revision overflow");
                 e.req.answer_path = answer_path;
                 self.sync_pending(&rid).into_iter().collect()
             }
@@ -455,6 +460,7 @@ impl Registry {
         let rid = format!("r{}", self.next_id);
         let req = Request {
             id: rid.clone(),
+            revision: 1,
             agent_id: o.agent_id.clone(),
             kind: o.kind,
             status: RequestStatus::Open,
@@ -515,6 +521,20 @@ impl Registry {
             return vec![];
         }
         let before = e.req.clone();
+        let semantic_changed = e.req.kind != o.kind
+            || e.req.answer_path != o.answer_path
+            || e.req.title != o.title
+            || e.req.detail != o.detail
+            || e.req.options != o.options
+            || e.req.questions != o.questions
+            || e.req.free_text != o.free_text;
+        if semantic_changed {
+            e.req.revision = e
+                .req
+                .revision
+                .checked_add(1)
+                .expect("request revision overflow");
+        }
         e.req.kind = o.kind;
         if e.req.status == RequestStatus::Open {
             e.req.answer_path = o.answer_path;
@@ -552,6 +572,7 @@ impl Registry {
         &mut self,
         request_id: &str,
         answer: Answer,
+        revision: Option<u64>,
     ) -> Result<(Request, Vec<Change>), ErrorCode> {
         let e = self
             .requests
@@ -568,6 +589,9 @@ impl Registry {
         }
         if !e.ready {
             return Err(ErrorCode::RequestNotReady);
+        }
+        if revision.is_some_and(|revision| revision != e.req.revision) {
+            return Err(ErrorCode::RequestChanged);
         }
         match &answer {
             Answer::Option(id) => {
@@ -642,6 +666,7 @@ mod tests {
             ReqEntry {
                 req: Request {
                     id: "request".into(),
+                    revision: 1,
                     agent_id: "agent".into(),
                     kind: RequestKind::Permission,
                     status: RequestStatus::Unknown,
@@ -661,7 +686,7 @@ mod tests {
         );
 
         assert_eq!(
-            registry.claim("request", Answer::Option("allow".into())),
+            registry.claim("request", Answer::Option("allow".into()), None),
             Err(ErrorCode::NotAnswerable)
         );
         assert_eq!(
@@ -669,5 +694,43 @@ mod tests {
             RequestStatus::Unknown
         );
         assert!(registry.requests["request"].claimed.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "request revision overflow")]
+    fn semantic_revision_overflow_panics_instead_of_wrapping() {
+        let mut registry = Registry::new("machine".into());
+        registry.apply(Observation::AgentUpsert(AgentObs {
+            id: "agent".into(),
+            source: Source::Herdr,
+            kind: AgentKind::Claude,
+            title: "agent".into(),
+            cwd: None,
+            project: None,
+            state: AgentState::Working,
+            failed: false,
+            last_message: None,
+            can_send: true,
+        }));
+        let mut request = RequestObs {
+            agent_id: "agent".into(),
+            key: CorrelationKey("key".into()),
+            upgrade_from: None,
+            kind: RequestKind::Permission,
+            answer_path: AnswerPath::Hook,
+            title: "title".into(),
+            detail: "first".into(),
+            options: vec![],
+            questions: None,
+            free_text: false,
+            raw_screen: None,
+            ready: true,
+            reusable_key: true,
+        };
+        registry.apply(Observation::RequestSeen(request.clone()));
+        let id = registry.agents()[0].pending.as_ref().unwrap().id.clone();
+        registry.requests.get_mut(&id).unwrap().req.revision = u64::MAX;
+        request.detail = "second".into();
+        registry.apply(Observation::RequestSeen(request));
     }
 }

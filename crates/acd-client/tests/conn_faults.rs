@@ -94,6 +94,7 @@ async fn submit_answer(
         h.submit(
             acd_client::commands::Command::Answer {
                 request_id: "r1".into(),
+                revision: 1,
                 option_id: "allow".into(),
             },
             None,
@@ -289,6 +290,7 @@ async fn not_ready_retry_reuses_the_id_then_succeeds() {
         h2.submit(
             acd_client::commands::Command::Answer {
                 request_id: "r1".into(),
+                revision: 1,
                 option_id: "allow".into(),
             },
             None,
@@ -361,6 +363,7 @@ async fn new_epoch_without_rotation_marks_uncertain() {
         h2.submit(
             acd_client::commands::Command::Answer {
                 request_id: "r1".into(),
+                revision: 1,
                 option_id: "allow".into(),
             },
             None,
@@ -390,6 +393,7 @@ async fn capability_removed_across_reconnect_is_not_resent() {
         h2.submit(
             acd_client::commands::Command::Answer {
                 request_id: "r1".into(),
+                revision: 1,
                 option_id: "allow".into(),
             },
             None,
@@ -421,6 +425,7 @@ async fn retry_result_lost_is_resent_and_recovers() {
         h2.submit(
             acd_client::commands::Command::Answer {
                 request_id: "r1".into(),
+                revision: 1,
                 option_id: "allow".into(),
             },
             None,

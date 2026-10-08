@@ -367,6 +367,7 @@ async fn answer_reaches_the_adapter_once() {
         h.submit(
             acd_client::commands::Command::Answer {
                 request_id: rid,
+                revision: 1,
                 option_id: "allow".into()
             },
             None
@@ -402,6 +403,7 @@ async fn rotation_revokes_inflight_and_never_resends() {
         h2.submit(
             acd_client::commands::Command::Answer {
                 request_id: rid,
+                revision: 1,
                 option_id: "allow".into(),
             },
             None,
@@ -461,6 +463,7 @@ async fn rotation_before_delivery_is_uncertain_and_new_token_works() {
         h2.submit(
             acd_client::commands::Command::Answer {
                 request_id: rid,
+                revision: 1,
                 option_id: "allow".into(),
             },
             None,
@@ -510,6 +513,7 @@ async fn rotation_before_delivery_is_uncertain_and_new_token_works() {
         h.submit(
             acd_client::commands::Command::Answer {
                 request_id: rid,
+                revision: 1,
                 option_id: "allow".into()
             },
             None

@@ -190,6 +190,7 @@ impl Core {
                     ErrorCode::RequestNotReady
                         | ErrorCode::RequestBusy
                         | ErrorCode::SourceUnavailable
+                        | ErrorCode::RequestChanged
                 )
             );
         self.inner.lock().unwrap().idem.finish(
@@ -211,6 +212,7 @@ impl Core {
         let result = match msg {
             ClientMessage::RequestAnswer {
                 request_id,
+                revision,
                 option_id,
                 text,
                 ..
@@ -255,7 +257,7 @@ impl Core {
                     .cloned();
                 let request = {
                     let mut st = self.inner.lock().unwrap();
-                    match st.registry.claim(&request_id, answer.clone()) {
+                    match st.registry.claim(&request_id, answer.clone(), revision) {
                         Ok((req, changes)) => {
                             if adapter.is_none() || req.answer_path != path {
                                 // Undo without publishing: clients never see answering -> open churn.

@@ -349,6 +349,7 @@ async fn answer(r: &Rig, cmd: &str, rid: &str, option: &str) -> CommandResult {
             ClientMessage::RequestAnswer {
                 id: cmd.into(),
                 request_id: rid.into(),
+                revision: None,
                 option_id: Some(option.into()),
                 text: None,
             },
@@ -514,6 +515,7 @@ async fn superseded_during_the_guard_read_sends_nothing() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
+                    revision: None,
                     option_id: Some("allow".into()),
                     text: None,
                 },
@@ -549,6 +551,7 @@ async fn cancelled_during_the_guard_read_never_sends_later() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
+                    revision: None,
                     option_id: Some("allow".into()),
                     text: None,
                 },
@@ -686,6 +689,7 @@ async fn late_refusal_publishes_nothing_even_if_the_dialog_closed() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
+                    revision: None,
                     option_id: Some("allow".into()),
                     text: None,
                 },
@@ -755,6 +759,7 @@ async fn no_target_is_not_ready_and_text_sends_nothing() {
             ClientMessage::RequestAnswer {
                 id: "t1".into(),
                 request_id: rid.clone(),
+                revision: None,
                 option_id: None,
                 text: Some("hi".into()),
             },
@@ -982,6 +987,7 @@ async fn lease_rejects_a_replaced_target() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
+                    revision: None,
                     option_id: Some("allow".into()),
                     text: None,
                 },

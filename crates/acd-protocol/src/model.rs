@@ -184,6 +184,8 @@ pub struct Question {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub id: String,
+    #[serde(default)]
+    pub revision: u64,
     pub agent_id: String,
     pub kind: RequestKind,
     pub status: RequestStatus,

@@ -134,6 +134,92 @@ fn same_key_updates_in_place() {
 }
 
 #[test]
+fn semantic_updates_bump_revision_but_raw_screen_and_readiness_do_not() {
+    let mut r = reg_with_agent();
+    let mut original = perm("a1", "k1", "ls");
+    original.raw_screen = Some("initial screen".into());
+    let id = opened(&r.apply(Observation::RequestSeen(original.clone())))[0]
+        .id
+        .clone();
+    assert_eq!(r.request(&id).unwrap().revision, 1);
+
+    let mut raw_only = original.clone();
+    raw_only.raw_screen = Some("updated screen".into());
+    raw_only.ready = false;
+    r.apply(Observation::RequestSeen(raw_only));
+    assert_eq!(r.request(&id).unwrap().revision, 1);
+
+    let mut changed = original;
+    changed.detail = "updated detail".into();
+    r.apply(Observation::RequestSeen(changed));
+    assert_eq!(r.request(&id).unwrap().revision, 2);
+}
+
+#[test]
+fn option_and_question_order_are_semantic() {
+    let mut r = reg_with_agent();
+    let mut obs = perm("a1", "ordered", "detail");
+    obs.kind = RequestKind::Question;
+    obs.answer_path = AnswerPath::T3;
+    obs.options = vec![
+        RequestOption {
+            id: "one".into(),
+            label: "One".into(),
+            description: None,
+            effect: Effect::Choose,
+        },
+        RequestOption {
+            id: "two".into(),
+            label: "Two".into(),
+            description: None,
+            effect: Effect::Choose,
+        },
+    ];
+    obs.questions = Some(vec![Question {
+        id: "q1".into(),
+        header: None,
+        text: "Pick".into(),
+        multi_select: false,
+        options: obs.options.clone(),
+    }]);
+    let id = opened(&r.apply(Observation::RequestSeen(obs.clone())))[0]
+        .id
+        .clone();
+    obs.options.reverse();
+    obs.questions.as_mut().unwrap()[0].options.reverse();
+    r.apply(Observation::RequestSeen(obs));
+    assert_eq!(r.request(&id).unwrap().revision, 2);
+}
+
+#[test]
+fn request_path_bumps_revision_and_invalidates_previous_answer() {
+    let mut r = reg_with_agent();
+    let id = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))))[0]
+        .id
+        .clone();
+    let stale = r.request(&id).unwrap().revision;
+    r.apply(Observation::RequestPath {
+        agent_id: "a1".into(),
+        key: CorrelationKey("k1".into()),
+        answer_path: AnswerPath::Keys,
+    });
+    let updated = r.request(&id).unwrap().revision;
+    assert_eq!(updated, stale + 1);
+    assert_eq!(
+        r.claim(&id, Answer::Option("allow".into()), Some(stale))
+            .unwrap_err(),
+        ErrorCode::RequestChanged
+    );
+    assert_eq!(
+        r.claim(&id, Answer::Option("allow".into()), Some(updated))
+            .unwrap()
+            .0
+            .status,
+        RequestStatus::Answering
+    );
+}
+
+#[test]
 fn different_key_supersedes() {
     let mut r = reg_with_agent();
     let first = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "ls"))))[0]
@@ -528,7 +614,7 @@ fn request_path_is_ignored_unless_open() {
     let rid = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0]
         .id
         .clone();
-    r.claim(&rid, Answer::Option("allow".into())).unwrap();
+    r.claim(&rid, Answer::Option("allow".into()), None).unwrap();
     let changes = r.apply(Observation::RequestPath {
         agent_id: "a1".into(),
         key: CorrelationKey("k".into()),
@@ -714,7 +800,7 @@ fn end_if_open_leaves_a_claimed_request_alone() {
     let rid = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "ls"))))[0]
         .id
         .clone();
-    r.claim(&rid, Answer::Option("allow".into())).unwrap();
+    r.claim(&rid, Answer::Option("allow".into()), None).unwrap();
     let ended = r.apply(Observation::RequestEndedIfOpen {
         request_id: rid.clone(),
         by: ResolvedBy::Terminal,
@@ -750,7 +836,7 @@ fn answering_request_superseded_is_uncertain_but_open_request_is_superseded() {
     let old = opened(&r.apply(Observation::RequestSeen(perm("a1", "k1", "old"))))[0]
         .id
         .clone();
-    r.claim(&old, Answer::Option("allow".into())).unwrap();
+    r.claim(&old, Answer::Option("allow".into()), None).unwrap();
     let changes = r.apply(Observation::RequestSeen(perm("a1", "k2", "new")));
     assert_eq!(
         resolved(&changes),
@@ -783,7 +869,7 @@ fn answering_agent_gone_is_uncertain_but_open_agent_gone_is_lost() {
     let id = opened(&r.apply(Observation::RequestSeen(perm("a1", "k", "old"))))[0]
         .id
         .clone();
-    r.claim(&id, Answer::Option("allow".into())).unwrap();
+    r.claim(&id, Answer::Option("allow".into()), None).unwrap();
     let changes = r.apply(Observation::AgentGone {
         agent_id: "a1".into(),
     });

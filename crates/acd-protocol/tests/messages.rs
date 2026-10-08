@@ -247,11 +247,28 @@ fn schema_accepts_and_decodes_text_answers() {
             ClientMessage::RequestAnswer {
                 id: "1".into(),
                 request_id: "r".into(),
+                revision: None,
                 option_id: None,
                 text: Some("x".into()),
             }
         );
     }
+}
+
+#[test]
+fn request_changed_decodes_and_unknown_old_decoder_falls_back() {
+    #[derive(serde::Deserialize, PartialEq, Debug)]
+    #[serde(rename_all = "snake_case")]
+    enum OldErrorCode {
+        RequestGone,
+        #[serde(other)]
+        Unknown,
+    }
+    let decoded: ErrorCode = serde_json::from_str("\"request_changed\"").unwrap();
+    assert_eq!(decoded, ErrorCode::RequestChanged);
+    assert_eq!(decoded.describe(), "the request changed; review it again");
+    let old_decoder: OldErrorCode = serde_json::from_str("\"request_changed\"").unwrap();
+    assert_eq!(old_decoder, OldErrorCode::Unknown);
 }
 
 #[test]
