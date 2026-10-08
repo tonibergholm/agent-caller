@@ -14,6 +14,23 @@ pub struct Config {
     pub listen: Vec<String>,
     pub allowed_origins: Vec<String>,
     pub herdr: HerdrSection,
+    pub t3: T3Section,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct T3Section {
+    pub enabled: bool,
+    pub url: Option<String>,
+}
+
+impl Default for T3Section {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            url: None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -48,6 +65,7 @@ impl Default for Config {
             listen: vec!["loopback".into(), "tailscale".into()],
             allowed_origins: vec![],
             herdr: HerdrSection::default(),
+            t3: T3Section::default(),
         }
     }
 }
@@ -74,6 +92,17 @@ mod tests {
         assert_eq!(c.port, 9000);
         assert_eq!(c.listen, vec!["loopback", "tailscale"]);
         assert!(c.herdr.enabled);
+    }
+
+    #[test]
+    fn t3_section_defaults_and_parses() {
+        let c: Config = toml::from_str("").unwrap();
+        assert!(c.t3.enabled);
+        assert!(c.t3.url.is_none());
+        let c: Config =
+            toml::from_str("[t3]\nenabled = false\nurl = \"http://127.0.0.1:3773\"\n").unwrap();
+        assert!(!c.t3.enabled);
+        assert_eq!(c.t3.url.as_deref(), Some("http://127.0.0.1:3773"));
     }
 
     #[test]

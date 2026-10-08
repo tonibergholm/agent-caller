@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use acd_core::{router, Auth, Core, ServerOptions};
+use acd_core::{Auth, Core, ServerOptions, router};
 use acd_protocol::{Machine, SourceStatus, Sources};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::{bind, config::Config, identity, secrets};
 
@@ -15,26 +15,55 @@ use crate::{bind, config::Config, identity, secrets};
 pub const EXIT_ADDRESSES_CHANGED: i32 = 75;
 
 /// The Unix socket in the config dir that local tools such as `acd status` use.
-pub fn socket_path(dir: &Path) -> PathBuf { dir.join("acd.sock") }
+pub fn socket_path(dir: &Path) -> PathBuf {
+    dir.join("acd.sock")
+}
 
 pub async fn run(dir: &Path) -> Result<()> {
     crate::preflight(dir)?;
     let cfg = Config::load(dir)?;
     let token = secrets::read_secret(&dir.join("client.token"))
         .and_then(|t| secrets::parse_token(&t))
-        .map_err(|e| anyhow::anyhow!("client.token is invalid ({e}); run `acd token rotate client`"))?;
+        .map_err(|e| {
+            anyhow::anyhow!("client.token is invalid ({e}); run `acd token rotate client`")
+        })?;
     let machine = Machine {
         id: identity::machine_id(dir)?,
         name: cfg.machine_name.clone(),
         acd_version: env!("CARGO_PKG_VERSION").into(),
-        sources: Sources { hooks: SourceStatus::unconfigured(), herdr: SourceStatus::unconfigured(), t3: SourceStatus::unconfigured() },
+        sources: Sources {
+            hooks: SourceStatus::unconfigured(),
+            herdr: SourceStatus::unconfigured(),
+            t3: SourceStatus::unconfigured(),
+        },
     };
-    let extra = cfg.herdr.extra_sockets.iter().map(|s| crate::config::expand_home(s)).collect();
-    let herdr = acd_adapters::herdr::HerdrAdapter::new(acd_adapters::herdr::HerdrConfig::from_env(cfg.herdr.enabled, extra));
-    let core = Core::new(machine, vec![herdr.clone()]);
+    let extra = cfg
+        .herdr
+        .extra_sockets
+        .iter()
+        .map(|s| crate::config::expand_home(s))
+        .collect();
+    let herdr = acd_adapters::herdr::HerdrAdapter::new(acd_adapters::herdr::HerdrConfig::from_env(
+        cfg.herdr.enabled,
+        extra,
+    ));
+    let t3 = acd_adapters::t3::T3Adapter::new(acd_adapters::t3::T3Config::new(
+        cfg.t3.enabled,
+        cfg.t3.url.clone(),
+        dir.join("t3.token"),
+    ));
+    let core = Core::new(machine, vec![herdr.clone(), t3.clone()]);
     herdr.start(core.clone());
+    t3.start(core.clone());
     let auth = Arc::new(Auth::new(token.clone()));
-    let app = router(core, auth.clone(), ServerOptions { allowed_origins: cfg.allowed_origins.clone(), ..Default::default() });
+    let app = router(
+        core,
+        auth.clone(),
+        ServerOptions {
+            allowed_origins: cfg.allowed_origins.clone(),
+            ..Default::default()
+        },
+    );
 
     let probe = bind::tailscale_reported().await;
     let listen_includes_tailscale = cfg.listen.iter().any(|e| e == "tailscale");
@@ -54,18 +83,25 @@ pub async fn run(dir: &Path) -> Result<()> {
         let addr = SocketAddr::new(*ip, cfg.port);
         match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => listeners.push((addr, l)),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable && *ip == IpAddr::V6(Ipv6Addr::LOCALHOST) => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::AddrNotAvailable
+                    && *ip == IpAddr::V6(Ipv6Addr::LOCALHOST) =>
+            {
                 tracing::warn!(%addr, error = %e, "IPv6 loopback unavailable; skipping");
             }
             Err(e) => bail!("cannot bind {addr}: {e}"),
         }
     }
-    if listeners.is_empty() { bail!("no listen address to bind ({ips:?})"); }
+    if listeners.is_empty() {
+        bail!("no listen address to bind ({ips:?})");
+    }
     for (addr, listener) in listeners {
         tracing::info!(%addr, "listening");
         let app = app.clone();
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await { tracing::error!(%addr, error = %e, "server stopped"); }
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!(%addr, error = %e, "server stopped");
+            }
         });
     }
     // The same router (and so the same limits) on the Unix socket. Hello and
@@ -75,7 +111,9 @@ pub async fn run(dir: &Path) -> Result<()> {
     let local = bind_local_socket(&sock)?;
     tracing::info!(path = %sock.display(), "listening");
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(local, app).await { tracing::error!(error = %e, "local socket server stopped"); }
+        if let Err(e) = axum::serve(local, app).await {
+            tracing::error!(error = %e, "local socket server stopped");
+        }
     });
 
     // Token rotation: re-read client.token every 2 s.
@@ -87,10 +125,17 @@ pub async fn run(dir: &Path) -> Result<()> {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             match secrets::read_secret(&token_path).and_then(|t| secrets::parse_token(&t)) {
-                Ok(t) if t != current => { tracing::info!("client token rotated"); rot_auth.rotate(t.clone()); current = t; invalid_logged = false; }
+                Ok(t) if t != current => {
+                    tracing::info!("client token rotated");
+                    rot_auth.rotate(t.clone());
+                    current = t;
+                    invalid_logged = false;
+                }
                 Ok(_) => invalid_logged = false,
                 Err(e) => {
-                    if !invalid_logged { tracing::error!(error = %e, "client token unreadable or invalid; keeping the current token"); }
+                    if !invalid_logged {
+                        tracing::error!(error = %e, "client token unreadable or invalid; keeping the current token");
+                    }
                     invalid_logged = true;
                 }
             }
@@ -110,7 +155,10 @@ pub async fn run(dir: &Path) -> Result<()> {
             let Some(reported) = bind::tailscale_reported().await else {
                 failures = bind::next_failure_count(failures, false);
                 if bind::should_exit_on_probe_failures(failures, &ips) {
-                    tracing::error!(failures, "`tailscale ip` keeps failing while bound to Tailscale addresses; exiting for restart");
+                    tracing::error!(
+                        failures,
+                        "`tailscale ip` keeps failing while bound to Tailscale addresses; exiting for restart"
+                    );
                     return;
                 }
                 continue;
@@ -118,7 +166,10 @@ pub async fn run(dir: &Path) -> Result<()> {
             failures = bind::next_failure_count(failures, true);
             let now = bind::resolve_listen(&listen, &reported).unwrap_or_default();
             let (exit, next) = bind::should_exit(pending.as_ref(), &now, &ips);
-            if exit { tracing::warn!(?now, "listen addresses changed; exiting for restart"); return; }
+            if exit {
+                tracing::warn!(?now, "listen addresses changed; exiting for restart");
+                return;
+            }
             pending = next;
         }
     });
@@ -144,13 +195,15 @@ fn bind_local_socket(path: &Path) -> Result<tokio::net::UnixListener> {
             if std::os::unix::net::UnixStream::connect(path).is_ok() {
                 bail!("another acd is running on {}", path.display());
             }
-            std::fs::remove_file(path).with_context(|| format!("removing stale {}", path.display()))?
+            std::fs::remove_file(path)
+                .with_context(|| format!("removing stale {}", path.display()))?
         }
         Ok(_) => bail!("{} exists and is not a socket; remove it", path.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     }
-    let listener = tokio::net::UnixListener::bind(path).with_context(|| format!("cannot bind {}", path.display()))?;
+    let listener = tokio::net::UnixListener::bind(path)
+        .with_context(|| format!("cannot bind {}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok(listener)
 }
