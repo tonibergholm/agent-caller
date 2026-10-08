@@ -60,13 +60,22 @@ pub struct SecretError(pub String);
 /// Canonical base64url without padding, decoding to exactly 32 bytes: the
 /// same rule as acd's `parse_token` (non-zero trailing bits are rejected).
 pub fn valid_token(s: &str) -> bool {
+    decode_canonical_32(s).is_some()
+}
+
+fn decode_canonical_32(s: &str) -> Option<[u8; 32]> {
     use base64::Engine;
-    s.len() == 43
-        && base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(s)
-            .is_ok_and(|b| {
-                b.len() == 32 && base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b) == s
-            })
+    if s.len() != 43 {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(s)
+        .ok()?;
+    if decoded.len() != 32 || base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&decoded) != s
+    {
+        return None;
+    }
+    decoded.try_into().ok()
 }
 
 /// The Keychain value for a remote machine (decision D7).
@@ -100,23 +109,16 @@ impl MachineSecret {
 }
 
 fn valid_pin(s: &str) -> bool {
-    use base64::Engine;
     let Some(encoded) = s.strip_prefix("sha256:") else {
         return false;
     };
-    encoded.len() == 43
-        && base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(encoded)
-            .is_ok_and(|b| {
-                b.len() == 32
-                    && base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b) == encoded
-            })
+    decode_canonical_32(encoded).is_some()
 }
 
 impl MachineEntry {
     pub fn validate(&self) -> Result<(), SettingsError> {
         let bad = |m: &str| Err(SettingsError::Invalid(m.into()));
-        if self.key.is_empty() || self.key.contains('/') || self.key.len() > 64 {
+        if self.key != LOCAL_KEY && uuid::Uuid::parse_str(&self.key).is_err() {
             return bad("invalid machine key");
         }
         let name = self.name.trim();
@@ -280,7 +282,7 @@ mod tests {
     #[test]
     fn entry_validation() {
         let tcp = |host: &str, port| MachineEntry {
-            key: "k".into(),
+            key: uuid::Uuid::new_v4().to_string(),
             name: "n".into(),
             endpoint: EndpointConfig::Tcp {
                 host: host.into(),
@@ -288,13 +290,18 @@ mod tests {
             },
         };
         assert!(tcp("devbox.tail1234.ts.net", 47800).validate().is_ok());
+        let mut local_key = tcp("devbox", 47800);
+        local_key.key = LOCAL_KEY.into();
+        assert!(local_key.validate().is_ok());
         assert!(tcp("", 47800).validate().is_err());
         assert!(tcp("ws://devbox", 47800).validate().is_err());
         assert!(tcp("dev box", 47800).validate().is_err());
         assert!(tcp("devbox", 0).validate().is_err());
         let mut bad_key = tcp("devbox", 1);
-        bad_key.key = "a/b".into();
-        assert!(bad_key.validate().is_err());
+        for invalid_key in ["", "machine", "a/b", "00000000-0000-0000-0000-00000000000g"] {
+            bad_key.key = invalid_key.into();
+            assert!(bad_key.validate().is_err(), "accepted key {invalid_key:?}");
+        }
         let mut no_name = tcp("devbox", 1);
         no_name.name = " ".into();
         assert!(no_name.validate().is_err());
@@ -313,6 +320,21 @@ mod tests {
             pin: "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
         };
         assert_eq!(MachineSecret::from_json(&ms.to_json()).unwrap(), ms);
+        for bad_pin in [
+            "sha256:!",
+            "sha256:AA",
+            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_",
+        ] {
+            let bad = MachineSecret {
+                pin: bad_pin.into(),
+                ..ms.clone()
+            };
+            assert!(
+                MachineSecret::from_json(&bad.to_json()).is_err(),
+                "accepted pin {bad_pin:?}"
+            );
+        }
         assert!(!format!("{ms:?}").contains("AAEC"));
         let m = MemorySecrets::default();
         assert_eq!(m.get("k").unwrap(), None);
