@@ -753,13 +753,18 @@ async fn resolution(
     rx: &mut tokio::sync::broadcast::Receiver<ServerMessage>,
     rid: &str,
 ) -> ResolvedBy {
-    loop {
-        if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
-            && request_id == rid
-        {
-            return by;
+    let wait = async {
+        loop {
+            if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+                && request_id == rid
+            {
+                return by;
+            }
         }
-    }
+    };
+    tokio::time::timeout(Duration::from_secs(10), wait)
+        .await
+        .unwrap_or_else(|_| panic!("{rid} did not resolve"))
 }
 
 const HOOKS_ONLY: &str = "claude:4e3885ee-7454-410d-a2e2-86f4dc2533c0";
@@ -1618,6 +1623,7 @@ async fn a_capture_from_a_replaced_pane_is_discarded() {
 #[tokio::test]
 async fn a_capture_result_after_t3_takeover_is_discarded() {
     let (r, agent, _filler) = unheld_bound_rig().await;
+    let (_, mut rx) = r.core.attach(None);
     let gate = r.fake.as_ref().unwrap().block_next("agent.read");
     let port = r.port;
     let mut payload = fx("claude/payload-PermissionRequest-Bash.json");
@@ -1648,9 +1654,11 @@ async fn a_capture_result_after_t3_takeover_is_discarded() {
     r.t3.set_for_tests("t3:thread-target", Some("target-session"));
     gate.release();
     let _ = hook.await.unwrap();
+    // Task 18: the takeover revokes the request; the late capture registers nothing.
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Lost);
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_none());
-    assert_eq!(r.core.request(&rid).unwrap().status, RequestStatus::Open);
+    assert!(r.fake.as_ref().unwrap().keys_sent().is_empty());
 }
 
 #[tokio::test]
@@ -1825,4 +1833,135 @@ async fn a_held_request_migrates_to_herdr_with_the_same_id() {
     })
     .await;
     assert!(r.agent(HOOKS_ONLY).is_none());
+}
+
+/// The hold's reply, bounded so a hold that is never released fails the test.
+async fn released(held: tokio::net::TcpStream) -> (u16, String) {
+    tokio::time::timeout(Duration::from_secs(10), read_response(held))
+        .await
+        .expect("the hold was not released")
+}
+
+#[tokio::test]
+async fn t3_takeover_revokes_a_bound_claude_hold_and_keeps_the_herdr_agent() {
+    let (r, agent) = bound_rig().await;
+    let (_, mut rx) = r.core.attach(None);
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    r.t3.set_for_tests("t3:thread-1", Some(SID));
+    assert_eq!(
+        released(held).await,
+        (200, String::new()),
+        "the hold is released empty"
+    );
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Lost);
+    assert!(
+        r.agent(&agent).is_some(),
+        "revocation never removes a herdr agent"
+    );
+}
+
+#[tokio::test]
+async fn t3_takeover_revokes_a_bound_claude_keys_request() {
+    let (r, agent) = bound_rig().await;
+    let (_, mut rx) = r.core.attach(None);
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await; // capture
+    drop(held); // switch to keys
+    until("target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid)
+    })
+    .await;
+    r.t3.set_for_tests("t3:thread-1", Some(SID));
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Lost);
+    assert!(
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_none(),
+        "target retired"
+    );
+    assert_eq!(
+        answer(&r, "a1", &rid, "allow").await.error_code(),
+        Some(ErrorCode::RequestGone)
+    );
+    assert!(r.fake.as_ref().unwrap().keys_sent().is_empty());
+    assert!(r.agent(&agent).is_some());
+}
+
+#[tokio::test]
+async fn rebinding_to_another_pane_revokes_on_the_old_one() {
+    let r = rig(
+        &[
+            fake_agent("w1:p1", "claude", "working"),
+            fake_agent("w1:p2", "claude", "working"),
+        ],
+        |_| {},
+    )
+    .await;
+    let (_, mut rx) = r.core.attach(None);
+    let sock = r.sock();
+    let on = |pane: &'static str| {
+        vec![
+            ("X-Herdr-Pane", pane),
+            ("X-Herdr-Socket", sock.as_str()),
+            ("X-Claude-Entrypoint", "cli"),
+        ]
+    };
+    let held = r
+        .hold(
+            &fx("claude/payload-PermissionRequest-Bash.json"),
+            &on("w1:p1"),
+        )
+        .await;
+    let p1 = r
+        .herdr
+        .as_ref()
+        .unwrap()
+        .panes()
+        .read()
+        .unwrap()
+        .iter()
+        .find(|(_, p)| p.pane_id == "w1:p1")
+        .unwrap()
+        .0
+        .clone();
+    let rid = until("request on p1", || {
+        r.agent(&p1).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    r.hook(
+        "claude",
+        "UserPromptSubmit",
+        &fx("claude/payload-UserPromptSubmit.json"),
+        &on("w1:p2"),
+    )
+    .await;
+    assert_eq!(released(held).await, (200, String::new()));
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Lost);
+    assert!(r.agent(&p1).is_some());
+}
+
+#[tokio::test]
+async fn a_hooks_only_session_taken_by_t3_releases_its_hold() {
+    let r = rig(&[], |_| {}).await;
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &CLI)
+        .await;
+    until("request", || r.agent(HOOKS_ONLY).and_then(|a| a.pending)).await;
+    r.t3.set_for_tests("t3:thread-1", Some(SID));
+    assert_eq!(released(held).await, (200, String::new()));
+    until("gone", || r.agent(HOOKS_ONLY).is_none().then_some(())).await;
 }

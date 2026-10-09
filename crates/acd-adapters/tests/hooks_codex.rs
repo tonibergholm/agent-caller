@@ -449,6 +449,8 @@ async fn a_changed_rival_inventory_refuses_as_not_ready() {
     // C6: a Codex pane added after validation; the lease refuses with
     // RequestNotReady (retryable), not RequestGone.
     let (r, rid, _a, _b) = ready_with_rival("codex-idle-detection.txt").await;
+    // Without ticks no C5 recheck restores readiness: only the lease decides.
+    r.hooks.pause_ticks_for_tests(true);
     let f = r.fake.as_ref().unwrap();
     let d = tempfile::tempdir().unwrap();
     f.set_agent(pane("w1:p3", d.path().to_str().unwrap(), None));
@@ -631,4 +633,330 @@ async fn an_enlarged_dialog_with_a_rival_showing_the_command_gets_no_target() {
         Some(ErrorCode::RequestNotReady)
     );
     assert!(f.keys_sent().is_empty());
+}
+
+// Task 18: ownership transitions, C5 and C6.
+
+async fn live_codex_target(r: &Rig, cwd: &str, p: &str) -> String {
+    r.fake.as_ref().unwrap().set_screen(
+        p,
+        "detection",
+        &screen("codex-permission-bash-detection.txt"),
+    );
+    let a = agent(r, p);
+    r.hook("codex", "PermissionRequest", &permission(cwd), &[])
+        .await;
+    let rid = until("request", || {
+        r.agent(&a).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    until("target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid)
+    })
+    .await;
+    rid
+}
+
+async fn revoked(r: &Rig, rx: &mut tokio::sync::broadcast::Receiver<ServerMessage>, rid: &str) {
+    assert_eq!(resolution(rx, rid).await, ResolvedBy::Lost);
+    assert!(
+        r.herdr.as_ref().unwrap().keys_targets().get(rid).is_none(),
+        "target retired"
+    );
+    assert!(r.fake.as_ref().unwrap().keys_sent().is_empty());
+}
+
+async fn add_matching_rival(r: &Rig, other: &std::path::Path) {
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen(
+        "w1:p2",
+        "detection",
+        &screen("codex-permission-bash-detection.txt"),
+    );
+    f.set_agent(pane("w1:p2", other.to_str().unwrap(), None));
+    // Wait for the rival itself, not a pane count (tests may have other panes).
+    until("rival listed", || {
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .panes()
+            .read()
+            .unwrap()
+            .values()
+            .any(|p| p.pane_id == "w1:p2")
+            .then_some(())
+    })
+    .await;
+}
+
+/// Answers `rid` while every read of p1 fails. An answer refused by core's
+/// readiness check (C5) never reaches herdr and is `RequestNotReady`; one
+/// that reaches delivery fails its guard read (`SourceUnavailable`) first.
+async fn answer_refused_by_readiness(r: &Rig, rid: &str) -> Option<ErrorCode> {
+    let f = r.fake.as_ref().unwrap();
+    f.set_read_failing("w1:p1", "detection", true);
+    let code = answer(r, rid, "allow").await.error_code();
+    f.set_read_failing("w1:p1", "detection", false);
+    code
+}
+
+#[tokio::test]
+async fn t3_takeover_revokes_a_codex_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    let (_, mut rx) = r.core.attach(None);
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    r.t3.set_for_tests("t3:thread-9", Some(CODEX_SID));
+    revoked(&r, &mut rx, &rid).await;
+    assert!(r.agent(&agent(&r, "w1:p1")).is_some());
+    assert_eq!(
+        answer(&r, &rid, "allow").await.error_code(),
+        Some(ErrorCode::RequestGone)
+    );
+    assert!(r.fake.as_ref().unwrap().keys_sent().is_empty());
+}
+
+#[tokio::test]
+async fn t3_takeover_during_a_rival_recheck_revokes_and_the_late_result_enables_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    let (_, mut rx) = r.core.attach(None);
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    let f = r.fake.as_ref().unwrap();
+    let gate = f.block_next("agent.read@w1:p2"); // the recheck's rival read
+    let other = tempfile::tempdir().unwrap();
+    f.set_screen("w1:p2", "detection", &screen("codex-idle-detection.txt"));
+    f.set_agent(pane("w1:p2", other.path().to_str().unwrap(), None));
+    tokio::time::timeout(Duration::from_secs(5), gate.arrived())
+        .await
+        .expect("the recheck read reached the gate");
+    r.t3.set_for_tests("t3:thread-9", Some(CODEX_SID));
+    revoked(&r, &mut rx, &rid).await;
+    gate.release();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_none());
+    assert!(
+        r.agent(&agent(&r, "w1:p1"))
+            .and_then(|a| a.pending)
+            .is_none()
+    );
+    assert!(f.keys_sent().is_empty());
+}
+
+#[tokio::test]
+async fn moving_the_codex_session_to_another_pane_revokes_the_live_target() {
+    // Codex Bound(a) -> Bound(b).
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let d2 = tempfile::tempdir().unwrap();
+    let p2 = pane("w1:p2", d2.path().to_str().unwrap(), None);
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID)), p2], |_| {}).await;
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen("w1:p2", "detection", &screen("codex-idle-detection.txt"));
+    let (_, mut rx) = r.core.attach(None);
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    f.set_agent(pane("w1:p1", &cwd, None));
+    f.set_agent(pane("w1:p2", d2.path().to_str().unwrap(), Some(CODEX_SID)));
+    revoked(&r, &mut rx, &rid).await;
+    assert!(
+        r.agent(&agent(&r, "w1:p1")).is_some(),
+        "the herdr agent stays"
+    );
+}
+
+#[tokio::test]
+async fn a_second_codex_pane_in_the_cwd_revokes_an_only_in_cwd_target() {
+    // Codex Bound(a) -> Unbound (ambiguous cwd).
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, None)], |_| {}).await;
+    let (_, mut rx) = r.core.attach(None);
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    r.fake
+        .as_ref()
+        .unwrap()
+        .set_agent(pane("w1:p2", &cwd, None));
+    revoked(&r, &mut rx, &rid).await;
+}
+
+#[tokio::test]
+async fn a_new_rival_showing_the_command_revokes_the_live_target() {
+    // C5: the binding is no longer unambiguous.
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    let (_, mut rx) = r.core.attach(None);
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    let other = tempfile::tempdir().unwrap();
+    add_matching_rival(&r, other.path()).await;
+    revoked(&r, &mut rx, &rid).await;
+}
+
+#[tokio::test]
+async fn a_new_rival_that_does_not_show_the_command_keeps_the_target() {
+    // C5: a passing recheck stores the new inventory and restores readiness.
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    let other = tempfile::tempdir().unwrap();
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen("w1:p2", "detection", &screen("codex-idle-detection.txt"));
+    f.set_agent(pane("w1:p2", other.path().to_str().unwrap(), None));
+    let p2 = until("rival listed", || {
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .panes()
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, p)| p.pane_id == "w1:p2")
+            .map(|(id, p)| (id.clone(), p.incarnation))
+    })
+    .await;
+    until("the recheck stored the new inventory", || {
+        (r.herdr.as_ref().unwrap().keys_targets().rivals(&rid) == Some(vec![p2.clone()]))
+            .then_some(())
+    })
+    .await;
+    assert!(
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_some(),
+        "the recheck enabled it again"
+    );
+    assert!(answer(&r, &rid, "allow").await.ok);
+    assert_eq!(f.keys_sent().len(), 1);
+}
+
+#[tokio::test]
+async fn a_live_target_is_not_ready_while_its_rival_recheck_is_blocked() {
+    // Sol R3-1: the window between a rival appearing and the recheck result.
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    let f = r.fake.as_ref().unwrap();
+    // Holds the recheck's rival read. herdr's own watch polls only p1 (the
+    // pane with a target), so it cannot take this gate.
+    let gate = f.block_next("agent.read@w1:p2");
+    let other = tempfile::tempdir().unwrap();
+    add_matching_rival(&r, other.path()).await;
+    tokio::time::timeout(Duration::from_secs(5), gate.arrived())
+        .await
+        .expect("the recheck read reached the gate");
+    assert_eq!(
+        answer_refused_by_readiness(&r, &rid).await,
+        Some(ErrorCode::RequestNotReady),
+        "C5: refused by readiness, before any delivery read"
+    );
+    assert!(
+        f.keys_sent().is_empty(),
+        "C6: zero keys before the recheck result"
+    );
+    gate.release();
+}
+
+#[tokio::test]
+async fn a_live_target_is_not_ready_while_no_read_slot_is_free() {
+    // The recheck cannot even start: every read slot is held elsewhere.
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    // "working": herdr never polls p3 itself, so only the capture reads it.
+    let claude = fake_agent("w1:p3", "claude", "working");
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID)), claude], |c| {
+        c.max_reads = 1
+    })
+    .await;
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    // A Claude capture on p3 takes the only slot and blocks.
+    let f = r.fake.as_ref().unwrap();
+    let dialog = screen("claude-permission-bash.txt");
+    f.set_screen("w1:p3", "detection", &dialog);
+    let gate = f.block_next("agent.read@w1:p3");
+    let sock = r.sock();
+    let h = [
+        ("X-Herdr-Pane", "w1:p3"),
+        ("X-Herdr-Socket", sock.as_str()),
+        ("X-Claude-Entrypoint", "cli"),
+    ];
+    let _held = acd_adapters::hooks::testing::send(
+        r.port,
+        "/hook/claude/PermissionRequest",
+        TOKEN,
+        &h,
+        &fx("claude/payload-PermissionRequest-Bash.json").to_string(),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), gate.arrived())
+        .await
+        .expect("the capture read reached the gate");
+    let other = tempfile::tempdir().unwrap();
+    add_matching_rival(&r, other.path()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await; // several ticks: the recheck stays wanted
+    assert_eq!(
+        answer_refused_by_readiness(&r, &rid).await,
+        Some(ErrorCode::RequestNotReady),
+        "C5: refused by readiness, before any delivery read"
+    );
+    assert!(
+        f.keys_sent().is_empty(),
+        "C6: zero keys with the recheck starved"
+    );
+    gate.release();
+}
+
+#[tokio::test]
+async fn the_lease_refuses_before_the_reconciler_notices_a_rival() {
+    // No tick runs during the test, so only the lease can catch it (C6).
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    r.hooks.pause_ticks_for_tests(true);
+    let other = tempfile::tempdir().unwrap();
+    add_matching_rival(&r, other.path()).await;
+    let res = answer(&r, &rid, "allow").await;
+    assert_eq!(
+        res.error_code(),
+        Some(ErrorCode::RequestNotReady),
+        "{res:?}"
+    );
+    assert!(r.fake.as_ref().unwrap().keys_sent().is_empty());
+    r.hooks.pause_ticks_for_tests(false);
+}
+
+#[tokio::test]
+async fn a_rival_recheck_that_finds_the_dialog_collapsed_revokes_the_live_target() {
+    // C5: a recheck either passes (C3) or revokes; collapsed is not a pass.
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    let (_, mut rx) = r.core.attach(None);
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    r.hooks.pause_ticks_for_tests(true);
+    let other = tempfile::tempdir().unwrap();
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen("w1:p2", "detection", &screen("codex-idle-detection.txt"));
+    f.set_agent(pane("w1:p2", other.path().to_str().unwrap(), None));
+    until("rival listed", || {
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .panes()
+            .read()
+            .unwrap()
+            .values()
+            .any(|p| p.pane_id == "w1:p2")
+            .then_some(())
+    })
+    .await;
+    f.set_screen(
+        "w1:p1",
+        "detection",
+        &screen("codex-permission-collapsed-small-pane-detection.txt"),
+    );
+    r.hooks.pause_ticks_for_tests(false);
+    revoked(&r, &mut rx, &rid).await;
 }

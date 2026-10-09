@@ -211,6 +211,14 @@ impl HooksAdapter {
     pub fn gates(&self) -> &state::Gates {
         &self.shared.gates
     }
+
+    /// Stops the reconciler's periodic work (`on_tick`) while `paused`.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pause_ticks_for_tests(&self, paused: bool) {
+        self.shared
+            .ticks_paused
+            .store(paused, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait]

@@ -43,6 +43,9 @@ pub(crate) struct Shared {
     occurrence_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     #[cfg(any(test, feature = "testing"))]
     pub gates: Gates,
+    /// While set, `on_tick` returns at once (tests only).
+    #[cfg(any(test, feature = "testing"))]
+    pub ticks_paused: AtomicBool,
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -178,6 +181,9 @@ struct Track {
     identity_seen: bool,
     codex_ctx: Option<CodexCtx>,
     codex_inventory: Vec<(String, u64)>,
+    /// C5: readiness was withdrawn for a rival recheck; only a passing
+    /// recheck (C3) restores it.
+    suspended: bool,
 }
 
 struct CodexSession {
@@ -718,6 +724,7 @@ impl Reconciler {
                 identity_seen: false,
                 codex_ctx: None,
                 codex_inventory: Vec::new(),
+                suspended: false,
             },
         );
         self.mark_shadow(&rid);
@@ -808,6 +815,7 @@ impl Reconciler {
                 identity_seen: false,
                 codex_ctx: None,
                 codex_inventory: Vec::new(),
+                suspended: false,
             },
         );
         self.mark_shadow(&rid);
@@ -1127,6 +1135,134 @@ impl Reconciler {
         }
     }
 
+    /// Ownership transitions: revoke every request of `sid`. For each track,
+    /// under its delivery lock and then its occurrence lock (R11): retire the
+    /// target, end the request (`uncertain` once an answer went out, else
+    /// `lost`), mark it gone, release the hold and drop the expectation.
+    /// Never removes a herdr agent. A Codex session's watch is aborted and
+    /// its `bind_gen` bumped, so every outstanding read fails G5; a Claude
+    /// session's `bind_gen` is bumped by `apply_owner` with the owner.
+    async fn revoke_session(&mut self, sid: &str) {
+        if let Some(c) = self.codex.get_mut(sid) {
+            c.bind_gen += 1;
+            c.watch.abort_all();
+            c.wanted = None;
+        }
+        let ids: Vec<String> = self
+            .tracks
+            .iter()
+            .filter(|(_, t)| t.session_id == sid)
+            .map(|(rid, _)| rid.clone())
+            .collect();
+        for rid in ids {
+            let Some(agent) = self.tracks.get(&rid).map(|t| t.agent_id.clone()) else {
+                continue;
+            };
+            let _agent_guard = self.agent_guard(&agent).await;
+            let _guard = self.shared.occurrence_lock(&agent).await;
+            if self.tracks.contains_key(&rid) {
+                self.revoke_locked(&rid);
+            }
+        }
+    }
+
+    /// Revokes one request while both of its locks are held.
+    fn revoke_locked(&mut self, rid: &str) {
+        if let Some(h) = &self.herdr {
+            h.keys_targets().remove(rid);
+        }
+        let answered = self.delivered(rid).is_some()
+            || self
+                .core
+                .request(rid)
+                .is_some_and(|r| r.status == RequestStatus::Answering);
+        let by = if answered {
+            ResolvedBy::Uncertain
+        } else {
+            ResolvedBy::Lost
+        };
+        self.end(rid, by);
+    }
+
+    /// The Codex rows of the ownership transitions table, C5 and C6. A Codex
+    /// track stays while `codex_bind` still picks its pane with the same
+    /// incarnation and T3 does not own the session; anything else revokes the
+    /// session, as does a T3 takeover of a session with a running watch. A
+    /// live target whose rival inventory changed loses readiness under its
+    /// locks before the recheck (C1 bind read) is scheduled; only a passing
+    /// recheck restores it (`on_codex_bound`).
+    async fn codex_transitions(&mut self) {
+        let panes = self.panes();
+        let t3_owns = |sid: &str| self.t3.as_ref().is_some_and(|m| m.owner(sid).is_some());
+        let mut revoke = Vec::new();
+        let mut recheck = Vec::new();
+        for (rid, t) in self
+            .tracks
+            .iter()
+            .filter(|(_, t)| t.kind == TrackKind::Codex)
+        {
+            let Some(pane) = &t.pane else { continue };
+            let bound = matches!(
+                codex_bind(&t.session_id, t.payload.cwd.as_deref(), &panes),
+                CodexBind::Session(p) | CodexBind::OnlyInCwd(p)
+                    if p.agent_id == pane.agent_id && p.incarnation == pane.incarnation
+            );
+            if t3_owns(&t.session_id) || !bound {
+                revoke.push(t.session_id.clone());
+            } else if t.phase == Phase::Keys
+                && self.open_on_keys(rid)
+                && !t.reads.busy(ReadKind::CodexBind)
+                && (t.suspended || t.codex_inventory != self.codex_inventory(&pane.agent_id))
+            {
+                recheck.push(rid.clone());
+            }
+        }
+        for (sid, c) in &self.codex {
+            if t3_owns(sid) && (c.wanted.is_some() || c.watch.busy(ReadKind::CodexBind)) {
+                revoke.push(sid.clone());
+            }
+        }
+        revoke.sort();
+        revoke.dedup();
+        for sid in revoke {
+            self.revoke_session(&sid).await;
+        }
+        for rid in recheck {
+            let Some(agent) = self.tracks.get(&rid).map(|t| t.agent_id.clone()) else {
+                continue;
+            };
+            let agent_guard = self.agent_guard(&agent).await;
+            let guard = self.shared.occurrence_lock(&agent).await;
+            if !self.open_on_keys(&rid) {
+                continue;
+            }
+            let Some(t) = self.tracks.get_mut(&rid) else {
+                continue;
+            };
+            if t.phase != Phase::Keys {
+                continue;
+            }
+            t.suspended = true;
+            self.core.observe(Observation::RequestReady {
+                agent_id: t.agent_id.clone(),
+                key: t.key.clone(),
+                ready: false,
+            });
+            let Some(ctx) = t.codex_ctx.clone() else {
+                continue;
+            };
+            drop(guard);
+            drop(agent_guard);
+            self.spawn_codex_bind(CodexCtx { tries: 0, ..ctx });
+        }
+    }
+
+    fn open_on_keys(&self, rid: &str) -> bool {
+        self.core
+            .request(rid)
+            .is_some_and(|r| r.status == RequestStatus::Open && r.answer_path == AnswerPath::Keys)
+    }
+
     fn end(&mut self, rid: &str, by: ResolvedBy) {
         self.core.observe(Observation::RequestEndedById {
             request_id: rid.to_owned(),
@@ -1257,6 +1393,9 @@ impl Reconciler {
         c.watch.abort_all();
         c.wanted = None;
         if self.t3.as_ref().is_some_and(|m| m.owner(&sid).is_some()) {
+            if self.tracks.values().any(|t| t.session_id == sid) {
+                self.revoke_session(&sid).await;
+            }
             return true;
         }
         self.apply_evidence(&event).await;
@@ -1528,18 +1667,24 @@ impl Reconciler {
                 });
             }
             CodexDecision::Retry | CodexDecision::Nothing => {
+                // A failed C5 recheck revokes the live target.
                 if let Some(rid) = &ctx.rid
                     && self.tracks.get(rid).is_some_and(|t| t.phase == Phase::Keys)
                 {
-                    if let Some(t) = self.tracks.get_mut(rid) {
-                        self.core.observe(Observation::RequestReady {
-                            agent_id: t.agent_id.clone(),
-                            key: t.key.clone(),
-                            ready: false,
-                        });
-                    }
-                    herdr.keys_targets().remove(rid);
-                    self.end(rid, ResolvedBy::Uncertain);
+                    self.revoke_locked(rid);
+                }
+            }
+            CodexDecision::Collapsed
+                if ctx
+                    .rid
+                    .as_ref()
+                    .and_then(|rid| self.tracks.get(rid))
+                    .is_some_and(|t| t.phase == Phase::Keys) =>
+            {
+                // A C5 recheck that finds the live dialog collapsed cannot
+                // pass, so it revokes like any other failed recheck.
+                if let Some(rid) = &ctx.rid {
+                    self.revoke_locked(rid);
                 }
             }
             decision @ (CodexDecision::Collapsed | CodexDecision::Enable(_)) => {
@@ -1565,6 +1710,7 @@ impl Reconciler {
                         );
                         if let Some(t) = self.tracks.get_mut(&rid) {
                             t.codex_inventory = read.inventory;
+                            t.suspended = false;
                             self.core.observe(Observation::RequestReady {
                                 agent_id: t.agent_id.clone(),
                                 key: t.key.clone(),
@@ -1635,6 +1781,7 @@ impl Reconciler {
                     ..ctx.clone()
                 }),
                 codex_inventory: Vec::new(),
+                suspended: false,
             },
         );
         self.mark_shadow(&rid);
@@ -1939,23 +2086,28 @@ impl Reconciler {
     async fn apply_owner(&mut self, sid: &str, owner: Owner) {
         let hooks_id = format!("claude:{sid}");
         let mut migrated_to = None;
-        let becoming_t3 = matches!(owner, Owner::T3(_));
-        let Some(previous_owner) = self.sessions.get(sid).map(|session| session.owner.clone())
-        else {
+        // A binding whose migration still waits for core's herdr agent keeps
+        // its requests on the hooks-only agent: it transitions as `Hooks`.
+        let Some(old) = self.sessions.get(sid).map(|session| {
+            if session.hooks_only {
+                Owner::Hooks
+            } else {
+                session.owner.clone()
+            }
+        }) else {
             return;
         };
-        if becoming_t3 && !matches!(previous_owner, Owner::T3(_)) {
-            let pending: Vec<(String, String)> = self
-                .tracks
-                .iter()
-                .filter(|(_, track)| track.session_id == sid)
-                .map(|(rid, track)| (rid.clone(), track.agent_id.clone()))
-                .collect();
-            for (rid, agent) in pending {
-                let _agent_guard = self.agent_guard(&agent).await;
-                let _occurrence_guard = self.shared.occurrence_lock(&agent).await;
-                self.evidence.forget(&rid);
-            }
+        // The ownership transitions table: every change except Hooks -> Herdr
+        // (a migration) and changes from T3 or Unknown (nothing is open)
+        // revokes the session's requests, holds, targets and expectations.
+        let revoke = match (&old, &owner) {
+            (Owner::Herdr(a), Owner::Herdr(b)) => a != b,
+            (Owner::Herdr(_), _) => true,
+            (Owner::Hooks, Owner::T3(_) | Owner::Unknown) => true,
+            _ => false,
+        };
+        if revoke {
+            self.revoke_session(sid).await;
         }
         let Some(session) = self.sessions.get_mut(sid) else {
             return;
@@ -2040,6 +2192,7 @@ impl Reconciler {
                 self.apply_owner(&sid, owner).await;
             }
         }
+        self.codex_transitions().await;
     }
 
     /// Sessions bound to a herdr agent that core did not have yet when the
@@ -2108,6 +2261,10 @@ impl Reconciler {
     }
 
     async fn on_tick(&mut self) {
+        #[cfg(any(test, feature = "testing"))]
+        if self.shared.ticks_paused.load(Ordering::SeqCst) {
+            return;
+        }
         self.retry_migrations().await;
         let now = Instant::now();
         self.sweep();
@@ -2231,6 +2388,7 @@ impl Reconciler {
                 || self.tracks.values().any(|t| t.session_id == *sid)
         });
         self.retry_wanted();
+        self.codex_transitions().await;
     }
 }
 
@@ -2357,6 +2515,7 @@ mod tests {
             identity_seen: false,
             codex_ctx: None,
             codex_inventory: Vec::new(),
+            suspended: false,
         }
     }
 
@@ -2568,6 +2727,34 @@ mod tests {
         assert!(r.core.agent(&hooks_id).is_none());
         assert!(!r.sessions["s1"].hooks_only);
         assert_eq!(r.core.request_id_for("herdr:abc:w1:p1", &key), Some(rid));
+    }
+
+    #[tokio::test]
+    async fn a_pending_migration_transitions_as_hooks_and_keeps_its_request() {
+        let mut r = reconciler(8);
+        r.on_event(hook("s1"), 1, None).await;
+        let hooks_id = "claude:s1";
+        r.core
+            .observe(Observation::RequestSeen(permission_obs(hooks_id, "k")));
+        let rid = r
+            .core
+            .request_id_for(hooks_id, &CorrelationKey("k".into()))
+            .unwrap();
+        r.tracks
+            .insert(rid.clone(), track("s1", &rid, Instant::now()));
+        // Core lacks the herdr agent: the migration waits, requests stay put.
+        r.apply_owner("s1", Owner::Herdr("herdr:abc:w1:p1".into()))
+            .await;
+        assert!(r.sessions["s1"].hooks_only);
+        // Herdr(pending) -> Hooks is Hooks -> Hooks; -> Herdr(b) migrates.
+        r.apply_owner("s1", Owner::Hooks).await;
+        r.apply_owner("s1", Owner::Herdr("herdr:abc:w1:p2".into()))
+            .await;
+        assert_eq!(r.core.request(&rid).unwrap().status, RequestStatus::Open);
+        assert!(r.tracks.contains_key(&rid));
+        // Leaving for T3 still revokes.
+        r.apply_owner("s1", Owner::T3("t3:x".into())).await;
+        assert!(!r.tracks.contains_key(&rid));
     }
 
     #[tokio::test]

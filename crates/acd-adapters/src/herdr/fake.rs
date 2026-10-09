@@ -265,6 +265,7 @@ impl FakeHerdr {
     /// side effect and before the reply, until the gate is released. A
     /// `fail_next` for the same method still applies on release. If the
     /// client drops the connection while the call is held, it is discarded.
+    /// `"<method>@<pane id>"` holds only a request whose `target` is that pane.
     pub fn block_next(&self, method: &str) -> Gate {
         let (arrived_tx, arrived_rx) = watch::channel(false);
         let (release_tx, release_rx) = oneshot::channel();
@@ -444,7 +445,11 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
             st.in_flight += 1;
             st.max_in_flight = st.max_in_flight.max(st.in_flight);
         }
-        st.gates.get_mut(&method).and_then(VecDeque::pop_front)
+        let pane_gate = params["target"]
+            .as_str()
+            .and_then(|t| st.gates.get_mut(&format!("{method}@{t}")))
+            .and_then(VecDeque::pop_front);
+        pane_gate.or_else(|| st.gates.get_mut(&method).and_then(VecDeque::pop_front))
     };
     if let Some(held) = gate {
         let _ = held.arrived.send(true);
