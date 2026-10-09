@@ -222,3 +222,85 @@ fn pending_key_names_the_primary_key() {
         rid
     );
 }
+
+#[test]
+fn a_leftover_key_on_the_target_does_not_hide_the_moved_request() {
+    let mut r = reg();
+    let k = CorrelationKey("k".into());
+    r.apply(Observation::RequestSeen(permission_obs(
+        "herdr:h:w1:p1",
+        "k",
+    )));
+    r.apply(Observation::RequestEnded {
+        agent_id: "herdr:h:w1:p1".into(),
+        key: k.clone(),
+        by: ResolvedBy::Terminal,
+    });
+    r.apply(Observation::RequestSeen(permission_obs("claude:s1", "k")));
+    let rid = r
+        .agent("claude:s1")
+        .unwrap()
+        .pending
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    r.apply(Observation::AgentMigrated {
+        from: "claude:s1".into(),
+        to: "herdr:h:w1:p1".into(),
+    });
+    assert_eq!(r.request_id_for("herdr:h:w1:p1", &k), Some(rid.clone()));
+    let ended = r.apply(Observation::RequestEnded {
+        agent_id: "herdr:h:w1:p1".into(),
+        key: k,
+        by: ResolvedBy::Terminal,
+    });
+    assert!(
+        ended
+            .iter()
+            .any(|c| matches!(c, Change::RequestResolved { request_id, .. } if *request_id == rid))
+    );
+}
+
+#[test]
+fn an_answering_request_loses_to_a_structured_one_as_uncertain() {
+    let mut r = reg();
+    r.apply(Observation::RequestSeen(permission_obs(
+        "herdr:h:w1:p1",
+        "other",
+    )));
+    let kept = r
+        .agent("herdr:h:w1:p1")
+        .unwrap()
+        .pending
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    r.apply(Observation::RequestSeen(permission_obs("claude:s1", "k")));
+    let moving = r
+        .agent("claude:s1")
+        .unwrap()
+        .pending
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    r.claim(&moving, Answer::Option("allow".into()), None)
+        .unwrap();
+    let changes = r.apply(Observation::AgentMigrated {
+        from: "claude:s1".into(),
+        to: "herdr:h:w1:p1".into(),
+    });
+    assert!(changes.iter().any(|c| matches!(c, Change::RequestResolved { request_id, by: ResolvedBy::Uncertain, .. } if *request_id == moving)));
+    assert_eq!(
+        r.agent("herdr:h:w1:p1")
+            .unwrap()
+            .pending
+            .as_ref()
+            .unwrap()
+            .id,
+        kept
+    );
+    assert!(r.agent("claude:s1").is_none());
+}

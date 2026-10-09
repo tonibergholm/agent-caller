@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use acd_protocol::*;
@@ -434,7 +435,21 @@ impl Registry {
             for (a, k) in moved {
                 let mut st = self.keys.remove(&(a, k.clone())).expect("listed above");
                 st.agent_id = to.to_string();
-                self.keys.entry((to.to_string(), k)).or_insert(st);
+                // A leftover state on the target (an earlier, resolved
+                // occurrence) must not hide the live request: the source's
+                // state wins when it holds one.
+                match self.keys.entry((to.to_string(), k)) {
+                    Entry::Vacant(v) => {
+                        v.insert(st);
+                    }
+                    Entry::Occupied(mut o) => {
+                        let generation = o.get().generation.max(st.generation);
+                        if st.open_request.is_some() {
+                            o.insert(st);
+                        }
+                        o.get_mut().generation = generation;
+                    }
+                }
             }
             let req = self
                 .requests
