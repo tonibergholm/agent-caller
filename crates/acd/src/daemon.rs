@@ -82,12 +82,24 @@ pub async fn run(dir: &Path) -> Result<()> {
         },
     );
 
-    let probe = bind::tailscale_reported().await;
     let listen_includes_tailscale = cfg.listen.iter().any(|e| e == "tailscale");
+    // Without a Tailscale entry nothing depends on the probe: never run the
+    // external CLI.
+    let needs_probe = bind::needs_tailscale_probe(&cfg.listen);
+    let probe = if needs_probe {
+        bind::tailscale_reported().await
+    } else {
+        None
+    };
     let reported = probe.clone().unwrap_or_default();
     let ips = bind::resolve_listen(&cfg.listen, &reported)?;
     if listen_includes_tailscale {
-        if probe.is_none() {
+        if bind::tailscale_cli().is_none() {
+            tracing::warn!(
+                searched = %bind::tailscale_cli_searched(),
+                "Tailscale CLI not found; Tailscale addresses unavailable"
+            );
+        } else if probe.is_none() {
             tracing::warn!("`tailscale ip` failed or timed out; Tailscale addresses unavailable");
         } else if !reported.iter().any(bind::in_tailscale_range) {
             tracing::warn!("listen contains \"tailscale\" but no Tailscale addresses are reported");
@@ -175,6 +187,9 @@ pub async fn run(dir: &Path) -> Result<()> {
     // the new bind set.
     let listen = cfg.listen.clone();
     let watch = tokio::spawn(async move {
+        if !needs_probe {
+            return std::future::pending().await;
+        }
         let mut pending: Option<Vec<IpAddr>> = None;
         let mut failures = 0u32;
         loop {

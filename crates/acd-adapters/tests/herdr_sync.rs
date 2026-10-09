@@ -202,7 +202,11 @@ async fn connection_loss_marks_agents_unknown_then_resyncs() {
         (core.agent(&id).map(|a| a.state) == Some(AgentState::NeedsYou)).then_some(())
     })
     .await;
-    assert_eq!(*handle.health().borrow(), Health::Connected);
+    // Agents can resync before the reconnect publishes its health.
+    until("connected", || {
+        (*handle.health().borrow() == Health::Connected).then_some(())
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -584,6 +588,7 @@ async fn blocked_pane_gets_a_read_only_request_then_terminal() {
             ClientMessage::RequestAnswer {
                 id: "a1".into(),
                 request_id: req.id.clone(),
+                revision: None,
                 option_id: Some("x".into()),
                 text: None,
             },

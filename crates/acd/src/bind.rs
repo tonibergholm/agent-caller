@@ -1,4 +1,6 @@
+use std::ffi::OsStr;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
@@ -14,11 +16,38 @@ pub fn in_tailscale_range(ip: &IpAddr) -> bool {
 /// failed or timed out (Tailscale missing, daemon down, hung); callers must not
 /// treat that as "no addresses".
 pub async fn tailscale_reported() -> Option<Vec<IpAddr>> {
-    let mut cmd = tokio::process::Command::new("tailscale");
+    let mut cmd = tokio::process::Command::new(tailscale_cli()?);
     cmd.arg("ip").kill_on_drop(true).stdin(std::process::Stdio::null());
     let out = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output()).await.ok()?.ok()?;
     if !out.status.success() { return None; }
     Some(String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect())
+}
+
+/// Where the macOS GUI app bundles the Tailscale CLI; it is usually not on PATH.
+#[cfg(target_os = "macos")]
+const FALLBACK_CLIS: &[&str] = &["/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+#[cfg(not(target_os = "macos"))]
+const FALLBACK_CLIS: &[&str] = &[];
+
+/// The `tailscale` CLI: an absolute PATH entry first, then known app-bundle paths.
+pub fn tailscale_cli() -> Option<PathBuf> {
+    find_cli(std::env::var_os("PATH").as_deref(), FALLBACK_CLIS, Path::is_file)
+}
+
+/// Every location `tailscale_cli` looks at, for diagnostics.
+pub fn tailscale_cli_searched() -> String {
+    let mut parts = vec!["tailscale on PATH".to_string()];
+    parts.extend(FALLBACK_CLIS.iter().map(|p| (*p).to_string()));
+    parts.join(", ")
+}
+
+fn find_cli(path: Option<&OsStr>, fallbacks: &[&str], is_file: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("tailscale"))
+        .chain(fallbacks.iter().map(PathBuf::from))
+        .find(|candidate| is_file(candidate))
 }
 
 /// Consecutive failed probes after which acd exits if it has a Tailscale
@@ -73,8 +102,26 @@ pub fn resolve_listen(listen: &[String], reported: &[IpAddr]) -> Result<Vec<IpAd
     Ok(out)
 }
 
+/// Whether any `listen` entry depends on `tailscale ip`: the `tailscale`
+/// keyword or an explicit address in the Tailscale ranges.
+pub fn needs_tailscale_probe(listen: &[String]) -> bool {
+    listen.iter().any(|e| {
+        e == "tailscale" || e.parse::<IpAddr>().is_ok_and(|ip| in_tailscale_range(&ip))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn probe_needed_for_the_keyword_or_an_explicit_tailscale_address() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(needs_tailscale_probe(&l(&["loopback", "tailscale"])));
+        assert!(needs_tailscale_probe(&l(&["loopback", "100.101.102.103"])));
+        assert!(needs_tailscale_probe(&l(&["fd7a:115c:a1e0::1"])));
+        assert!(!needs_tailscale_probe(&l(&["loopback"])));
+        assert!(!needs_tailscale_probe(&l(&["127.0.0.1", "::1"])));
+    }
+
     use super::*;
 
     fn ip(s: &str) -> IpAddr { s.parse().unwrap() }
@@ -140,5 +187,35 @@ mod tests {
     fn reported_addresses_outside_tailscale_ranges_are_ignored() {
         let got = resolve_listen(&["tailscale".into()], &[ip("10.0.0.5")]).unwrap();
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn cli_path_hit_wins_over_fallback() {
+        let path = std::env::join_paths(["/nope", "/opt/bin"]).unwrap();
+        let got = find_cli(Some(&path), &["/app/Tailscale"], |p| {
+            p == Path::new("/opt/bin/tailscale") || p == Path::new("/app/Tailscale")
+        });
+        assert_eq!(got, Some(PathBuf::from("/opt/bin/tailscale")));
+    }
+
+    #[test]
+    fn cli_path_miss_falls_back_to_app_path() {
+        let path = std::env::join_paths(["/nope"]).unwrap();
+        let got = find_cli(Some(&path), &["/app/Tailscale"], |p| p == Path::new("/app/Tailscale"));
+        assert_eq!(got, Some(PathBuf::from("/app/Tailscale")));
+    }
+
+    #[test]
+    fn cli_nothing_found_is_none() {
+        let path = std::env::join_paths(["/nope"]).unwrap();
+        assert_eq!(find_cli(Some(&path), &["/app/Tailscale"], |_| false), None);
+        assert_eq!(find_cli(None, &[], |_| true), None);
+    }
+
+    #[test]
+    fn cli_relative_path_entries_are_ignored() {
+        let path = std::env::join_paths(["relative/bin", "."]).unwrap();
+        let got = find_cli(Some(&path), &[], |p| p.ends_with("tailscale"));
+        assert_eq!(got, None);
     }
 }

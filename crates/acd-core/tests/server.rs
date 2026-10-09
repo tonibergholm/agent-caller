@@ -4,18 +4,31 @@ use acd_core::testing::*;
 use acd_core::*;
 use acd_protocol::*;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async, tungstenite::{client::IntoClientRequest, Message}, MaybeTlsStream, WebSocketStream,
+    MaybeTlsStream, WebSocketStream, connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
 };
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-struct Server { core: Arc<Core>, auth: Arc<Auth>, url: String, fake: Arc<FakeAdapter> }
+struct Server {
+    core: Arc<Core>,
+    auth: Arc<Auth>,
+    url: String,
+    fake: Arc<FakeAdapter>,
+}
 
 async fn start(fake: Arc<FakeAdapter>) -> Server {
-    start_with(fake, ServerOptions { hello_timeout: Duration::from_millis(300), ..Default::default() }).await
+    start_with(
+        fake,
+        ServerOptions {
+            hello_timeout: Duration::from_millis(300),
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 async fn start_with(fake: Arc<FakeAdapter>, opts: ServerOptions) -> Server {
@@ -25,12 +38,21 @@ async fn start_with(fake: Arc<FakeAdapter>, opts: ServerOptions) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Server { core, auth, url, fake }
+    Server {
+        core,
+        auth,
+        url,
+        fake,
+    }
 }
 
-async fn connect(url: &str) -> Ws { connect_async(url).await.unwrap().0 }
+async fn connect(url: &str) -> Ws {
+    connect_async(url).await.unwrap().0
+}
 
-async fn send(ws: &mut Ws, v: Value) { ws.send(Message::text(v.to_string())).await.unwrap(); }
+async fn send(ws: &mut Ws, v: Value) {
+    ws.send(Message::text(v.to_string())).await.unwrap();
+}
 
 /// The next JSON frame, or the close code as `{"closed": code}`.
 async fn next(ws: &mut Ws) -> Value {
@@ -40,7 +62,9 @@ async fn next(ws: &mut Ws) -> Value {
             .expect("timed out after 2s waiting for the next websocket frame or close")
         {
             Some(Ok(Message::Text(t))) => return serde_json::from_str(t.as_str()).unwrap(),
-            Some(Ok(Message::Close(frame))) => return json!({"closed": frame.map(|f| u16::from(f.code))}),
+            Some(Ok(Message::Close(frame))) => {
+                return json!({"closed": frame.map(|f| u16::from(f.code))});
+            }
             Some(Ok(_)) => continue,
             Some(Err(_)) | None => return json!({"closed": null}),
         }
@@ -67,10 +91,16 @@ async fn expect_slow_close(ws: &mut Ws) {
             Err(_) => panic!("no close after {frames} frames / {bytes} bytes"),
         };
         match m {
-            Some(Ok(Message::Text(t))) => { frames += 1; bytes += t.len(); }
+            Some(Ok(Message::Text(t))) => {
+                frames += 1;
+                bytes += t.len();
+            }
             Some(Ok(Message::Close(frame))) => {
                 let code = frame.map(|f| u16::from(f.code));
-                assert!(code.is_none() || code == Some(4408), "unexpected close code {code:?}");
+                assert!(
+                    code.is_none() || code == Some(4408),
+                    "unexpected close code {code:?}"
+                );
                 return;
             }
             Some(Ok(_)) => {}
@@ -81,7 +111,9 @@ async fn expect_slow_close(ws: &mut Ws) {
 
 fn hello(token: &str, resume: Option<Value>) -> Value {
     let mut v = json!({"type":"hello","protocol":"acd/1","token":token,"client":{"id":"c1","name":"test","version":"0"}});
-    if let Some(r) = resume { v["resume"] = r; }
+    if let Some(r) = resume {
+        v["resume"] = r;
+    }
     v
 }
 
@@ -110,7 +142,10 @@ async fn unknown_protocol_is_rejected_with_4400() {
     h["protocol"] = json!("acd/9");
     send(&mut ws, h).await;
     let err = next(&mut ws).await;
-    assert_eq!((err["code"].clone(), err["supported"].clone()), (json!("unsupported_protocol"), json!(["acd/1"])));
+    assert_eq!(
+        (err["code"].clone(), err["supported"].clone()),
+        (json!("unsupported_protocol"), json!(["acd/1"]))
+    );
     assert_eq!(next(&mut ws).await["closed"], 4400);
 }
 
@@ -133,7 +168,8 @@ async fn silent_client_is_closed_after_hello_timeout() {
 async fn origin_header_is_forbidden() {
     let s = start(FakeAdapter::new()).await;
     let mut req = s.url.as_str().into_client_request().unwrap();
-    req.headers_mut().insert("Origin", "https://evil.example".parse().unwrap());
+    req.headers_mut()
+        .insert("Origin", "https://evil.example".parse().unwrap());
     let err = connect_async(req).await.unwrap_err();
     assert!(err.to_string().contains("403"), "got {err}");
 }
@@ -143,11 +179,17 @@ async fn hello_returns_welcome_then_snapshot_then_live_events() {
     let s = start(FakeAdapter::new()).await;
     let (mut ws, welcome, initial) = authed(&s.url).await;
     assert_eq!(welcome["type"], "welcome");
-    assert_eq!(welcome["capabilities"], json!(["answer","send","mark_seen"]));
+    assert_eq!(
+        welcome["capabilities"],
+        json!(["answer", "send", "mark_seen", "answer.revision"])
+    );
     assert_eq!(initial["type"], "snapshot");
     s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
     let ev = next(&mut ws).await;
-    assert_eq!((ev["type"].clone(), ev["agent"]["id"].clone()), (json!("agent.updated"), json!("a1")));
+    assert_eq!(
+        (ev["type"].clone(), ev["agent"]["id"].clone()),
+        (json!("agent.updated"), json!("a1"))
+    );
     assert!(ev["seq"].as_u64().unwrap() > initial["seq"].as_u64().unwrap());
 }
 
@@ -156,18 +198,43 @@ async fn answer_round_trip_and_second_client_gets_busy() {
     let fake = FakeAdapter::gated();
     let s = start(fake.clone()).await;
     s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
-    s.core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    s.core
+        .observe(Observation::RequestSeen(permission_obs("a1", "k1")));
     let (mut a, _, snap) = authed(&s.url).await;
     let (mut b, _, _) = authed(&s.url).await;
-    let rid = snap["agents"][0]["pending"]["id"].as_str().unwrap().to_string();
-    send(&mut a, json!({"type":"request.answer","id":"x1","request_id":rid,"option_id":"allow"})).await;
+    let rid = snap["agents"][0]["pending"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    send(
+        &mut a,
+        json!({"type":"request.answer","id":"x1","request_id":rid,"option_id":"allow"}),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    send(&mut b, json!({"type":"request.answer","id":"y1","request_id":rid,"option_id":"deny"})).await;
-    let busy = loop { let m = next(&mut b).await; if m["type"] == "result" { break m; } };
+    send(
+        &mut b,
+        json!({"type":"request.answer","id":"y1","request_id":rid,"option_id":"deny"}),
+    )
+    .await;
+    let busy = loop {
+        let m = next(&mut b).await;
+        if m["type"] == "result" {
+            break m;
+        }
+    };
     assert_eq!(busy["error"]["code"], "request_busy");
     fake.open_gate();
-    let ok = loop { let m = next(&mut a).await; if m["type"] == "result" { break m; } };
-    assert_eq!((ok["ok"].clone(), ok["outcome"].clone()), (json!(true), json!("delivered")));
+    let ok = loop {
+        let m = next(&mut a).await;
+        if m["type"] == "result" {
+            break m;
+        }
+    };
+    assert_eq!(
+        (ok["ok"].clone(), ok["outcome"].clone()),
+        (json!(true), json!("delivered"))
+    );
     assert_eq!(s.fake.delivered().len(), 1);
 }
 
@@ -180,12 +247,20 @@ async fn resume_in_same_epoch_replays_and_other_epoch_snapshots() {
     s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
 
     let mut ws = connect(&s.url).await;
-    send(&mut ws, hello("secret", Some(json!({"epoch": epoch, "seq": seq})))).await;
+    send(
+        &mut ws,
+        hello("secret", Some(json!({"epoch": epoch, "seq": seq}))),
+    )
+    .await;
     next(&mut ws).await; // welcome
     assert_eq!(next(&mut ws).await["type"], "agent.updated");
 
     let mut ws2 = connect(&s.url).await;
-    send(&mut ws2, hello("secret", Some(json!({"epoch": "stale", "seq": seq})))).await;
+    send(
+        &mut ws2,
+        hello("secret", Some(json!({"epoch": "stale", "seq": seq}))),
+    )
+    .await;
     next(&mut ws2).await;
     assert_eq!(next(&mut ws2).await["type"], "snapshot");
 }
@@ -200,7 +275,14 @@ async fn malformed_frames_get_bad_request_and_connection_stays_open() {
     assert_eq!(next(&mut ws).await["code"], "bad_request");
     send(&mut ws, json!({"type":"agent.launch","id":"z9"})).await;
     let r = next(&mut ws).await;
-    assert_eq!((r["type"].clone(), r["id"].clone(), r["error"]["code"].clone()), (json!("result"), json!("z9"), json!("bad_request")));
+    assert_eq!(
+        (
+            r["type"].clone(),
+            r["id"].clone(),
+            r["error"]["code"].clone()
+        ),
+        (json!("result"), json!("z9"), json!("bad_request"))
+    );
     send(&mut ws, json!({"type":"ping","id":"p1"})).await;
     assert_eq!(next(&mut ws).await, json!({"type":"pong","id":"p1"}));
 }
@@ -231,7 +313,11 @@ async fn oversized_frame_closes_the_connection() {
     let s = start(FakeAdapter::new()).await;
     let (mut ws, _, _) = authed(&s.url).await;
     let big = "x".repeat(2 * 1024 * 1024);
-    let _ = ws.send(Message::text(format!("{{\"type\":\"ping\",\"id\":\"{big}\"}}"))).await;
+    let _ = ws
+        .send(Message::text(format!(
+            "{{\"type\":\"ping\",\"id\":\"{big}\"}}"
+        )))
+        .await;
     assert!(next(&mut ws).await.get("closed").is_some());
 }
 
@@ -239,9 +325,13 @@ async fn oversized_frame_closes_the_connection() {
 async fn stalled_client_is_closed() {
     let s = start(FakeAdapter::new()).await;
     let (mut ws, _, _) = authed(&s.url).await;
-    for i in 0..3000 { // > RING_CAPACITY
-        s.core.observe(Observation::AgentUpsert(flood_obs(&format!("a{i}"))));
-        if i % 100 == 0 { tokio::task::yield_now().await; }
+    for i in 0..3000 {
+        // > RING_CAPACITY
+        s.core
+            .observe(Observation::AgentUpsert(flood_obs(&format!("a{i}"))));
+        if i % 100 == 0 {
+            tokio::task::yield_now().await;
+        }
     }
     expect_slow_close(&mut ws).await;
 }
@@ -250,15 +340,22 @@ async fn stalled_client_is_closed() {
 async fn ping_during_large_replay_gets_pong() {
     let s = start(FakeAdapter::new()).await;
     for i in 0..500 {
-        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+        s.core
+            .observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
     }
     let mut ws = connect(&s.url).await;
-    send(&mut ws, hello("secret", Some(json!({"epoch": s.core.epoch(), "seq": 0})))).await;
+    send(
+        &mut ws,
+        hello("secret", Some(json!({"epoch": s.core.epoch(), "seq": 0}))),
+    )
+    .await;
     send(&mut ws, json!({"type":"ping","id":"p1"})).await;
     loop {
         let m = next(&mut ws).await;
         assert!(m.get("closed").is_none(), "closed: {m}");
-        if m["type"] == "pong" { break; }
+        if m["type"] == "pong" {
+            break;
+        }
     }
 }
 
@@ -267,7 +364,9 @@ async fn rotation_closes_idle_session_immediately() {
     let s = start(FakeAdapter::new()).await;
     let (mut ws, _, _) = authed(&s.url).await;
     s.auth.rotate("new".into());
-    let m = tokio::time::timeout(Duration::from_millis(200), next(&mut ws)).await.expect("not closed within 200ms");
+    let m = tokio::time::timeout(Duration::from_millis(200), next(&mut ws))
+        .await
+        .expect("not closed within 200ms");
     assert_eq!(m["closed"], 4401);
 }
 
@@ -276,25 +375,54 @@ async fn too_many_in_flight_commands_get_bad_request() {
     let fake = FakeAdapter::gated();
     let s = start(fake.clone()).await;
     for i in 0..33 {
-        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
-        s.core.observe(Observation::RequestSeen(permission_obs(&format!("a{i}"), "k")));
+        s.core
+            .observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+        s.core.observe(Observation::RequestSeen(permission_obs(
+            &format!("a{i}"),
+            "k",
+        )));
     }
     let (mut ws, _, snap) = authed(&s.url).await;
-    let ids: Vec<String> = snap["agents"].as_array().unwrap().iter().map(|a| a["pending"]["id"].as_str().unwrap().to_string()).collect();
+    let ids: Vec<String> = snap["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["pending"]["id"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(ids.len(), 33);
     for (i, rid) in ids.iter().take(32).enumerate() {
         send(&mut ws, json!({"type":"request.answer","id":format!("c{i}"),"request_id":rid,"option_id":"allow"})).await;
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
-    send(&mut ws, json!({"type":"request.answer","id":"c32","request_id":ids[32],"option_id":"allow"})).await;
-    let r = loop { let m = next(&mut ws).await; if m["type"] == "result" { break m; } };
-    assert_eq!((r["id"].clone(), r["error"]["code"].clone()), (json!("c32"), json!("bad_request")));
+    send(
+        &mut ws,
+        json!({"type":"request.answer","id":"c32","request_id":ids[32],"option_id":"allow"}),
+    )
+    .await;
+    let r = loop {
+        let m = next(&mut ws).await;
+        if m["type"] == "result" {
+            break m;
+        }
+    };
+    assert_eq!(
+        (r["id"].clone(), r["error"]["code"].clone()),
+        (json!("c32"), json!("bad_request"))
+    );
     fake.open_gate();
 }
 
 #[tokio::test]
 async fn preauth_cap_returns_503() {
-    let s = start_with(FakeAdapter::new(), ServerOptions { max_preauth: 1, hello_timeout: Duration::from_secs(5), ..Default::default() }).await;
+    let s = start_with(
+        FakeAdapter::new(),
+        ServerOptions {
+            max_preauth: 1,
+            hello_timeout: Duration::from_secs(5),
+            ..Default::default()
+        },
+    )
+    .await;
     let _first = connect(&s.url).await;
     let err = connect_async(s.url.as_str()).await.unwrap_err();
     assert!(err.to_string().contains("503"), "got {err}");
@@ -305,9 +433,13 @@ async fn disconnect_mid_delivery_then_retry_gets_cached_result() {
     let fake = FakeAdapter::gated();
     let s = start(fake.clone()).await;
     s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
-    s.core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    s.core
+        .observe(Observation::RequestSeen(permission_obs("a1", "k1")));
     let (mut a, _, snap) = authed(&s.url).await;
-    let rid = snap["agents"][0]["pending"]["id"].as_str().unwrap().to_string();
+    let rid = snap["agents"][0]["pending"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let cmd = json!({"type":"request.answer","id":"x","request_id":rid,"option_id":"allow"});
     send(&mut a, cmd.clone()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -317,8 +449,16 @@ async fn disconnect_mid_delivery_then_retry_gets_cached_result() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let (mut b, _, _) = authed(&s.url).await;
     send(&mut b, cmd).await;
-    let r = loop { let m = next(&mut b).await; if m["type"] == "result" { break m; } };
-    assert_eq!((r["ok"].clone(), r["outcome"].clone()), (json!(true), json!("delivered")));
+    let r = loop {
+        let m = next(&mut b).await;
+        if m["type"] == "result" {
+            break m;
+        }
+    };
+    assert_eq!(
+        (r["ok"].clone(), r["outcome"].clone()),
+        (json!(true), json!("delivered"))
+    );
     assert_eq!(s.fake.delivered().len(), 1);
 }
 
@@ -327,13 +467,26 @@ async fn rotation_aborts_in_flight_commands() {
     let fake = FakeAdapter::gated();
     let s = start(fake.clone()).await;
     s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
-    s.core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    s.core
+        .observe(Observation::RequestSeen(permission_obs("a1", "k1")));
     let (mut a, _, snap) = authed(&s.url).await;
-    let rid = snap["agents"][0]["pending"]["id"].as_str().unwrap().to_string();
-    send(&mut a, json!({"type":"request.answer","id":"r","request_id":rid,"option_id":"allow"})).await;
+    let rid = snap["agents"][0]["pending"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    send(
+        &mut a,
+        json!({"type":"request.answer","id":"r","request_id":rid,"option_id":"allow"}),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     s.auth.rotate("new-secret".into());
-    let code = loop { let m = next(&mut a).await; if let Some(c) = m.get("closed") { break c.clone(); } };
+    let code = loop {
+        let m = next(&mut a).await;
+        if let Some(c) = m.get("closed") {
+            break c.clone();
+        }
+    };
     assert_eq!(code, 4401);
     fake.open_gate();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -348,8 +501,14 @@ async fn rotation_aborts_in_flight_commands() {
 
 fn pending_status(core: &Core, agent: &str) -> Option<RequestStatus> {
     let (initial, _) = core.attach(None);
-    let ServerMessage::Snapshot { agents, .. } = &initial[0] else { panic!("expected snapshot") };
-    agents.iter().find(|a| a.id == agent).and_then(|a| a.pending.as_ref()).map(|p| p.status)
+    let ServerMessage::Snapshot { agents, .. } = &initial[0] else {
+        panic!("expected snapshot")
+    };
+    agents
+        .iter()
+        .find(|a| a.id == agent)
+        .and_then(|a| a.pending.as_ref())
+        .map(|p| p.status)
 }
 
 /// Polls until the agent's pending request has the given status (`None`:
@@ -357,7 +516,11 @@ fn pending_status(core: &Core, agent: &str) -> Option<RequestStatus> {
 async fn wait_pending(core: &Core, agent: &str, want: Option<RequestStatus>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while pending_status(core, agent) != want {
-        assert!(tokio::time::Instant::now() < deadline, "{agent}: pending is {:?}, want {want:?}", pending_status(core, agent));
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{agent}: pending is {:?}, want {want:?}",
+            pending_status(core, agent)
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -371,9 +534,13 @@ async fn rotation_cancels_commands_detached_by_an_earlier_disconnect() {
     let fake = FakeAdapter::gated();
     let s = start(fake.clone()).await;
     s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
-    s.core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    s.core
+        .observe(Observation::RequestSeen(permission_obs("a1", "k1")));
     let (mut a, _, snap) = authed(&s.url).await;
-    let rid = snap["agents"][0]["pending"]["id"].as_str().unwrap().to_string();
+    let rid = snap["agents"][0]["pending"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     send(&mut a, answer_cmd("x", &rid)).await;
     wait_pending(&s.core, "a1", Some(RequestStatus::Answering)).await;
     drop(a);
@@ -390,14 +557,21 @@ async fn rotation_after_a_slow_client_close_does_not_deliver() {
     let fake = FakeAdapter::gated();
     let s = start(fake.clone()).await;
     s.core.observe(Observation::AgentUpsert(agent_obs("a1")));
-    s.core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    s.core
+        .observe(Observation::RequestSeen(permission_obs("a1", "k1")));
     let (mut a, _, snap) = authed(&s.url).await;
-    let rid = snap["agents"][0]["pending"]["id"].as_str().unwrap().to_string();
+    let rid = snap["agents"][0]["pending"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     send(&mut a, answer_cmd("x", &rid)).await;
     wait_pending(&s.core, "a1", Some(RequestStatus::Answering)).await;
     for i in 0..3000 {
-        s.core.observe(Observation::AgentUpsert(flood_obs(&format!("flood{i}"))));
-        if i % 100 == 0 { tokio::task::yield_now().await; }
+        s.core
+            .observe(Observation::AgentUpsert(flood_obs(&format!("flood{i}"))));
+        if i % 100 == 0 {
+            tokio::task::yield_now().await;
+        }
     }
     expect_slow_close(&mut a).await;
     s.auth.rotate("new-secret".into());
@@ -410,14 +584,27 @@ async fn rotation_after_a_slow_client_close_does_not_deliver() {
 #[tokio::test]
 async fn daemon_wide_cap_counts_detached_commands() {
     let fake = FakeAdapter::gated();
-    let opts = ServerOptions { hello_timeout: Duration::from_millis(300), max_inflight_total: 2, ..Default::default() };
+    let opts = ServerOptions {
+        hello_timeout: Duration::from_millis(300),
+        max_inflight_total: 2,
+        ..Default::default()
+    };
     let s = start_with(fake.clone(), opts).await;
     for i in 0..3 {
-        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
-        s.core.observe(Observation::RequestSeen(permission_obs(&format!("a{i}"), "k")));
+        s.core
+            .observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+        s.core.observe(Observation::RequestSeen(permission_obs(
+            &format!("a{i}"),
+            "k",
+        )));
     }
     let (mut a, _, snap) = authed(&s.url).await;
-    let ids: Vec<String> = snap["agents"].as_array().unwrap().iter().map(|a| a["pending"]["id"].as_str().unwrap().to_string()).collect();
+    let ids: Vec<String> = snap["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["pending"]["id"].as_str().unwrap().to_string())
+        .collect();
     send(&mut a, answer_cmd("c0", &ids[0])).await;
     send(&mut a, answer_cmd("c1", &ids[1])).await;
     wait_pending(&s.core, "a0", Some(RequestStatus::Answering)).await;
@@ -425,10 +612,29 @@ async fn daemon_wide_cap_counts_detached_commands() {
     drop(a);
     let (mut b, _, _) = authed(&s.url).await;
     send(&mut b, answer_cmd("c2", &ids[2])).await;
-    let r = loop { let m = next(&mut b).await; if m["type"] == "result" { break m; } };
-    assert_eq!((r["id"].clone(), r["error"]["code"].clone(), r["error"]["message"].clone()),
-        (json!("c2"), json!("bad_request"), json!("too many in-flight commands")));
-    assert_eq!(pending_status(&s.core, "a2"), Some(RequestStatus::Open), "rejected before any claim");
+    let r = loop {
+        let m = next(&mut b).await;
+        if m["type"] == "result" {
+            break m;
+        }
+    };
+    assert_eq!(
+        (
+            r["id"].clone(),
+            r["error"]["code"].clone(),
+            r["error"]["message"].clone()
+        ),
+        (
+            json!("c2"),
+            json!("bad_request"),
+            json!("too many in-flight commands")
+        )
+    );
+    assert_eq!(
+        pending_status(&s.core, "a2"),
+        Some(RequestStatus::Open),
+        "rejected before any claim"
+    );
     fake.open_gate();
 }
 
@@ -446,24 +652,53 @@ async fn oversized_client_id_is_refused() {
 #[tokio::test]
 async fn waiting_retries_count_against_the_daemon_wide_cap() {
     let fake = FakeAdapter::gated();
-    let opts = ServerOptions { hello_timeout: Duration::from_millis(300), max_inflight_total: 2, ..Default::default() };
+    let opts = ServerOptions {
+        hello_timeout: Duration::from_millis(300),
+        max_inflight_total: 2,
+        ..Default::default()
+    };
     let s = start_with(fake.clone(), opts).await;
     for i in 0..2 {
-        s.core.observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
-        s.core.observe(Observation::RequestSeen(permission_obs(&format!("a{i}"), "k")));
+        s.core
+            .observe(Observation::AgentUpsert(agent_obs(&format!("a{i}"))));
+        s.core.observe(Observation::RequestSeen(permission_obs(
+            &format!("a{i}"),
+            "k",
+        )));
     }
     let (mut a, _, snap) = authed(&s.url).await;
-    let ids: Vec<String> = snap["agents"].as_array().unwrap().iter().map(|a| a["pending"]["id"].as_str().unwrap().to_string()).collect();
+    let ids: Vec<String> = snap["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["pending"]["id"].as_str().unwrap().to_string())
+        .collect();
     send(&mut a, answer_cmd("x", &ids[0])).await;
     wait_pending(&s.core, "a0", Some(RequestStatus::Answering)).await;
     let (mut b, _, _) = authed(&s.url).await; // same client.id: the retry waits on the first run
     send(&mut b, answer_cmd("x", &ids[0])).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     send(&mut b, answer_cmd("y", &ids[1])).await;
-    let r = loop { let m = next(&mut b).await; if m["type"] == "result" { break m; } };
-    assert_eq!((r["id"].clone(), r["error"]["message"].clone()), (json!("y"), json!("too many in-flight commands")));
+    let r = loop {
+        let m = next(&mut b).await;
+        if m["type"] == "result" {
+            break m;
+        }
+    };
+    assert_eq!(
+        (r["id"].clone(), r["error"]["message"].clone()),
+        (json!("y"), json!("too many in-flight commands"))
+    );
     fake.open_gate();
-    let r = loop { let m = next(&mut b).await; if m["type"] == "result" { break m; } };
-    assert_eq!((r["id"].clone(), r["outcome"].clone()), (json!("x"), json!("delivered")));
+    let r = loop {
+        let m = next(&mut b).await;
+        if m["type"] == "result" {
+            break m;
+        }
+    };
+    assert_eq!(
+        (r["id"].clone(), r["outcome"].clone()),
+        (json!("x"), json!("delivered"))
+    );
     assert_eq!(fake.delivered().len(), 1);
 }

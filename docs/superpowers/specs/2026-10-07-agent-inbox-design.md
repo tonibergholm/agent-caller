@@ -1032,6 +1032,18 @@ react to events, such as notifications.
 
 ## 8. Mac app (Tauri)
 
+**Decided in P5** (docs/superpowers/plans/2026-10-08-p5-mac-app.md):
+- Pair with `acd pair` and clipboard import; remote machines use pinned TLS (D1, D6).
+- The local machine connects over `acd.sock` (D2).
+- `⏎` submits only the reply field, with IME and modifier guards (D10).
+- The countdown policy uses atomic `Esc` and connection generations (D9).
+- Readiness and liveness are distinct; cards are actionable only when ready (D11).
+- Notifications contain only the tool name (D12).
+- Duplicate machine entries are identified and suppressed (D14).
+- The default hotkey is Control+Option+Space; the panel is non-activating and the app is `LSUIElement` (D15).
+- The IME guard is `isComposing || keyCode === 229` (D10).
+- macOS notifications use `mac-notification-sys` directly and unique ids (D12).
+
 **Configuration.**
 - Each machine has a name, an address (MagicDNS name or IP, plus port) and
   a token.
@@ -1045,7 +1057,8 @@ react to events, such as notifications.
 - The number of `needs_you` agents is shown next to it.
 
 **Floating panel.**
-- Opened by a global hotkey, by default ⌥Space. It is a non-activating
+- Opened by a global hotkey, by default ⌃⌥Space (Control+Option+Space). ⌥Space
+  is commonly taken by launchers such as Raycast and Alfred. It is a non-activating
   `tauri-nspanel`, so focus stays where it was.
 - Cards are ordered:
   1. requests, oldest first;
@@ -1228,6 +1241,24 @@ isolated herdr session, covering:
 - coexisting permission hooks;
 - running hook install and uninstall twice each.
 
+**P5 Mac app manual checklist** (run from the production bundle; record each
+result in the PR description):
+1. With Terminal frontmost, `Control+Option+Space` opens the panel while Terminal stays active. J/K/1–9/Esc reach the panel; Esc hides it and typing returns to Terminal.
+2. In Settings, change the hotkey; an unavailable hotkey leaves the old key working.
+3. In the reply field, type English and Japanese. The Enter that commits IME composition does not send; `⏎` starts the countdown and Esc cancels it.
+4. Pick Yes and immediately press Esc; acd's debug log has no `request.answer`.
+5. With real herdr agents, check amber with a count while blocked, blue while working and green when done.
+6. While the panel is hidden, create a request and verify only the tool name appears in one notification. With the panel visible, verify no notification.
+7. Create repeated requests and verify all repeated notifications show.
+8. Run `acd pair` on a remote machine, copy its output and use Add from clipboard; it connects. Relaunch and verify it reconnects without pairing. Record any Keychain prompt after rebuild.
+9. Verify a Tailscale MagicDNS host connects and an address outside the Tailscale ranges is rejected before connection.
+10. Replace the remote daemon with `openssl s_server` using a fresh key; the app says "Server identity changed. Re-pair this machine." and the server logs no application data.
+11. Rotate the remote TLS key; the open session continues, reconnect reports identity changed, and re-pairing fixes it.
+12. Rotate this Mac's client token; the local machine reconnects. Rotate a remote token; the app reports `auth_failed` until re-paired.
+13. Stop and restart acd; cards grey with "offline since", then refresh after Syncing without a stuck spinner.
+14. Import pairing from the clipboard and answer a real request end to end.
+15. Use a token file owned by another user in a test config directory; the local machine reports "not owned by you".
+
 ## 14. Acceptance criteria (v1)
 
 1. **Claude permission, remote.** A Claude permission prompt in a herdr
@@ -1265,6 +1296,8 @@ isolated herdr session, covering:
     with its state. When it is blocked, its raw screen is shown read-only.
 
 ## 15. Review log
+
+**P5 Task 18, 2026-10-08.** Records the decided Mac app details in §8, adds the P5 production-bundle checklist to §13, and adds TLS-backed end-to-end Inbox/Core tests (docs/superpowers/plans/2026-10-08-p5-mac-app.md).
 
 **Task 3, 2026-10-08.** Task 3 adds TLS 1.3 on TCP, atomic `tls.pem`, `acd pair` and `acd tls rotate`.
 

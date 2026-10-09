@@ -1,1 +1,1 @@
-{"type":"welcome","machine":{"id":"mac-1a2b3c4d","name":"Mac","acd_version":"0.1.0","sources":{"hooks":{"state":"unconfigured"},"herdr":{"state":"ok"},"t3":{"state":"degraded","message":"t3 unreachable"}}},"capabilities":["answer","send","mark_seen"],"epoch":"e1","seq":42}
+{"type":"welcome","machine":{"id":"mac-1a2b3c4d","name":"Mac","acd_version":"0.1.0","sources":{"hooks":{"state":"unconfigured"},"herdr":{"state":"ok"},"t3":{"state":"degraded","message":"t3 unreachable"}}},"capabilities":["answer","send","mark_seen","answer.revision"],"epoch":"e1","seq":42}

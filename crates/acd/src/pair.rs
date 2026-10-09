@@ -35,12 +35,11 @@ pub async fn print(dir: &Path, requested_host: Option<String>) -> Result<()> {
 }
 
 async fn discover_host() -> Result<String> {
-    let Some(path) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join("tailscale"))
-        .find(|path| path.is_file())
-    else {
-        bail!("Tailscale is unavailable")
+    let Some(path) = crate::bind::tailscale_cli() else {
+        bail!(
+            "Tailscale CLI not found (looked for: {})",
+            crate::bind::tailscale_cli_searched()
+        )
     };
     let mut cmd = tokio::process::Command::new(path);
     cmd.args(["status", "--json"])

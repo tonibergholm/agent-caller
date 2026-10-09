@@ -1,0 +1,33 @@
+[package]
+name = "agent-caller-app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+publish = false
+
+# Its own workspace: tauri needs GTK/WebKit on Linux and tauri-nspanel builds
+# only on macOS, so this crate stays out of the root workspace (decision D3).
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.1", features = [] }
+
+[dependencies]
+acd-client = { path = "../../crates/acd-client" }
+acd-protocol = { path = "../../crates/acd-protocol" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "=2.12.1", features = ["tray-icon"] }
+tauri-nspanel = "=2.1.1"
+tauri-plugin-global-shortcut = "=2.4.0"
+tauri-plugin-notification = "=2.5.1"
+tauri-plugin-clipboard-manager = "=2.4.1"
+security-framework = "=3.7.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys = "=0.6.15"

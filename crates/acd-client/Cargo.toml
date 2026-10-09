@@ -1,0 +1,39 @@
+[package]
+name = "acd-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+testing = ["dep:acd-core"]
+ts = ["dep:ts-rs", "acd-protocol/ts"]
+
+[dependencies]
+acd-protocol.workspace = true
+acd-securefs.workspace = true
+chrono.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+sha2.workspace = true
+libc.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+x509-parser.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+ts-rs = { workspace = true, optional = true }
+uuid.workspace = true
+acd-core = { workspace = true, optional = true, features = ["testing"] }
+
+[dev-dependencies]
+acd-client = { path = ".", features = ["testing", "ts"] }
+tokio-rustls.workspace = true
+axum.workspace = true
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+tempfile.workspace = true

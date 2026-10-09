@@ -45,6 +45,32 @@ pub fn owner_ok(file_uid: u32, expected_uid: u32) -> bool {
     file_uid == expected_uid
 }
 
+/// Decide, from lstat facts, whether a permission-denied open is really a
+/// symlink or wrong-owner problem. Diagnostic only: never grants access.
+fn classify_denied(
+    path: &Path,
+    meta_uid: u32,
+    expected_uid: u32,
+    is_symlink: bool,
+) -> Option<SecureFsError> {
+    if is_symlink {
+        Some(SecureFsError::Symlink(path.into()))
+    } else if !owner_ok(meta_uid, expected_uid) {
+        Some(SecureFsError::Owner(path.into()))
+    } else {
+        None
+    }
+}
+
+fn diagnose_denied(path: &Path, open_err: std::io::Error) -> SecureFsError {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => classify_denied(path, m.uid(), euid(), m.file_type().is_symlink())
+            .unwrap_or_else(|| SecureFsError::Io(path.into(), open_err)),
+        Err(_) => SecureFsError::Io(path.into(), open_err),
+    }
+}
+
 fn open_path(path: &Path, directory: bool) -> Result<File, SecureFsError> {
     use std::os::unix::ffi::OsStrExt;
     let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
@@ -65,6 +91,7 @@ fn open_path(path: &Path, directory: bool) -> Result<File, SecureFsError> {
             Some(libc::ELOOP) => SecureFsError::Symlink(path.into()),
             Some(libc::ENOENT) => SecureFsError::Missing(path.into()),
             Some(libc::ENOTDIR) => SecureFsError::NotRegular(path.into()),
+            _ if e.kind() == std::io::ErrorKind::PermissionDenied => diagnose_denied(path, e),
             _ => SecureFsError::Io(path.into(), e),
         });
     }
@@ -112,4 +139,62 @@ pub fn read_private(path: &Path, max_mode: u32, max_len: u64) -> Result<Vec<u8>,
         return Err(SecureFsError::TooLarge(path.into()));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_denied_decisions() {
+        let p = Path::new("/x");
+        assert!(matches!(
+            classify_denied(p, 0, 501, false),
+            Some(SecureFsError::Owner(_))
+        ));
+        assert!(matches!(
+            classify_denied(p, 501, 501, true),
+            Some(SecureFsError::Symlink(_))
+        ));
+        assert!(matches!(
+            classify_denied(p, 0, 501, true),
+            Some(SecureFsError::Symlink(_))
+        ));
+        assert!(classify_denied(p, 501, 501, false).is_none());
+    }
+
+    #[test]
+    fn denied_open_of_own_file_stays_io() {
+        use std::os::unix::fs::PermissionsExt;
+        if euid() == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("t");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = read_private(&f, 0o600, 16).unwrap_err();
+        assert!(
+            matches!(&err, SecureFsError::Io(_, e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn denied_traverse_of_own_dir_stays_io() {
+        use std::os::unix::fs::PermissionsExt;
+        if euid() == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().join("d");
+        std::fs::create_dir(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = check_private_dir(&d, 0o700).unwrap_err();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(&err, SecureFsError::Io(_, e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "{err:?}"
+        );
+    }
 }

@@ -39,6 +39,13 @@ its name.
 
 ## P3: hooks and service
 
+- Answer revisions (docs/superpowers/plans/2026-10-08-p5-answer-revision.md):
+  a herdr keys target must stay immutable for the life of an occurrence,
+  or be bound to the revision or digest that was claimed. Today the
+  target is fetched after the claim from a replaceable map
+  (crates/acd-adapters/src/herdr/keys.rs), so the revision check alone
+  does not cover it.
+
 - P3 ownership rule 1: read `T3Adapter::sessions()` (`SessionMap`). For each
   Claude session, if `SessionMap::owner(session_id)` is `Some`, drop the
   hook-side and discovery state for that session. Re-evaluate sessions whose
@@ -135,6 +142,9 @@ its name.
   `acd-protocol` and its schema, so coordinate it with P5.
 - Bind Codex sessions with `agent_session.value`, which `AgentInfo` now
   carries.
+- When adding `reason` to `request.resolved`, map it in
+  `acd_client::view::resolution_notice`. `stray_keystroke` maps to "A stray
+  keystroke may be in the input box". Regenerate the bindings.
 
 ## P5: Mac app
 
@@ -143,17 +153,52 @@ its name.
 
 - Add `serde(other)` to `Source`, `AgentKind`, `RequestStatus`,
   `ResolvedBy` and `SourceState`, if the Tauri backend reuses the Rust
-  types.
+  types. **Done, Task 1.**
 - Express the one-of rules in the schema (`request.answer` takes
   `option_id` xor `text`; a result carries `ok` with `outcome` or `error`).
   Unknown variants currently serialize as `"unknown"`, and timestamps have
-  no `format: date-time`.
+  no `format: date-time`. **Done, Task 1; null cases included.**
 - Clients must validate that a MagicDNS name resolves into the Tailscale
   ranges. TCP clients have no way to authenticate the server: decide this
   at the protocol level before P5 freezes the client. Local tools use
-  `acd.sock`.
+  `acd.sock`. **Done, Tasks 2–3: pinned TLS (D1), by controller ruling
+  after Sol round 1. Tasks 1–3 PR review: Round 3 approved; findings
+  resolved (see P5 plan review log).**
 - Authenticated sessions per token are uncapped, and the idempotency table
-  cap (16384 entries) is shared by all clients.
+  cap (16384 entries) is shared by all clients. **Accepted, D13.**
+
+### P5 deferred
+
+- Optional `tailscale whois` node validation hardening.
+- Keychain prompts after rebuilds of unsigned builds. No prompt appeared
+  in the 2026-10-09 checklist run.
+- The panel is centered; its position is not remembered.
+- The `acd pair` output remains in the user's clipboard after import.
+- Test the hotkey failed-registration path; it requires a live shortcut manager.
+- `mark_seen` has no test outside a runtime.
+- Concurrent `set_hotkey` calls can race.
+
+From the 2026-10-09 production-bundle checklist:
+
+- The app never asks for notification permission and cannot tell when
+  notifications are off; macOS dropped them silently until the user
+  enabled them in System Settings. Request authorization on first run
+  (UNUserNotificationCenter) and show the state in Settings.
+- A saved hotkey keeps the old default (`Alt+Space`) after the default
+  changed to `Control+Alt+Space`. Decide whether to migrate it.
+- A pairing line with a literal IP outside the Tailscale ranges is saved
+  and only refused at connect time. Refuse it at import.
+- A Codex agent's title showed `<environment_context>`: raw context leaks
+  into the agent title. Find which adapter sets it.
+- herdr alone produces only "Answer in terminal" cards; option cards and
+  replies need T3 or P3 hooks. Say so in the setup docs.
+- On a remote Mac, the macOS firewall prompts for the unsigned `acd`
+  binary on first incoming connection. Say so in the setup docs.
+- With an explicit Tailscale IP in `listen` and no Tailscale CLI, acd
+  refuses the address without saying the CLI is missing. Key the startup
+  warnings on `needs_tailscale_probe`, not the `tailscale` keyword.
+- After Cancel in the inline remove confirmation, focus falls to the page
+  body. Return it to the restored Remove button.
 
 ## Process
 

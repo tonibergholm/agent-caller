@@ -11,7 +11,12 @@ use tokio_tungstenite::tungstenite::Message;
 
 fn acd(dir: &std::path::Path) -> std::process::Command {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_acd"));
-    cmd.env("ACD_CONFIG_DIR", dir).env_remove("RUST_LOG");
+    // HOME points into the test dir so the daemon never finds the real
+    // herdr socket under ~/.config/herdr.
+    cmd.env("ACD_CONFIG_DIR", dir)
+        .env("HOME", dir)
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("RUST_LOG");
     cmd
 }
 
