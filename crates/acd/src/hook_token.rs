@@ -244,6 +244,13 @@ pub struct LiveSession {
 }
 
 /// A complete registry scan (T4), with wall-clock times.
+///
+/// Caller contract: build one only from a scan that completed (never a
+/// partial one); `live` must list every session that may still hold the
+/// previous token; and the `on_current` set passed with it must be scoped
+/// to the store being evaluated (cleared when the store is reset or
+/// rotated). `retire_if_done` additionally requires
+/// `started_at_ms <= finished_at_ms <= now`.
 #[allow(dead_code)] // used from Task 31
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanView {
@@ -316,8 +323,12 @@ pub fn retire_if_done(
         }
         let fresh_ms = i64::try_from(fresh_within.as_millis()).unwrap_or(i64::MAX);
         let fresh = |sc: &&ScanView| {
-            sc.started_at_ms >= s.headers.updated_at_ms.saturating_add(REGISTRY_GRACE_MS)
-                && now_ms.saturating_sub(sc.finished_at_ms) <= fresh_ms
+            // An inverted interval, a scan finishing after the clock read
+            // (a backward clock jump), or a malformed view never counts.
+            sc.started_at_ms <= sc.finished_at_ms
+                && sc.finished_at_ms <= now_ms
+                && sc.started_at_ms >= s.headers.updated_at_ms.saturating_add(REGISTRY_GRACE_MS)
+                && now_ms - sc.finished_at_ms <= fresh_ms
         };
         let Some(sc) = scan.filter(fresh) else {
             return Ok(Retire::Kept(KeepReason::NoFreshScan));
@@ -328,7 +339,9 @@ pub fn retire_if_done(
         }
     }
     s.previous = None;
-    save_locked(dir, &held, &s)?;
+    save_locked(dir, &held, &s).with_context(|| {
+        format!("could not write {STORE_FILE} to retire the previous hook token")
+    })?;
     Ok(Retire::Retired)
 }
 
@@ -803,7 +816,8 @@ mod tests {
     #[test]
     fn a_failed_retirement_is_an_error_and_keeps_the_previous_token() {
         if acd_securefs::euid() == 0 {
-            return; // root writes into a read-only directory anyway
+            eprintln!("skipped: root writes into a read-only directory anyway");
+            return;
         }
         use std::os::unix::fs::PermissionsExt;
         let d = dir();
@@ -818,7 +832,40 @@ mod tests {
             &at(AFTER),
         );
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(r.is_err());
+        let e = format!("{:#}", r.unwrap_err());
+        assert!(
+            e.contains("could not write") && e.contains(STORE_FILE),
+            "{e}"
+        );
+        assert!(load(d.path()).unwrap().previous.is_some());
+    }
+
+    #[test]
+    fn impossible_scan_times_never_make_a_scan_eligible() {
+        let d = dir();
+        let s = rotated_at(d.path(), Some(DONE));
+        let before = std::fs::read(d.path().join(STORE_FILE)).unwrap();
+        let none = HashSet::new();
+        let r = |sc: ScanView, now: i64| {
+            retire_if_done(d.path(), &s, Some(&sc), FRESH, &none, &at(now)).unwrap()
+        };
+        let kept = Retire::Kept(KeepReason::NoFreshScan);
+        assert_eq!(
+            r(scan(AFTER, AFTER + 10_000, vec![]), AFTER),
+            kept,
+            "completion in the future"
+        );
+        assert_eq!(
+            r(scan(AFTER + 5, AFTER, vec![]), AFTER + 5),
+            kept,
+            "inverted interval"
+        );
+        assert_eq!(
+            r(scan(AFTER, AFTER + 1_000, vec![]), AFTER - 100_000),
+            kept,
+            "clock rollback"
+        );
+        assert_eq!(std::fs::read(d.path().join(STORE_FILE)).unwrap(), before);
         assert!(load(d.path()).unwrap().previous.is_some());
     }
 
