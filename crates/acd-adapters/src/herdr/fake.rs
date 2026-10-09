@@ -63,6 +63,8 @@ struct State {
     gates: HashMap<String, VecDeque<Held>>,
     delays: HashMap<String, VecDeque<Duration>>,
     truncated: HashSet<(String, String)>,
+    /// `(pane, source)` whose every `agent.read` fails.
+    failing: HashSet<(String, String)>,
     /// `agent.read` source -> queued error codes.
     read_fails: HashMap<String, VecDeque<String>>,
     on_keys: Option<KeysHook>,
@@ -234,6 +236,18 @@ impl FakeHerdr {
             st.truncated.insert(key);
         } else {
             st.truncated.remove(&key);
+        }
+    }
+
+    /// Every `agent.read` of this pane and source fails with
+    /// `platform_error` while `value` is true.
+    pub fn set_read_failing(&self, pane_id: &str, source: &str, value: bool) {
+        let key = (pane_id.to_owned(), source.to_owned());
+        let mut st = self.st();
+        if value {
+            st.failing.insert(key);
+        } else {
+            st.failing.remove(&key);
         }
     }
 
@@ -548,6 +562,9 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
                             return err(&code, "injected read failure");
                         }
                         let key = (t.to_owned(), source.to_owned());
+                        if st.failing.contains(&key) {
+                            return err("platform_error", "injected read failure");
+                        }
                         let text = st.screens.get(&key).cloned().unwrap_or_default();
                         let truncated = st.truncated.contains(&key);
                         Outcome::Reply(json!({"type": "pane_read", "read": {

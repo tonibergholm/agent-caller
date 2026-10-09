@@ -177,7 +177,19 @@ struct TargetsInner {
     live: HashMap<String, KeysTarget>,
     retired: VecDeque<String>,
     retired_set: HashSet<String>,
-    rivals: HashMap<String, Vec<(String, u64)>>,
+    rivals: HashMap<String, Rivals>,
+}
+
+/// Whether a screen shows the command a Codex target answers. P3 builds it
+/// from its dialog matcher; herdr only calls it on whole (untruncated) reads.
+pub type ShowsCommand = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// A Codex target's validated rival inventory (C6) and the matcher the
+/// delivery re-reads every rival with (C7).
+#[derive(Clone)]
+struct Rivals {
+    inventory: Vec<(String, u64)>,
+    shows: ShowsCommand,
 }
 
 impl TargetsInner {
@@ -248,12 +260,23 @@ impl KeysTargets {
         self.lock().live.get(request_id).cloned()
     }
 
-    /// Stores the validated Codex rival inventory beside the immutable lease.
-    pub fn set_rivals(&self, request_id: &str, inventory: Vec<(String, u64)>) {
-        self.lock().rivals.insert(request_id.to_owned(), inventory);
+    /// Stores the validated Codex rival inventory beside the immutable lease,
+    /// with the matcher for the command: before the key, every rival in the
+    /// inventory is read again and must not show it (C7).
+    pub fn set_rivals(&self, request_id: &str, inventory: Vec<(String, u64)>, shows: ShowsCommand) {
+        self.lock()
+            .rivals
+            .insert(request_id.to_owned(), Rivals { inventory, shows });
     }
 
     pub fn rivals(&self, request_id: &str) -> Option<Vec<(String, u64)>> {
+        self.lock()
+            .rivals
+            .get(request_id)
+            .map(|r| r.inventory.clone())
+    }
+
+    fn rivals_of(&self, request_id: &str) -> Option<Rivals> {
         self.lock().rivals.get(request_id).cloned()
     }
 
@@ -423,16 +446,18 @@ impl Engine {
     /// Whether `request_id` is still ours to answer with `key`: claimed for
     /// keys in the core, and its target unchanged since the guard (same
     /// digest, identity and key for the option), and its pane still the
-    /// incarnation the target is bound to.
-    fn lease_held(
+    /// incarnation the target is bound to (else `RequestGone`). A Codex
+    /// target's rival inventory must also equal the validated one (C6, else
+    /// `RequestNotReady`: the reconciler revalidates it).
+    fn lease(
         &self,
         core: &Weak<Core>,
         panes: &PaneMap,
         target: &KeysTarget,
         option_id: &str,
-    ) -> bool {
+    ) -> Result<(), ErrorCode> {
         let Some(core) = core.upgrade() else {
-            return false;
+            return Err(ErrorCode::RequestGone);
         };
         let claimed = core.request(&target.request_id).is_some_and(|r| {
             r.status == RequestStatus::Answering && r.answer_path == AnswerPath::Keys
@@ -442,17 +467,56 @@ impl Engine {
             .expect("pane map")
             .get(&target.agent_id)
             .is_some_and(|p| target.incarnation_ok(p));
+        let unchanged = self
+            .targets
+            .get(&target.request_id)
+            .is_some_and(|t| t.unchanged_since(target, option_id));
+        if !(claimed && same_pane && unchanged) {
+            return Err(ErrorCode::RequestGone);
+        }
         let rivals_ok = self
             .targets
             .rivals(&target.request_id)
             .is_none_or(|v| v == codex_inventory(panes, &target.agent_id));
-        claimed
-            && same_pane
-            && rivals_ok
-            && self
-                .targets
-                .get(&target.request_id)
-                .is_some_and(|t| t.unchanged_since(target, option_id))
+        if !rivals_ok {
+            return Err(ErrorCode::RequestNotReady);
+        }
+        Ok(())
+    }
+
+    /// C7: reads every rival in the validated inventory again; each must be
+    /// a whole read that does not show the command. A rival missing from the
+    /// pane map, unreadable before `deadline`, truncated or showing the
+    /// command refuses the key.
+    async fn rivals_clear(
+        &self,
+        panes: &PaneMap,
+        rivals: &Rivals,
+        deadline: Instant,
+    ) -> Result<(), ErrorCode> {
+        for (id, incarnation) in &rivals.inventory {
+            let pane = panes
+                .read()
+                .expect("pane map")
+                .get(id)
+                .filter(|p| p.incarnation == *incarnation)
+                .cloned();
+            let Some(pane) = pane else {
+                return Err(ErrorCode::RequestNotReady);
+            };
+            let read = pane
+                .herdr
+                .read_screen(&pane.pane_id, "detection", None, deadline)
+                .await;
+            match read {
+                Ok(r) if !r.truncated && !(rivals.shows)(&r.text) => {}
+                _ => {
+                    tracing::debug!(rival = %id, "a Codex rival may show the command; key refused");
+                    return Err(ErrorCode::RequestNotReady);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Runs inline: nothing is sent from a spawned task, so no send can start
@@ -511,6 +575,13 @@ impl Engine {
         // and a draft that already ends in the sent digit is reported as a
         // stray (`uncertain`, the safe side).
         let baseline = prompt_line(pane.kind, &read.text);
+        // C7: no rival may show the command now. Read under the lock, after
+        // the guard, so only the connect lies between these reads and the key.
+        if let Some(rivals) = self.targets.rivals_of(&target.request_id) {
+            self.rivals_clear(panes, &rivals, deadline)
+                .await
+                .map_err(not_delivered)?;
+        }
 
         // Connect first, then check the lease, so only the local write lies
         // between the check and the key reaching herdr. The screen can still
@@ -521,10 +592,10 @@ impl Engine {
             .connect_until(deadline)
             .await
             .map_err(|_| not_delivered(ErrorCode::SourceUnavailable))?;
-        if !self.lease_held(&core, panes, &target, option_id) {
+        if let Err(code) = self.lease(&core, panes, &target, option_id) {
             drop(lock);
             drop(connected); // unused: nothing was sent
-            return Err(not_delivered(ErrorCode::RequestGone));
+            return Err(not_delivered(code));
         }
 
         tracing::debug!(pane_id = %pane.pane_id, request_id = %target.request_id, "herdr agent.send_keys");

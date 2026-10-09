@@ -350,3 +350,285 @@ async fn rival_added_during_bind_read_prevents_opening() {
     assert!(pending.is_none_or(|p| p.kind == RequestKind::BlockedUnparsed));
     assert!(f.keys_sent().is_empty());
 }
+
+async fn resolution(
+    rx: &mut tokio::sync::broadcast::Receiver<ServerMessage>,
+    rid: &str,
+) -> ResolvedBy {
+    let wait = async {
+        loop {
+            if let ServerMessage::RequestResolved { request_id, by, .. } = rx.recv().await.unwrap()
+                && request_id == rid
+            {
+                return by;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), wait)
+        .await
+        .unwrap_or_else(|_| panic!("{rid} did not resolve"))
+}
+
+/// p1 (session-bound) is ready with a target; p2 is a Codex pane in another
+/// cwd showing `p2_screen`. Returns the rig, the request id and p2's dir.
+async fn ready_with_rival(p2_screen: &str) -> (Rig, String, tempfile::TempDir, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let d = tempfile::tempdir().unwrap();
+    let r = rig(
+        &[
+            pane("w1:p1", &cwd, Some(CODEX_SID)),
+            pane("w1:p2", d.path().to_str().unwrap(), None),
+        ],
+        |_| {},
+    )
+    .await;
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen(
+        "w1:p1",
+        "detection",
+        &screen("codex-permission-bash-detection.txt"),
+    );
+    f.set_screen("w1:p2", "detection", &screen(p2_screen));
+    let a = agent(&r, "w1:p1");
+    r.hook("codex", "PermissionRequest", &permission(&cwd), &[])
+        .await;
+    let rid = until("request", || {
+        r.agent(&a).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    until("target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid)
+    })
+    .await;
+    (r, rid, tmp, d)
+}
+
+#[tokio::test]
+async fn a_live_target_refuses_while_a_rival_now_shows_the_command() {
+    // C7 (Sol T17 Critical): p2's screen changes to the same command after
+    // p1's target is live; its id and incarnation do not change.
+    let (r, rid, _a, _b) = ready_with_rival("codex-idle-detection.txt").await;
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen(
+        "w1:p2",
+        "detection",
+        &screen("codex-permission-bash-detection.txt"),
+    );
+    assert_eq!(
+        answer(&r, &rid, "allow").await.error_code(),
+        Some(ErrorCode::RequestNotReady)
+    );
+    assert!(f.keys_sent().is_empty());
+}
+
+#[tokio::test]
+async fn an_unreadable_or_truncated_rival_refuses_the_key() {
+    let (r, rid, _a, _b) = ready_with_rival("codex-idle-detection.txt").await;
+    let f = r.fake.as_ref().unwrap();
+    f.set_read_failing("w1:p2", "detection", true);
+    assert_eq!(
+        answer(&r, &rid, "allow").await.error_code(),
+        Some(ErrorCode::RequestNotReady)
+    );
+    f.set_read_failing("w1:p2", "detection", false);
+    f.set_truncated("w1:p2", "detection", true);
+    assert_eq!(
+        answer(&r, &rid, "allow").await.error_code(),
+        Some(ErrorCode::RequestNotReady)
+    );
+    assert!(f.keys_sent().is_empty());
+    // Both refusals are retryable: a clean rival read lets the key through.
+    f.set_truncated("w1:p2", "detection", false);
+    assert!(answer(&r, &rid, "allow").await.ok);
+    assert_eq!(f.keys_sent().len(), 1);
+}
+
+#[tokio::test]
+async fn a_changed_rival_inventory_refuses_as_not_ready() {
+    // C6: a Codex pane added after validation; the lease refuses with
+    // RequestNotReady (retryable), not RequestGone.
+    let (r, rid, _a, _b) = ready_with_rival("codex-idle-detection.txt").await;
+    let f = r.fake.as_ref().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    f.set_agent(pane("w1:p3", d.path().to_str().unwrap(), None));
+    f.set_screen("w1:p3", "detection", &screen("codex-idle-detection.txt"));
+    until("p3 listed", || {
+        (r.herdr.as_ref().unwrap().panes().read().unwrap().len() == 3).then_some(())
+    })
+    .await;
+    assert_eq!(
+        answer(&r, &rid, "allow").await.error_code(),
+        Some(ErrorCode::RequestNotReady)
+    );
+    assert!(f.keys_sent().is_empty());
+}
+
+fn answered_screens(f: &acd_adapters::herdr::fake::FakeHerdr) {
+    f.on_keys(|f, pane, _| {
+        f.set_screen(pane, "detection", &screen("codex-idle-detection.txt"));
+        f.set_screen(pane, "visible", &screen("codex-idle-prompt.txt"));
+    });
+}
+
+#[tokio::test]
+async fn an_allowed_command_that_runs_resolves_inbox() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen(
+        "w1:p1",
+        "detection",
+        &screen("codex-permission-bash-detection.txt"),
+    );
+    answered_screens(f);
+    let (_, mut rx) = r.core.attach(None);
+    let a = agent(&r, "w1:p1");
+    r.hook("codex", "PermissionRequest", &permission(&cwd), &[])
+        .await;
+    let rid = until("request", || {
+        r.agent(&a).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    until("target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid)
+    })
+    .await;
+    assert!(answer(&r, &rid, "allow").await.ok);
+    let mut post = fx("codex/payload-PostToolUse-Bash.json");
+    post["tool_input"]["command"] = "touch ~/acp0_test_t5_1.txt".into();
+    post["cwd"] = cwd.as_str().into();
+    r.hook("codex", "PostToolUse", &post, &[]).await;
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Inbox);
+}
+
+/// Answers p1's Codex approval with `option`, then sends a Stop with no
+/// PostToolUse, and returns how the request resolved.
+async fn stop_without_running_after(option: &str) -> ResolvedBy {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen(
+        "w1:p1",
+        "detection",
+        &screen("codex-permission-bash-detection.txt"),
+    );
+    answered_screens(f);
+    let (_, mut rx) = r.core.attach(None);
+    let a = agent(&r, "w1:p1");
+    r.hook("codex", "PermissionRequest", &permission(&cwd), &[])
+        .await;
+    let rid = until("request", || {
+        r.agent(&a).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    until("target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid)
+    })
+    .await;
+    assert!(answer(&r, &rid, option).await.ok);
+    let mut stop = fx("codex/payload-UserPromptSubmit.json");
+    stop["hook_event_name"] = "Stop".into();
+    stop["cwd"] = cwd.as_str().into();
+    r.hook("codex", "Stop", &stop, &[]).await;
+    resolution(&mut rx, &rid).await
+}
+
+#[tokio::test]
+async fn a_denied_command_that_stops_without_running_resolves_inbox() {
+    // Spec §6 attribution: deny + Stop with no matching PostToolUse.
+    assert_eq!(stop_without_running_after("deny").await, ResolvedBy::Inbox);
+}
+
+#[tokio::test]
+async fn an_allowed_command_that_never_runs_resolves_terminal() {
+    // Contradicting outcome: acd allowed, the tool never ran.
+    assert_eq!(
+        stop_without_running_after("allow").await,
+        ResolvedBy::Terminal
+    );
+}
+
+#[tokio::test]
+async fn a_repeated_dialog_opens_a_new_occurrence_with_a_fresh_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    r.fake.as_ref().unwrap().set_screen(
+        "w1:p1",
+        "detection",
+        &screen("codex-permission-bash-detection.txt"),
+    );
+    let a = agent(&r, "w1:p1");
+    let (_, mut rx) = r.core.attach(None);
+    r.hook("codex", "PermissionRequest", &permission(&cwd), &[])
+        .await;
+    let r1 = until("first", || {
+        r.agent(&a).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    until("first target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&r1)
+    })
+    .await;
+    // Answered in the terminal and asked again before the watch saw it go.
+    r.hook("codex", "PermissionRequest", &permission(&cwd), &[])
+        .await;
+    assert_eq!(resolution(&mut rx, &r1).await, ResolvedBy::Terminal);
+    let r2 = until("second", || {
+        r.agent(&a)
+            .and_then(|a| a.pending)
+            .map(|p| p.id)
+            .filter(|id| *id != r1)
+    })
+    .await;
+    until("second target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&r2)
+    })
+    .await;
+    assert!(r.herdr.as_ref().unwrap().keys_targets().get(&r1).is_none());
+    assert!(answer(&r, &r2, "allow").await.ok);
+    assert_eq!(r.fake.as_ref().unwrap().keys_sent().len(), 1);
+}
+
+#[tokio::test]
+async fn an_enlarged_dialog_with_a_rival_showing_the_command_gets_no_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let d = tempfile::tempdir().unwrap();
+    let r = rig(
+        &[
+            pane("w1:p1", &cwd, Some(CODEX_SID)),
+            pane("w1:p2", d.path().to_str().unwrap(), None),
+        ],
+        |_| {},
+    )
+    .await;
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen(
+        "w1:p1",
+        "detection",
+        &screen("codex-permission-collapsed-small-pane-detection.txt"),
+    );
+    f.set_screen("w1:p2", "detection", &screen("codex-idle-detection.txt"));
+    let a = agent(&r, "w1:p1");
+    r.hook("codex", "PermissionRequest", &permission(&cwd), &[])
+        .await;
+    let rid = until("collapsed request", || {
+        r.agent(&a).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    // Enlarged, but another pane now shows the same command (C1: same path).
+    let dialog = screen("codex-permission-bash-detection.txt");
+    f.set_screen("w1:p2", "detection", &dialog);
+    f.set_screen("w1:p1", "detection", &dialog);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_none());
+    assert_eq!(
+        answer(&r, &rid, "allow").await.error_code(),
+        Some(ErrorCode::RequestNotReady)
+    );
+    assert!(f.keys_sent().is_empty());
+}

@@ -208,6 +208,14 @@ pub(crate) fn pane_seen(
     }
 }
 
+/// The C7 rival check for a Codex target: the Task 13 matcher for `command`.
+fn shows_command(command: &str) -> crate::herdr::keys::ShowsCommand {
+    let matcher = DialogMatch::CodexCommand {
+        command: command.to_owned(),
+    };
+    std::sync::Arc::new(move |screen: &str| matcher.find(screen).is_some())
+}
+
 #[derive(Clone)]
 pub(crate) struct CodexCtx {
     event: HookEvent,
@@ -1550,9 +1558,11 @@ impl Reconciler {
                         .get(&rid)
                         .is_some_and(|t| t.phase == Phase::Keys)
                     {
-                        herdr
-                            .keys_targets()
-                            .set_rivals(&rid, read.inventory.clone());
+                        herdr.keys_targets().set_rivals(
+                            &rid,
+                            read.inventory.clone(),
+                            shows_command(&ctx.command),
+                        );
                         if let Some(t) = self.tracks.get_mut(&rid) {
                             t.codex_inventory = read.inventory;
                             self.core.observe(Observation::RequestReady {
@@ -1644,6 +1654,9 @@ impl Reconciler {
         let Some(t) = self.tracks.get_mut(rid) else {
             return;
         };
+        let Expect::CodexTool { command, .. } = t.expect.clone() else {
+            return;
+        };
         let obs = mapping::codex_permission(&t.agent_id, t.key.clone(), None, &t.payload, false);
         self.core.observe(Observation::RequestSeen(obs));
         let keys = mapping::CODEX_KEYS
@@ -1669,7 +1682,9 @@ impl Reconciler {
             return;
         };
         if herdr.keys_targets().set(target).is_ok() {
-            herdr.keys_targets().set_rivals(rid, inventory.clone());
+            herdr
+                .keys_targets()
+                .set_rivals(rid, inventory.clone(), shows_command(&command));
             self.core.observe(Observation::RequestReady {
                 agent_id: t.agent_id.clone(),
                 key: t.key.clone(),
