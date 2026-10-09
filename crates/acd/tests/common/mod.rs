@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const ISOLATED: [&str; 16] = [
+pub const ISOLATED: [&str; 17] = [
     "HERDR_SOCKET_PATH",
+    "HERDR_PANE_ID",
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
     "CLAUDE_CODE_ENTRYPOINT",

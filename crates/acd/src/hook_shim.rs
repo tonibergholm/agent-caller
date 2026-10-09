@@ -1,18 +1,24 @@
-//! `acd hook codex <event>` (spec §6.1): Codex's command hook. Reads the
-//! payload on stdin, forwards it to the local hook endpoint, prints the
-//! reply body and exits 0. Any failure prints nothing and still exits 0, so
-//! Codex shows its own dialog. It never logs and never prints the token.
+//! `acd hook codex <event>` (spec §6.1, amendment A1): Codex's command hook.
+//! Reads the payload on stdin, forwards it over the owner-only Unix socket
+//! `<config_dir>/hook.sock` (never TCP), prints the reply body and exits 0.
+//! Any failure prints nothing and still exits 0, so Codex shows its own
+//! dialog. It never logs and never prints the token.
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub const MAX_BODY: usize = 1 << 20;
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub fn main(args: &[OsString]) -> i32 {
-    if let Some(body) = run(args) {
+    // Silent panic hook: the shim must never write to stderr.
+    std::panic::set_hook(Box::new(|_| {}));
+    let args = args.to_vec();
+    let result = std::panic::catch_unwind(move || run(&args));
+    if let Ok(Some(body)) = result {
         let mut out = std::io::stdout().lock();
         let _ = out.write_all(body.as_bytes());
         let _ = out.flush();
@@ -53,21 +59,24 @@ fn run(args: &[OsString]) -> Option<String> {
         }
     }
     let deadline = Instant::now() + budget(event);
-    let mut body = Vec::new();
-    std::io::stdin()
-        .lock()
-        .take(MAX_BODY as u64 + 1)
-        .read_to_end(&mut body)
-        .ok()?;
-    if body.len() > MAX_BODY {
-        return None;
-    }
     let dir = match config_dir {
         Some(d) => d,
         None => crate::paths::config_dir().ok()?,
     };
+    let sock = checked_socket(&dir)?;
+    let body = within(deadline, || {
+        let mut body = Vec::new();
+        std::io::stdin()
+            .lock()
+            .take(MAX_BODY as u64 + 1)
+            .read_to_end(&mut body)
+            .ok()?;
+        Some(body)
+    })?;
+    if body.len() > MAX_BODY {
+        return None;
+    }
     let token = crate::hook_token::load(&dir).ok()?.current;
-    let port = crate::config::Config::load(&dir).ok()?.hook_port;
     let mut headers = vec![("X-Acd-Token".to_string(), token)];
     // Hints only (D17): acd never binds Codex with them.
     for (env, header) in [
@@ -80,26 +89,55 @@ fn run(args: &[OsString]) -> Option<String> {
             headers.push((header.to_string(), v));
         }
     }
-    post(
-        port,
-        &format!("/hook/codex/{event}"),
-        &headers,
-        &body,
-        deadline,
-    )
+    let path = format!("/hook/codex/{event}");
+    within(deadline, move || {
+        post(&sock, &path, &headers, &body, deadline)
+    })
+}
+
+/// Runs `f` on a helper thread and gives up at `deadline`. The abandoned
+/// thread dies with the process.
+fn within<T: Send + 'static>(
+    deadline: Instant,
+    f: impl FnOnce() -> Option<T> + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(deadline.checked_duration_since(Instant::now())?)
+        .ok()?
+}
+
+/// `<dir>/hook.sock` if the directory and the socket are what amendment A1
+/// requires: no symlinks, owned by the effective uid, modes 0700 and 0600.
+fn checked_socket(dir: &Path) -> Option<PathBuf> {
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    let d = std::fs::symlink_metadata(dir).ok()?;
+    if !d.file_type().is_dir() || d.uid() != euid || d.mode() & 0o7777 != 0o700 {
+        return None;
+    }
+    let sock = dir.join("hook.sock");
+    let m = std::fs::symlink_metadata(&sock).ok()?;
+    if !m.file_type().is_socket() || m.uid() != euid || m.mode() & 0o7777 != 0o600 {
+        return None;
+    }
+    Some(sock)
 }
 
 fn post(
-    port: u16,
+    sock: &Path,
     path: &str,
     headers: &[(String, String)],
     body: &[u8],
     deadline: Instant,
 ) -> Option<String> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut s = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).ok()?;
+    let mut s = UnixStream::connect(sock).ok()?;
+    // The socket timeouts are best effort: macOS rejects them once the peer
+    // has closed, and `within` enforces the deadline regardless.
     let left = deadline.checked_duration_since(Instant::now())?;
-    s.set_write_timeout(Some(left)).ok()?;
+    let _ = s.set_write_timeout(Some(left));
     let mut req = format!(
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
@@ -114,7 +152,7 @@ fn post(
     let mut buf = [0u8; 8192];
     loop {
         let left = deadline.checked_duration_since(Instant::now())?;
-        s.set_read_timeout(Some(left)).ok()?;
+        let _ = s.set_read_timeout(Some(left));
         match s.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
@@ -122,11 +160,37 @@ fn post(
                 if resp.len() > MAX_BODY + 8192 {
                     return None;
                 }
+                if let Some(end) = response_end(&resp)? {
+                    resp.truncate(end);
+                    break;
+                }
             }
             Err(_) => return None,
         }
     }
     parse_response(&resp)
+}
+
+/// `Some(Some(end))` once the head and `Content-Length` body bytes have all
+/// arrived, `Some(None)` while more is needed (or no length is declared and
+/// EOF ends the body), `None` for a head that cannot be accepted.
+fn response_end(resp: &[u8]) -> Option<Option<usize>> {
+    let Some(pos) = resp.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Some(None);
+    };
+    let head = String::from_utf8_lossy(&resp[..pos]).to_ascii_lowercase();
+    if head.lines().any(|l| l.starts_with("transfer-encoding:")) {
+        return None;
+    }
+    let Some(len) = head.lines().find_map(|l| l.strip_prefix("content-length:")) else {
+        return Some(None);
+    };
+    let len: usize = len.trim().parse().ok()?;
+    if len > MAX_BODY {
+        return None;
+    }
+    let end = pos + 4 + len;
+    Some((resp.len() >= end).then_some(end))
 }
 
 /// The body of a 2xx reply with a plain (non-chunked) body.
