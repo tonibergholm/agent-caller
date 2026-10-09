@@ -9,6 +9,18 @@ pub fn hook_token_of(dir: &std::path::Path) -> String {
     store_of(dir)["current"].as_str().unwrap().to_owned()
 }
 
+fn rotate(dir: &std::path::Path, home: &std::path::Path, extra: &[&str]) -> std::process::Output {
+    acd_home(dir, home)
+        .args(["token", "rotate", "hook"])
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+fn settings_token(home: &std::path::Path) -> serde_json::Value {
+    json_of(&home.join(".claude/settings.json"))["hooks"]["Stop"][0]["hooks"][0]["headers"]["X-Acd-Token"].clone()
+}
+
 fn home_with_acd() -> (tempfile::TempDir, std::path::PathBuf) {
     let home = tempfile::tempdir().unwrap();
     let dir = init_dir(home.path());
@@ -26,6 +38,291 @@ fn init_creates_a_private_store_and_no_hook_token_file() {
     assert_eq!(mode(&dir.join("hook-tokens.json")), 0o600);
     assert!(!dir.join("hook.token").exists());
     assert_eq!(store_of(&dir)["generation"], 1);
+}
+
+#[test]
+fn rotation_commits_the_store_then_rewrites_the_headers() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let old = hook_token_of(&dir);
+    let out = rotate(&dir, home.path(), &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let store = store_of(&dir);
+    let new = hook_token_of(&dir);
+    assert_ne!(old, new);
+    assert_eq!(store["previous"]["token"], old.as_str());
+    assert_eq!(store["headers"]["state"], "done");
+    assert_eq!(settings_token(home.path()), new.as_str());
+    for output in [&out.stdout, &out.stderr] {
+        let output = String::from_utf8_lossy(output);
+        assert!(
+            !output.contains(&new) && !output.contains(&old),
+            "hook tokens are never printed"
+        );
+    }
+}
+
+#[test]
+fn rotation_refuses_a_journal_conflict_without_changing_the_store() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let before = store_of(&dir);
+    let destination = home.path().join(".claude/settings.json");
+    let journal = serde_json::json!({
+        "destination": destination,
+        "before": "not-the-current-digest",
+        "after": "also-not-the-current-digest",
+        "record_after": null,
+        "target": "claude",
+        "conflict": null
+    });
+    let journal_path = dir.join("hooks-journal.json");
+    std::fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+    set_mode(&journal_path, 0o600);
+    let moved = home.path().join("settings-moved.json");
+    std::fs::rename(&destination, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &destination).unwrap();
+    let out = rotate(&dir, home.path(), &[]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("conflict"));
+    assert_eq!(store_of(&dir), before);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_record_save_failure_stops_rewrite_and_install_recovers_both_destinations() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let second_home = home.path().join("other-home");
+    std::fs::create_dir(&second_home).unwrap();
+    let second_settings = second_home.join(".claude/settings.json");
+    let out = acd_home(&dir, home.path())
+        .env("CLAUDE_CONFIG_DIR", second_home.join(".claude"))
+        .args(["hooks", "install", "claude", "--allow-unknown-git"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = acd_home(&dir, home.path())
+        .env("ACD_TEST_FAIL_AT", "record-write")
+        .args(["token", "rotate", "hook", "--allow-unknown-git"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("record-write"));
+    assert!(dir.join("hooks-journal.json").exists());
+    assert_eq!(store_of(&dir)["generation"], 2);
+    assert!(
+        install(&dir, home.path(), "claude", &["--allow-unknown-git"])
+            .status
+            .success()
+    );
+    assert!(!dir.join("hooks-journal.json").exists());
+    let current = hook_token_of(&dir);
+    assert_eq!(settings_token(home.path()), current.as_str());
+    let other_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(second_settings).unwrap()).unwrap();
+    assert_eq!(
+        other_value["hooks"]["Stop"][0]["hooks"][0]["headers"]["X-Acd-Token"],
+        current.as_str()
+    );
+    assert_eq!(store_of(&dir)["headers"]["state"], "done");
+    assert_eq!(store_of(&dir)["headers"]["failed"], serde_json::json!([]));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_crash_after_the_store_commit_is_repaired_by_install() {
+    for stage in ["after-store", "before-headers-state"] {
+        let (home, dir) = home_with_acd();
+        assert!(install(&dir, home.path(), "claude", &[]).status.success());
+        let out = acd_home(&dir, home.path())
+            .env("ACD_TEST_FAIL_AT", stage)
+            .args(["token", "rotate", "hook"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{stage}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(&format!("injected failure at {stage}")),
+            "{stage} was reached"
+        );
+        let store = store_of(&dir);
+        assert_eq!(store["generation"], 2, "{stage}: rotation committed");
+        assert!(store["previous"].is_object());
+        assert_ne!(store["headers"]["state"], "done");
+        assert!(!rotate(&dir, home.path(), &["--force"]).status.success());
+        assert_eq!(store_of(&dir)["generation"], 2);
+        assert!(install(&dir, home.path(), "claude", &[]).status.success());
+        assert_eq!(store_of(&dir)["headers"]["state"], "done");
+        assert_eq!(settings_token(home.path()), hook_token_of(&dir).as_str());
+    }
+}
+
+#[test]
+fn a_symlinked_settings_file_is_refused_before_committing() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let before = store_of(&dir);
+    let settings = home.path().join(".claude/settings.json");
+    let moved = home.path().join("moved.json");
+    std::fs::rename(&settings, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &settings).unwrap();
+    let out = rotate(&dir, home.path(), &[]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("symlink"));
+    assert_eq!(store_of(&dir), before);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_failed_header_write_fails_rotation_until_install_succeeds() {
+    let (home, dir) = home_with_acd();
+    assert!(
+        install(&dir, home.path(), "claude", &["--allow-unknown-git"])
+            .status
+            .success()
+    );
+    let out = acd_home(&dir, home.path())
+        .env("ACD_TEST_FAIL_AT", "settings-write")
+        .args(["token", "rotate", "hook", "--allow-unknown-git"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("injected failure at settings-write"), "{err}");
+    assert!(err.contains("settings.json"), "names the file");
+    let store = store_of(&dir);
+    assert_eq!(
+        (
+            store["generation"].as_u64(),
+            store["headers"]["state"].as_str()
+        ),
+        (Some(2), Some("failed"))
+    );
+    assert!(!dir.join("hooks-journal.json").exists());
+    assert!(
+        install(&dir, home.path(), "claude", &["--allow-unknown-git"])
+            .status
+            .success()
+    );
+    assert_eq!(store_of(&dir)["headers"]["state"], "done");
+    assert_eq!(settings_token(home.path()), hook_token_of(&dir).as_str());
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn header_completion_is_recorded_after_the_last_write() {
+    let (home, dir) = home_with_acd();
+    assert!(
+        install(&dir, home.path(), "claude", &["--allow-unknown-git"])
+            .status
+            .success()
+    );
+    let gate = home.path().join("gate");
+    let mut child = acd_home(&dir, home.path())
+        .env(
+            "ACD_TEST_PAUSE_AT",
+            format!("before-headers-state={}", gate.display()),
+        )
+        .args(["token", "rotate", "hook", "--allow-unknown-git"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let reached = home.path().join("gate.reached");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !reached.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "rotation never reached the gate"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let session_started = chrono::Utc::now().timestamp_millis();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&gate, b"").unwrap();
+    assert!(child.wait().unwrap().success());
+    let updated = store_of(&dir)["headers"]["updated_at_ms"].as_i64().unwrap();
+    assert!(
+        updated > session_started,
+        "updated_at_ms {updated} must follow the gap ({session_started})"
+    );
+}
+
+#[test]
+fn rotation_refuses_a_tracked_file_before_committing() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let before = store_of(&dir);
+    let claude = home.path().join(".claude");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(&claude)
+            .args(args)
+            .env("HOME", home.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap()
+    };
+    git(&["init", "-q"]);
+    git(&["add", "settings.json"]);
+    let out = rotate(&dir, home.path(), &[]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("tracked by Git"));
+    assert_eq!(store_of(&dir), before);
+    assert!(
+        rotate(&dir, home.path(), &["--allow-tracked"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn rotation_refuses_a_suspicious_entry_before_committing() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let before = store_of(&dir);
+    let path = home.path().join(".claude/settings.json");
+    let mut value = json_of(&path);
+    value["hooks"]["Stop"].as_array_mut().unwrap().push(serde_json::json!({"hooks": [{"type": "http", "url": "http://10.0.0.1:47801/hook/claude/Stop?marker=acd-managed:v1", "headers": {}}]}));
+    std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+    let out = rotate(&dir, home.path(), &[]);
+    assert!(!out.status.success());
+    assert_eq!(store_of(&dir), before);
+    assert!(
+        json_of(&path)["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["hooks"][0]["headers"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_second_rotation_needs_force_while_the_previous_token_is_retained() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    let gen2 = hook_token_of(&dir);
+    let out = rotate(&dir, home.path(), &[]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--force"));
+    assert_eq!(store_of(&dir)["generation"], 2);
+    let out = rotate(&dir, home.path(), &["--force"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no longer accepted"));
+    assert_eq!(store_of(&dir)["previous"]["token"], gen2.as_str());
 }
 
 #[cfg(debug_assertions)]

@@ -82,7 +82,15 @@ enum TlsCmd {
 #[derive(Subcommand)]
 enum TokenCmd {
     /// Replace a token. Running daemons close sessions that used the old one.
-    Rotate { which: TokenKind },
+    Rotate {
+        which: TokenKind,
+        #[arg(long)]
+        allow_tracked: bool,
+        #[arg(long)]
+        allow_unknown_git: bool,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy)]
@@ -134,7 +142,13 @@ fn real_main() -> Result<()> {
     match cli.cmd {
         Cmd::Init { force } => init(&dir, force),
         Cmd::Token {
-            cmd: TokenCmd::Rotate { which },
+            cmd:
+                TokenCmd::Rotate {
+                    which,
+                    allow_tracked,
+                    allow_unknown_git,
+                    force,
+                },
         } => {
             if !dir.is_dir() {
                 bail!("{} not initialized; run `acd init`", dir.display());
@@ -148,8 +162,33 @@ fn real_main() -> Result<()> {
                     Ok(())
                 }
                 TokenKind::Hook => {
-                    let s = hook_token::rotate_store(&dir, chrono::Utc::now().timestamp_millis())?;
-                    println!("Hook token rotated to generation {}.", s.generation);
+                    let ctx = hooks_install::Ctx::from_env(&dir)?;
+                    let flags = hooks_install::Flags {
+                        allow_tracked,
+                        allow_unknown_git,
+                    };
+                    let (store, report) = hook_token::rotate(
+                        &dir,
+                        &ctx,
+                        flags,
+                        force,
+                        chrono::Utc::now().timestamp_millis(),
+                    )?;
+                    for path in &report.updated {
+                        println!("Updated {}", path.display());
+                    }
+                    if !report.failed.is_empty() {
+                        for (path, why) in &report.failed {
+                            eprintln!("could not update {}: {why}", path.display());
+                        }
+                        bail!(
+                            "hook token rotation incomplete: fix the file(s) and run `acd hooks install claude`"
+                        );
+                    }
+                    println!(
+                        "Hook token rotated to generation {}. The previous token stays valid until every Claude session started before now has exited or used the new token, at most 30 days.",
+                        store.generation
+                    );
                     Ok(())
                 }
             }

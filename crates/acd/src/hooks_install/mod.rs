@@ -358,6 +358,16 @@ fn edit_settings(
         } else {
             Some(format!("{}\n", doc.render()))
         };
+        let current_record = Record::load(&ctx.config_dir)?.files.get(dest).cloned();
+        if text.as_deref() == before.as_deref() && rec == current_record {
+            return Ok(Report {
+                path: dest.to_path_buf(),
+                backup: None,
+                removed_file: false,
+                suspicious,
+                recovery_note: None,
+            });
+        }
         // Stage first: the temp file is written and fsynced before the last
         // content check, so that check sits right next to the rename.
         let staged = text
@@ -462,7 +472,17 @@ fn edit_settings(
 }
 
 pub fn install(ctx: &Ctx, t: Target, flags: Flags) -> Result<Report> {
-    install_entries(ctx, t, flags)
+    let report = install_entries(ctx, t, flags)?;
+    if t == Target::Claude {
+        let rewritten = crate::hook_token::update_headers(&ctx.config_dir, ctx, flags)?;
+        for (path, why) in &rewritten.failed {
+            eprintln!(
+                "warning: could not update the hook token in {}: {why}",
+                path.display()
+            );
+        }
+    }
+    Ok(report)
 }
 
 fn install_entries(ctx: &Ctx, t: Target, flags: Flags) -> Result<Report> {
@@ -655,7 +675,9 @@ fn rewrite_event_token(
         let owned: Vec<bool> = items
             .iter()
             .map(|e| match entries::classify(event, e) {
-                Ownership::Owned => e.get("headers").is_some(),
+                Ownership::Owned => e.get("headers").is_some_and(|headers| {
+                    headers.get("X-Acd-Token").and_then(Value::as_str) != Some(token)
+                }),
                 Ownership::Suspicious => {
                     *suspicious += 1;
                     false
@@ -690,7 +712,40 @@ fn rewrite_event_token(
     changed.then(|| raw_text(render_array(&out))).transpose()
 }
 
-#[allow(dead_code)]
+/// Before rotation commits, every recorded Claude destination must pass the
+/// same safe read and Git checks used by the subsequent writes.
+pub fn precheck_claude(ctx: &Ctx, _held: &WriterLock, flags: Flags) -> Result<()> {
+    for dest in Record::load(&ctx.config_dir)?.claude_destinations() {
+        let text = read_settings(&dest)?;
+        git::check(&dest, flags.allow_tracked, flags.allow_unknown_git)?;
+        let Some(text) = text else { continue };
+        let value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("{} is not valid JSON", dest.display()))?;
+        let Some(hooks) = value.get("hooks").and_then(Value::as_object) else {
+            continue;
+        };
+        for (event, groups) in hooks {
+            for group in groups.as_array().into_iter().flatten() {
+                for entry in group
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if entries::classify_for(Target::Claude, event, entry) == Ownership::Suspicious
+                    {
+                        bail!(
+                            "{}: an unexpected entry for {event} carries the acd marker; remove it by hand",
+                            dest.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn rewrite_claude_token(
     ctx: &Ctx,
     _held: &WriterLock,

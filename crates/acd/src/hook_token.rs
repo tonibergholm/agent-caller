@@ -8,6 +8,7 @@ use acd_protocol::SourceState;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::hooks_install;
 use crate::secrets;
 use crate::writer_lock::{self, WriterLock};
 
@@ -197,11 +198,6 @@ pub fn ensure_locked(dir: &Path, held: &WriterLock, force: bool) -> Result<bool>
     Ok(true)
 }
 
-pub fn rotate_store(dir: &Path, now_ms: i64) -> Result<Store> {
-    let held = writer_lock::acquire(dir)?;
-    rotate_store_locked(dir, &held, now_ms)
-}
-
 pub fn rotate_store_locked(dir: &Path, held: &WriterLock, now_ms: i64) -> Result<Store> {
     let old = load(dir)?;
     let generation = old.generation.checked_add(1).with_context(|| {
@@ -229,6 +225,94 @@ pub fn rotate_store_locked(dir: &Path, held: &WriterLock, now_ms: i64) -> Result
     };
     save_locked(dir, held, &s)?;
     Ok(s)
+}
+
+fn update_headers_locked(
+    dir: &Path,
+    ctx: &hooks_install::Ctx,
+    held: &WriterLock,
+    flags: hooks_install::Flags,
+) -> Result<hooks_install::RewriteReport> {
+    let mut store = load(dir)?;
+    if store.headers.state == HeaderState::Done && store.headers.generation == store.generation {
+        return Ok(hooks_install::RewriteReport {
+            updated: vec![],
+            failed: vec![],
+            recovery_note: None,
+        });
+    }
+    let report = hooks_install::rewrite_claude_token(ctx, held, &store.current, flags)?;
+    pause_at("before-headers-state");
+    fail_at("before-headers-state")?;
+    let completed_ms = now_ms();
+    store.headers = if !report.failed.is_empty() {
+        Headers {
+            generation: store.generation,
+            state: HeaderState::Failed,
+            updated_at_ms: store.headers.updated_at_ms,
+            failed: report
+                .failed
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect(),
+        }
+    } else {
+        Headers {
+            generation: store.generation,
+            state: HeaderState::Done,
+            updated_at_ms: completed_ms,
+            failed: vec![],
+        }
+    };
+    save_locked(dir, held, &store)?;
+    Ok(report)
+}
+
+/// Idempotently repair managed Claude headers. T6 entry point.
+pub fn update_headers(
+    dir: &Path,
+    ctx: &hooks_install::Ctx,
+    flags: hooks_install::Flags,
+) -> Result<hooks_install::RewriteReport> {
+    let held = writer_lock::acquire(dir)?;
+    hooks_install::journal::recover(dir)?;
+    migrate_locked(dir, &held)?;
+    update_headers_locked(dir, ctx, &held, flags)
+}
+
+/// Rotates the hook credential and rewrites its managed Claude headers under
+/// one writer lock. `now_ms` is the rotation instant; completion uses a later
+/// clock read after the destination writes.
+pub fn rotate(
+    dir: &Path,
+    ctx: &hooks_install::Ctx,
+    flags: hooks_install::Flags,
+    force: bool,
+    now_ms: i64,
+) -> Result<(Store, hooks_install::RewriteReport)> {
+    let held = writer_lock::acquire(dir)?;
+    hooks_install::journal::recover(dir)?;
+    let store = migrate_locked(dir, &held)?;
+    if store.headers.state != HeaderState::Done || store.headers.generation != store.generation {
+        bail!("the last hook token rotation is incomplete: run `acd hooks install claude` first");
+    }
+    if let Some(previous) = &store.previous
+        && now_ms < previous.expires_at_ms
+    {
+        if !force {
+            bail!(
+                "the previous hook token is still accepted for Claude sessions started before the last rotation (see `acd status`); rotating again cuts them off. Restart those sessions and wait, or pass --force"
+            );
+        }
+        eprintln!(
+            "warning: the token before the last rotation is no longer accepted; restart Claude sessions that still use it"
+        );
+    }
+    hooks_install::precheck_claude(ctx, &held, flags)?;
+    rotate_store_locked(dir, &held, now_ms)?;
+    fail_at("after-store")?;
+    let report = update_headers_locked(dir, ctx, &held, flags)?;
+    Ok((load(dir)?, report))
 }
 
 /// T4: Claude writes its registry entry shortly after it starts; a scan
@@ -516,7 +600,8 @@ mod tests {
     }
     fn rotated(d: &Path) -> Store {
         ensure(d, false).unwrap();
-        rotate_store(d, 1_000).unwrap()
+        let held = writer_lock::acquire(d).unwrap();
+        rotate_store_locked(d, &held, 1_000).unwrap()
     }
     #[test]
     fn generation_overflow_is_an_error_and_leaves_the_store_unchanged() {
@@ -526,8 +611,10 @@ mod tests {
         s.headers.generation = u64::MAX;
         write_store(d.path(), &s);
         let before = std::fs::read(d.path().join(STORE_FILE)).unwrap();
-        let e = format!("{:#}", rotate_store(d.path(), 5).unwrap_err());
+        let held = writer_lock::acquire(d.path()).unwrap();
+        let e = format!("{:#}", rotate_store_locked(d.path(), &held, 5).unwrap_err());
         assert!(e.contains("maximum") && e.contains(STORE_FILE), "{e}");
+        drop(held);
         let e = format!("{:#}", ensure(d.path(), true).unwrap_err());
         assert!(e.contains("maximum") && e.contains(STORE_FILE), "{e}");
         assert_eq!(std::fs::read(d.path().join(STORE_FILE)).unwrap(), before);
