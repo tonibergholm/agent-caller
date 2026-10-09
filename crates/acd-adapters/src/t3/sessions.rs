@@ -92,6 +92,14 @@ impl SessionMap {
     }
 }
 
+impl SessionMap {
+    /// Lets integration tests in other modules claim a session.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_for_tests(&self, agent_id: &str, session_id: Option<&str>) {
+        self.set(agent_id, session_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
