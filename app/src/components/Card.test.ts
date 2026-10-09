@@ -145,14 +145,18 @@ test("the selected card hints only at the keys it accepts", () => {
   expect(unselected.container.querySelector(".keys")).toBeNull();
 });
 
-test("a multi-line detail keeps its line break and renders monospace pre-wrap", () => {
+test("a multi-line detail renders one hanging-indent block per logical line", () => {
   const c = card({ key: "m/x" });
-  c.agent.pending = { ...c.agent.pending!, detail: "echo hello\nrm -rf ~" };
+  const long = `echo a${" ".repeat(300)}b`;
+  c.agent.pending = { ...c.agent.pending!, detail: `$ echo hello\n> ${long}\n"run_in_background": true` };
   const { container } = render(Card, props(c));
-  const d = container.querySelector(".detail") as HTMLElement;
-  expect(d.textContent).toBe("echo hello\nrm -rf ~");
+  const lines = Array.from(container.querySelectorAll(".detail > .line")).map((e) => e.textContent);
+  expect(lines).toEqual(["$ echo hello", `> ${long}`, '"run_in_background": true']);
   // jsdom applies no component styles, so check the stylesheet source.
   const css = cardSource;
-  expect(css).toMatch(/\.detail[^{]*\{[^}]*white-space:\s*pre-wrap/);
-  expect(css).toMatch(/\.detail[^{]*\{[^}]*monospace/);
+  const rule = css.match(/\.detail \.line\s*\{([^}]*)\}/)?.[1] ?? "";
+  expect(rule).toMatch(/white-space:\s*pre-wrap/);
+  expect(rule).toMatch(/padding-left:\s*2ch/);
+  expect(rule).toMatch(/text-indent:\s*-2ch/);
+  expect(css).toMatch(/\.detail\s*\{[^}]*monospace/);
 });

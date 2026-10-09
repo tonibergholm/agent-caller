@@ -214,7 +214,8 @@ pub fn always_rule(p: &Payload) -> Option<AlwaysRule> {
     if p.tool_name.as_deref() == Some("Bash")
         && let Some(c) = command_of(&p.tool_input)
     {
-        if c.contains(['*', '(', ')']) {
+        // An empty rule would be saved as plain `Bash`, which allows everything.
+        if c.trim().is_empty() || c.contains(['*', '(', ')']) {
             return None;
         }
         return Some(AlwaysRule {
@@ -227,9 +228,13 @@ pub fn always_rule(p: &Payload) -> Option<AlwaysRule> {
             return None;
         }
         let r = s.get("rules")?.as_array()?.first()?;
+        let rule_content = r.get("ruleContent")?.as_str()?;
+        if rule_content.trim().is_empty() {
+            return None;
+        }
         Some(AlwaysRule {
             tool_name: r.get("toolName")?.as_str()?.into(),
-            rule_content: r.get("ruleContent")?.as_str()?.into(),
+            rule_content: rule_content.into(),
         })
     })
 }
@@ -377,6 +382,17 @@ mod tests {
         for cmd in ["ls *", "foo :*", "echo (a)", "echo a)"] {
             p.tool_input["command"] = cmd.into();
             assert_eq!(always_rule(&p), None, "{cmd}");
+        }
+        for cmd in ["", " ", "\n\t"] {
+            p.tool_input["command"] = cmd.into();
+            assert_eq!(always_rule(&p), None, "{cmd:?}");
+        }
+        let mut e = p.clone();
+        e.tool_name = Some("Edit".into());
+        for rc in ["", "  "] {
+            e.permission_suggestions =
+                vec![json!({"type":"addRules","rules":[{"toolName":"Edit","ruleContent":rc}]})];
+            assert_eq!(always_rule(&e), None, "{rc:?}");
         }
         p.tool_input["command"] = "ls /tmp".into();
         assert_eq!(always_rule(&p).unwrap().rule_content, "ls /tmp");
