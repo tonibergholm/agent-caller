@@ -133,7 +133,9 @@ pub fn read_secret(path: &Path) -> Result<String> {
 pub fn repair_mode(path: &Path, mode: u32) -> Result<bool> {
     use std::os::unix::fs::MetadataExt;
     let file = acd_securefs::open_owned_file(path).map_err(explain)?;
-    let meta = file.metadata().with_context(|| format!("reading {}", path.display()))?;
+    let meta = file
+        .metadata()
+        .with_context(|| format!("reading {}", path.display()))?;
     if meta.mode() & 0o7777 & !mode == 0 {
         return Ok(false);
     }
@@ -243,7 +245,10 @@ mod tests {
         let err = check_mode(&p, 0o600).unwrap_err().to_string();
         assert!(err.contains("4600"), "{err}");
         assert!(repair_mode(&p, 0o600).unwrap());
-        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o7777, 0o600);
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
         check_mode(&p, 0o600).unwrap();
     }
 }
