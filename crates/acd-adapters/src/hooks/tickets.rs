@@ -245,4 +245,22 @@ mod tests {
         slots.admit(ReadKind::Presence, true);
         assert!(old.await.unwrap_err().is_cancelled());
     }
+
+    #[tokio::test]
+    async fn same_purpose_out_of_order_completion_does_not_finish_the_new_read() {
+        let mut slots = ReadSlots::default();
+        let first = slots.admit(ReadKind::Capture, true).unwrap();
+        let old_task = tokio::spawn(std::future::pending::<()>());
+        slots.started(ReadKind::Capture, old_task.abort_handle());
+        let second = slots.admit(ReadKind::Capture, true).unwrap();
+        assert!(old_task.await.unwrap_err().is_cancelled());
+        let new_task = tokio::spawn(std::future::pending::<()>());
+        slots.started(ReadKind::Capture, new_task.abort_handle());
+
+        slots.finished(ReadKind::Capture, first);
+        assert!(slots.busy(ReadKind::Capture));
+        slots.finished(ReadKind::Capture, second);
+        assert!(!slots.busy(ReadKind::Capture));
+        new_task.abort();
+    }
 }

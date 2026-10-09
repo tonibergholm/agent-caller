@@ -515,6 +515,11 @@ impl Reconciler {
         self.core.observe(obs);
     }
 
+    async fn agent_guard(&self, agent_id: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let locks = self.herdr.as_ref()?.agent_locks();
+        Some(locks.lock(agent_id).await)
+    }
+
     fn bound_pane(&self, sid: &str) -> Option<PaneFact> {
         let Owner::Herdr(agent) = &self.sessions.get(sid)?.owner else {
             return None;
@@ -841,6 +846,7 @@ impl Reconciler {
             let Some(agent) = self.tracks.get(&rid).map(|t| t.agent_id.clone()) else {
                 continue;
             };
+            let _agent_guard = self.agent_guard(&agent).await;
             let _guard = self.shared.occurrence_lock(&agent).await;
             let Some(track) = self.tracks.get(&rid) else {
                 continue;
@@ -911,6 +917,7 @@ impl Reconciler {
             let Some(agent) = self.tracks.get(rid).map(|t| t.agent_id.clone()) else {
                 continue;
             };
+            let _agent_guard = self.agent_guard(&agent).await;
             let _guard = self.shared.occurrence_lock(&agent).await;
             let Some((opened_at, phase)) = self.tracks.get(rid).map(|t| (t.opened_at, t.phase))
             else {
@@ -997,19 +1004,20 @@ impl Reconciler {
         if self.herdr.is_none() {
             return;
         }
+        let locks = self.herdr.as_ref().expect("herdr checked").agent_locks();
+        let Ok(_agent_guard) =
+            tokio::time::timeout(self.cfg.lock_wait, locks.lock(&ticket.agent_id)).await
+        else {
+            self.retry_screen(&ticket, purpose);
+            return;
+        };
         let Ok(_guard) = tokio::time::timeout(
             self.cfg.lock_wait,
             self.shared.occurrence_lock(&ticket.agent_id),
         )
         .await
         else {
-            if let Some(rid) = &ticket.request_id
-                && let Some(track) = self.tracks.get_mut(rid)
-            {
-                track.reads.finished(ticket.kind, ticket.read_seq);
-                track.reads.admit(ticket.kind, false);
-                track.wanted_purpose.insert(ticket.kind, purpose);
-            }
+            self.retry_screen(&ticket, purpose);
             return;
         };
         if let Some(rid) = &ticket.request_id
@@ -1064,7 +1072,8 @@ impl Reconciler {
                 self.switch_to_keys_locked(&rid, screen, ticket.incarnation)
             }
             (Purpose::HoldEnded { .. }, ReadResult::NoMatch) => {
-                self.end(&rid, ResolvedBy::Terminal)
+                // Without an exact capture, the hook stream owns attribution.
+                // Keep the occurrence open for later lifecycle evidence.
             }
             (Purpose::HoldEnded { expired }, ReadResult::Unavailable) => {
                 let tries = self.tracks.get_mut(&rid).map(|track| {
@@ -1080,6 +1089,16 @@ impl Reconciler {
         }
     }
 
+    fn retry_screen(&mut self, ticket: &Ticket, purpose: Purpose) {
+        if let Some(rid) = &ticket.request_id
+            && let Some(track) = self.tracks.get_mut(rid)
+        {
+            track.reads.finished(ticket.kind, ticket.read_seq);
+            track.reads.admit(ticket.kind, false);
+            track.wanted_purpose.insert(ticket.kind, purpose);
+        }
+    }
+
     async fn on_hold_ended(&mut self, hold: HoldId, expired: bool) {
         let Some(rid) = self.holds.get(&hold).cloned() else {
             return;
@@ -1087,6 +1106,7 @@ impl Reconciler {
         let Some(agent) = self.tracks.get(&rid).map(|track| track.agent_id.clone()) else {
             return;
         };
+        let _agent_guard = self.agent_guard(&agent).await;
         let _guard = self.shared.occurrence_lock(&agent).await;
         if self.holds.remove(&hold).is_none() {
             return;
@@ -1105,16 +1125,14 @@ impl Reconciler {
             since: Instant::now(),
         };
         let captured = track.pane.is_some() && track.capture.is_some();
-        let has_pane = track.pane.is_some();
         if captured {
             self.spawn_read(&rid, Purpose::HoldEnded { expired });
         } else if expired {
             self.end(&rid, ResolvedBy::Lost);
-        } else if !has_pane {
-            // A hooks-only close has no screen to inspect. Keep it open for
-            // lifecycle evidence; the evidence window retires it uncertain.
         } else {
-            self.end(&rid, ResolvedBy::Terminal);
+            // Without a matched capture, the hook stream owns attribution.
+            // Keep it open for later lifecycle evidence; the window retires
+            // it uncertain if no evidence arrives.
         }
     }
 
@@ -1341,6 +1359,7 @@ impl Reconciler {
             let Some(agent) = self.tracks.get(&rid).map(|track| track.agent_id.clone()) else {
                 continue;
             };
+            let _agent_guard = self.agent_guard(&agent).await;
             let _guard = self.shared.occurrence_lock(&agent).await;
             let now = Instant::now();
             let Some(track) = self.tracks.get(&rid) else {
@@ -1368,6 +1387,7 @@ impl Reconciler {
             let Some(agent) = self.tracks.get(&rid).map(|track| track.agent_id.clone()) else {
                 continue;
             };
+            let _agent_guard = self.agent_guard(&agent).await;
             let _guard = self.shared.occurrence_lock(&agent).await;
             let should_read = self.tracks.get(&rid).is_some_and(|track| {
                 matches!(track.phase, Phase::Held | Phase::ReadOnly)

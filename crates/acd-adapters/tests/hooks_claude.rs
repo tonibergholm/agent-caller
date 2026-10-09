@@ -761,11 +761,79 @@ async fn bound_rig() -> (Rig, String) {
         .panes()
         .read()
         .unwrap()
-        .keys()
-        .next()
+        .iter()
+        .find(|(_, pane)| pane.pane_id == "w1:p1")
         .unwrap()
+        .0
         .clone();
     (r, agent)
+}
+
+async fn unheld_bound_rig() -> (Rig, String, tokio::net::TcpStream) {
+    let r = rig(
+        &[
+            fake_agent("w1:p1", "claude", "working"),
+            fake_agent("w1:p2", "claude", "working"),
+        ],
+        |cfg| {
+            cfg.max_holds = 1;
+        },
+    )
+    .await;
+    let dialog = std::fs::read_to_string(format!(
+        "{}/../../tests/fixtures/herdr/claude-permission-bash.txt",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    for pane in ["w1:p1", "w1:p2"] {
+        r.fake
+            .as_ref()
+            .unwrap()
+            .set_screen(pane, "detection", &dialog);
+    }
+    let socket = r.sock();
+    let filler_headers = vec![
+        ("X-Herdr-Pane", "w1:p2"),
+        ("X-Herdr-Socket", socket.as_str()),
+        ("X-Claude-Entrypoint", "cli"),
+    ];
+    let filler_payload = fx("claude/payload-PermissionRequest-Bash.json");
+    let filler = r.hold(&filler_payload, &filler_headers).await;
+    let filler_agent = r
+        .herdr
+        .as_ref()
+        .unwrap()
+        .panes()
+        .read()
+        .unwrap()
+        .iter()
+        .find(|(_, pane)| pane.pane_id == "w1:p2")
+        .unwrap()
+        .0
+        .clone();
+    until("hold capacity occupied", || {
+        r.agent(&filler_agent).and_then(|agent| agent.pending)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let mut response = [0_u8; 1];
+    assert!(matches!(
+        filler.try_read(&mut response),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    let agent = r
+        .herdr
+        .as_ref()
+        .unwrap()
+        .panes()
+        .read()
+        .unwrap()
+        .iter()
+        .find(|(_, pane)| pane.pane_id == "w1:p1")
+        .unwrap()
+        .0
+        .clone();
+    (r, agent, filler)
 }
 
 #[tokio::test]
@@ -859,7 +927,7 @@ async fn a_bound_hold_close_with_the_matching_dialog_switches_to_incarnation_bou
 }
 
 #[tokio::test]
-async fn a_bound_hold_close_without_the_dialog_is_terminal() {
+async fn a_bound_hold_close_without_the_dialog_waits_for_evidence_then_is_uncertain() {
     let (r, agent) = bound_rig().await;
     let (_, mut rx) = r.core.attach(None);
     let h = bound_headers(&r);
@@ -885,7 +953,58 @@ async fn a_bound_hold_close_without_the_dialog_is_terminal() {
         .unwrap()
         .set_screen("w1:p1", "detection", &idle);
     drop(held);
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Uncertain);
+}
+
+#[tokio::test]
+async fn a_bound_hold_close_without_a_capture_uses_stop_evidence() {
+    let (r, agent) = bound_rig().await;
+    let (_, mut rx) = r.core.attach(None);
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    r.fake
+        .as_ref()
+        .unwrap()
+        .set_truncated("w1:p1", "detection", true);
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    drop(held);
+    r.hook("claude", "Stop", &stop_after_deny(), &h).await;
     assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Terminal);
+}
+
+#[tokio::test]
+async fn a_bound_hold_close_without_a_capture_or_evidence_is_uncertain() {
+    let (r, agent) = bound_rig().await;
+    let (_, mut rx) = r.core.attach(None);
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    r.fake
+        .as_ref()
+        .unwrap()
+        .set_truncated("w1:p1", "detection", true);
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    drop(held);
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Uncertain);
 }
 
 #[tokio::test]
@@ -948,37 +1067,156 @@ async fn unavailable_hold_end_reads_resolve_uncertain() {
 }
 
 #[tokio::test]
-async fn a_capture_that_returns_after_stop_is_dropped() {
-    let r = rig(&[fake_agent("w1:p1", "claude", "working")], |_| {}).await;
-    let dialog = std::fs::read_to_string(format!(
-        "{}/../../tests/fixtures/herdr/claude-permission-bash.txt",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap();
-    r.fake
-        .as_ref()
-        .unwrap()
-        .set_screen("w1:p1", "detection", &dialog);
-    let agent = r
-        .herdr
-        .as_ref()
-        .unwrap()
-        .panes()
-        .read()
-        .unwrap()
-        .keys()
-        .next()
-        .unwrap()
-        .clone();
-    let h = bound_headers(&r);
-    let h: Vec<(&str, &str)> = h
-        .iter()
-        .map(|(key, value)| (*key, value.as_str()))
-        .collect();
+async fn a_capture_result_waits_for_the_herdr_delivery_lock_before_applying() {
+    let (r, agent, _filler) = unheld_bound_rig().await;
     let gate = r.fake.as_ref().unwrap().block_next("agent.read");
-    let _held = r
-        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
-        .await;
+    let port = r.port;
+    let mut payload = fx("claude/payload-PermissionRequest-Bash.json");
+    payload["session_id"] = "target-session".into();
+    let body = payload.to_string();
+    let headers = bound_headers(&r);
+    let hook = tokio::spawn(async move {
+        let borrowed: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        acd_adapters::hooks::testing::post(
+            port,
+            "/hook/claude/PermissionRequest",
+            TOKEN,
+            &borrowed,
+            &body,
+        )
+        .await
+    });
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    let initial_request = r.core.request(&rid).unwrap();
+    assert_eq!(initial_request.answer_path, AnswerPath::Keys);
+    tokio::time::timeout(Duration::from_secs(3), gate.arrived())
+        .await
+        .expect("capture read reached fake gate");
+    let locks = r.herdr.as_ref().unwrap().agent_locks();
+    let guard = locks.lock(&agent).await;
+    gate.release();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_none());
+    assert_eq!(r.core.request(&rid).unwrap(), initial_request);
+    drop(guard);
+    until("capture applies after delivery lock release", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid)
+    })
+    .await;
+    assert_eq!(r.core.request(&rid).unwrap().status, RequestStatus::Open);
+    assert_eq!(r.core.request(&rid).unwrap().answer_path, AnswerPath::Keys);
+    let _ = hook.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_capture_from_a_replaced_pane_is_discarded() {
+    let (r, agent, _filler) = unheld_bound_rig().await;
+    let gate = r.fake.as_ref().unwrap().block_next("agent.read");
+    let port = r.port;
+    let mut payload = fx("claude/payload-PermissionRequest-Bash.json");
+    payload["session_id"] = "target-session".into();
+    let body = payload.to_string();
+    let headers = bound_headers(&r);
+    let hook = tokio::spawn(async move {
+        let borrowed: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        acd_adapters::hooks::testing::post(
+            port,
+            "/hook/claude/PermissionRequest",
+            TOKEN,
+            &borrowed,
+            &body,
+        )
+        .await
+    });
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(3), gate.arrived())
+        .await
+        .expect("capture read reached fake gate");
+    let panes = r.herdr.as_ref().unwrap().panes();
+    panes
+        .write()
+        .unwrap()
+        .get_mut(&agent)
+        .expect("captured pane remains registered")
+        .incarnation += 1;
+    gate.release();
+    let _ = hook.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_none());
+    assert_eq!(r.core.request(&rid).unwrap().status, RequestStatus::Open);
+}
+
+#[tokio::test]
+async fn a_capture_result_after_t3_takeover_is_discarded() {
+    let (r, agent, _filler) = unheld_bound_rig().await;
+    let gate = r.fake.as_ref().unwrap().block_next("agent.read");
+    let port = r.port;
+    let mut payload = fx("claude/payload-PermissionRequest-Bash.json");
+    payload["session_id"] = "target-session".into();
+    let body = payload.to_string();
+    let headers = bound_headers(&r);
+    let hook = tokio::spawn(async move {
+        let borrowed: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        acd_adapters::hooks::testing::post(
+            port,
+            "/hook/claude/PermissionRequest",
+            TOKEN,
+            &borrowed,
+            &body,
+        )
+        .await
+    });
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(3), gate.arrived())
+        .await
+        .expect("capture read reached fake gate");
+    r.t3.set_for_tests("t3:thread-target", Some("target-session"));
+    gate.release();
+    let _ = hook.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_none());
+    assert_eq!(r.core.request(&rid).unwrap().status, RequestStatus::Open);
+}
+
+#[tokio::test]
+async fn a_stale_capture_for_an_unheld_request_cannot_register_a_target() {
+    let (r, agent, _filler) = unheld_bound_rig().await;
+    let gate = r.fake.as_ref().unwrap().block_next("agent.read");
+    let port = r.port;
+    let body = fx("claude/payload-PermissionRequest-Bash.json").to_string();
+    let headers = bound_headers(&r);
+    let hook = tokio::spawn(async move {
+        let borrowed: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        acd_adapters::hooks::testing::post(
+            port,
+            "/hook/claude/PermissionRequest",
+            TOKEN,
+            &borrowed,
+            &body,
+        )
+        .await
+    });
     let rid = until("request", || {
         r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
     })
@@ -986,12 +1224,12 @@ async fn a_capture_that_returns_after_stop_is_dropped() {
     tokio::time::timeout(Duration::from_secs(3), gate.arrived())
         .await
         .expect("capture read reached the fake gate");
-    r.hook("claude", "Stop", &stop_after_deny(), &h).await;
-    until("request ended", || {
-        r.core.request(&rid).is_none().then_some(())
-    })
-    .await;
+    r.core.observe(Observation::RequestEndedById {
+        request_id: rid.clone(),
+        by: ResolvedBy::Terminal,
+    });
     gate.release();
+    let _ = hook.await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_none());
     assert!(r.agent(&agent).and_then(|a| a.pending).is_none());
