@@ -189,7 +189,7 @@ const RECENT: usize = 256;
 
 /// Per-request evidence provider for herdr's guarded keys engine.
 pub struct EvidenceHub {
-    expects: Mutex<HashMap<String, (Expect, bool)>>,
+    expects: Mutex<HashMap<String, (Expect, bool, Instant)>>,
     recent: Mutex<VecDeque<HookEvent>>,
     tx: broadcast::Sender<HookEvent>,
 }
@@ -205,11 +205,11 @@ impl Default for EvidenceHub {
 }
 
 impl EvidenceHub {
-    pub fn expect(&self, request_id: &str, e: Expect, shadowed: bool) {
+    pub fn expect(&self, request_id: &str, e: Expect, shadowed: bool, opened_at: Instant) {
         self.expects
             .lock()
             .expect("evidence")
-            .insert(request_id.to_owned(), (e, shadowed));
+            .insert(request_id.to_owned(), (e, shadowed, opened_at));
     }
 
     pub fn forget(&self, request_id: &str) {
@@ -246,7 +246,7 @@ impl crate::herdr::keys::Evidence for EvidenceHub {
         option_id: &str,
         sent_at: Instant,
     ) -> Verdict {
-        let Some((expect, shadowed)) = self
+        let Some((expect, shadowed, opened_at)) = self
             .expects
             .lock()
             .expect("evidence")
@@ -264,7 +264,7 @@ impl crate::herdr::keys::Evidence for EvidenceHub {
             .lock()
             .expect("evidence")
             .iter()
-            .filter(|ev| ev.at >= sent_at)
+            .filter(|ev| ev.at > sent_at.max(opened_at))
             .cloned()
             .collect();
         for ev in &backlog {
@@ -278,7 +278,7 @@ impl crate::herdr::keys::Evidence for EvidenceHub {
         }
         loop {
             match rx.recv().await {
-                Ok(ev) if ev.at >= sent_at => {
+                Ok(ev) if ev.at > sent_at.max(opened_at) => {
                     if let Some(seen) = observe_shadowed(&expect, &ev, shadowed) {
                         return if shadowed {
                             Verdict::NoEvidence
@@ -347,14 +347,20 @@ mod tests {
     async fn hub_correlates_only_post_send_evidence_to_its_request() {
         use crate::herdr::keys::Evidence as _;
         let hub = EvidenceHub::default();
-        hub.expect("r1", bash("touch /tmp/acp0/t2.txt"), false);
+        hub.expect(
+            "r1",
+            bash("touch /tmp/acp0/t2.txt"),
+            false,
+            Instant::now() - std::time::Duration::from_secs(2),
+        );
         let mut post = ev(
             "claude/payload-PostToolUse-Bash.json",
             HookName::PostToolUse,
         );
         hub.publish(&post);
         let sent_at = Instant::now();
-        post.at = Instant::now();
+        // Strictly after the send, whatever the clock's resolution.
+        post.at = sent_at + std::time::Duration::from_millis(1);
         hub.publish(&post);
         assert_eq!(
             hub.outcome(&target("r1"), "allow", sent_at).await,
@@ -376,10 +382,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hub_ignores_evidence_exactly_at_sent_time() {
+        use crate::herdr::keys::Evidence as _;
+        let hub = EvidenceHub::default();
+        let sent_at = Instant::now();
+        hub.expect(
+            "r1",
+            bash("touch /tmp/acp0/t2.txt"),
+            false,
+            sent_at - std::time::Duration::from_secs(1),
+        );
+        let mut post = ev(
+            "claude/payload-PostToolUse-Bash.json",
+            HookName::PostToolUse,
+        );
+        post.at = sent_at;
+        hub.publish(&post);
+        let target = target("r1");
+        let h = std::sync::Arc::new(hub);
+        let hh = h.clone();
+        let waiting = tokio::spawn(async move { hh.outcome(&target, "allow", sent_at).await });
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(!waiting.is_finished());
+        let mut later = post;
+        later.at = Instant::now();
+        h.publish(&later);
+        assert_eq!(waiting.await.unwrap(), Verdict::Consistent);
+    }
+
+    #[tokio::test]
     async fn hub_waits_for_live_evidence_and_ignores_shadowed_identity() {
         use crate::herdr::keys::Evidence as _;
         let hub = std::sync::Arc::new(EvidenceHub::default());
-        hub.expect("r1", bash("touch /tmp/acp0/t2.txt"), true);
+        hub.expect(
+            "r1",
+            bash("touch /tmp/acp0/t2.txt"),
+            true,
+            Instant::now() - std::time::Duration::from_secs(2),
+        );
         let sent_at = Instant::now();
         let h = hub.clone();
         let waiting = tokio::spawn(async move { h.outcome(&target("r1"), "allow", sent_at).await });

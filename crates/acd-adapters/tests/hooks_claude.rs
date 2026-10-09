@@ -362,7 +362,37 @@ async fn a_switched_permission_is_resolved_through_the_evidence_hub() {
     let mut post = fx("claude/payload-PostToolUse-Bash.json");
     post["tool_input"] = fx("claude/payload-PermissionRequest-Bash.json")["tool_input"].clone();
     r.hook("claude", "PostToolUse", &post, &CLI).await;
-    assert_eq!(resolution(&mut rx, &q).await, ResolvedBy::Uncertain);
+    assert_eq!(resolution(&mut rx, &q).await, ResolvedBy::Inbox);
+}
+
+#[tokio::test]
+async fn subagent_post_tool_use_does_not_resolve_keys_request_as_inbox() {
+    let (r, agent) = bound_rig().await;
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let (_, mut rx) = r.core.attach(None);
+    let q = until("held permission", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(held);
+    until("keys target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&q)
+    })
+    .await;
+    assert!(answer(&r, "a1", &q, "allow").await.ok);
+    let mut post = fx("claude/payload-PostToolUse-Bash.json");
+    post["tool_input"] = fx("claude/payload-PermissionRequest-Bash.json")["tool_input"].clone();
+    post["agent_id"] = "subagent-1".into();
+    r.hook("claude", "PostToolUse", &post, &CLI).await;
+    assert_ne!(resolution(&mut rx, &q).await, ResolvedBy::Inbox);
 }
 
 #[tokio::test]
@@ -1099,6 +1129,13 @@ fn bound_headers(r: &Rig) -> Vec<(&'static str, String)> {
 
 async fn bound_rig() -> (Rig, String) {
     let r = rig(&[fake_agent("w1:p1", "claude", "blocked")], |_| {}).await;
+    r.fake.as_ref().unwrap().on_keys(|f, pane, _| {
+        let idle = herdr_screen("claude-idle-detection.txt");
+        let prompt = herdr_screen("claude-idle-prompt.txt");
+        f.set_screen(pane, "detection", &idle);
+        f.set_screen(pane, "visible", &prompt);
+        f.set_status(pane, "working");
+    });
     let dialog = std::fs::read_to_string(format!(
         "{}/../../tests/fixtures/herdr/claude-permission-bash.txt",
         env!("CARGO_MANIFEST_DIR")

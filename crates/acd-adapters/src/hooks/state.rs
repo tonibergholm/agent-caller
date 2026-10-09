@@ -436,7 +436,6 @@ impl Reconciler {
         generation: u64,
         hold: Option<super::endpoint::HoldIn>,
     ) {
-        self.evidence.publish(&event);
         {
             let mut generations = self.shared.by_generation.lock().expect("shared");
             let ids = generations.entry(generation).or_default();
@@ -457,8 +456,14 @@ impl Reconciler {
             return;
         }
         match event.agent {
-            HookAgent::Claude => self.on_claude(event, hold).await,
-            HookAgent::Codex => self.on_codex(event).await,
+            HookAgent::Claude => {
+                self.on_claude(event.clone(), hold).await;
+                self.evidence.publish(&event);
+            }
+            HookAgent::Codex => {
+                self.on_codex(event.clone()).await;
+                self.evidence.publish(&event);
+            }
         }
     }
 
@@ -774,7 +779,7 @@ impl Reconciler {
                 });
                 track.phase = Phase::Keys;
                 self.evidence
-                    .expect(rid, track.expect.clone(), track.shadowed);
+                    .expect(rid, track.expect.clone(), track.shadowed, track.opened_at);
             }
             _ => {
                 self.core.observe(Observation::RequestPath {
@@ -1088,9 +1093,6 @@ impl Reconciler {
             else {
                 continue;
             };
-            if phase == Phase::Keys {
-                continue;
-            }
             if ev.at <= opened_at {
                 evidence_eligible = false;
                 continue;
@@ -1098,6 +1100,9 @@ impl Reconciler {
             let delivered_at = self.delivered(rid).map(|(_, at)| at);
             if delivered_at.is_some_and(|at| ev.at <= at) {
                 evidence_eligible = false;
+                continue;
+            }
+            if phase == Phase::Keys {
                 continue;
             }
             let Some(seen) = self
@@ -1350,10 +1355,12 @@ impl Reconciler {
                         ready: true,
                     });
                     track.phase = Phase::Keys;
-                    self.evidence
-                        .expect(rid, track.expect.clone(), track.shadowed);
-                    self.evidence
-                        .expect(rid, track.expect.clone(), track.shadowed);
+                    self.evidence.expect(
+                        rid,
+                        track.expect.clone(),
+                        track.shadowed,
+                        track.opened_at,
+                    );
                 } else {
                     self.core.observe(Observation::RequestPath {
                         agent_id: track.agent_id.clone(),
@@ -1810,6 +1817,25 @@ mod tests {
             .insert("r3".into(), track("s1", "r3", Instant::now()));
         r.mark_shadow("r3");
         assert!(r.tracks["r3"].shadowed);
+    }
+
+    #[tokio::test]
+    async fn pre_open_stop_does_not_clear_shadow_for_keys_track() {
+        let mut r = reconciler(8);
+        r.on_event(hook("s1"), 1, None).await;
+        let now = Instant::now();
+        let older = track("s1", "old", now - std::time::Duration::from_secs(2));
+        r.note_unconsumed(&older);
+        let opened_at = now - std::time::Duration::from_secs(1);
+        let mut keys = track("s1", "r2", opened_at);
+        keys.phase = Phase::Keys;
+        r.tracks.insert("r2".into(), keys);
+
+        let mut stop = hook("s1");
+        stop.name = HookName::Stop;
+        stop.at = opened_at - std::time::Duration::from_millis(1);
+        r.apply_evidence(&stop).await;
+        assert!(r.unconsumed.get("s1").is_some_and(|u| u.entries.len() == 1));
     }
 
     #[tokio::test]
