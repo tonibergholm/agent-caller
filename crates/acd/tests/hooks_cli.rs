@@ -120,6 +120,21 @@ fn a_record_save_failure_stops_rewrite_and_install_recovers_both_destinations() 
     assert!(String::from_utf8_lossy(&out.stderr).contains("record-write"));
     assert!(dir.join("hooks-journal.json").exists());
     assert_eq!(store_of(&dir)["generation"], 2);
+    let token_in = |p: &std::path::Path| -> serde_json::Value {
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+        v["hooks"]["Stop"][0]["hooks"][0]["headers"]["X-Acd-Token"].clone()
+    };
+    let new_token = hook_token_of(&dir);
+    assert_eq!(
+        token_in(&home.path().join(".claude/settings.json")),
+        new_token.as_str(),
+        "the first destination already has the new token"
+    );
+    assert_ne!(
+        token_in(&second_settings),
+        new_token.as_str(),
+        "the second destination still has the old token"
+    );
     assert!(
         install(&dir, home.path(), "claude", &["--allow-unknown-git"])
             .status
@@ -179,6 +194,42 @@ fn a_symlinked_settings_file_is_refused_before_committing() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("symlink"));
     assert_eq!(store_of(&dir), before);
+}
+
+#[test]
+fn a_symlinked_settings_directory_is_refused_before_committing() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let before = store_of(&dir);
+    let claude = home.path().join(".claude");
+    let moved = home.path().join("moved-claude");
+    std::fs::rename(&claude, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &claude).unwrap();
+    let out = rotate(&dir, home.path(), &[]);
+    assert!(!out.status.success());
+    assert_eq!(store_of(&dir), before, "the precheck left the store alone");
+}
+
+#[test]
+fn install_restores_0600_on_an_unchanged_but_loosened_settings_file() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let settings = home.path().join(".claude/settings.json");
+    let text = std::fs::read(&settings).unwrap();
+    for loose in [0o644, 0o4600] {
+        set_mode(&settings, loose);
+        let out = install(&dir, home.path(), "claude", &[]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(mode(&settings), 0o600, "restored from {loose:o}");
+        assert_eq!(
+            String::from_utf8(std::fs::read(&settings).unwrap()).unwrap(),
+            String::from_utf8(text.clone()).unwrap()
+        );
+    }
 }
 
 #[cfg(debug_assertions)]

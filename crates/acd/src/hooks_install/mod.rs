@@ -214,7 +214,26 @@ fn read_pinned(
     let mut text = String::new();
     f.read_to_string(&mut text)
         .with_context(|| format!("reading {}", shown.display()))?;
-    Ok(Some((text, m.permissions().mode() & 0o777)))
+    Ok(Some((text, m.permissions().mode() & 0o7777)))
+}
+
+/// `read_settings` for a path, but through the same pinned-directory,
+/// no-follow, descriptor-validated read the writes use. A missing directory
+/// reads as a missing file.
+fn read_settings_pinned(path: &Path) -> Result<Option<String>> {
+    let parent = path.parent().context("settings path has no parent")?;
+    let name = path.file_name().context("settings path has no file name")?;
+    let dir = match crate::secrets::DirFd::open(parent, true) {
+        Ok(d) => d,
+        Err(_)
+            if matches!(std::fs::symlink_metadata(parent),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(read_pinned(&dir, name)?.map(|(text, _)| text))
 }
 
 /// A private copy of the pre-edit text. Names are unique and never reused:
@@ -254,7 +273,7 @@ fn backup(ctx: &Ctx, path: &Path, text: &str) -> Result<PathBuf> {
 fn file_mode(existing: Option<u32>, t: Target) -> u32 {
     match t {
         Target::Claude => 0o600,
-        Target::Codex => existing.unwrap_or(0o600),
+        Target::Codex => existing.map_or(0o600, |m| m & 0o777),
     }
 }
 
@@ -356,10 +375,19 @@ fn edit_settings(
         let text = if remove {
             None
         } else {
-            Some(format!("{}\n", doc.render()))
+            // `render` already ends in a newline when the input did; adding
+            // another on every pass would make a re-install never a no-op.
+            let mut rendered = doc.render();
+            if !rendered.ends_with('\n') {
+                rendered.push('\n');
+            }
+            Some(rendered)
         };
         let current_record = Record::load(&ctx.config_dir)?.files.get(dest).cloned();
-        if text.as_deref() == before.as_deref() && rec == current_record {
+        // A Claude file must also already be exactly 0600: a loosened mode
+        // (or a setuid/setgid/sticky bit) is rewritten through the pinned dir.
+        let mode_ok = t != Target::Claude || existing_mode.is_none_or(|m| m == 0o600);
+        if mode_ok && text.as_deref() == before.as_deref() && rec == current_record {
             return Ok(Report {
                 path: dest.to_path_buf(),
                 backup: None,
@@ -716,7 +744,7 @@ fn rewrite_event_token(
 /// same safe read and Git checks used by the subsequent writes.
 pub fn precheck_claude(ctx: &Ctx, _held: &WriterLock, flags: Flags) -> Result<()> {
     for dest in Record::load(&ctx.config_dir)?.claude_destinations() {
-        let text = read_settings(&dest)?;
+        let text = read_settings_pinned(&dest)?;
         git::check(&dest, flags.allow_tracked, flags.allow_unknown_git)?;
         let Some(text) = text else { continue };
         let value: Value = serde_json::from_str(&text)
