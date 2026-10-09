@@ -1,0 +1,8 @@
+  ⎿  UserPromptSubmit hook error
+  ⎿  HTTP 401 from http://127.0.0.1:47931/hook/claude/UserPromptSubmit
+⏺ Ran 7 stop hooks
+  ⎿  Stop hook error: HTTP 401 from http://127.0.0.1:47931/hook/claude/Stop
+  (footer) Stop hook error occurred · ctrl+o to see
+Stalled lifecycle hook (timeout 1):
+  ⎿  UserPromptSubmit hook [http://127.0.0.1:47931/hook/claude/UserPromptSubmit] timed out after 1s — output discarded. Raise the hook's "timeout" to allow more time.
+PermissionRequest rejected 401/403: no message; normal dialog shown.

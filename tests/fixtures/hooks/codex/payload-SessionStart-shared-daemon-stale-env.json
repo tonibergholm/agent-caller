@@ -1,0 +1,21 @@
+{
+ "session_id": "01a11f89-aad4-76f3-aa0c-b7cf329274c8",
+ "transcript_path": "/Users/tonibergholm/.codex/sessions/2026/10/09/rollout-2026-10-09T10-21-18-01a11f89-aad4-76f3-aa0c-b7cf329274c8.jsonl",
+ "cwd": "/private/tmp/acp3/codex/d1",
+ "hook_event_name": "SessionStart",
+ "model": "gpt-5.6-terra",
+ "permission_mode": "default",
+ "source": "startup",
+ "_env": {
+  "HERDR_PANE_ID": "w1:p2",
+  "HERDR_SOCKET_PATH": "/Users/tonibergholm/.config/herdr/sessions/spike/herdr.sock",
+  "HERDR_ENV": "1",
+  "HERDR_SESSION": "spike",
+  "HERDR_WORKSPACE_ID": "w1",
+  "HERDR_TAB_ID": "w1:t1",
+  "CODEX_THREAD_ID": null,
+  "CLAUDE_CODE_ENTRYPOINT": "sdk-ts"
+ },
+ "_ppid": 46406,
+ "_shimpid": 852
+}

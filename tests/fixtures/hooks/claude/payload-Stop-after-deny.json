@@ -1,0 +1,15 @@
+{
+ "session_id": "<uuid>",
+ "transcript_path": "<path>",
+ "cwd": "/private/tmp/acp3/claude/s2",
+ "prompt_id": "c546a0a7-7b19-4395-8955-b075f2efda58",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "Stop",
+ "stop_hook_active": false,
+ "last_assistant_message": "The command `touch /tmp/acp3/claude/x-7.txt` was denied. The error was \"Denied from fake acd\", which doesn't say whether this came from you or from a permission rule. I haven't retried it. Tell me if you want me to run it again.",
+ "background_tasks": [],
+ "session_crons": []
+}
