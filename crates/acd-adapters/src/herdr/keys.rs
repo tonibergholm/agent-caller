@@ -7,12 +7,14 @@
 //! provide `Evidence`. A key never reaches a screen whose dialog digest
 //! differs from the target's, and nothing is labelled `inbox` without
 //! evidence that matches this occurrence.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use acd_core::{Answer, Core, CorrelationKey, DeliverError, Observation};
-use acd_protocol::{AgentKind, AnswerPath, ErrorCode, Request, RequestStatus, ResolvedBy};
+use acd_protocol::{
+    AgentKind, AnswerPath, ErrorCode, Request, RequestStatus, ResolveReason, ResolvedBy,
+};
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
@@ -147,9 +149,43 @@ fn check_keys(option_keys: &HashMap<String, String>) -> Result<(), &'static str>
     }
 }
 
-/// Registered targets, by request id.
+/// Retired request ids remembered so a removed target is never re-set.
+const RETIRED_CAP: usize = 4096;
+
 #[derive(Default)]
-pub struct KeysTargets(Mutex<HashMap<String, KeysTarget>>);
+struct TargetsInner {
+    live: HashMap<String, KeysTarget>,
+    retired: VecDeque<String>,
+    retired_set: HashSet<String>,
+}
+
+impl TargetsInner {
+    fn retire(&mut self, request_id: &str) {
+        if self.retired_set.insert(request_id.to_owned()) {
+            self.retired.push_back(request_id.to_owned());
+            if self.retired.len() > RETIRED_CAP
+                && let Some(old) = self.retired.pop_front()
+            {
+                self.retired_set.remove(&old);
+            }
+        }
+    }
+}
+
+/// Registered targets, by request id. A target is immutable for its
+/// request id: the content the user reviewed is the content the guard checks.
+#[derive(Default)]
+pub struct KeysTargets(Mutex<TargetsInner>);
+
+impl KeysTarget {
+    fn same_as(&self, other: &KeysTarget) -> bool {
+        self.agent_id == other.agent_id
+            && self.key == other.key
+            && self.digest == other.digest
+            && self.identity == other.identity
+            && self.option_keys == other.option_keys
+    }
+}
 
 /// Keys the guard can vouch for. The fingerprint blanks the cursor marker,
 /// so it cannot tell which option Enter would pick: Enter is never allowed.
@@ -158,11 +194,12 @@ fn is_guardable_key(k: &str) -> bool {
 }
 
 impl KeysTargets {
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, KeysTarget>> {
+    fn lock(&self) -> MutexGuard<'_, TargetsInner> {
         self.0.lock().expect("keys targets")
     }
 
-    /// Registers or replaces the target for `t.request_id`. Rejects any
+    /// Registers a target once for `t.request_id`. Identical registration is
+    /// idempotent; a different or retired target is rejected. Rejects any
     /// option key other than `"1"`..`"9"` or `"esc"`.
     ///
     /// Register only once the herdr agent exists (`core.agent(agent_id)` is
@@ -170,20 +207,33 @@ impl KeysTargets {
     /// at its next poll.
     pub fn set(&self, t: KeysTarget) -> Result<(), &'static str> {
         check_keys(&t.option_keys)?;
-        self.lock().insert(t.request_id.clone(), t);
-        Ok(())
+        let mut inner = self.lock();
+        if inner.retired_set.contains(&t.request_id) {
+            return Err("this request's target was already retired");
+        }
+        match inner.live.get(&t.request_id) {
+            Some(old) if old.same_as(&t) => Ok(()),
+            Some(_) => Err("a different target is already registered for this request"),
+            None => {
+                inner.live.insert(t.request_id.clone(), t);
+                Ok(())
+            }
+        }
     }
 
     pub fn get(&self, request_id: &str) -> Option<KeysTarget> {
-        self.lock().get(request_id).cloned()
+        self.lock().live.get(request_id).cloned()
     }
 
     pub fn remove(&self, request_id: &str) -> Option<KeysTarget> {
-        self.lock().remove(request_id)
+        let mut inner = self.lock();
+        inner.retire(request_id);
+        inner.live.remove(request_id)
     }
 
     pub fn for_agent(&self, agent_id: &str) -> Vec<KeysTarget> {
         self.lock()
+            .live
             .values()
             .filter(|t| t.agent_id == agent_id)
             .cloned()
@@ -191,12 +241,46 @@ impl KeysTargets {
     }
 
     pub(crate) fn all(&self) -> Vec<KeysTarget> {
-        self.lock().values().cloned().collect()
+        self.lock().live.values().cloned().collect()
     }
 
     /// Drops every target of an agent whose pane is gone.
     pub(crate) fn remove_agent(&self, agent_id: &str) {
-        self.lock().retain(|_, t| t.agent_id != agent_id);
+        let mut inner = self.lock();
+        let ids: Vec<String> = inner
+            .live
+            .values()
+            .filter(|t| t.agent_id == agent_id)
+            .map(|t| t.request_id.clone())
+            .collect();
+        for id in ids {
+            inner.retire(&id);
+            inner.live.remove(&id);
+        }
+    }
+}
+
+/// One async lock per agent. The engine holds it from before its final guard
+/// read until the key write completes.
+#[derive(Default)]
+pub struct AgentLocks(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+impl AgentLocks {
+    pub async fn lock(&self, agent_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let mutex = {
+            let mut map = self.0.lock().expect("agent locks");
+            map.retain(|_, mutex| Arc::strong_count(mutex) > 1);
+            map.entry(agent_id.to_owned()).or_default().clone()
+        };
+        mutex.lock_owned().await
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.lock().expect("agent locks").len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -274,6 +358,7 @@ fn not_delivered(code: ErrorCode) -> DeliverError {
 /// The adapter's keys state: targets, the evidence source and timing.
 pub(crate) struct Engine {
     targets: Arc<KeysTargets>,
+    locks: Arc<AgentLocks>,
     evidence: Mutex<Arc<dyn Evidence>>,
     timing: KeysTiming,
 }
@@ -282,6 +367,7 @@ impl Engine {
     pub(crate) fn new(timing: KeysTiming) -> Engine {
         Engine {
             targets: Arc::default(),
+            locks: Arc::default(),
             evidence: Mutex::new(Arc::new(NoEvidence)),
             timing,
         }
@@ -289,6 +375,10 @@ impl Engine {
 
     pub(crate) fn targets(&self) -> Arc<KeysTargets> {
         self.targets.clone()
+    }
+
+    pub(crate) fn locks(&self) -> Arc<AgentLocks> {
+        self.locks.clone()
     }
 
     pub(crate) fn set_evidence(&self, e: Arc<dyn Evidence>) {
@@ -344,6 +434,12 @@ impl Engine {
             return Err(not_delivered(ErrorCode::AgentGone));
         };
 
+        // A lock wait must never sit between the screen check and the key.
+        let lock = match timeout_at(deadline, self.locks.lock(&request.agent_id)).await {
+            Ok(guard) => guard,
+            Err(_) => return Err(not_delivered(ErrorCode::SourceUnavailable)),
+        };
+
         // Guard: the screen must show exactly the dialog the user saw.
         let read = pane
             .herdr
@@ -370,6 +466,7 @@ impl Engine {
             .await
             .map_err(|_| not_delivered(ErrorCode::SourceUnavailable))?;
         if !self.lease_held(&core, &target, option_id) {
+            drop(lock);
             drop(connected); // unused: nothing was sent
             return Err(not_delivered(ErrorCode::RequestGone));
         }
@@ -383,6 +480,7 @@ impl Engine {
             .await
             // herdr frames by newline: a partial line is never dispatched.
             .map_err(|_| not_delivered(ErrorCode::SourceUnavailable))?;
+        drop(lock);
         let t_send = written.at();
 
         // Start confirming now, before the reply, so the first prompt check
@@ -588,17 +686,20 @@ impl Confirm {
 
     /// herdr accepted the key: attribute the outcome and publish it.
     async fn report(self, seen: Observed) {
-        let by = if seen.stray || !seen.closed {
-            ResolvedBy::Uncertain
+        let (by, reason) = if seen.stray {
+            (ResolvedBy::Uncertain, Some(ResolveReason::StrayKeystroke))
+        } else if !seen.closed {
+            (ResolvedBy::Uncertain, None)
         } else {
             let outcome = self
                 .evidence
                 .outcome(&self.target, &self.option_id, self.t_send);
-            match timeout(self.timing.evidence_timeout, outcome).await {
+            let by = match timeout(self.timing.evidence_timeout, outcome).await {
                 Ok(Verdict::Consistent) => ResolvedBy::Inbox,
                 Ok(Verdict::Contradicts) => ResolvedBy::Terminal,
                 Ok(Verdict::NoEvidence) | Err(_) => ResolvedBy::Uncertain,
-            }
+            };
+            (by, None)
         };
         let Some(core) = self.core.upgrade() else {
             return;
@@ -614,7 +715,15 @@ impl Confirm {
         }
         // Otherwise the target stays: the watch monitors the dialog until it
         // is really gone. Never another key.
-        core.observe(Observation::RequestEndedById { request_id, by });
+        if let Some(reason) = reason {
+            core.observe(Observation::RequestEndedWithReason {
+                request_id,
+                by,
+                reason,
+            });
+        } else {
+            core.observe(Observation::RequestEndedById { request_id, by });
+        }
         let _ = self.hints.try_send(Hint::Pane(self.pane_id.clone()));
     }
 }
@@ -659,6 +768,54 @@ mod tests {
         )
         .unwrap();
         (t, dialog)
+    }
+
+    #[test]
+    fn a_target_is_set_once_per_request_id() {
+        let (t, dialog) = claude_target();
+        let targets = KeysTargets::default();
+        targets.set(t.clone()).unwrap();
+        targets.set(t.clone()).unwrap();
+        let redrawn = dialog.replace("⏺ Creating empty file", "⏺ Creating an empty file");
+        let other = KeysTarget::from_screen(
+            "r1".into(),
+            "a".into(),
+            CorrelationKey("k".into()),
+            &redrawn,
+            [("allow".to_string(), "1".to_string())].into(),
+        )
+        .unwrap();
+        assert!(
+            targets.set(other.clone()).is_err(),
+            "a different target never replaces"
+        );
+        assert_eq!(targets.get("r1").unwrap().fingerprint(), t.fingerprint());
+        targets.remove("r1");
+        assert!(
+            targets.set(other).is_err(),
+            "a retired request id never gets a target again"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_locks_serialize_per_agent_and_forget_idle_entries() {
+        let locks = Arc::new(AgentLocks::default());
+        let g = locks.lock("a").await;
+        let l2 = locks.clone();
+        let waiter = tokio::spawn(async move {
+            l2.lock("a").await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !waiter.is_finished(),
+            "a second lock on the same agent waits"
+        );
+        let _other = locks.lock("b").await;
+        drop(g);
+        waiter.await.unwrap();
+        drop(_other);
+        let _ = locks.lock("c").await;
+        assert!(locks.len() <= 1, "idle entries are pruned");
     }
 
     /// The same target with one digest byte past the 16-hex prefix flipped:
