@@ -317,7 +317,7 @@ fn init_named() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 fn start(dir: &std::path::Path, name: &str, env: &[(&str, &str)]) -> common::Started {
-    common::start_daemon(dir, &format!("machine_name = \"{name}\"\n"), env)
+    common::start_daemon(dir, None, &format!("machine_name = \"{name}\"\n"), env)
 }
 
 /// Runs `acd status` until it succeeds, for at most 10 s.
@@ -362,7 +362,7 @@ fn token_forms(token: &str) -> Vec<String> {
 #[test]
 fn trace_logs_never_contain_the_token() {
     for rust_log in ["trace", "trace,tungstenite::protocol::frame=trace,tokio_tungstenite=trace,axum::extract::ws=trace"] {
-    let (_tmp, dir) = init_named();
+        let (_tmp, dir) = init_named();
         let token = std::fs::read_to_string(dir.join("client.token")).unwrap().trim().to_string();
         let started = start(&dir, "log-box", &[("RUST_LOG", rust_log)]);
         let log_path = started.log.clone();
@@ -454,16 +454,16 @@ fn run_fails_when_a_listen_address_cannot_be_bound() {
 
 #[test]
 fn second_daemon_on_another_port_leaves_the_live_socket_alone() {
-        let (_tmp, dir) = init_named();
+    let (_tmp, dir) = init_named();
     let _daemon = start(&dir, "first", &[]);
-    status_when_ready(&dir, None);
-    std::fs::write(dir.join("config.toml"), format!("machine_name = \"second\"\nport = {}\nhook_port = {}\nlisten = [\"loopback\"]\n", free_port(), free_port())).unwrap();
-    let (mut status, mut err) = run_expecting_exit(&dir);
-    assert!(!status.success());
-    assert!(err.contains("another acd is running") || err.contains("cannot bind"), "{err}");
-    if err.contains("cannot bind") {
-        (status, err) = run_expecting_exit(&dir);
+    let mut err = String::new();
+    for _ in 0..5 {
+        // Fresh ports each time, so a retry never reuses ports that just failed.
+        std::fs::write(dir.join("config.toml"), format!("machine_name = \"second\"\nport = {}\nhook_port = {}\nlisten = [\"loopback\"]\n", free_port(), free_port())).unwrap();
+        let (status, e) = run_expecting_exit(&dir);
         assert!(!status.success());
+        err = e;
+        if !(err.contains("cannot bind 127.") || err.contains("cannot bind [")) { break; }
     }
     assert!(err.contains("another acd is running"), "{err}");
     let out = String::from_utf8_lossy(&acd(&dir).arg("status").output().unwrap().stdout).into_owned();

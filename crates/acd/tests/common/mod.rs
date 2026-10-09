@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const ISOLATED: [&str; 15] = [
+pub const ISOLATED: [&str; 16] = [
     "HERDR_SOCKET_PATH",
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
@@ -23,6 +23,7 @@ pub const ISOLATED: [&str; 15] = [
     "ACD_TEST_TOUCH_SETTINGS",
     "ACD_TEST_SERVICE_FAIL",
     "ACD_TEST_PAUSE_AT",
+    "ACD_TEST_FAILPOINT",
 ];
 
 pub fn acd(dir: &Path) -> Command {
@@ -34,6 +35,12 @@ pub fn acd_home(dir: &Path, home: &Path) -> Command {
     c.env("ACD_CONFIG_DIR", dir).env("HOME", home);
     for k in ISOLATED {
         c.env_remove(k);
+    }
+    // Strip every ACD_TEST_* override, so future ones cannot leak in.
+    for (k, _) in std::env::vars() {
+        if k.starts_with("ACD_TEST_") {
+            c.env_remove(k);
+        }
     }
     c
 }
@@ -73,23 +80,31 @@ pub fn init_dir(parent: &Path) -> PathBuf {
     dir
 }
 
-pub fn start_daemon(dir: &Path, extra_config: &str, env: &[(&str, &str)]) -> Started {
-    start_daemon_with(dir, extra_config, env, || (free_port(), free_port()))
+/// Starts `acd run` with fresh free ports. `listen` is the TOML value of the
+/// `listen` key (e.g. `["loopback"]`); `None` means `["loopback"]`.
+/// `extra_config` is appended verbatim and must not contain `listen`.
+pub fn start_daemon(
+    dir: &Path,
+    listen: Option<&str>,
+    extra_config: &str,
+    env: &[(&str, &str)],
+) -> Started {
+    start_daemon_with(dir, listen, extra_config, env, || {
+        (free_port(), free_port())
+    })
 }
 
 pub fn start_daemon_with(
     dir: &Path,
+    listen: Option<&str>,
     extra_config: &str,
     env: &[(&str, &str)],
     mut pick: impl FnMut() -> (u16, u16),
 ) -> Started {
+    let mut last_log = String::new();
     for attempt in 0..5 {
         let (port, hook_port) = pick();
-        let listen = if extra_config.contains("listen =") {
-            ""
-        } else {
-            "listen = [\"loopback\"]\n"
-        };
+        let listen = format!("listen = {}\n", listen.unwrap_or("[\"loopback\"]"));
         std::fs::write(
             dir.join("config.toml"),
             format!("port = {port}\nhook_port = {hook_port}\n{listen}{extra_config}"),
@@ -119,7 +134,13 @@ pub fn start_daemon_with(
             }
             if let Some(status) = daemon.0.try_wait().unwrap() {
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                if text.contains("cannot bind") || text.contains("Address already in use") {
+                // Only TCP bind failures are retried; the Unix-socket bind
+                // error also says "cannot bind" but a new port will not fix it.
+                if text.contains("cannot bind 127.")
+                    || text.contains("cannot bind [")
+                    || text.contains("Address already in use")
+                {
+                    last_log = text;
                     break;
                 }
                 panic!("acd run exited with {status}: {text}");
@@ -128,7 +149,7 @@ pub fn start_daemon_with(
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-    panic!("could not start acd after 5 attempts");
+    panic!("could not start acd after 5 attempts; last log: {last_log}");
 }
 
 fn ready(dir: &Path) -> bool {

@@ -31,7 +31,7 @@ fn start(
     if let Some(n) = admission.as_deref() {
         env.push(("ACD_TEST_MAX_UNAUTH", n));
     }
-    common::start_daemon(dir, &format!("listen = {listen}\n"), &env)
+    common::start_daemon(dir, Some(listen), "", &env)
 }
 
 #[derive(Debug)]
