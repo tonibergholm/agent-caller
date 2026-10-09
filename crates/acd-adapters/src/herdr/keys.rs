@@ -130,6 +130,8 @@ impl KeysTarget {
         self
     }
 
+    /// The bound pane incarnation. `None` means unbound; P3 never leaves a
+    /// target unbound.
     pub fn incarnation(&self) -> Option<u64> {
         self.incarnation
     }

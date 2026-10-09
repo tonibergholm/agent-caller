@@ -1198,4 +1198,54 @@ async fn a_target_for_an_old_incarnation_is_refused() {
         r.fake.keys_sent().is_empty(),
         "zero keys to a replaced pane"
     );
+    assert_eq!(reads(&r, "detection"), 0, "refused before any screen read");
+}
+
+#[tokio::test]
+async fn a_pane_replaced_during_the_guard_read_gets_no_key() {
+    let (r, rid) = bound_keys_rig(0).await;
+    let agent_id = agent(&r).id;
+    let gate = r.fake.block_next("agent.read");
+    let pending = tokio::spawn({
+        let core = r.core.clone();
+        let rid = rid.clone();
+        async move {
+            core.handle(
+                "c",
+                ClientMessage::RequestAnswer {
+                    id: "a1".into(),
+                    request_id: rid,
+                    revision: None,
+                    option_id: Some("allow".into()),
+                    text: None,
+                },
+            )
+            .await
+        }
+    });
+    gate.arrived().await; // the guard read is held
+    // Rewrite the map directly (forget_pane would drop the target too), and
+    // keep rewriting: the reconciler republishes the pane's real incarnation
+    // on its next refresh.
+    let writer = tokio::spawn({
+        let panes = r.adapter.panes();
+        let agent_id = agent_id.clone();
+        async move {
+            loop {
+                if let Some(p) = panes.write().unwrap().get_mut(&agent_id) {
+                    p.incarnation = u64::MAX;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    gate.release();
+    let res = pending.await.unwrap();
+    writer.abort();
+    assert_eq!(res.error_code(), Some(ErrorCode::RequestGone), "{res:?}");
+    assert!(
+        r.fake.keys_sent().is_empty(),
+        "the lease must catch a replaced pane before the write"
+    );
 }
