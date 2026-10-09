@@ -13,6 +13,19 @@ use crate::{bind, config::Config, identity, secrets};
 /// Exit code that asks the supervisor (launchd or systemd) to restart acd
 /// after the Tailscale addresses change.
 pub const EXIT_ADDRESSES_CHANGED: i32 = 75;
+/// A server task stopped: the supervisor restarts acd.
+pub const EXIT_SERVER_STOPPED: i32 = 1;
+/// Any panic, including a poisoned mutex (D14).
+pub const EXIT_PANIC: i32 = 70;
+
+fn exit_on_panic() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        eprintln!("acd: panic; exiting so the supervisor restarts acd");
+        std::process::exit(EXIT_PANIC);
+    }));
+}
 
 /// The Unix socket in the config dir that local tools such as `acd status` use.
 pub fn socket_path(dir: &Path) -> PathBuf {
@@ -20,6 +33,14 @@ pub fn socket_path(dir: &Path) -> PathBuf {
 }
 
 pub async fn run(dir: &Path) -> Result<()> {
+    exit_on_panic();
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("ACD_TEST_PANIC_AFTER_MS").ok().and_then(|s| s.parse::<u64>().ok()) {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            panic!("test panic");
+        });
+    }
     crate::preflight(dir)?;
     let cfg = Config::load(dir)?;
     let (key_files, installed_pin) = crate::tls::load(dir)?;
@@ -124,6 +145,7 @@ pub async fn run(dir: &Path) -> Result<()> {
     if listeners.is_empty() {
         bail!("no listen address to bind ({ips:?})");
     }
+    let mut servers = tokio::task::JoinSet::<String>::new();
     for (addr, listener) in listeners {
         tracing::info!(%addr, "listening");
         let app = app.clone();
@@ -133,7 +155,7 @@ pub async fn run(dir: &Path) -> Result<()> {
             admission.clone(),
             core_tls::Limits::default(),
         );
-        tokio::spawn(async move {
+        servers.spawn(async move {
             if let Err(e) = axum::serve(
                 tls_listener,
                 app.into_make_service_with_connect_info::<core_tls::Admit>(),
@@ -142,6 +164,7 @@ pub async fn run(dir: &Path) -> Result<()> {
             {
                 tracing::error!(%addr, error = %e, "server stopped");
             }
+            format!("listener {addr}")
         });
     }
     let tls_watch = tokio::spawn(crate::tls::watch(dir.to_path_buf(), installed_pin, tls_tx));
@@ -151,10 +174,17 @@ pub async fn run(dir: &Path) -> Result<()> {
     let sock = socket_path(dir);
     let local = bind_local_socket(&sock)?;
     tracing::info!(path = %sock.display(), "listening");
-    tokio::spawn(async move {
+    #[cfg(debug_assertions)]
+    let stop_local = std::env::var("ACD_TEST_STOP_SERVER").is_ok_and(|v| v == "local");
+    servers.spawn(async move {
+        #[cfg(debug_assertions)]
+        if stop_local {
+            return "local socket".to_string();
+        }
         if let Err(e) = axum::serve(local, app).await {
             tracing::error!(error = %e, "local socket server stopped");
         }
+        "local socket".to_string()
     });
 
     // Token rotation: re-read client.token every 2 s.
@@ -218,9 +248,15 @@ pub async fn run(dir: &Path) -> Result<()> {
         }
     });
 
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let exit_code = tokio::select! {
         _ = tokio::signal::ctrl_c() => None,
+        _ = term.recv() => None,
         _ = watch => Some(EXIT_ADDRESSES_CHANGED),
+        Some(done) = servers.join_next() => {
+            tracing::error!(server = %done.unwrap_or_else(|e| e.to_string()), "a server task stopped; exiting");
+            Some(EXIT_SERVER_STOPPED)
+        }
     };
     tls_watch.abort();
     let _ = std::fs::remove_file(&sock);

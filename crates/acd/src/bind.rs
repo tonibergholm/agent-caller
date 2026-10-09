@@ -23,11 +23,17 @@ pub async fn tailscale_reported() -> Option<Vec<IpAddr>> {
     Some(String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect())
 }
 
-/// Where the macOS GUI app bundles the Tailscale CLI; it is usually not on PATH.
+/// Where the Tailscale CLI lives when it is not on PATH: the macOS app bundle,
+/// Homebrew and the distro paths. launchd and systemd start acd with a minimal
+/// PATH, so these absolute paths are what find it under a service.
 #[cfg(target_os = "macos")]
-const FALLBACK_CLIS: &[&str] = &["/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+const FALLBACK_CLIS: &[&str] = &[
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/opt/homebrew/bin/tailscale",
+    "/usr/local/bin/tailscale",
+];
 #[cfg(not(target_os = "macos"))]
-const FALLBACK_CLIS: &[&str] = &[];
+const FALLBACK_CLIS: &[&str] = &["/usr/bin/tailscale", "/usr/sbin/tailscale", "/usr/local/bin/tailscale"];
 
 /// The `tailscale` CLI: an absolute PATH entry first, then known app-bundle paths.
 pub fn tailscale_cli() -> Option<PathBuf> {
@@ -123,6 +129,13 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn homebrew_tailscale_is_a_fallback() {
+        assert!(super::FALLBACK_CLIS.contains(&"/opt/homebrew/bin/tailscale"));
+        assert!(super::FALLBACK_CLIS.contains(&"/usr/local/bin/tailscale"));
+    }
 
     fn ip(s: &str) -> IpAddr { s.parse().unwrap() }
 

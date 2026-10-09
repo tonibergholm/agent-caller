@@ -1572,3 +1572,83 @@ fn an_unreadable_settings_file_is_a_reported_conflict() {
     );
     assert!(!dir.join("hooks-journal.json").exists());
 }
+
+/// Spawns `acd run` on free ports without waiting for readiness, for tests
+/// where the daemon is expected to exit by itself.
+#[cfg(debug_assertions)]
+fn spawn_run(dir: &std::path::Path, env: &[(&str, &str)]) -> Daemon {
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "port = {}\nhook_port = {}\nlisten = [\"loopback\"]\n",
+            free_port(),
+            free_port()
+        ),
+    )
+    .unwrap();
+    let mut cmd = acd(dir);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    Daemon(
+        cmd.arg("run")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+fn wait_for_exit(daemon: &mut Daemon, what: &str) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(s) = daemon.0.try_wait().unwrap() {
+            return s;
+        }
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(debug_assertions)] // ACD_TEST_STOP_SERVER is debug-only
+#[test]
+fn a_dead_server_task_exits_1_so_the_supervisor_restarts_acd() {
+    let (_home, dir) = home_with_acd();
+    let mut daemon = spawn_run(&dir, &[("ACD_TEST_STOP_SERVER", "local")]);
+    let status = wait_for_exit(
+        &mut daemon,
+        "acd kept running without its local socket server",
+    );
+    assert_eq!(status.code(), Some(1));
+}
+
+#[test]
+fn sigterm_exits_cleanly_and_removes_the_socket() {
+    let (_home, dir) = home_with_acd();
+    let started = start_daemon(&dir, None, "", &[]);
+    let mut daemon = started.daemon;
+    let pid = daemon.0.id().to_string();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let status = wait_for_exit(&mut daemon, "acd did not exit on SIGTERM");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "launchd and systemd must not restart a clean stop"
+    );
+    assert!(!dir.join("acd.sock").exists());
+}
+
+#[cfg(debug_assertions)] // ACD_TEST_PANIC_AFTER_MS is debug-only
+#[test]
+fn a_panic_exits_with_70_so_the_supervisor_restarts_acd() {
+    let (_home, dir) = home_with_acd();
+    let mut daemon = spawn_run(&dir, &[("ACD_TEST_PANIC_AFTER_MS", "200")]);
+    let status = wait_for_exit(&mut daemon, "acd did not exit after a panic");
+    assert_eq!(status.code(), Some(70));
+}
