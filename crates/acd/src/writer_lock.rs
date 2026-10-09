@@ -32,7 +32,8 @@ fn validate_descriptor(f: &std::fs::File, path: &Path) -> Result<()> {
             m.uid()
         );
     }
-    if m.mode() & 0o177 != 0 {
+    // Any bit beyond owner read/write, special bits included, is repaired.
+    if m.mode() & 0o7777 != 0o600 {
         f.set_permissions(std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("could not restrict {} to 0600", path.display()))?;
     }
@@ -133,6 +134,9 @@ mod tests {
         drop(acquire(d.path()).unwrap());
         assert_eq!(mode(&p), 0o600);
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o666)).unwrap();
+        drop(acquire(d.path()).unwrap());
+        assert_eq!(mode(&p), 0o600);
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o4600)).unwrap();
         drop(acquire(d.path()).unwrap());
         assert_eq!(mode(&p), 0o600);
     }
