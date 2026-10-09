@@ -1,4 +1,7 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use acd_adapters::hooks::endpoint::*;
@@ -78,6 +81,11 @@ async fn rejects_bad_tokens_methods_paths_and_agents() {
         401
     );
     assert_eq!(post(port, "/elsewhere", TOKEN, &[], &body).await.0, 401);
+    assert_eq!(
+        post(port, "/hook/%FF/Stop", TOKEN, &[], &body).await.0,
+        401,
+        "a malformed path segment is unauthorized, not a 400"
+    );
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .unwrap();
@@ -165,7 +173,8 @@ fn rejections_are_logged_by_an_opaque_id_and_the_table_is_capped() {
 
 #[tokio::test]
 async fn lifecycle_hooks_reply_at_once_without_a_consumer() {
-    let (port, _, _) = serve(EndpointOptions::default()).await;
+    // A live mailbox that is never drained (not a closed one).
+    let (port, _, _mailbox) = serve(EndpointOptions::default()).await;
     let started = Instant::now();
     assert_eq!(
         post(
@@ -535,6 +544,79 @@ async fn a_consumed_hold_keeps_its_slot_while_the_adapter_owns_the_permit() {
     );
 }
 
+fn direct_request(body: &str) -> axum::extract::Request {
+    axum::http::Request::post("/")
+        .header("x-acd-token", TOKEN)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_owned()))
+        .unwrap()
+}
+
+/// Polls `fut` exactly once.
+async fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
+    std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *fut).poll(cx))).await
+}
+
+#[tokio::test]
+async fn a_replied_hold_keeps_its_close_slot_until_its_handler_ends() {
+    // R10: the adapter answered hold A and freed its permit, but A's handler
+    // has not run since (hyper has not polled it yet). A still owns its
+    // reserved close slot, so B fails open instead of taking a slot that
+    // A's `HoldClosed` would need.
+    let opts = EndpointOptions {
+        max_holds: 1,
+        ..Default::default()
+    };
+    let (tx, mut mailbox) = mailbox(&opts);
+    let hooks = DirectHooks::new(Arc::new(HookAuth::new(cred(TOKEN, 1))), tx, opts);
+    let body = fx("claude/payload-PermissionRequest-Bash.json");
+    let call = || Box::pin(hooks.call("claude", "PermissionRequest", direct_request(&body)));
+
+    let mut a = call();
+    assert!(poll_once(&mut a).await.is_pending(), "A is held");
+    let Ok(Inbound::Held {
+        hold: a_hold,
+        reply,
+        permit,
+        ..
+    }) = mailbox.control.try_recv()
+    else {
+        panic!("A's Held is queued")
+    };
+    reply
+        .send(acd_adapters::hooks::wire::reply_allow())
+        .unwrap();
+    drop(permit); // A1: the adapter is done with A; A is not polled again.
+
+    let mut b = call();
+    let Poll::Ready(response) = poll_once(&mut b).await else {
+        panic!("B is answered at once, not held")
+    };
+    assert_eq!(response.status(), 200);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(bytes.is_empty(), "B fails open with an empty reply");
+    assert!(
+        matches!(mailbox.events.try_recv(), Ok(Inbound::Event { .. })),
+        "an unheld copy of B for the keys path"
+    );
+    assert!(mailbox.control.try_recv().is_err(), "B was not held");
+
+    drop(a); // The client closed before A's handler saw the reply.
+    assert!(
+        matches!(mailbox.control.try_recv(), Ok(Inbound::HoldClosed { hold }) if hold == a_hold),
+        "A's HoldClosed is delivered"
+    );
+
+    let mut c = call();
+    assert!(poll_once(&mut c).await.is_pending());
+    assert!(
+        matches!(mailbox.control.try_recv(), Ok(Inbound::Held { .. })),
+        "a new hold is admitted once A's slot is free"
+    );
+}
+
 #[tokio::test]
 async fn churning_disconnected_holds_never_grows_the_control_queue() {
     let (port, _, mut mailbox) = serve(EndpointOptions {
@@ -587,12 +669,41 @@ async fn oversized_and_non_object_bodies_fail_open() {
 }
 
 #[cfg(unix)]
+async fn unix_send(path: &std::path::Path, token: &str, body: &str) -> tokio::net::UnixStream {
+    use tokio::io::AsyncWriteExt;
+    let mut stream = tokio::net::UnixStream::connect(path).await.unwrap();
+    let req = format!(
+        "POST /hook/claude/UserPromptSubmit HTTP/1.1\r\nHost: local\r\nX-Acd-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    stream
+}
+
+#[cfg(unix)]
+async fn unix_post(path: &std::path::Path, token: &str, body: &str) -> u16 {
+    use tokio::io::AsyncReadExt;
+    let mut stream = unix_send(path, token, body).await;
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response).await;
+    let response = String::from_utf8_lossy(&response);
+    response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn unix_listener_serves_the_same_authenticated_endpoint_and_bounds() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hook.sock");
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let opts = EndpointOptions::default();
+    let opts = EndpointOptions {
+        max_connections: 1,
+        ..Default::default()
+    };
     let (tx, mut mailbox) = mailbox(&opts);
     let auth = Arc::new(HookAuth::new(cred(TOKEN, 1)));
     let app = router(auth, tx, opts.clone());
@@ -601,21 +712,31 @@ async fn unix_listener_serves_the_same_authenticated_endpoint_and_bounds() {
             .await
             .unwrap()
     });
-
-    let mut stream = tokio::net::UnixStream::connect(path).await.unwrap();
     let body = fx("claude/payload-UserPromptSubmit.json");
-    let req = format!(
-        "POST /hook/claude/UserPromptSubmit HTTP/1.1\r\nHost: local\r\nX-Acd-Token: {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    stream.write_all(req.as_bytes()).await.unwrap();
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.unwrap();
-    let response = String::from_utf8_lossy(&response);
-    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+    assert_eq!(unix_post(&path, "wrong", &body).await, 401);
+    assert_eq!(unix_post(&path, TOKEN, &body).await, 200);
     assert!(matches!(
         next_event(&mut mailbox).await,
         Inbound::Event { generation: 1, .. }
+    ));
+
+    // The connection cap applies to the Unix listener too.
+    let idle = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let waiting = {
+        let path = path.clone();
+        let body = body.clone();
+        tokio::spawn(async move { unix_post(&path, TOKEN, &body).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !waiting.is_finished(),
+        "the second connection waits for a slot"
+    );
+    drop(idle);
+    assert_eq!(waiting.await.unwrap(), 200);
+    assert!(matches!(
+        next_event(&mut mailbox).await,
+        Inbound::Event { .. }
     ));
 }

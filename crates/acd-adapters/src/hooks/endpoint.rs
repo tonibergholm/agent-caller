@@ -8,14 +8,16 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, Request, State};
 use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
+use axum::serve::Listener;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::time::Instant;
 
@@ -271,14 +273,20 @@ struct Ctx {
     next: Arc<AtomicU64>,
 }
 
+impl Ctx {
+    fn new(auth: Arc<HookAuth>, tx: MailboxTx, opts: EndpointOptions) -> Self {
+        Ctx {
+            auth,
+            tx,
+            holds: Arc::new(Semaphore::new(opts.max_holds)),
+            opts,
+            next: Arc::default(),
+        }
+    }
+}
+
 pub fn router(auth: Arc<HookAuth>, tx: MailboxTx, opts: EndpointOptions) -> Router {
-    let ctx = Ctx {
-        auth,
-        tx,
-        holds: Arc::new(Semaphore::new(opts.max_holds)),
-        opts,
-        next: Arc::default(),
-    };
+    let ctx = Ctx::new(auth, tx, opts);
     Router::new()
         .route("/hook/{agent}/{event}", any(handle))
         .fallback(|| async { StatusCode::UNAUTHORIZED })
@@ -291,13 +299,22 @@ fn empty() -> Response {
 
 async fn handle(
     State(ctx): State<Ctx>,
-    Path((agent, event)): Path<(String, String)>,
+    path: Result<Path<(String, String)>, PathRejection>,
     req: Request,
 ) -> Response {
+    // A malformed segment (`/hook/%FF/Stop`) is unauthorized like any
+    // other bad path, not a 400 from the extractor.
+    let Ok(Path((agent, event))) = path else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    serve_hook(ctx, &agent, &event, req).await
+}
+
+async fn serve_hook(ctx: Ctx, agent: &str, event: &str, req: Request) -> Response {
     if req.method() != Method::POST {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let Some(agent) = HookAgent::parse(&agent) else {
+    let Some(agent) = HookAgent::parse(agent) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let hints = Hints::from_headers(req.headers());
@@ -320,7 +337,7 @@ async fn handle(
         Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
         Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
-    let name = HookName::parse(&event);
+    let name = HookName::parse(event);
     log_payload(agent, &name, &body);
     let Some(payload) = serde_json::from_slice(&body)
         .ok()
@@ -356,6 +373,30 @@ async fn handle(
         return empty();
     };
     hold(ctx, event, generation, permit, held, end).await
+}
+
+/// Calls the hook handler directly, without the router or a connection, so
+/// a test can poll a handler future by hand and drop it at a chosen point
+/// (the way hyper drops it when the client closes).
+#[cfg(any(test, feature = "testing"))]
+pub struct DirectHooks(Ctx);
+
+#[cfg(any(test, feature = "testing"))]
+impl DirectHooks {
+    pub fn new(auth: Arc<HookAuth>, tx: MailboxTx, opts: EndpointOptions) -> Self {
+        DirectHooks(Ctx::new(auth, tx, opts))
+    }
+
+    /// The handler for `POST /hook/{agent}/{event}` with `req`.
+    pub fn call(
+        &self,
+        agent: &str,
+        event: &str,
+        req: Request,
+    ) -> impl std::future::Future<Output = Response> + Send + 'static {
+        let (ctx, agent, event) = (self.0.clone(), agent.to_owned(), event.to_owned());
+        async move { serve_hook(ctx, &agent, &event, req).await }
+    }
 }
 
 /// Owns the hold's reserved second control slot. Dropped with the slot
@@ -413,97 +454,41 @@ async fn hold(
     }
 }
 
-/// A connection-limited TCP listener for `axum::serve`.
-pub struct CappedListener {
-    inner: TcpListener,
+/// A listener that keeps at most `max` connections open; `accept` waits
+/// for a slot. The slot lives in the connection's IO and is returned when
+/// hyper drops it. One policy for TCP and Unix: the inner listener's own
+/// `accept` (axum's) retries transient errors.
+pub struct Capped<L> {
+    inner: L,
     slots: Arc<Semaphore>,
+}
+
+/// The loopback TCP hook listener.
+pub type CappedListener = Capped<TcpListener>;
+/// The `hook.sock` listener (Amendment A1).
+pub type CappedUnixListener = Capped<UnixListener>;
+
+fn capped_with<L>(inner: L, max: usize) -> Capped<L> {
+    Capped {
+        inner,
+        slots: Arc::new(Semaphore::new(max)),
+    }
 }
 
 pub fn capped(listener: TcpListener, max: usize) -> CappedListener {
-    CappedListener {
-        inner: listener,
-        slots: Arc::new(Semaphore::new(max)),
-    }
-}
-
-pub struct CappedIo {
-    io: TcpStream,
-    _slot: OwnedSemaphorePermit,
-}
-
-impl AsyncRead for CappedIo {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.io).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for CappedIo {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.io).poll_write(cx, buf)
-    }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.io).poll_flush(cx)
-    }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.io).poll_shutdown(cx)
-    }
-}
-
-impl axum::serve::Listener for CappedListener {
-    type Io = CappedIo;
-    type Addr = std::net::SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            let slot = self
-                .slots
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("semaphore is never closed");
-            match self.inner.accept().await {
-                Ok((io, addr)) => return (CappedIo { io, _slot: slot }, addr),
-                Err(error) => {
-                    drop(slot);
-                    tracing::debug!(error = %error, "hook listener accept failed");
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            }
-        }
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.inner.local_addr()
-    }
-}
-
-/// The Unix counterpart of [`capped`], sharing the same router and bounds.
-pub struct CappedUnixListener {
-    inner: UnixListener,
-    slots: Arc<Semaphore>,
+    capped_with(listener, max)
 }
 
 pub fn capped_unix(listener: UnixListener, max: usize) -> CappedUnixListener {
-    CappedUnixListener {
-        inner: listener,
-        slots: Arc::new(Semaphore::new(max)),
-    }
+    capped_with(listener, max)
 }
 
-pub struct CappedUnixIo {
-    io: UnixStream,
+pub struct CappedIo<S> {
+    io: S,
     _slot: OwnedSemaphorePermit,
 }
 
-impl AsyncRead for CappedUnixIo {
+impl<S: AsyncRead + Unpin> AsyncRead for CappedIo<S> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -513,7 +498,7 @@ impl AsyncRead for CappedUnixIo {
     }
 }
 
-impl AsyncWrite for CappedUnixIo {
+impl<S: AsyncWrite + Unpin> AsyncWrite for CappedIo<S> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -529,27 +514,19 @@ impl AsyncWrite for CappedUnixIo {
     }
 }
 
-impl axum::serve::Listener for CappedUnixListener {
-    type Io = CappedUnixIo;
-    type Addr = tokio::net::unix::SocketAddr;
+impl<L: Listener> Listener for Capped<L> {
+    type Io = CappedIo<L::Io>;
+    type Addr = L::Addr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            let slot = self
-                .slots
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("semaphore is never closed");
-            match self.inner.accept().await {
-                Ok((io, addr)) => return (CappedUnixIo { io, _slot: slot }, addr),
-                Err(error) => {
-                    drop(slot);
-                    tracing::debug!(error = %error, "hook Unix listener accept failed");
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            }
-        }
+        let slot = self
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore is never closed");
+        let (io, addr) = self.inner.accept().await;
+        (CappedIo { io, _slot: slot }, addr)
     }
 
     fn local_addr(&self) -> io::Result<Self::Addr> {
