@@ -74,8 +74,35 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Shared semantic validation for load and save. `file` names the store in errors.
+fn validate(s: &Store, file: &Path) -> Result<()> {
+    let f = file.display();
+    if s.version != 1 {
+        bail!(
+            "{f} has unsupported version {}; run `acd init --force`",
+            s.version
+        );
+    }
+    secrets::parse_token(&s.current).with_context(|| format!("{f} holds an invalid token"))?;
+    if let Some(p) = &s.previous {
+        secrets::parse_token(&p.token)
+            .with_context(|| format!("{f} holds an invalid previous token"))?;
+        if p.generation >= s.generation {
+            bail!(
+                "{f} previous generation {} is not older than current generation {}",
+                p.generation,
+                s.generation
+            );
+        }
+        if p.expires_at_ms < p.rotated_at_ms {
+            bail!("{f} previous token expires before it was rotated");
+        }
+    }
+    Ok(())
+}
+
 pub fn save_locked(dir: &Path, _held: &WriterLock, s: &Store) -> Result<()> {
-    secrets::parse_token(&s.current).context("refusing to save an invalid hook token")?;
+    validate(s, &dir.join(STORE_FILE)).context("refusing to save an invalid hook token store")?;
     fail_at("store-write")?;
     secrets::write_structured(&dir.join(STORE_FILE), &serde_json::to_string_pretty(s)?)
 }
@@ -109,8 +136,7 @@ pub fn load(dir: &Path) -> Result<Store> {
     }
     let s: Store = serde_json::from_str(&secrets::read_structured(&path)?)
         .with_context(|| format!("{} is corrupt; run `acd init --force`", path.display()))?;
-    secrets::parse_token(&s.current)
-        .with_context(|| format!("{} holds an invalid token", path.display()))?;
+    validate(&s, &path)?;
     Ok(s)
 }
 
@@ -149,7 +175,15 @@ pub fn ensure_locked(dir: &Path, held: &WriterLock, force: bool) -> Result<bool>
         return Ok(false);
     }
     let generation = if store {
-        load(dir).map(|s| s.generation + 1).unwrap_or(1)
+        match load(dir) {
+            Ok(s) => s.generation.checked_add(1).with_context(|| {
+                format!(
+                    "{} generation is at its maximum; cannot advance",
+                    dir.join(STORE_FILE).display()
+                )
+            })?,
+            Err(_) => 1,
+        }
     } else {
         1
     };
@@ -167,7 +201,12 @@ pub fn rotate_store(dir: &Path, now_ms: i64) -> Result<Store> {
 
 pub fn rotate_store_locked(dir: &Path, held: &WriterLock, now_ms: i64) -> Result<Store> {
     let old = load(dir)?;
-    let generation = old.generation + 1;
+    let generation = old.generation.checked_add(1).with_context(|| {
+        format!(
+            "{} generation is at its maximum; cannot rotate",
+            dir.join(STORE_FILE).display()
+        )
+    })?;
     let s = Store {
         version: 1,
         generation,
@@ -296,5 +335,68 @@ mod tests {
         crate::secrets::write_secret(&d.path().join(STORE_FILE), "{not json").unwrap();
         let e = format!("{:#}", load(d.path()).unwrap_err());
         assert!(e.contains(STORE_FILE), "{e}");
+    }
+    fn write_store(d: &Path, s: &Store) {
+        crate::secrets::write_structured(
+            &d.join(STORE_FILE),
+            &serde_json::to_string_pretty(s).unwrap(),
+        )
+        .unwrap();
+    }
+    fn rotated(d: &Path) -> Store {
+        ensure(d, false).unwrap();
+        rotate_store(d, 1_000).unwrap()
+    }
+    #[test]
+    fn generation_overflow_is_an_error_and_leaves_the_store_unchanged() {
+        let d = dir();
+        let mut s = load_after_ensure(d.path());
+        s.generation = u64::MAX;
+        s.headers.generation = u64::MAX;
+        write_store(d.path(), &s);
+        let before = std::fs::read(d.path().join(STORE_FILE)).unwrap();
+        let e = format!("{:#}", rotate_store(d.path(), 5).unwrap_err());
+        assert!(e.contains("maximum") && e.contains(STORE_FILE), "{e}");
+        let e = format!("{:#}", ensure(d.path(), true).unwrap_err());
+        assert!(e.contains("maximum") && e.contains(STORE_FILE), "{e}");
+        assert_eq!(std::fs::read(d.path().join(STORE_FILE)).unwrap(), before);
+    }
+    fn load_after_ensure(d: &Path) -> Store {
+        ensure(d, false).unwrap();
+        load(d).unwrap()
+    }
+    #[test]
+    fn semantic_validation_rejects_bad_stores_on_load_and_save() {
+        let d = dir();
+        let good = rotated(d.path());
+        let held = writer_lock::acquire(d.path()).unwrap();
+        let mut cases: Vec<(&str, Store)> = vec![];
+        let mut s = good.clone();
+        s.version = 2;
+        cases.push(("unsupported version", s));
+        let mut s = good.clone();
+        s.previous.as_mut().unwrap().token = "bad".into();
+        cases.push(("invalid previous token", s));
+        let mut s = good.clone();
+        s.previous.as_mut().unwrap().generation = s.generation;
+        cases.push(("not older", s));
+        let mut s = good.clone();
+        s.previous.as_mut().unwrap().expires_at_ms = 0;
+        cases.push(("expires before", s));
+        for (want, s) in cases {
+            let e = format!("{:#}", save_locked(d.path(), &held, &s).unwrap_err());
+            assert!(
+                e.contains(want) && e.contains(STORE_FILE),
+                "save {want}: {e}"
+            );
+            assert_eq!(load(d.path()).unwrap(), good, "save left store unchanged");
+            write_store(d.path(), &s);
+            let e = format!("{:#}", load(d.path()).unwrap_err());
+            assert!(
+                e.contains(want) && e.contains(STORE_FILE),
+                "load {want}: {e}"
+            );
+            write_store(d.path(), &good);
+        }
     }
 }
