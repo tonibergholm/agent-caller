@@ -61,29 +61,77 @@ pub fn runner() -> Box<dyn Runner> {
     Box::new(SystemRunner)
 }
 
-fn write_definition(path: &Path, text: &str, force: bool) -> Result<bool> {
+/// The path acd was invoked by when it is absolute, else the resolved
+/// executable. Canonicalizing would pin a Homebrew keg path
+/// (`/opt/homebrew/Cellar/acd/<version>/bin/acd`) that disappears on upgrade;
+/// the invoked `/opt/homebrew/bin/acd` symlink keeps working.
+pub fn invoked_exe() -> Result<PathBuf> {
+    if let Some(arg0) = std::env::args_os().next() {
+        let arg0 = PathBuf::from(arg0);
+        if arg0.is_absolute() && arg0.exists() {
+            return Ok(arg0);
+        }
+    }
+    Ok(std::fs::canonicalize(std::env::current_exe()?)?)
+}
+
+fn contains_marker(bytes: &[u8]) -> bool {
+    let marker = MARKER.as_bytes();
+    bytes.windows(marker.len()).any(|window| window == marker)
+}
+
+fn backup_definition(path: &Path, old: &[u8], backup_dir: &Path) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::create_dir_all(backup_dir)
+        .with_context(|| format!("creating {}", backup_dir.display()))?;
+    let name = path
+        .file_name()
+        .expect("service path has a name")
+        .to_string_lossy();
+    let stamp = chrono::Utc::now().timestamp_millis();
+    for attempt in 0u32.. {
+        let file = if attempt == 0 {
+            format!("{name}.bak-{stamp}")
+        } else {
+            format!("{name}.bak-{stamp}-{attempt}")
+        };
+        let backup = backup_dir.join(file);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&backup)
+        {
+            Ok(mut out) => {
+                out.write_all(old)
+                    .with_context(|| format!("writing backup {}", backup.display()))?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("creating {}", backup.display()));
+            }
+        }
+    }
+    unreachable!()
+}
+
+fn write_definition(path: &Path, text: &str, force: bool, backup_dir: &Path) -> Result<bool> {
     std::fs::create_dir_all(path.parent().expect("service path has parent"))?;
-    let had_definition = match std::fs::read_to_string(path) {
+    let had_definition = match std::fs::read(path) {
         Ok(old) => {
-            if !old.contains(MARKER) && !force {
+            if !contains_marker(&old) && !force {
                 bail!(
                     "{} exists and was not written by acd; rerun with --force to replace it (a backup is kept)",
                     path.display()
                 );
             }
-            let name = path
-                .file_name()
-                .expect("service path has a name")
-                .to_string_lossy();
-            let backup = path.with_file_name(format!(
-                "{name}.bak-{}",
-                chrono::Utc::now().timestamp_millis()
-            ));
-            std::fs::copy(path, &backup).with_context(|| {
-                format!("backing up {} to {}", path.display(), backup.display())
-            })?;
-            if old == text {
-                return Ok(true);
+            // Identical content needs no backup, but the rewrite below still
+            // restores mode 0o644.
+            if old != text.as_bytes() {
+                backup_definition(path, &old, backup_dir)?;
             }
             true
         }
@@ -143,15 +191,24 @@ pub fn launchd_plist(exe: &Path, config_dir: &Path, log: &Path) -> String {
     )
 }
 
-fn unit_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+/// Quotes for systemd and escapes specifiers (`%`); `dollar` also escapes `$`
+/// (variable expansion applies to ExecStart only).
+fn unit_quote(s: &str, dollar: bool) -> String {
+    let mut out = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    if dollar {
+        out = out.replace('$', "$$");
+    }
+    format!("\"{out}\"")
 }
 
 pub fn systemd_unit(exe: &Path, config_dir: &Path) -> String {
     format!(
-        "# {MARKER}\n[Unit]\nDescription=agent-caller daemon (acd)\nAfter=network-online.target\n\n[Service]\nExecStart={} run\nEnvironment={}\nEnvironment=\"PATH={PATH_LINUX}\"\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
-        unit_quote(&exe.to_string_lossy()),
-        unit_quote(&format!("ACD_CONFIG_DIR={}", config_dir.display())),
+        "# {MARKER}\n[Unit]\nDescription=agent-caller daemon (acd)\n\n[Service]\nExecStart={} run\nEnvironment={}\nEnvironment=\"PATH={PATH_LINUX}\"\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
+        unit_quote(&exe.to_string_lossy(), true),
+        unit_quote(&format!("ACD_CONFIG_DIR={}", config_dir.display()), false),
     )
 }
 
@@ -172,15 +229,17 @@ pub fn install(
             return Ok(text);
         }
         std::fs::create_dir_all(home.join("Library/Logs"))?;
-        let existed = write_definition(&plist, &text, force)?;
+        let existed = write_definition(&plist, &text, force, &config_dir.join("backups"))?;
         let uid = acd_securefs::euid();
         if existed {
-            runner
-                .run(
-                    "launchctl",
-                    &["bootout".into(), format!("gui/{uid}/{LABEL}")],
-                )
-                .context("launchctl bootout failed")?;
+            // A service that is not loaded (stopped by hand, failed bootstrap,
+            // foreign plist) makes bootout fail; bootstrap is the real check.
+            if let Err(error) = runner.run(
+                "launchctl",
+                &["bootout".into(), format!("gui/{uid}/{LABEL}")],
+            ) {
+                tracing::debug!("launchctl bootout ignored: {error:#}");
+            }
         }
         runner
             .run(
@@ -202,7 +261,7 @@ pub fn install(
         if print {
             return Ok(text);
         }
-        write_definition(&unit, &text, force)?;
+        write_definition(&unit, &text, force, &config_dir.join("backups"))?;
         for args in [
             &["daemon-reload"][..],
             &["enable", "acd.service"],
@@ -216,7 +275,7 @@ pub fn install(
                 .with_context(|| format!("systemctl {call_name} failed"))?;
         }
         Ok(format!(
-            "Installed and started {}. Stop it with: systemctl --user disable --now acd.service",
+            "Installed and started {}. Stop it with: systemctl --user disable --now acd.service. To keep it running after you log out: loginctl enable-linger $USER",
             unit.display()
         ))
     } else {
@@ -284,76 +343,81 @@ mod tests {
         }
     }
 
+    fn run_install(home: &Path, cfg: &Path, exe: &str, force: bool, fake: &Fake) -> Result<String> {
+        install(home, Path::new(exe), cfg, false, force, fake)
+    }
+
+    fn backups(cfg: &Path) -> Vec<PathBuf> {
+        match std::fs::read_dir(cfg.join("backups")) {
+            Ok(dir) => dir.filter_map(|e| e.ok()).map(|e| e.path()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     #[test]
     fn a_foreign_definition_is_refused_without_force() {
         let home = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
         let path = definition_path(home.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "someone else's service\n").unwrap();
         let fake = Fake::default();
-        let error = install(
-            home.path(),
-            Path::new("/x/acd"),
-            Path::new("/c"),
-            false,
-            false,
-            &fake,
-        )
-        .unwrap_err();
+        let error = run_install(home.path(), cfg.path(), "/x/acd", false, &fake).unwrap_err();
         assert!(error.to_string().contains("--force"), "{error}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "someone else's service\n"
         );
         assert!(fake.calls.borrow().is_empty());
-        install(
-            home.path(),
-            Path::new("/x/acd"),
-            Path::new("/c"),
-            false,
-            true,
-            &fake,
-        )
-        .unwrap();
+        run_install(home.path(), cfg.path(), "/x/acd", true, &fake).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains(MARKER));
-        let backup = std::fs::read_dir(path.parent().unwrap())
-            .unwrap()
-            .filter_map(|entry| entry.ok())
-            .find(|entry| entry.file_name().to_string_lossy().contains(".bak-"))
-            .expect("backup");
+        let found = backups(cfg.path());
+        assert_eq!(found.len(), 1);
         assert_eq!(
-            std::fs::read_to_string(backup.path()).unwrap(),
+            std::fs::read_to_string(&found[0]).unwrap(),
             "someone else's service\n"
         );
+        // Nothing is left beside the definition.
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_foreign_definition_can_be_forced() {
+        let home = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let path = definition_path(home.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, [0xff, 0xfe, b'x', 0x80]).unwrap();
+        let fake = Fake::default();
+        assert!(run_install(home.path(), cfg.path(), "/x/acd", false, &fake).is_err());
+        run_install(home.path(), cfg.path(), "/x/acd", true, &fake).unwrap();
+        let found = backups(cfg.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(std::fs::read(&found[0]).unwrap(), [0xff, 0xfe, b'x', 0x80]);
     }
 
     #[test]
     fn reinstall_backs_up_and_reloads_a_running_service() {
         let home = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
         let fake = Fake::default();
-        install(
-            home.path(),
-            Path::new("/old/acd"),
-            Path::new("/c"),
-            false,
-            false,
-            &fake,
-        )
-        .unwrap();
+        run_install(home.path(), cfg.path(), "/old/acd", false, &fake).unwrap();
         fake.calls.borrow_mut().clear();
-        install(
-            home.path(),
-            Path::new("/new/acd"),
-            Path::new("/c"),
-            false,
-            false,
-            &fake,
-        )
-        .unwrap();
+        run_install(home.path(), cfg.path(), "/new/acd", false, &fake).unwrap();
         assert!(
             std::fs::read_to_string(definition_path(home.path()))
                 .unwrap()
                 .contains("/new/acd")
+        );
+        let found = backups(cfg.path());
+        assert_eq!(found.len(), 1);
+        assert!(
+            std::fs::read_to_string(&found[0])
+                .unwrap()
+                .contains("/old/acd")
         );
         let calls = fake.calls.borrow().join("\n");
         if cfg!(target_os = "macos") {
@@ -370,6 +434,56 @@ mod tests {
     }
 
     #[test]
+    fn an_identical_reinstall_writes_no_backup_and_restores_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let fake = Fake::default();
+        run_install(home.path(), cfg.path(), "/x/acd", false, &fake).unwrap();
+        run_install(home.path(), cfg.path(), "/x/acd", false, &fake).unwrap();
+        assert!(backups(cfg.path()).is_empty());
+        let path = definition_path(home.path());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        run_install(home.path(), cfg.path(), "/x/acd", false, &fake).unwrap();
+        assert!(backups(cfg.path()).is_empty());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+    }
+
+    #[test]
+    fn reinstall_succeeds_when_bootout_fails_because_nothing_is_loaded() {
+        let home = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let ok = Fake::default();
+        run_install(home.path(), cfg.path(), "/old/acd", false, &ok).unwrap();
+        let fake = Fake {
+            fail: Some("bootout"),
+            ..Default::default()
+        };
+        run_install(home.path(), cfg.path(), "/new/acd", false, &fake).unwrap();
+        if cfg!(target_os = "macos") {
+            let calls = fake.calls.borrow().join("\n");
+            assert!(calls.contains("bootout"), "{calls}");
+            assert!(calls.contains("bootstrap"), "{calls}");
+        }
+    }
+
+    #[test]
+    fn the_unit_escapes_specifiers_and_variables() {
+        let unit = systemd_unit(Path::new("/opt/50%/a$b/acd"), Path::new("/home/u/100%/c$d"));
+        assert!(
+            unit.contains("ExecStart=\"/opt/50%%/a$$b/acd\" run"),
+            "{unit}"
+        );
+        assert!(
+            unit.contains("Environment=\"ACD_CONFIG_DIR=/home/u/100%%/c$d\""),
+            "{unit}"
+        );
+        assert!(!unit.contains("network-online"));
+    }
+
+    #[test]
     fn a_failing_runner_call_fails_install_and_names_the_call() {
         let home = tempfile::tempdir().unwrap();
         let word = if cfg!(target_os = "macos") {
@@ -381,15 +495,8 @@ mod tests {
             fail: Some(word),
             ..Default::default()
         };
-        let error = install(
-            home.path(),
-            Path::new("/x/acd"),
-            Path::new("/c"),
-            false,
-            false,
-            &fake,
-        )
-        .unwrap_err();
+        let cfg = tempfile::tempdir().unwrap();
+        let error = run_install(home.path(), cfg.path(), "/x/acd", false, &fake).unwrap_err();
         assert!(format!("{error:#}").contains(word), "{error:#}");
     }
 }

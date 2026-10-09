@@ -297,7 +297,7 @@ fn real_main() -> Result<()> {
             preflight(&dir)?;
             let home =
                 std::path::PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
-            let exe = std::fs::canonicalize(std::env::current_exe()?)?;
+            let exe = service::invoked_exe()?;
             let dir = std::fs::canonicalize(&dir)?;
             println!(
                 "{}",
