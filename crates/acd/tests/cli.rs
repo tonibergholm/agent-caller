@@ -1,16 +1,6 @@
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
-
-fn acd(dir: &std::path::Path) -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_acd"));
-    // HOME points into the test dir so the daemon never finds the real
-    // herdr socket under ~/.config/herdr.
-    c.env("ACD_CONFIG_DIR", dir)
-        .env("HOME", dir)
-        .env_remove("HERDR_SOCKET_PATH")
-        .env_remove("RUST_LOG");
-    c
-}
+mod common;
+use common::{acd, free_port};
 
 fn initialized() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -319,30 +309,15 @@ fn run_expecting_exit(dir: &std::path::Path) -> (std::process::ExitStatus, Strin
     (status, err)
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
-
-/// A running `acd run`, killed when dropped so a failed assert cannot leave
-/// it behind.
-struct Daemon(std::process::Child);
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        self.0.kill().ok();
-        self.0.wait().ok();
-    }
-}
-
-/// An initialized config dir listening on a free loopback port.
-fn init_loopback(name: &str) -> (tempfile::TempDir, std::path::PathBuf, u16) {
+/// An initialized config dir; `start` writes ports and starts the daemon.
+fn init_named() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("acd");
-    assert!(acd(&dir).arg("init").status().unwrap().success());
-    let port = free_port();
-    let cfg = format!("machine_name = \"{name}\"\nport = {port}\nlisten = [\"loopback\"]\n");
-    std::fs::write(dir.join("config.toml"), cfg).unwrap();
-    (tmp, dir, port)
+    let dir = common::init_dir(tmp.path());
+    (tmp, dir)
+}
+
+fn start(dir: &std::path::Path, name: &str, env: &[(&str, &str)]) -> common::Started {
+    common::start_daemon(dir, &format!("machine_name = \"{name}\"\n"), env)
 }
 
 /// Runs `acd status` until it succeeds, for at most 10 s.
@@ -361,11 +336,11 @@ fn status_when_ready(dir: &std::path::Path, rust_log: Option<&str>) -> std::proc
 #[test]
 fn run_serves_loopback_and_status_reports_machine() {
     use std::os::unix::fs::FileTypeExt;
-    let (_tmp, dir, _) = init_loopback("e2e-box");
+    let (_tmp, dir) = init_named();
     // A socket left by a crashed daemon is replaced.
     drop(std::os::unix::net::UnixListener::bind(dir.join("acd.sock")).unwrap());
 
-    let _daemon = Daemon(acd(&dir).arg("run").spawn().unwrap());
+    let _daemon = start(&dir, "e2e-box", &[]);
     let out = String::from_utf8_lossy(&status_when_ready(&dir, None).stdout).into_owned();
     assert!(out.contains("machine: e2e-box"), "{out}");
     assert!(out.contains("agents: 0"), "{out}");
@@ -387,13 +362,12 @@ fn token_forms(token: &str) -> Vec<String> {
 #[test]
 fn trace_logs_never_contain_the_token() {
     for rust_log in ["trace", "trace,tungstenite::protocol::frame=trace,tokio_tungstenite=trace,axum::extract::ws=trace"] {
-        let (tmp, dir, _) = init_loopback("log-box");
+    let (_tmp, dir) = init_named();
         let token = std::fs::read_to_string(dir.join("client.token")).unwrap().trim().to_string();
-        let log_path = tmp.path().join("daemon.log");
-        let log = std::fs::File::create(&log_path).unwrap();
-        let daemon = Daemon(acd(&dir).env("RUST_LOG", rust_log).arg("run").stderr(log).spawn().unwrap());
+        let started = start(&dir, "log-box", &[("RUST_LOG", rust_log)]);
+        let log_path = started.log.clone();
         let status = status_when_ready(&dir, Some(rust_log));
-        drop(daemon);
+        drop(started);
         let daemon_log = std::fs::read_to_string(&log_path).unwrap();
         let status_log = String::from_utf8_lossy(&status.stderr).into_owned();
         assert!(daemon_log.contains("TRACE"), "{rust_log}: expected trace output from the daemon");
@@ -480,12 +454,17 @@ fn run_fails_when_a_listen_address_cannot_be_bound() {
 
 #[test]
 fn second_daemon_on_another_port_leaves_the_live_socket_alone() {
-    let (_tmp, dir, _) = init_loopback("first");
-    let _daemon = Daemon(acd(&dir).arg("run").spawn().unwrap());
+        let (_tmp, dir) = init_named();
+    let _daemon = start(&dir, "first", &[]);
     status_when_ready(&dir, None);
-    std::fs::write(dir.join("config.toml"), format!("machine_name = \"second\"\nport = {}\nlisten = [\"loopback\"]\n", free_port())).unwrap();
-    let (status, err) = run_expecting_exit(&dir);
+    std::fs::write(dir.join("config.toml"), format!("machine_name = \"second\"\nport = {}\nhook_port = {}\nlisten = [\"loopback\"]\n", free_port(), free_port())).unwrap();
+    let (mut status, mut err) = run_expecting_exit(&dir);
     assert!(!status.success());
+    assert!(err.contains("another acd is running") || err.contains("cannot bind"), "{err}");
+    if err.contains("cannot bind") {
+        (status, err) = run_expecting_exit(&dir);
+        assert!(!status.success());
+    }
     assert!(err.contains("another acd is running"), "{err}");
     let out = String::from_utf8_lossy(&acd(&dir).arg("status").output().unwrap().stdout).into_owned();
     assert!(out.contains("machine: first"), "{out}");
