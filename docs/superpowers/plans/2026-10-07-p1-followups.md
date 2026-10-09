@@ -170,13 +170,30 @@ its name.
 ### P5 deferred
 
 - Optional `tailscale whois` node validation hardening.
-- Keychain prompts after rebuilds of unsigned builds.
+- Keychain prompts after rebuilds of unsigned builds. No prompt appeared
+  in the 2026-10-09 checklist run.
 - The panel is centered; its position is not remembered.
 - The `acd pair` output remains in the user's clipboard after import.
-- Confirm manually that repeated notifications all show.
 - Test the hotkey failed-registration path; it requires a live shortcut manager.
 - `mark_seen` has no test outside a runtime.
 - Concurrent `set_hotkey` calls can race.
+
+From the 2026-10-09 production-bundle checklist:
+
+- The app never asks for notification permission and cannot tell when
+  notifications are off; macOS dropped them silently until the user
+  enabled them in System Settings. Request authorization on first run
+  (UNUserNotificationCenter) and show the state in Settings.
+- A saved hotkey keeps the old default (`Alt+Space`) after the default
+  changed to `Control+Alt+Space`. Decide whether to migrate it.
+- A pairing line with a literal IP outside the Tailscale ranges is saved
+  and only refused at connect time. Refuse it at import.
+- A Codex agent's title showed `<environment_context>`: raw context leaks
+  into the agent title. Find which adapter sets it.
+- herdr alone produces only "Answer in terminal" cards; option cards and
+  replies need T3 or P3 hooks. Say so in the setup docs.
+- On a remote Mac, the macOS firewall prompts for the unsigned `acd`
+  binary on first incoming connection. Say so in the setup docs.
 
 ## Process
 

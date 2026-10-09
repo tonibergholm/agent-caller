@@ -37,7 +37,7 @@ pub async fn print(dir: &Path, requested_host: Option<String>) -> Result<()> {
 async fn discover_host() -> Result<String> {
     let Some(path) = crate::bind::tailscale_cli() else {
         bail!(
-            "Tailscale CLI not found (looked for: {}); pass --host",
+            "Tailscale CLI not found (looked for: {})",
             crate::bind::tailscale_cli_searched()
         )
     };

@@ -154,9 +154,13 @@
             <button onclick={() => act(() => api.retryMachine(m.key), "Could not retry")}>Retry</button>
           {/if}
           {#if m.endpoint.kind !== "local"}
-            <button onclick={() => remove(m)}>{confirming === m.key ? "Confirm remove" : "Remove"}</button>
             {#if confirming === m.key}
+              <!-- Cancel takes Remove's place, so a double click cancels. -->
               <button onclick={() => (confirming = null)}>Cancel</button>
+              <button onclick={() => remove(m)}>Confirm remove</button>
+              <span aria-live="polite">Remove {m.name}?</span>
+            {:else}
+              <button onclick={() => remove(m)}>Remove</button>
             {/if}
           {/if}
         </li>

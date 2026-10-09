@@ -43,6 +43,20 @@ test("rename and remove", async () => {
   expect(screen.queryByRole("button", { name: "Confirm remove" })).toBeNull();
 });
 
+test("a double click on Remove lands on Cancel and removes nothing", async () => {
+  const api = fakeApi({ machines: [devbox()] });
+  render(Settings, { api });
+  const remove = await screen.findByRole("button", { name: "Remove" });
+  const row = remove.closest("li")!;
+  const index = [...row.querySelectorAll("button")].indexOf(remove as HTMLButtonElement);
+  await userEvent.click(remove);
+  const same = row.querySelectorAll("button")[index] as HTMLButtonElement;
+  expect(same.textContent).toBe("Cancel");
+  await userEvent.click(same);
+  expect(api.calls.some((c) => c[0] === "removeMachine")).toBe(false);
+  expect(screen.getByRole("button", { name: "Remove" })).toBeTruthy();
+});
+
 test("cancelling the inline remove confirmation sends nothing", async () => {
   const api = fakeApi({ machines: [devbox()] });
   render(Settings, { api });

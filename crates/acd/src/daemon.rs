@@ -82,8 +82,14 @@ pub async fn run(dir: &Path) -> Result<()> {
         },
     );
 
-    let probe = bind::tailscale_reported().await;
     let listen_includes_tailscale = cfg.listen.iter().any(|e| e == "tailscale");
+    // Without a tailscale entry nothing depends on the probe: never run the
+    // external CLI.
+    let probe = if listen_includes_tailscale {
+        bind::tailscale_reported().await
+    } else {
+        None
+    };
     let reported = probe.clone().unwrap_or_default();
     let ips = bind::resolve_listen(&cfg.listen, &reported)?;
     if listen_includes_tailscale {
@@ -180,6 +186,9 @@ pub async fn run(dir: &Path) -> Result<()> {
     // the new bind set.
     let listen = cfg.listen.clone();
     let watch = tokio::spawn(async move {
+        if !listen_includes_tailscale {
+            return std::future::pending().await;
+        }
         let mut pending: Option<Vec<IpAddr>> = None;
         let mut failures = 0u32;
         loop {
