@@ -1939,14 +1939,25 @@ fn concurrent_starts_leave_exactly_one_daemon_with_its_sockets() {
                 .collect();
             std::thread::sleep(Duration::from_millis(20));
         }
+        // Let the survivor either become ready or fail its binds.
+        while !ready(&dir)
+            && daemons
+                .iter_mut()
+                .any(|(d, _)| d.0.try_wait().unwrap().is_none())
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let logs: Vec<String> = daemons
             .iter()
             .map(|(_, log)| std::fs::read_to_string(log).unwrap_or_default())
             .collect();
-        if exited.len() == daemons.len()
-            && logs.iter().any(|l| l.contains("Address already in use"))
-        {
-            continue; // a picked port was taken meanwhile, so nobody won
+        if logs.iter().any(|l| l.contains("Address already in use")) {
+            // A picked port was taken from outside: whoever got the lock
+            // failed its binds and a sibling may have won after it. Stop
+            // every survivor and start the attempt over.
+            drop(daemons);
+            continue;
         }
         assert_eq!(exited.len(), 2, "{logs:#?}");
         for &i in &exited {
@@ -2168,4 +2179,156 @@ fn status_and_hooks_status_warn_when_the_hook_port_is_held_while_acd_is_down() {
     let _started = start_daemon(&dir, None, "", &[]);
     let out = hooks_status(&dir, home.path());
     assert!(!String::from_utf8_lossy(&out.stderr).contains(warning));
+}
+
+/// A Unix listener on `path` with a backlog of 0 that never accepts, filled
+/// with pending connections until the kernel refuses more. Returns every
+/// descriptor; they close when the returned files drop.
+fn saturated_listener(path: &std::path::Path) -> Vec<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::FromRawFd;
+    fn addr(path: &std::path::Path) -> libc::sockaddr_un {
+        // SAFETY: an all-zero sockaddr_un is valid.
+        let mut a: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        a.sun_family = libc::AF_UNIX as _;
+        let bytes = path.as_os_str().as_bytes();
+        assert!(bytes.len() < a.sun_path.len());
+        for (d, s) in a.sun_path.iter_mut().zip(bytes) {
+            *d = *s as libc::c_char;
+        }
+        a
+    }
+    let a = addr(path);
+    let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    // SAFETY: plain socket calls on descriptors this function owns.
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        assert!(fd >= 0);
+        assert_eq!(
+            libc::bind(fd, &a as *const _ as *const libc::sockaddr, len),
+            0
+        );
+        assert_eq!(libc::listen(fd, 0), 0);
+        let mut fds = vec![std::fs::File::from_raw_fd(fd)];
+        for _ in 0..256 {
+            let c = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            assert!(c >= 0);
+            libc::fcntl(c, libc::F_SETFL, libc::O_NONBLOCK);
+            let rc = libc::connect(c, &a as *const _ as *const libc::sockaddr, len);
+            fds.push(std::fs::File::from_raw_fd(c));
+            if rc != 0 {
+                break; // the backlog is full
+            }
+        }
+        fds
+    }
+}
+
+#[test]
+fn a_saturated_acd_sock_cannot_hang_status_or_hooks_status() {
+    let (home, dir) = home_with_acd();
+    write_ports(&dir);
+    let _held = saturated_listener(&dir.join("acd.sock"));
+    for args in [&["status"][..], &["hooks", "status"][..]] {
+        let mut cmd = acd_home(&dir, home.path());
+        cmd.args(args);
+        let started = Instant::now();
+        let out = run_within(cmd, 10);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{args:?} took {:?}",
+            started.elapsed()
+        );
+        // A listening acd.sock counts as a running acd: no squat warning.
+        assert!(
+            !String::from_utf8_lossy(&out.stderr).contains("is held by another process"),
+            "{args:?}"
+        );
+    }
+}
+
+fn permission_request(n: usize) -> String {
+    let mut v: serde_json::Value =
+        serde_json::from_str(&claude_fixture("payload-PermissionRequest-Bash.json")).unwrap();
+    v["session_id"] = format!("00000000-0000-4000-8000-{n:012}").into();
+    v.to_string()
+}
+
+fn hold_request(token: &str, body: &str) -> String {
+    format!(
+        "POST /hook/claude/PermissionRequest HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nX-Acd-Token: {token}\r\nX-Claude-Entrypoint: cli\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// Still waiting for its reply: no byte and no close yet.
+fn unanswered(s: &mut dyn Read) -> bool {
+    let mut b = [0u8; 1];
+    matches!(s.read(&mut b), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+}
+
+#[test]
+fn both_hook_listeners_share_one_hold_cap_and_distinct_hold_ids() {
+    const MAX_HOLDS: usize = 64;
+    let (_home, dir) = home_with_acd();
+    let started = start_daemon(&dir, None, "", &[]);
+    let token = store_token(&dir);
+    let sock = dir.join("hook.sock");
+    // Half the holds on each listener, one session each.
+    let mut held: Vec<Box<dyn Read>> = Vec::new();
+    for n in 0..MAX_HOLDS {
+        let req = hold_request(&token, &permission_request(n));
+        if n % 2 == 0 {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", started.hook_port)).unwrap();
+            s.write_all(req.as_bytes()).unwrap();
+            s.set_nonblocking(true).unwrap();
+            held.push(Box::new(s));
+        } else {
+            let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+            s.write_all(req.as_bytes()).unwrap();
+            s.set_nonblocking(true).unwrap();
+            held.push(Box::new(s));
+        }
+    }
+    // Every hold reached the reconciler as its own request: hold ids
+    // that collided would replace (and release) each other.
+    wait_until("every request is held and shown", || {
+        status_text(&dir).matches("NeedsYou Claude").count() == MAX_HOLDS
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        status_text(&dir).matches("NeedsYou Claude").count(),
+        MAX_HOLDS
+    );
+    for (n, s) in held.iter_mut().enumerate() {
+        assert!(unanswered(s.as_mut()), "hold {n} was released");
+    }
+    // The cap is shared: one more on either listener fails open at once.
+    let extra = permission_request(MAX_HOLDS);
+    let cli = [("X-Claude-Entrypoint", "cli")];
+    let path = "/hook/claude/PermissionRequest";
+    let at = Instant::now();
+    assert_eq!(
+        post_hook(started.hook_port, path, &token, &cli, &extra),
+        (200, String::new())
+    );
+    let extra = permission_request(MAX_HOLDS + 1);
+    assert_eq!(
+        post_hook_unix(&sock, path, &token, &cli, &extra),
+        (200, String::new())
+    );
+    assert!(at.elapsed() < Duration::from_secs(3), "{:?}", at.elapsed());
+    for (n, s) in held.iter_mut().enumerate() {
+        assert!(unanswered(s.as_mut()), "hold {n} was released");
+    }
+    // Hold ids are distinct across listeners: closing the first TCP hold
+    // releases that hold only. With a shared id, the close would end the
+    // hook.sock hold that reused it, which then gets its empty reply. The
+    // closed request itself stays open (no capture), so give the
+    // reconciler a moment instead of waiting on a status change.
+    drop(held.remove(0));
+    std::thread::sleep(Duration::from_secs(1));
+    for (n, s) in held.iter_mut().enumerate() {
+        assert!(unanswered(s.as_mut()), "hold {} was released", n + 1);
+    }
 }

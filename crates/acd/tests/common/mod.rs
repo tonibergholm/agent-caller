@@ -177,23 +177,35 @@ fn hook_request(path: &str, token: &str, headers: &[(&str, &str)], body: &str) -
     req
 }
 
-/// `(status, body)`; status 0 when the connection ended without a reply.
+/// `(status, body)` of one complete HTTP reply. Panics on a read error
+/// (including the read timeout) or an incomplete reply, so a dropped or
+/// truncated connection never passes for an answer.
 fn hook_exchange(mut s: impl std::io::Read + std::io::Write, req: &str) -> (u16, String) {
     s.write_all(req.as_bytes()).unwrap();
     let mut raw = Vec::new();
-    let _ = s.read_to_end(&mut raw);
+    s.read_to_end(&mut raw).expect("reading the hook reply");
     let out = String::from_utf8_lossy(&raw);
-    let status = out
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .unwrap_or(0);
-    (
-        status,
-        out.split_once("\r\n\r\n")
-            .map(|(_, b)| b.to_owned())
-            .unwrap_or_default(),
-    )
+    let (head, body) = out
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("incomplete HTTP reply: {out:?}"));
+    let status = head
+        .strip_prefix("HTTP/1.1 ")
+        .and_then(|rest| rest.get(..3))
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no HTTP status line: {head:?}"));
+    let length = head.lines().find_map(|l| {
+        let (name, value) = l.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().expect("Content-Length"))
+    });
+    match length {
+        Some(n) => assert_eq!(body.len(), n, "truncated body: {out:?}"),
+        None => assert!(
+            !head.to_ascii_lowercase().contains("transfer-encoding"),
+            "unexpected chunked reply: {out:?}"
+        ),
+    }
+    (status, body.to_owned())
 }
 
 /// A hook request to the daemon's loopback endpoint (blocking `std::net`).

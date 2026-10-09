@@ -117,9 +117,9 @@ fn clear_stale(path: &Path, euid: u32) -> Result<()> {
     }
 }
 
-/// Connects in a helper thread so a socket that never answers cannot stall
-/// startup.
-fn connect_within(path: &Path, timeout: Duration) -> std::io::Result<()> {
+/// Connects in a helper thread so a socket that never answers (for example
+/// one with a full accept backlog) cannot stall the caller.
+pub(crate) fn connect_within(path: &Path, timeout: Duration) -> std::io::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
     let path = path.to_path_buf();
     std::thread::spawn(move || {
