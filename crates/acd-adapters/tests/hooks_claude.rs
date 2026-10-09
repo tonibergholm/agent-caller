@@ -730,3 +730,404 @@ async fn the_same_command_after_an_uncertain_end_opens_again() {
     .await;
     assert_ne!(rid1, rid2);
 }
+
+fn bound_headers(r: &Rig) -> Vec<(&'static str, String)> {
+    vec![
+        ("X-Herdr-Pane", "w1:p1".into()),
+        ("X-Herdr-Socket", r.sock()),
+        ("X-Claude-Entrypoint", "cli".into()),
+    ]
+}
+
+async fn bound_rig() -> (Rig, String) {
+    let r = rig(&[fake_agent("w1:p1", "claude", "blocked")], |_| {}).await;
+    let dialog = std::fs::read_to_string(format!(
+        "{}/../../tests/fixtures/herdr/claude-permission-bash.txt",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    r.fake
+        .as_ref()
+        .unwrap()
+        .set_screen("w1:p1", "detection", &dialog);
+    r.fake
+        .as_ref()
+        .unwrap()
+        .set_screen("w1:p1", "visible", &dialog);
+    let agent = r
+        .herdr
+        .as_ref()
+        .unwrap()
+        .panes()
+        .read()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    (r, agent)
+}
+
+#[tokio::test]
+async fn a_hooks_only_hold_close_is_terminal_with_stop_evidence_and_uncertain_without() {
+    let r = rig(&[], |_| {}).await;
+    let (_, mut rx) = r.core.attach(None);
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &CLI)
+        .await;
+    let rid = until("request", || {
+        r.agent(HOOKS_ONLY).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    drop(held);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        answer(&r, "a1", &rid, "allow").await.error_code(),
+        Some(ErrorCode::RequestGone)
+    );
+    r.hook("claude", "Stop", &stop_after_deny(), &CLI).await;
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Terminal);
+
+    let mut second = fx("claude/payload-PermissionRequest-Bash.json");
+    second["tool_input"]["command"] = "touch /tmp/acp0/t9.txt".into();
+    let held = r.hold(&second, &CLI).await;
+    let rid2 = until("second request", || {
+        r.agent(HOOKS_ONLY)
+            .and_then(|a| a.pending)
+            .map(|p| p.id)
+            .filter(|id| *id != rid)
+    })
+    .await;
+    drop(held);
+    assert_eq!(resolution(&mut rx, &rid2).await, ResolvedBy::Uncertain);
+}
+
+#[tokio::test]
+async fn a_hooks_only_expiry_is_lost() {
+    let r = rig(&[], |cfg| cfg.permission_hold = Duration::from_millis(200)).await;
+    let (_, mut rx) = r.core.attach(None);
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &CLI)
+        .await;
+    let rid = until("request", || {
+        r.agent(HOOKS_ONLY).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    assert_eq!(read_response(held).await, (200, String::new()));
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Lost);
+}
+
+#[tokio::test]
+async fn a_bound_hold_close_with_the_matching_dialog_switches_to_incarnation_bound_keys() {
+    let (r, agent) = bound_rig().await;
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let rid = until("bound request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_none());
+    drop(held);
+    let req = until("keys path", || {
+        r.core
+            .request(&rid)
+            .filter(|request| request.answer_path == AnswerPath::Keys)
+    })
+    .await;
+    assert_eq!(
+        req.options
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["allow", "deny"]
+    );
+    assert!(req.revision >= 2);
+    let target = until("keys target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid)
+    })
+    .await;
+    assert!(target.incarnation().is_some());
+    assert!(answer(&r, "a1", &rid, "allow").await.ok);
+    assert_eq!(r.fake.as_ref().unwrap().keys_sent().len(), 1);
+}
+
+#[tokio::test]
+async fn a_bound_hold_close_without_the_dialog_is_terminal() {
+    let (r, agent) = bound_rig().await;
+    let (_, mut rx) = r.core.attach(None);
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let idle = std::fs::read_to_string(format!(
+        "{}/../../tests/fixtures/herdr/claude-idle-detection.txt",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    r.fake
+        .as_ref()
+        .unwrap()
+        .set_screen("w1:p1", "detection", &idle);
+    drop(held);
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Terminal);
+}
+
+#[tokio::test]
+async fn a_claim_during_the_hold_end_read_is_not_misreported_as_gone() {
+    let (r, agent) = bound_rig().await;
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let gate = r.fake.as_ref().unwrap().block_next("agent.read");
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(3), gate.arrived())
+        .await
+        .expect("hold-end read reached fake gate");
+    assert_eq!(
+        answer(&r, "a1", &rid, "allow").await.error_code(),
+        Some(ErrorCode::RequestNotReady)
+    );
+    gate.release();
+    until("keys path", || {
+        r.core
+            .request(&rid)
+            .filter(|request| request.answer_path == AnswerPath::Keys)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn unavailable_hold_end_reads_resolve_uncertain() {
+    let (r, agent) = bound_rig().await;
+    let (_, mut rx) = r.core.attach(None);
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    r.fake
+        .as_ref()
+        .unwrap()
+        .set_truncated("w1:p1", "detection", true);
+    drop(held);
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Uncertain);
+}
+
+#[tokio::test]
+async fn a_capture_that_returns_after_stop_is_dropped() {
+    let r = rig(&[fake_agent("w1:p1", "claude", "working")], |_| {}).await;
+    let dialog = std::fs::read_to_string(format!(
+        "{}/../../tests/fixtures/herdr/claude-permission-bash.txt",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    r.fake
+        .as_ref()
+        .unwrap()
+        .set_screen("w1:p1", "detection", &dialog);
+    let agent = r
+        .herdr
+        .as_ref()
+        .unwrap()
+        .panes()
+        .read()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let gate = r.fake.as_ref().unwrap().block_next("agent.read");
+    let _held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(3), gate.arrived())
+        .await
+        .expect("capture read reached the fake gate");
+    r.hook("claude", "Stop", &stop_after_deny(), &h).await;
+    until("request ended", || {
+        r.core.request(&rid).is_none().then_some(())
+    })
+    .await;
+    gate.release();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(r.herdr.as_ref().unwrap().keys_targets().get(&rid).is_none());
+    assert!(r.agent(&agent).and_then(|a| a.pending).is_none());
+}
+
+#[tokio::test]
+async fn a_hold_end_read_waiting_for_a_slot_still_switches_to_keys() {
+    let r = rig(
+        &[
+            fake_agent("w1:p1", "claude", "blocked"),
+            fake_agent("w1:p2", "claude", "blocked"),
+        ],
+        |cfg| {
+            cfg.max_reads = 1;
+            cfg.held_dialog_poll = Duration::from_secs(30);
+        },
+    )
+    .await;
+    let dialog = std::fs::read_to_string(format!(
+        "{}/../../tests/fixtures/herdr/claude-permission-bash.txt",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let fake = r.fake.as_ref().unwrap();
+    for pane in ["w1:p1", "w1:p2"] {
+        fake.set_screen(pane, "detection", &dialog);
+        fake.set_screen(pane, "visible", &dialog);
+    }
+    let sock = r.sock();
+    let on = |pane: &'static str| {
+        vec![
+            ("X-Herdr-Pane", pane),
+            ("X-Herdr-Socket", sock.as_str()),
+            ("X-Claude-Entrypoint", "cli"),
+        ]
+    };
+    let agent_for = |pane: &str| {
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .panes()
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, fact)| fact.pane_id == pane)
+            .unwrap()
+            .0
+            .clone()
+    };
+    let (a1, a2) = (agent_for("w1:p1"), agent_for("w1:p2"));
+    let held_a = r
+        .hold(
+            &fx("claude/payload-PermissionRequest-Bash.json"),
+            &on("w1:p1"),
+        )
+        .await;
+    let rid_a = until("A", || r.agent(&a1).and_then(|a| a.pending).map(|p| p.id)).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let gate = fake.block_next("agent.read");
+    let mut second = fx("claude/payload-PermissionRequest-Bash.json");
+    second["session_id"] = "5f4996ff-0000-4000-8000-000000000002".into();
+    let _held_b = r.hold(&second, &on("w1:p2")).await;
+    until("B", || r.agent(&a2).and_then(|a| a.pending)).await;
+    gate.arrived().await;
+    drop(held_a);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .keys_targets()
+            .get(&rid_a)
+            .is_none()
+    );
+    gate.release();
+    until("A keys target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid_a)
+    })
+    .await;
+    assert_eq!(
+        r.core.request(&rid_a).map(|request| request.answer_path),
+        Some(AnswerPath::Keys)
+    );
+}
+
+#[tokio::test]
+async fn a_held_request_migrates_to_herdr_with_the_same_id() {
+    let mut pane = fake_agent("w1:p1", "claude", "blocked");
+    let r = rig(&[pane.clone()], |_| {}).await;
+    let _held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &CLI)
+        .await;
+    let rid = until("hooks-only pending request", || {
+        r.agent(HOOKS_ONLY).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    pane["agent_session"] = json!({"value": SID});
+    r.fake.as_ref().unwrap().set_agent(pane);
+    r.fake
+        .as_ref()
+        .unwrap()
+        .push_event(json!({"event":"pane_updated","data":{"pane_id":"w1:p1"}}));
+    until("herdr session binding", || {
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .panes()
+            .read()
+            .unwrap()
+            .values()
+            .find_map(|pane| pane.session.clone())
+    })
+    .await;
+    r.hook(
+        "claude",
+        "Notification",
+        &fx("claude/payload-Notification.json"),
+        &CLI,
+    )
+    .await;
+    let agent = r
+        .herdr
+        .as_ref()
+        .unwrap()
+        .panes()
+        .read()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    until("migrated request", || {
+        r.agent(&agent)
+            .and_then(|a| a.pending)
+            .filter(|pending| pending.id == rid)
+    })
+    .await;
+    assert!(r.agent(HOOKS_ONLY).is_none());
+}

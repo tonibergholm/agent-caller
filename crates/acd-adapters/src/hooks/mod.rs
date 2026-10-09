@@ -8,6 +8,7 @@ pub mod owner;
 mod state;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+pub(crate) mod tickets;
 pub mod wire;
 
 #[cfg(any(test, feature = "testing"))]
@@ -238,7 +239,11 @@ impl Adapter for HooksAdapter {
             return Err(DeliverError::NotDelivered(ErrorCode::RequestGone));
         };
         if h.reply.is_none() {
-            return Err(DeliverError::NotDelivered(ErrorCode::RequestGone));
+            return Err(DeliverError::NotDelivered(if h.bound_captured {
+                ErrorCode::RequestNotReady
+            } else {
+                ErrorCode::RequestGone
+            }));
         }
         let body = match (effect, &h.rule) {
             (Effect::Allow, _) => wire::reply_allow(),
@@ -252,7 +257,11 @@ impl Adapter for HooksAdapter {
         h.delivered = Some((effect, tokio::time::Instant::now()));
         if reply.send(body).is_err() {
             h.delivered = None;
-            return Err(DeliverError::NotDelivered(ErrorCode::RequestGone));
+            return Err(DeliverError::NotDelivered(if h.bound_captured {
+                ErrorCode::RequestNotReady
+            } else {
+                ErrorCode::RequestGone
+            }));
         }
         h.permit = None;
         Ok(())
