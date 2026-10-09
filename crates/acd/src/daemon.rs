@@ -87,7 +87,12 @@ pub async fn run(dir: &Path) -> Result<()> {
     let reported = probe.clone().unwrap_or_default();
     let ips = bind::resolve_listen(&cfg.listen, &reported)?;
     if listen_includes_tailscale {
-        if probe.is_none() {
+        if bind::tailscale_cli().is_none() {
+            tracing::warn!(
+                searched = %bind::tailscale_cli_searched(),
+                "Tailscale CLI not found; Tailscale addresses unavailable"
+            );
+        } else if probe.is_none() {
             tracing::warn!("`tailscale ip` failed or timed out; Tailscale addresses unavailable");
         } else if !reported.iter().any(bind::in_tailscale_range) {
             tracing::warn!("listen contains \"tailscale\" but no Tailscale addresses are reported");

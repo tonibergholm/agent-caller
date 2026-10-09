@@ -3,7 +3,12 @@ use std::process::Command;
 
 fn acd(dir: &std::path::Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_acd"));
-    c.env("ACD_CONFIG_DIR", dir).env_remove("RUST_LOG");
+    // HOME points into the test dir so the daemon never finds the real
+    // herdr socket under ~/.config/herdr.
+    c.env("ACD_CONFIG_DIR", dir)
+        .env("HOME", dir)
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("RUST_LOG");
     c
 }
 
