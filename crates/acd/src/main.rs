@@ -8,6 +8,7 @@ mod identity;
 mod pair;
 mod paths;
 mod secrets;
+mod service;
 mod status;
 mod tls;
 mod writer_lock;
@@ -54,6 +55,23 @@ enum Cmd {
     Hooks {
         #[command(subcommand)]
         cmd: HooksCmd,
+    },
+    /// Install acd as a launchd agent or systemd user service.
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    Install {
+        /// Print the service definition instead of installing it.
+        #[arg(long)]
+        print: bool,
+        /// Replace a service file that acd did not write (a backup is kept).
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -268,6 +286,23 @@ fn real_main() -> Result<()> {
                     }
                 }
             }
+            Ok(())
+        }
+        Cmd::Service {
+            cmd: ServiceCmd::Install { print, force },
+        } => {
+            if !dir.is_dir() {
+                bail!("{} not initialized; run `acd init`", dir.display());
+            }
+            preflight(&dir)?;
+            let home =
+                std::path::PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+            let exe = std::fs::canonicalize(std::env::current_exe()?)?;
+            let dir = std::fs::canonicalize(&dir)?;
+            println!(
+                "{}",
+                service::install(&home, &exe, &dir, print, force, service::runner().as_ref())?
+            );
             Ok(())
         }
         Cmd::Run => tokio::runtime::Runtime::new()?.block_on(daemon::run(&dir)),
