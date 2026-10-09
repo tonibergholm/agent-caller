@@ -50,6 +50,25 @@ enum Cmd {
         #[arg(long)]
         host: Option<String>,
     },
+    /// Install or remove acd's Claude Code or Codex hooks.
+    Hooks {
+        #[command(subcommand)]
+        cmd: HooksCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum HooksCmd {
+    Install {
+        target: hooks_install::Target,
+        #[arg(long)]
+        allow_tracked: bool,
+        #[arg(long)]
+        allow_unknown_git: bool,
+    },
+    Uninstall {
+        target: hooks_install::Target,
+    },
 }
 
 #[derive(Subcommand)]
@@ -151,6 +170,57 @@ fn real_main() -> Result<()> {
                 bail!("{} not initialized; run `acd init`", dir.display());
             }
             tokio::runtime::Runtime::new()?.block_on(pair::print(&dir, host))
+        }
+        Cmd::Hooks { cmd } => {
+            if !dir.is_dir() {
+                bail!("{} not initialized; run `acd init`", dir.display());
+            }
+            preflight(&dir)?;
+            let ctx = hooks_install::Ctx::from_env(&dir)?;
+            match cmd {
+                HooksCmd::Install {
+                    target,
+                    allow_tracked,
+                    allow_unknown_git,
+                } => {
+                    let r = hooks_install::install(
+                        &ctx,
+                        target,
+                        hooks_install::Flags {
+                            allow_tracked,
+                            allow_unknown_git,
+                        },
+                    )?;
+                    if r.suspicious > 0 {
+                        eprintln!(
+                            "warning: {} unexpected entries in {} carry the acd marker; acd left them alone",
+                            r.suspicious,
+                            r.path.display()
+                        );
+                    }
+                    println!("Installed acd hooks in {}", r.path.display());
+                    if let Some(b) = r.backup {
+                        println!("Backup: {}", b.display());
+                    }
+                    match target {
+                        hooks_install::Target::Claude => println!(
+                            "Claude reads hooks when a session starts: restart running sessions or run /clear in them."
+                        ),
+                        hooks_install::Target::Codex => println!(
+                            "Codex may ask you to review these hooks the first time it runs them. Codex sessions that share Codex's background app-server can be answered from the inbox only when acd can tell which herdr pane they run in; otherwise their prompts are shown read-only."
+                        ),
+                    }
+                }
+                HooksCmd::Uninstall { target } => {
+                    let r = hooks_install::uninstall(&ctx, target)?;
+                    if r.removed_file {
+                        println!("Removed {} (acd created it)", r.path.display());
+                    } else {
+                        println!("Removed acd hooks from {}", r.path.display());
+                    }
+                }
+            }
+            Ok(())
         }
         Cmd::Run => tokio::runtime::Runtime::new()?.block_on(daemon::run(&dir)),
         Cmd::Status => tokio::runtime::Runtime::new()?.block_on(status::status(&dir)),

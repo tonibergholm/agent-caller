@@ -458,3 +458,403 @@ fn a_write_stall_is_bounded_by_the_deadline() {
     assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty());
     assert!(took < Duration::from_millis(1200), "{took:?}");
 }
+
+fn install(
+    dir: &std::path::Path,
+    home: &std::path::Path,
+    target: &str,
+    extra: &[&str],
+) -> std::process::Output {
+    acd_home(dir, home)
+        .args(["hooks", "install", target])
+        .args(extra)
+        .output()
+        .unwrap()
+}
+fn uninstall(dir: &std::path::Path, home: &std::path::Path, target: &str) -> std::process::Output {
+    acd_home(dir, home)
+        .args(["hooks", "uninstall", target])
+        .output()
+        .unwrap()
+}
+fn json_of(p: &std::path::Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+}
+fn owned_count(v: &serde_json::Value) -> usize {
+    v["hooks"].as_object().map_or(0, |events| {
+        events
+            .values()
+            .flat_map(|groups| groups.as_array().into_iter().flatten())
+            .flat_map(|g| g["hooks"].as_array().into_iter().flatten())
+            .filter(|e| e.to_string().contains("acd-managed:v1"))
+            .count()
+    })
+}
+const FOREIGN_CLAUDE: &str = r#"{
+ "permissions": {"allow": ["Bash(npm test)"]},
+ "hooks": {
+  "Stop": [{"hooks": [{"type": "command", "command": "say done"}]}],
+  "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "guard.sh"}]}]
+ },
+ "model": "opus"
+}"#;
+#[test]
+fn claude_install_writes_owned_entries_with_the_token_at_mode_0600() {
+    let (home, dir) = home_with_acd();
+    std::fs::write(dir.join("config.toml"), "hook_port = 47999\n").unwrap();
+    let out = install(&dir, home.path(), "claude", &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let p = home.path().join(".claude/settings.json");
+    assert_eq!(mode(&p), 0o600);
+    let v = json_of(&p);
+    let token = hook_token_of(&dir);
+    for (event, timeout) in [
+        ("UserPromptSubmit", 1),
+        ("PermissionRequest", 3610),
+        ("PreToolUse", 1),
+        ("PostToolUse", 1),
+        ("Stop", 1),
+        ("SessionEnd", 1),
+    ] {
+        let e = &v["hooks"][event][0]["hooks"][0];
+        assert_eq!(e["type"], "http", "{event}");
+        assert_eq!(e["timeout"], timeout, "{event}");
+        assert_eq!(
+            e["url"],
+            format!("http://127.0.0.1:47999/hook/claude/{event}?marker=acd-managed:v1")
+        );
+        assert_eq!(e["headers"]["X-Acd-Token"], token.as_str());
+        assert_eq!(e["headers"]["X-Herdr-Pane"], "$HERDR_PANE_ID");
+        assert_eq!(
+            e["allowedEnvVars"],
+            serde_json::json!([
+                "HERDR_PANE_ID",
+                "HERDR_SOCKET_PATH",
+                "CLAUDE_CODE_ENTRYPOINT"
+            ])
+        );
+    }
+    assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "AskUserQuestion");
+    assert!(v["hooks"].get("SessionStart").is_none());
+    assert_eq!(mode(&dir.join("hooks-installed.json")), 0o600);
+    for o in [&out.stdout, &out.stderr] {
+        assert!(!String::from_utf8_lossy(o).contains(&token));
+    }
+}
+#[test]
+fn install_twice_then_uninstall_is_identity() {
+    for (target, rel, original) in [
+        ("claude", ".claude/settings.json", FOREIGN_CLAUDE),
+        (
+            "codex",
+            ".codex/hooks.json",
+            r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify"}]}]}}"#,
+        ),
+    ] {
+        let (home, dir) = home_with_acd();
+        let p = home.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, original).unwrap();
+        assert!(install(&dir, home.path(), target, &[]).status.success());
+        assert!(install(&dir, home.path(), target, &[]).status.success());
+        assert_eq!(
+            owned_count(&json_of(&p)),
+            if target == "claude" { 7 } else { 5 }
+        );
+        let out = uninstall(&dir, home.path(), target);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            json_of(&p),
+            serde_json::from_str::<serde_json::Value>(original).unwrap()
+        );
+    }
+}
+#[test]
+fn refuses_symlink_and_tracked_settings() {
+    let (home, dir) = home_with_acd();
+    let c = home.path().join(".claude");
+    std::fs::create_dir_all(&c).unwrap();
+    let real = home.path().join("dotfiles-settings.json");
+    std::fs::write(&real, "{}").unwrap();
+    std::os::unix::fs::symlink(&real, c.join("settings.json")).unwrap();
+    let out = install(&dir, home.path(), "claude", &[]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("symlink"));
+    std::fs::remove_file(c.join("settings.json")).unwrap();
+    std::fs::write(c.join("settings.json"), "{}").unwrap();
+    let git = |a: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(&c)
+            .args(a)
+            .env("HOME", home.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap()
+    };
+    git(&["init", "-q"]);
+    git(&["add", "settings.json"]);
+    let out = install(&dir, home.path(), "claude", &[]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("tracked by Git") && err.contains("--allow-tracked"),
+        "{err}"
+    );
+    assert!(
+        install(&dir, home.path(), "claude", &["--allow-tracked"])
+            .status
+            .success()
+    );
+}
+#[test]
+fn uninstall_survives_claude_reformatting() {
+    let (home, dir) = home_with_acd();
+    let p = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, FOREIGN_CLAUDE).unwrap();
+    install(&dir, home.path(), "claude", &[]);
+    let mut v = json_of(&p);
+    v["permissions"]["allow"]
+        .as_array_mut()
+        .unwrap()
+        .push("Bash(touch /tmp/*)".into());
+    std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    assert!(uninstall(&dir, home.path(), "claude").status.success());
+    let mut want: serde_json::Value = serde_json::from_str(FOREIGN_CLAUDE).unwrap();
+    want["permissions"]["allow"]
+        .as_array_mut()
+        .unwrap()
+        .push("Bash(touch /tmp/*)".into());
+    assert_eq!(json_of(&p), want);
+}
+#[test]
+fn no_file_before_install_means_no_file_after_uninstall() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "codex", &[]).status.success());
+    let p = home.path().join(".codex/hooks.json");
+    assert!(p.exists());
+    assert!(uninstall(&dir, home.path(), "codex").status.success());
+    assert!(!p.exists());
+}
+#[test]
+fn codex_commands_call_the_absolute_binary_with_config_dir_and_marker() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "codex", &[]).status.success());
+    let v = json_of(&home.path().join(".codex/hooks.json"));
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_acd")).unwrap();
+    for (event, timeout) in [
+        ("SessionStart", 2),
+        ("UserPromptSubmit", 2),
+        ("PermissionRequest", 1),
+        ("PostToolUse", 2),
+        ("Stop", 2),
+    ] {
+        let e = &v["hooks"][event][0]["hooks"][0];
+        assert_eq!(e["type"], "command");
+        assert_eq!(e["timeout"], timeout);
+        let cmd = e["command"].as_str().unwrap();
+        assert!(
+            cmd.starts_with(&format!(
+                "'{}' hook codex {event} --config-dir '",
+                exe.display()
+            )),
+            "{cmd}"
+        );
+        assert!(cmd.ends_with(" acd-managed:v1"));
+    }
+    assert!(
+        !String::from_utf8_lossy(&std::fs::read(dir.join("hooks-installed.json")).unwrap())
+            .is_empty()
+    );
+}
+#[test]
+fn backups_are_private_and_outside_settings_dir() {
+    let (home, dir) = home_with_acd();
+    let p = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, FOREIGN_CLAUDE).unwrap();
+    install(&dir, home.path(), "claude", &[]);
+    let b = dir.join("backups");
+    assert_eq!(mode(&b), 0o700);
+    let files: Vec<_> = std::fs::read_dir(&b)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(mode(&files[0]), 0o600);
+    assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), FOREIGN_CLAUDE);
+    assert_eq!(std::fs::read_dir(p.parent().unwrap()).unwrap().count(), 1);
+}
+#[test]
+fn claude_config_dir_is_honoured() {
+    let (home, dir) = home_with_acd();
+    let c = home.path().join("custom-claude");
+    let out = acd_home(&dir, home.path())
+        .env("CLAUDE_CONFIG_DIR", &c)
+        .args(["hooks", "install", "claude"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(c.join("settings.json").exists());
+    assert!(!home.path().join(".claude/settings.json").exists());
+}
+#[test]
+fn concurrent_installs_are_serialized() {
+    let (home, dir) = home_with_acd();
+    let kids: Vec<_> = (0..4)
+        .map(|_| {
+            acd_home(&dir, home.path())
+                .args(["hooks", "install", "claude"])
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for mut k in kids {
+        assert!(k.wait().unwrap().success());
+    }
+    assert_eq!(
+        owned_count(&json_of(&home.path().join(".claude/settings.json"))),
+        7
+    );
+}
+#[cfg(debug_assertions)]
+#[test]
+fn a_change_between_read_and_rename_is_kept() {
+    let (home, dir) = home_with_acd();
+    let p = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, "{}").unwrap();
+    let out = acd_home(&dir, home.path())
+        .env("ACD_TEST_TOUCH_SETTINGS", r#"{"model":"opus"}"#)
+        .args(["hooks", "install", "claude"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = json_of(&p);
+    assert_eq!(v["model"], "opus");
+    assert_eq!(owned_count(&v), 7);
+}
+#[test]
+fn a_changed_config_root_gets_its_own_record() {
+    let (home, dir) = home_with_acd();
+    let a = home.path().join("claude-a");
+    let b = home.path().join("claude-b");
+    for r in [&a, &b] {
+        assert!(
+            acd_home(&dir, home.path())
+                .env("CLAUDE_CONFIG_DIR", r)
+                .args(["hooks", "install", "claude"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let rec = json_of(&dir.join("hooks-installed.json"));
+    assert_eq!(rec["files"].as_object().unwrap().len(), 2);
+    assert!(
+        acd_home(&dir, home.path())
+            .env("CLAUDE_CONFIG_DIR", &b)
+            .args(["hooks", "uninstall", "claude"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!b.join("settings.json").exists());
+    assert_eq!(owned_count(&json_of(&a.join("settings.json"))), 7);
+}
+#[cfg(debug_assertions)]
+#[test]
+fn a_record_write_failure_is_repaired_by_the_journal() {
+    let (home, dir) = home_with_acd();
+    let p = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, FOREIGN_CLAUDE).unwrap();
+    let out = acd_home(&dir, home.path())
+        .env("ACD_TEST_FAIL_AT", "record-write")
+        .args(["hooks", "install", "claude", "--allow-unknown-git"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("injected failure at record-write"));
+    assert!(dir.join("hooks-journal.json").exists());
+    assert_eq!(owned_count(&json_of(&p)), 7);
+    assert!(uninstall(&dir, home.path(), "claude").status.success());
+    assert_eq!(
+        json_of(&p),
+        serde_json::from_str::<serde_json::Value>(FOREIGN_CLAUDE).unwrap()
+    );
+    assert!(!dir.join("hooks-journal.json").exists());
+}
+#[cfg(debug_assertions)]
+#[test]
+fn an_unknown_git_status_is_refused_without_the_flag() {
+    let (home, dir) = home_with_acd();
+    let run = |extra: &[&str]| {
+        acd_home(&dir, home.path())
+            .env("ACD_TEST_GIT", "/nonexistent/git")
+            .args(["hooks", "install", "claude"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let out = run(&[]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--allow-unknown-git"));
+    assert!(run(&["--allow-unknown-git"]).status.success());
+}
+#[test]
+fn a_deleted_but_still_tracked_settings_file_is_refused() {
+    let (home, dir) = home_with_acd();
+    let c = home.path().join(".claude");
+    std::fs::create_dir_all(&c).unwrap();
+    std::fs::write(c.join("settings.json"), "{}").unwrap();
+    let git = |a: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(&c)
+            .args(a)
+            .env("HOME", home.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap()
+    };
+    git(&["init", "-q"]);
+    git(&["add", "settings.json"]);
+    std::fs::remove_file(c.join("settings.json")).unwrap();
+    let out = install(&dir, home.path(), "claude", &[]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("tracked by Git"));
+}
+#[test]
+fn entries_that_only_mention_the_marker_are_left_alone() {
+    let (home, dir) = home_with_acd();
+    let p = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    let f = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo acd-managed:v1 >> /tmp/log"}]}]}}"#;
+    std::fs::write(&p, f).unwrap();
+    let out = install(&dir, home.path(), "claude", &[]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unexpected"));
+    assert!(uninstall(&dir, home.path(), "claude").status.success());
+    assert_eq!(
+        json_of(&p),
+        serde_json::from_str::<serde_json::Value>(f).unwrap()
+    );
+}
