@@ -49,6 +49,16 @@ fn post_answer(label: &str) -> Value {
     p
 }
 
+fn pre_question(labels: &[&str]) -> Value {
+    let mut p = fx("claude/payload-PreToolUse-AskUserQuestion.json");
+    p["tool_input"]["questions"][0]["options"] = labels
+        .iter()
+        .map(|label| json!({"label": label, "description": "d"}))
+        .collect::<Vec<_>>()
+        .into();
+    p
+}
+
 #[tokio::test]
 async fn a_single_question_is_answered_with_its_number_key_and_attributed() {
     let (r, agent) = question_rig().await;
@@ -124,6 +134,235 @@ async fn a_question_answered_with_another_option_is_terminal() {
     r.hook("claude", "PostToolUse", &post_answer("Blue"), &h)
         .await;
     assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Terminal);
+}
+
+#[tokio::test]
+async fn a_changed_option_set_shadows_the_older_question_answer() {
+    let r = rig(&[], |_| {}).await;
+    r.hook(
+        "claude",
+        "PreToolUse",
+        &pre_question(&["Red", "Blue"]),
+        &CLI,
+    )
+    .await;
+    let q1 = until("first question", || {
+        r.agent(HOOKS_ONLY).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    r.hook(
+        "claude",
+        "PreToolUse",
+        &pre_question(&["Blue", "Green", "Red"]),
+        &CLI,
+    )
+    .await;
+    let q2 = until("changed question", || {
+        r.agent(HOOKS_ONLY)
+            .and_then(|a| a.pending)
+            .map(|p| p.id)
+            .filter(|id| *id != q1)
+    })
+    .await;
+    r.hook("claude", "PostToolUse", &post_answer("Red"), &CLI)
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        r.core.request(&q2).map(|q| q.status),
+        Some(RequestStatus::Open)
+    );
+}
+
+#[tokio::test]
+async fn an_unrelated_question_outcome_does_not_resolve_or_consume_evidence() {
+    let r = rig(&[], |_| {}).await;
+    r.hook(
+        "claude",
+        "PreToolUse",
+        &pre_question(&["Red", "Blue"]),
+        &CLI,
+    )
+    .await;
+    let q = until("question", || {
+        r.agent(HOOKS_ONLY).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    let mut other = post_answer("Red");
+    other["tool_response"]["answers"] = json!({"A different question?": "Yes"});
+    other["tool_input"]["answers"] = json!({"A different question?": "Yes"});
+    r.hook("claude", "PostToolUse", &other, &CLI).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        r.core.request(&q).map(|q| q.status),
+        Some(RequestStatus::Open)
+    );
+    let mut matching = post_answer("Blue");
+    let questions = pre_question(&["Red", "Blue"])["tool_input"]["questions"].clone();
+    matching["tool_input"]["questions"] = questions.clone();
+    matching["tool_response"]["questions"] = questions;
+    let (_, mut rx) = r.core.attach(None);
+    r.hook("claude", "PostToolUse", &matching, &CLI).await;
+    assert_eq!(resolution(&mut rx, &q).await, ResolvedBy::Terminal);
+}
+
+#[tokio::test]
+async fn an_uncaptured_question_is_attributed_by_hooks_only() {
+    let r = rig(&[fake_agent("w1:p1", "claude", "blocked")], |_| {}).await;
+    r.fake.as_ref().unwrap().set_screen(
+        "w1:p1",
+        "detection",
+        &herdr_screen("claude-idle-detection.txt"),
+    );
+    let agent = r
+        .herdr
+        .as_ref()
+        .unwrap()
+        .panes()
+        .read()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    r.hook(
+        "claude",
+        "PreToolUse",
+        &fx("claude/payload-PreToolUse-AskUserQuestion.json"),
+        &h,
+    )
+    .await;
+    let q = until("read-only question", || {
+        r.agent(&agent)
+            .and_then(|a| a.pending)
+            .filter(|p| p.kind == RequestKind::Question)
+            .map(|p| p.id)
+    })
+    .await;
+    until("read-only path", || {
+        r.core
+            .request(&q)
+            .filter(|req| req.answer_path == AnswerPath::None)
+    })
+    .await;
+    let (_, mut rx) = r.core.attach(None);
+    r.hook("claude", "PostToolUse", &post_answer("Red"), &h)
+        .await;
+    assert_eq!(resolution(&mut rx, &q).await, ResolvedBy::Terminal);
+}
+
+#[tokio::test]
+async fn malformed_question_stays_read_only_without_a_keys_target() {
+    let (r, agent) = question_rig().await;
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut p = fx("claude/payload-PreToolUse-AskUserQuestion.json");
+    p["tool_input"]["questions"][0]["options"][1]["label"] = json!(42);
+    r.hook("claude", "PreToolUse", &p, &h).await;
+    let q = until("malformed question", || {
+        r.agent(&agent)
+            .and_then(|a| a.pending)
+            .filter(|p| p.kind == RequestKind::Question)
+            .map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(r.core.request(&q).unwrap().answer_path, AnswerPath::None);
+    assert!(r.herdr.as_ref().unwrap().keys_targets().get(&q).is_none());
+}
+
+#[tokio::test]
+async fn a_question_upgrades_the_existing_blocked_fallback_using_its_open_key() {
+    let (r, agent) = bound_rig().await;
+    r.fake.as_ref().unwrap().set_screen(
+        "w1:p1",
+        "detection",
+        &herdr_screen("claude-permission-bash.txt"),
+    );
+    r.fake.as_ref().unwrap().set_screen(
+        "w1:p1",
+        "visible",
+        &herdr_screen("claude-permission-bash.txt"),
+    );
+    let (_, mut rx) = r.core.attach(None);
+    let fallback_id = until("blocked fallback", || {
+        r.agent(&agent)
+            .and_then(|a| a.pending)
+            .filter(|p| p.kind == RequestKind::BlockedUnparsed)
+            .map(|p| p.id)
+    })
+    .await;
+    let _fallback = r.core.request(&fallback_id).unwrap();
+    r.fake.as_ref().unwrap().set_screen(
+        "w1:p1",
+        "detection",
+        &herdr_screen("claude-askuserquestion-single.txt"),
+    );
+    r.fake.as_ref().unwrap().set_screen(
+        "w1:p1",
+        "visible",
+        &herdr_screen("claude-askuserquestion-single.txt"),
+    );
+    let mut h = bound_headers(&r);
+    h.push(("X-Claude-Entrypoint", "cli".into()));
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    r.hook(
+        "claude",
+        "PreToolUse",
+        &fx("claude/payload-PreToolUse-AskUserQuestion.json"),
+        &h,
+    )
+    .await;
+    let q = until("upgraded question", || {
+        r.agent(&agent)
+            .and_then(|a| a.pending)
+            .filter(|p| p.kind == RequestKind::Question)
+            .map(|p| p.id)
+    })
+    .await;
+    assert_eq!(q, fallback_id);
+    assert_eq!(r.core.request(&q).unwrap().kind, RequestKind::Question);
+    assert_eq!(
+        r.core.request(&q).unwrap().questions.as_ref().unwrap()[0].text,
+        "Pick a color"
+    );
+    let _ = &mut rx;
+}
+
+#[tokio::test]
+async fn a_switched_permission_is_resolved_through_the_evidence_hub() {
+    let (r, agent) = bound_rig().await;
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let (_, mut rx) = r.core.attach(None);
+    let q = until("held permission", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(held);
+    until("keys path", || {
+        r.core
+            .request(&q)
+            .filter(|req| req.answer_path == AnswerPath::Keys && req.status == RequestStatus::Open)
+    })
+    .await;
+    until("switched keys target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&q)
+    })
+    .await;
+    assert!(answer(&r, "a1", &q, "allow").await.ok);
+    let mut post = fx("claude/payload-PostToolUse-Bash.json");
+    post["tool_input"] = fx("claude/payload-PermissionRequest-Bash.json")["tool_input"].clone();
+    r.hook("claude", "PostToolUse", &post, &CLI).await;
+    assert_eq!(resolution(&mut rx, &q).await, ResolvedBy::Uncertain);
 }
 
 #[tokio::test]
