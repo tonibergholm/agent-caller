@@ -25,7 +25,7 @@ use acd_protocol::{Agent, AnswerPath, ErrorCode, Request, Source};
 use async_trait::async_trait;
 
 use self::claude_sessions::{CompleteScan, ProcCheck};
-use self::endpoint::{EndpointOptions, HookAuth, Mailbox, MailboxTx};
+use self::endpoint::{EndpointOptions, HookAuth, Mailbox, MailboxTx, Release};
 use crate::herdr::HerdrAdapter;
 use crate::t3::sessions::SessionMap;
 
@@ -173,6 +173,7 @@ pub struct HooksAdapter {
     opts: EndpointOptions,
     tx: MailboxTx,
     rx: Mutex<Option<Mailbox>>,
+    release: Release,
 }
 
 impl HooksAdapter {
@@ -199,10 +200,23 @@ impl HooksAdapter {
             opts,
             tx,
             rx: Mutex::new(Some(rx)),
+            release: Release::default(),
         })
     }
+    /// The hook endpoint. Build it once and clone it for every listener, so
+    /// the hold cap and hold ids are shared.
     pub fn router(&self, auth: Arc<HookAuth>) -> axum::Router {
-        endpoint::router(auth, self.tx.clone(), self.opts.clone())
+        endpoint::router_with_release(
+            auth,
+            self.tx.clone(),
+            self.opts.clone(),
+            self.release.clone(),
+        )
+    }
+    /// Shutdown: every held request gets an empty reply now, and so does
+    /// every holdable request that arrives later (fail open).
+    pub fn release_holds(&self) {
+        self.release.release();
     }
     pub fn start(self: &Arc<Self>, core: Arc<Core>) {
         let rx = self

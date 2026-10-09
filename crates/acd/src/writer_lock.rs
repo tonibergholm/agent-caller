@@ -14,7 +14,7 @@ pub struct WriterLock(#[allow(dead_code)] std::fs::File);
 
 /// Checks the opened descriptor (not the path): a regular file owned by the
 /// effective uid. A looser mode on an owned file is repaired via the descriptor.
-fn validate_descriptor(f: &std::fs::File, path: &Path) -> Result<()> {
+pub(crate) fn validate_descriptor(f: &std::fs::File, path: &Path) -> Result<()> {
     let m = f
         .metadata()
         .with_context(|| format!("could not inspect {}", path.display()))?;

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const ISOLATED: [&str; 17] = [
+pub const ISOLATED: [&str; 18] = [
     "HERDR_SOCKET_PATH",
     "HERDR_PANE_ID",
     "CLAUDE_CONFIG_DIR",
@@ -25,6 +25,7 @@ pub const ISOLATED: [&str; 17] = [
     "ACD_TEST_SERVICE_FAIL",
     "ACD_TEST_PAUSE_AT",
     "ACD_TEST_FAILPOINT",
+    "ACD_TEST_BLOCKING_MS",
 ];
 
 pub fn acd(dir: &Path) -> Command {
@@ -153,7 +154,7 @@ pub fn start_daemon_with(
     panic!("could not start acd after 5 attempts; last log: {last_log}");
 }
 
-fn ready(dir: &Path) -> bool {
+pub fn ready(dir: &Path) -> bool {
     dir.join("acd.sock").exists()
         && acd(dir)
             .arg("status")
@@ -161,4 +162,70 @@ fn ready(dir: &Path) -> bool {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
+}
+
+fn hook_request(path: &str, token: &str, headers: &[(&str, &str)], body: &str) -> String {
+    let mut req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nX-Acd-Token: {token}\r\n",
+        body.len()
+    );
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(body);
+    req
+}
+
+/// `(status, body)`; status 0 when the connection ended without a reply.
+fn hook_exchange(mut s: impl std::io::Read + std::io::Write, req: &str) -> (u16, String) {
+    s.write_all(req.as_bytes()).unwrap();
+    let mut raw = Vec::new();
+    let _ = s.read_to_end(&mut raw);
+    let out = String::from_utf8_lossy(&raw);
+    let status = out
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    (
+        status,
+        out.split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_owned())
+            .unwrap_or_default(),
+    )
+}
+
+/// A hook request to the daemon's loopback endpoint (blocking `std::net`).
+pub fn post_hook(
+    port: u16,
+    path: &str,
+    token: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, String) {
+    let s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    hook_exchange(s, &hook_request(path, token, headers, body))
+}
+
+/// The same request over the daemon's `hook.sock`.
+pub fn post_hook_unix(
+    sock: &Path,
+    path: &str,
+    token: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, String) {
+    let s = std::os::unix::net::UnixStream::connect(sock).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    hook_exchange(s, &hook_request(path, token, headers, body))
+}
+
+/// The current hook token from the store (Task 21 layout).
+pub fn store_token(dir: &Path) -> String {
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("hook-tokens.json")).unwrap())
+            .unwrap();
+    v["current"].as_str().unwrap().to_owned()
 }

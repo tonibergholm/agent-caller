@@ -443,7 +443,7 @@ fn token_forms(token: &str) -> Vec<String> {
 }
 
 #[test]
-fn trace_logs_never_contain_the_token() {
+fn trace_logs_never_contain_either_token() {
     for rust_log in [
         "trace",
         "trace,tungstenite::protocol::frame=trace,tokio_tungstenite=trace,axum::extract::ws=trace",
@@ -456,6 +456,32 @@ fn trace_logs_never_contain_the_token() {
         let started = start(&dir, "log-box", &[("RUST_LOG", rust_log)]);
         let log_path = started.log.clone();
         let status = status_when_ready(&dir, Some(rust_log));
+        let hook = common::store_token(&dir);
+        let body = std::fs::read_to_string(format!(
+            "{}/../../tests/fixtures/hooks/claude/payload-UserPromptSubmit.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let path = "/hook/claude/UserPromptSubmit";
+        let cli = [("X-Claude-Entrypoint", "cli")];
+        assert_eq!(
+            common::post_hook(started.hook_port, path, &hook, &cli, &body).0,
+            200
+        );
+        assert_eq!(
+            common::post_hook(started.hook_port, path, "wrong-token-value", &[], &body).0,
+            401
+        );
+        // The same over hook.sock (Codex's path).
+        let sock = dir.join("hook.sock");
+        assert_eq!(
+            common::post_hook_unix(&sock, path, &hook, &cli, &body).0,
+            200
+        );
+        assert_eq!(
+            common::post_hook_unix(&sock, path, "wrong-token-value", &[], &body).0,
+            401
+        );
         drop(started);
         let daemon_log = std::fs::read_to_string(&log_path).unwrap();
         let status_log = String::from_utf8_lossy(&status.stderr).into_owned();
@@ -463,16 +489,25 @@ fn trace_logs_never_contain_the_token() {
             daemon_log.contains("TRACE"),
             "{rust_log}: expected trace output from the daemon"
         );
-        for form in token_forms(&token) {
+        for form in token_forms(&token).into_iter().chain(token_forms(&hook)) {
             assert!(
                 !daemon_log.contains(&form),
-                "{rust_log}: daemon log contains the token as {form}"
+                "{rust_log}: daemon log contains a token as {form}"
             );
             assert!(
                 !status_log.contains(&form),
-                "{rust_log}: status log contains the token as {form}"
+                "{rust_log}: status log contains a token as {form}"
             );
         }
+        // Sol I8: the rejection log carries only the opaque remote id.
+        assert!(
+            daemon_log.contains("missing or retired token"),
+            "{rust_log}"
+        );
+        assert!(
+            !daemon_log.contains("wrong-token-value"),
+            "{rust_log}: daemon log contains a rejected token"
+        );
     }
 }
 
@@ -518,7 +553,10 @@ fn status_never_sends_the_token_over_tcp() {
     assert!(acd(&dir).arg("init").status().unwrap().success());
     std::fs::write(
         dir.join("config.toml"),
-        format!("port = {port}\nlisten = [\"loopback\"]\n"),
+        format!(
+            "port = {port}\nhook_port = {}\nlisten = [\"loopback\"]\n",
+            free_port()
+        ),
     )
     .unwrap();
     let token = std::fs::read_to_string(dir.join("client.token"))
@@ -541,7 +579,10 @@ fn run_refuses_empty_or_short_client_token() {
         let port = free_port();
         std::fs::write(
             dir.join("config.toml"),
-            format!("port = {port}\nlisten = [\"loopback\"]\n"),
+            format!(
+                "port = {port}\nhook_port = {}\nlisten = [\"loopback\"]\n",
+                free_port()
+            ),
         )
         .unwrap();
         std::fs::write(dir.join("client.token"), bad).unwrap();
@@ -561,7 +602,10 @@ fn run_fails_when_a_listen_address_cannot_be_bound() {
     let port = blocker.local_addr().unwrap().port();
     std::fs::write(
         dir.join("config.toml"),
-        format!("port = {port}\nlisten = [\"loopback\"]\n"),
+        format!(
+            "port = {port}\nhook_port = {}\nlisten = [\"loopback\"]\n",
+            free_port()
+        ),
     )
     .unwrap();
     let (status, err) = run_expecting_exit(&dir);

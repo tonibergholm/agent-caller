@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use super::mapping::log_payload;
@@ -283,6 +283,30 @@ impl MailboxTx {
 
 type ControlSlot = mpsc::OwnedPermit<Inbound>;
 
+/// Releases every held request with an empty reply, and answers holdable
+/// requests that arrive later with an empty reply at once (shutdown, fail
+/// open).
+#[derive(Clone)]
+pub struct Release(Arc<watch::Sender<bool>>);
+
+impl Default for Release {
+    fn default() -> Self {
+        Self(Arc::new(watch::channel(false).0))
+    }
+}
+
+impl Release {
+    pub fn release(&self) {
+        self.0.send_replace(true);
+    }
+
+    async fn released(mut rx: watch::Receiver<bool>) {
+        // The sender lives in `Release`, which `Ctx` holds, so the channel
+        // never closes while a handler waits on it.
+        let _ = rx.wait_for(|released| *released).await;
+    }
+}
+
 #[derive(Clone)]
 struct Ctx {
     auth: Arc<HookAuth>,
@@ -290,22 +314,35 @@ struct Ctx {
     opts: EndpointOptions,
     holds: Arc<Semaphore>,
     next: Arc<AtomicU64>,
+    release: Release,
 }
 
 impl Ctx {
-    fn new(auth: Arc<HookAuth>, tx: MailboxTx, opts: EndpointOptions) -> Self {
+    fn new(auth: Arc<HookAuth>, tx: MailboxTx, opts: EndpointOptions, release: Release) -> Self {
         Ctx {
             auth,
             tx,
             holds: Arc::new(Semaphore::new(opts.max_holds)),
             opts,
             next: Arc::default(),
+            release,
         }
     }
 }
 
+/// One router per endpoint: clone it to serve it on several listeners, so
+/// the hold cap and hold ids are shared.
 pub fn router(auth: Arc<HookAuth>, tx: MailboxTx, opts: EndpointOptions) -> Router {
-    let ctx = Ctx::new(auth, tx, opts);
+    router_with_release(auth, tx, opts, Release::default())
+}
+
+pub fn router_with_release(
+    auth: Arc<HookAuth>,
+    tx: MailboxTx,
+    opts: EndpointOptions,
+    release: Release,
+) -> Router {
+    let ctx = Ctx::new(auth, tx, opts, release);
     Router::new()
         .route("/hook/{agent}/{event}", any(handle))
         .fallback(|| async { StatusCode::UNAUTHORIZED })
@@ -403,7 +440,7 @@ pub struct DirectHooks(Ctx);
 #[cfg(any(test, feature = "testing"))]
 impl DirectHooks {
     pub fn new(auth: Arc<HookAuth>, tx: MailboxTx, opts: EndpointOptions) -> Self {
-        DirectHooks(Ctx::new(auth, tx, opts))
+        DirectHooks(Ctx::new(auth, tx, opts, Release::default()))
     }
 
     /// The handler for `POST /hook/{agent}/{event}` with `req`.
@@ -456,7 +493,15 @@ async fn hold(
         generation,
         permit,
     });
-    let result = tokio::time::timeout(ctx.opts.permission_hold, receive).await;
+    let released = Release::released(ctx.release.0.subscribe());
+    let result = tokio::select! {
+        // An answer that is already here wins over a release.
+        biased;
+        result = tokio::time::timeout(ctx.opts.permission_hold, receive) => result,
+        // Shutdown: the guard reports `HoldClosed`, so the reconciler stays
+        // the only owner of the hold's state.
+        () = released => return empty(),
+    };
     let end = guard.end.take();
     match result {
         Ok(Ok(body)) if !body.is_empty() => {

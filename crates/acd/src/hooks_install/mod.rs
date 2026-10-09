@@ -71,7 +71,6 @@ impl Record {
     }
 }
 
-#[allow(dead_code)]
 pub fn recorded_claude_roots(config_dir: &Path) -> Vec<PathBuf> {
     Record::load(config_dir)
         .map(|r| {

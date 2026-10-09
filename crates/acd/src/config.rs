@@ -18,6 +18,9 @@ pub struct Config {
     pub herdr: HerdrSection,
     pub t3: T3Section,
     pub claude: ClaudeSection,
+    /// Claude entrypoints (such as the Agent SDK's) whose sessions are not
+    /// shown unless they are bound to a herdr pane.
+    pub ignored_entrypoints: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -86,8 +89,23 @@ impl Default for Config {
             herdr: HerdrSection::default(),
             t3: T3Section::default(),
             claude: ClaudeSection::default(),
+            ignored_entrypoints: vec!["sdk-ts".into()],
         }
     }
+}
+
+/// A free loopback port other than `avoid`, for a new config's `hook_port`
+/// (amendment A1: not a well-known default).
+pub fn random_free_port(avoid: u16) -> Result<u16> {
+    for _ in 0..16 {
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+            .local_addr()?
+            .port();
+        if port != avoid {
+            return Ok(port);
+        }
+    }
+    anyhow::bail!("could not find a free loopback port")
 }
 
 impl Config {
@@ -113,6 +131,16 @@ mod tests {
         assert_eq!(c.hook_port, DEFAULT_HOOK_PORT);
         assert_eq!(c.listen, vec!["loopback", "tailscale"]);
         assert!(c.herdr.enabled);
+    }
+
+    #[test]
+    fn ignored_entrypoints_default_and_parse() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.ignored_entrypoints, vec!["sdk-ts"]);
+        let c: Config = toml::from_str("ignored_entrypoints = []\n").unwrap();
+        assert!(c.ignored_entrypoints.is_empty());
+        let c: Config = toml::from_str("ignored_entrypoints = [\"a\", \"b\"]\n").unwrap();
+        assert_eq!(c.ignored_entrypoints, vec!["a", "b"]);
     }
 
     #[test]

@@ -325,6 +325,47 @@ async fn a_released_hold_replies_empty() {
 }
 
 #[tokio::test]
+async fn release_answers_open_and_later_holds_empty_and_reports_them_closed() {
+    let opts = EndpointOptions::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, mut mailbox) = mailbox(&opts);
+    let auth = Arc::new(HookAuth::new(cred(TOKEN, 1)));
+    let release = Release::default();
+    let app = router_with_release(auth, tx, opts.clone(), release.clone());
+    tokio::spawn(async move {
+        axum::serve(capped(listener, opts.max_connections), app)
+            .await
+            .unwrap()
+    });
+    let body = fx("claude/payload-PermissionRequest-Bash.json");
+    let stream = send(port, "/hook/claude/PermissionRequest", TOKEN, &[], &body).await;
+    // The reconciler keeps the reply sender: only the release can end it.
+    let Inbound::Held { hold, reply, .. } = next_control(&mut mailbox).await else {
+        panic!("not held")
+    };
+    release.release();
+    assert_eq!(
+        timeout(Duration::from_secs(2), read_response(stream))
+            .await
+            .expect("released in time"),
+        (200, String::new())
+    );
+    match next_control(&mut mailbox).await {
+        Inbound::HoldClosed { hold: closed } => assert_eq!(closed, hold),
+        other => panic!("{other:?}"),
+    }
+    drop(reply);
+    // A holdable request after the release is answered at once.
+    let started = Instant::now();
+    assert_eq!(
+        post(port, "/hook/claude/PermissionRequest", TOKEN, &[], &body).await,
+        (200, String::new())
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[tokio::test]
 async fn a_client_close_is_seen_as_hold_closed() {
     let (port, _, mut mailbox) = serve(EndpointOptions::default()).await;
     let stream = send(

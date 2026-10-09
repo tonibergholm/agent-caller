@@ -5,6 +5,7 @@ mod hook_shim;
 mod hook_token;
 mod hooks_install;
 mod identity;
+mod local_socket;
 mod pair;
 mod paths;
 mod secrets;
@@ -265,15 +266,26 @@ fn real_main() -> Result<()> {
                         println!("Backup: {}", b.display());
                     }
                     match target {
-                        hooks_install::Target::Claude => println!(
-                            "Claude reads hooks when a session starts: restart running sessions or run /clear in them."
-                        ),
+                        hooks_install::Target::Claude => {
+                            println!(
+                                "Claude reads hooks when a session starts: restart running sessions or run /clear in them."
+                            );
+                            println!(
+                                "Trust note: Claude sends its hooks, with the hook token, to 127.0.0.1:{}. While acd is not running, another local user or process can take that port, read the token and payloads, and approve Claude permission prompts. Use acd v1 on personal, trusted hosts only.",
+                                ctx.hook_port
+                            );
+                        }
                         hooks_install::Target::Codex => println!(
                             "Codex may ask you to review these hooks the first time it runs them. Codex sessions that share Codex's background app-server can be answered from the inbox only when acd can tell which herdr pane they run in; otherwise their prompts are shown read-only."
                         ),
                     }
                 }
-                HooksCmd::Status => print!("{}", hooks_install::status(&ctx)?),
+                HooksCmd::Status => {
+                    print!("{}", hooks_install::status(&ctx)?);
+                    if let Some(w) = status::hook_port_warning(&dir, ctx.hook_port) {
+                        eprintln!("warning: {w}");
+                    }
+                }
                 HooksCmd::Uninstall { target } => {
                     let r = hooks_install::uninstall(&ctx, target)?;
                     if let Some(n) = &r.recovery_note {
@@ -305,7 +317,14 @@ fn real_main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Run => tokio::runtime::Runtime::new()?.block_on(daemon::run(&dir)),
+        Cmd::Run => {
+            let rt = tokio::runtime::Runtime::new()?;
+            let result = rt.block_on(daemon::run(&dir));
+            // Blocking tasks (registry scans, path resolution) must not
+            // delay the exit.
+            rt.shutdown_timeout(std::time::Duration::from_millis(500));
+            result
+        }
         Cmd::Status => tokio::runtime::Runtime::new()?.block_on(status::status(&dir)),
     }
 }
@@ -376,7 +395,9 @@ fn init(dir: &Path, force: bool) -> Result<()> {
     };
     let cfg_path = dir.join("config.toml");
     if cfg_path.symlink_metadata().is_err() {
-        secrets::write_secret(&cfg_path, &toml::to_string(&config::Config::default())?)?;
+        let mut cfg = config::Config::default();
+        cfg.hook_port = config::random_free_port(cfg.port)?;
+        secrets::write_secret(&cfg_path, &toml::to_string(&cfg)?)?;
         created.push("config.toml");
     }
     tls::ensure(dir)?;

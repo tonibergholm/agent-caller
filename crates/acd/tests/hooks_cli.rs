@@ -892,6 +892,13 @@ fn claude_install_writes_owned_entries_with_the_token_at_mode_0600() {
     for o in [&out.stdout, &out.stderr] {
         assert!(!String::from_utf8_lossy(o).contains(&token));
     }
+    // Amendment A1: the residual risk of loopback http hooks.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Trust note") && stdout.contains("127.0.0.1:47999"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("trusted hosts"), "{stdout}");
 }
 #[test]
 fn install_twice_then_uninstall_is_identity() {
@@ -1614,38 +1621,48 @@ fn wait_for_exit(daemon: &mut Daemon, what: &str) -> std::process::ExitStatus {
 #[test]
 fn a_dead_server_task_exits_1_so_the_supervisor_restarts_acd() {
     let (_home, dir) = home_with_acd();
-    let mut daemon = spawn_run(&dir, &[("ACD_TEST_STOP_SERVER", "local")]);
-    let sock = dir.join("acd.sock");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !sock.exists() {
+    for (server, name) in [
+        ("local", "local socket"),
+        ("hook", "hook endpoint"),
+        ("hook-sock", "hook socket"),
+    ] {
+        let mut daemon = spawn_run(&dir, &[("ACD_TEST_STOP_SERVER", server)]);
+        let sock = dir.join("acd.sock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !sock.exists() {
+            assert!(
+                daemon.0.try_wait().unwrap().is_none(),
+                "{server}: acd exited before binding its local socket"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{server}: acd did not bind its local socket"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let status = wait_for_exit(
+            &mut daemon,
+            &format!("acd kept running without its {name} server"),
+        );
+        assert_eq!(status.code(), Some(1), "{server}");
+        use std::io::Read as _;
+        let mut stderr = String::new();
+        daemon
+            .0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
         assert!(
-            daemon.0.try_wait().unwrap().is_none(),
-            "acd exited before binding its local socket"
+            stderr.contains("a server task stopped; exiting") && stderr.contains(name),
+            "{server}: {stderr}"
         );
         assert!(
-            std::time::Instant::now() < deadline,
-            "acd did not bind its local socket"
+            !sock.exists() && !dir.join("hook.sock").exists(),
+            "{server}"
         );
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let status = wait_for_exit(
-        &mut daemon,
-        "acd kept running without its local socket server",
-    );
-    assert_eq!(status.code(), Some(1));
-    use std::io::Read as _;
-    let mut stderr = String::new();
-    daemon
-        .0
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
-    assert!(
-        stderr.contains("a server task stopped; exiting"),
-        "{stderr}"
-    );
 }
 
 #[test]
@@ -1677,4 +1694,478 @@ fn a_panic_exits_with_70_so_the_supervisor_restarts_acd() {
     let mut daemon = spawn_run(&dir, &[("ACD_TEST_PANIC_AFTER_MS", "200")]);
     let status = wait_for_exit(&mut daemon, "acd did not exit after a panic");
     assert_eq!(status.code(), Some(70));
+}
+
+// ---- Task 30: daemon wiring (hook listeners, A1 socket rules) ----
+
+fn claude_fixture(name: &str) -> String {
+    std::fs::read_to_string(format!(
+        "{}/../../tests/fixtures/hooks/claude/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+fn status_text(dir: &std::path::Path) -> String {
+    String::from_utf8_lossy(&acd(dir).arg("status").output().unwrap().stdout).into_owned()
+}
+
+fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn inode(p: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(p).unwrap().ino()
+}
+
+fn write_ports(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "port = {}\nhook_port = {}\nlisten = [\"loopback\"]\n",
+            free_port(),
+            free_port()
+        ),
+    )
+    .unwrap();
+}
+
+/// Runs `acd run` on fresh ports and expects it to exit by itself within
+/// 10 s. Retries when a picked port was taken meanwhile.
+fn run_to_exit(dir: &std::path::Path) -> (std::process::ExitStatus, String) {
+    for _ in 0..5 {
+        write_ports(dir);
+        let mut daemon = Daemon(
+            acd(dir)
+                .arg("run")
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(s) = daemon.0.try_wait().unwrap() {
+                break s;
+            }
+            assert!(Instant::now() < deadline, "acd run did not exit");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let mut err = String::new();
+        daemon
+            .0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut err)
+            .unwrap();
+        if !err.contains("Address already in use") {
+            return (status, err);
+        }
+    }
+    panic!("no free ports after 5 attempts");
+}
+
+#[test]
+fn the_daemon_serves_hooks_on_loopback_and_shows_the_session() {
+    let (_home, dir) = home_with_acd();
+    let started = start_daemon(&dir, None, "", &[]);
+    let token = store_token(&dir);
+    let body = claude_fixture("payload-UserPromptSubmit.json");
+    let path = "/hook/claude/UserPromptSubmit";
+    assert_eq!(
+        post_hook(started.hook_port, path, "wrong", &[], &body).0,
+        401
+    );
+    assert_eq!(
+        post_hook(
+            started.hook_port,
+            path,
+            &token,
+            &[("X-Claude-Entrypoint", "cli")],
+            &body
+        ),
+        (200, String::new())
+    );
+    let mut out = String::new();
+    wait_until("the hooks-only session appears", || {
+        out = status_text(&dir);
+        out.contains("Working Claude")
+    });
+    assert!(out.contains("hooks=Ok"), "{out}");
+}
+
+#[test]
+fn the_daemon_serves_the_same_endpoint_on_an_owner_only_hook_sock() {
+    let (_home, dir) = home_with_acd();
+    let _started = start_daemon(&dir, None, "", &[]);
+    let sock = dir.join("hook.sock");
+    assert_eq!(mode(&sock), 0o600);
+    let token = store_token(&dir);
+    let body = claude_fixture("payload-UserPromptSubmit.json");
+    let path = "/hook/claude/UserPromptSubmit";
+    assert_eq!(post_hook_unix(&sock, path, "wrong", &[], &body).0, 401);
+    assert_eq!(
+        post_hook_unix(
+            &sock,
+            path,
+            &token,
+            &[("X-Claude-Entrypoint", "cli")],
+            &body
+        ),
+        (200, String::new())
+    );
+    wait_until("the hooks-only session appears", || {
+        status_text(&dir).contains("Working Claude")
+    });
+}
+
+#[test]
+fn a_taken_hook_port_is_fatal_before_any_socket_is_served() {
+    let (_home, dir) = home_with_acd();
+    let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let hook_port = blocker.local_addr().unwrap().port();
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "port = {}\nhook_port = {hook_port}\nlisten = [\"loopback\"]\n",
+            free_port()
+        ),
+    )
+    .unwrap();
+    let mut daemon = Daemon(
+        acd(&dir)
+            .arg("run")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(s) = daemon.0.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "acd kept running without its hook endpoint"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut err = String::new();
+    daemon
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert!(!status.success());
+    assert!(err.contains("hook endpoint"), "{err}");
+    assert!(!dir.join("acd.sock").exists());
+    assert!(!dir.join("hook.sock").exists());
+}
+
+#[test]
+fn the_daemon_and_init_migrate_a_legacy_dir_concurrently_without_hanging() {
+    // Sol N7: both take hooks.lock once; neither reacquires it.
+    let (home, dir) = home_with_acd();
+    let token = store_token(&dir);
+    std::fs::remove_file(dir.join("hook-tokens.json")).unwrap();
+    std::fs::write(dir.join("hook.token"), format!("{token}\n")).unwrap();
+    set_mode(&dir.join("hook.token"), 0o600);
+    let inits: Vec<_> = (0..3)
+        .map(|_| {
+            acd_home(&dir, home.path())
+                .arg("init")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let started = start_daemon(&dir, None, "", &[]); // readiness bounds the daemon side (10 s)
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for mut c in inits {
+        loop {
+            if let Some(st) = c.try_wait().unwrap() {
+                assert!(st.success());
+                break;
+            }
+            assert!(Instant::now() < deadline, "acd init hung");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    assert_eq!(
+        store_token(&dir),
+        token,
+        "one migration; everyone agrees on the token"
+    );
+    assert!(!dir.join("hook.token").exists());
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &token, &[], "{}").0,
+        200
+    );
+}
+
+#[test]
+fn concurrent_starts_leave_exactly_one_daemon_with_its_sockets() {
+    let (_home, dir) = home_with_acd();
+    for _attempt in 0..5 {
+        write_ports(&dir);
+        let mut daemons: Vec<(Daemon, std::path::PathBuf)> = (0..3)
+            .map(|i| {
+                let log = dir.join(format!("concurrent-{i}.log"));
+                let child = acd(&dir)
+                    .arg("run")
+                    .stdout(Stdio::null())
+                    .stderr(std::fs::File::create(&log).unwrap())
+                    .spawn()
+                    .unwrap();
+                (Daemon(child), log)
+            })
+            .collect();
+        // Losers exit at once; the winner keeps running.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut exited = Vec::new();
+        while exited.len() < 2 && Instant::now() < deadline {
+            exited = (0..daemons.len())
+                .filter(|&i| daemons[i].0.0.try_wait().unwrap().is_some())
+                .collect();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let logs: Vec<String> = daemons
+            .iter()
+            .map(|(_, log)| std::fs::read_to_string(log).unwrap_or_default())
+            .collect();
+        if exited.len() == daemons.len()
+            && logs.iter().any(|l| l.contains("Address already in use"))
+        {
+            continue; // a picked port was taken meanwhile, so nobody won
+        }
+        assert_eq!(exited.len(), 2, "{logs:#?}");
+        for &i in &exited {
+            assert!(
+                !daemons[i].0.0.try_wait().unwrap().unwrap().success(),
+                "{}",
+                logs[i]
+            );
+            assert!(logs[i].contains("another acd is running"), "{}", logs[i]);
+        }
+        wait_until("the winner is ready", || ready(&dir));
+        let (acd_sock, hook_sock) = (inode(&dir.join("acd.sock")), inode(&dir.join("hook.sock")));
+        let winner = (0..3).find(|i| !exited.contains(i)).unwrap();
+        assert!(daemons[winner].0.0.try_wait().unwrap().is_none());
+        // A later start is refused too and leaves the winner's sockets alone.
+        let (status, err) = run_to_exit(&dir);
+        assert!(!status.success());
+        assert!(err.contains("another acd is running"), "{err}");
+        assert_eq!(inode(&dir.join("acd.sock")), acd_sock);
+        assert_eq!(inode(&dir.join("hook.sock")), hook_sock);
+        assert!(ready(&dir));
+        daemons.clear();
+        return;
+    }
+    panic!("no free ports after 5 attempts");
+}
+
+#[test]
+fn a_stale_hook_sock_is_replaced() {
+    let (_home, dir) = home_with_acd();
+    let sock = dir.join("hook.sock");
+    drop(UnixListener::bind(&sock).unwrap()); // left by a crashed daemon
+    let stale = inode(&sock);
+    let _started = start_daemon(&dir, None, "", &[]);
+    assert_ne!(inode(&sock), stale);
+    assert_eq!(mode(&sock), 0o600);
+    let body = claude_fixture("payload-UserPromptSubmit.json");
+    assert_eq!(
+        post_hook_unix(&sock, "/hook/claude/Stop", &store_token(&dir), &[], &body).0,
+        200
+    );
+}
+
+#[test]
+fn a_live_socket_is_never_replaced() {
+    for name in ["hook.sock", "acd.sock"] {
+        let (_home, dir) = home_with_acd();
+        let sock = dir.join(name);
+        let _live = UnixListener::bind(&sock).unwrap();
+        let before = inode(&sock);
+        let (status, err) = run_to_exit(&dir);
+        assert!(!status.success(), "{name}");
+        assert!(err.contains("is in use"), "{name}: {err}");
+        assert_eq!(inode(&sock), before, "{name}");
+        // Nothing acd bound before the refusal is left behind.
+        for other in ["hook.sock", "acd.sock"] {
+            if other != name {
+                assert!(!dir.join(other).exists(), "{name}: {other} left behind");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_path_that_is_not_a_socket_is_never_replaced() {
+    let (_home, dir) = home_with_acd();
+    let target = dir.join("elsewhere.sock");
+    drop(UnixListener::bind(&target).unwrap());
+    for (name, make) in [
+        (
+            "hook.sock",
+            &(|p: &std::path::Path| std::fs::write(p, b"x").unwrap()) as &dyn Fn(&std::path::Path),
+        ),
+        ("hook.sock", &|p: &std::path::Path| {
+            std::fs::create_dir(p).unwrap()
+        }),
+        ("acd.sock", &|p: &std::path::Path| {
+            std::os::unix::fs::symlink(dir.join("elsewhere.sock"), p).unwrap()
+        }),
+    ] {
+        let path = dir.join(name);
+        make(&path);
+        let (status, err) = run_to_exit(&dir);
+        assert!(!status.success(), "{name}");
+        assert!(err.contains("not a socket"), "{name}: {err}");
+        assert!(std::fs::symlink_metadata(&path).is_ok(), "{name} removed");
+        if path.is_dir() && !path.is_symlink() {
+            std::fs::remove_dir(&path).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    assert!(std::fs::symlink_metadata(&target).is_ok());
+}
+
+#[test]
+fn sigterm_answers_a_held_permission_request_empty_before_exiting() {
+    let (_home, dir) = home_with_acd();
+    let started = start_daemon(&dir, None, "", &[]);
+    let token = store_token(&dir);
+    let port = started.hook_port;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let body = claude_fixture("payload-PermissionRequest-Bash.json");
+        write!(
+            s,
+            "POST /hook/claude/PermissionRequest HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nX-Acd-Token: {token}\r\nX-Claude-Entrypoint: cli\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let _ = s.read_to_end(&mut out);
+        let _ = tx.send(String::from_utf8_lossy(&out).into_owned());
+    });
+    wait_until("the request is held and shown", || {
+        status_text(&dir).contains("NeedsYou Claude")
+    });
+    assert!(
+        rx.try_recv().is_err(),
+        "the request was answered before the stop"
+    );
+    let mut daemon = started.daemon;
+    let pid = daemon.0.id().to_string();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let reply = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the held request ended");
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    assert_eq!(reply.split_once("\r\n\r\n").map(|(_, b)| b), Some(""));
+    assert_eq!(
+        wait_for_exit(&mut daemon, "acd did not exit on SIGTERM").code(),
+        Some(0)
+    );
+    assert!(!dir.join("hook.sock").exists());
+}
+
+#[cfg(debug_assertions)] // ACD_TEST_BLOCKING_MS is debug-only
+#[test]
+fn a_blocking_task_does_not_delay_a_clean_exit() {
+    let (_home, dir) = home_with_acd();
+    let started = start_daemon(&dir, None, "", &[("ACD_TEST_BLOCKING_MS", "60000")]);
+    let mut daemon = started.daemon;
+    let pid = daemon.0.id().to_string();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        wait_for_exit(&mut daemon, "a blocking task delayed the exit").code(),
+        Some(0)
+    );
+}
+
+#[test]
+fn init_records_a_random_hook_port_and_keeps_an_existing_one() {
+    let read_port = |dir: &std::path::Path| -> u16 {
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let v: toml::Value = toml::from_str(&text).unwrap();
+        v["hook_port"].as_integer().unwrap() as u16
+    };
+    let (home, dir) = home_with_acd();
+    let first = read_port(&dir);
+    let (_home2, dir2) = home_with_acd();
+    assert!(
+        first != 47801 || read_port(&dir2) != 47801,
+        "init must not write the well-known default"
+    );
+    assert!(
+        acd_home(&dir, home.path())
+            .arg("init")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(read_port(&dir), first, "an existing config keeps its port");
+}
+
+#[test]
+fn status_and_hooks_status_warn_when_the_hook_port_is_held_while_acd_is_down() {
+    let (home, dir) = home_with_acd();
+    let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = squatter.local_addr().unwrap().port();
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "port = {}\nhook_port = {port}\nlisten = [\"loopback\"]\n",
+            free_port()
+        ),
+    )
+    .unwrap();
+    let warning = "is held by another process while acd is not running";
+    let out = acd(&dir).arg("status").output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(warning) && err.contains(&port.to_string()),
+        "{err}"
+    );
+    let out = hooks_status(&dir, home.path());
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(warning), "{err}");
+    drop(squatter);
+    let out = hooks_status(&dir, home.path());
+    assert!(!String::from_utf8_lossy(&out.stderr).contains(warning));
+    // A running acd holds the port itself.
+    let _started = start_daemon(&dir, None, "", &[]);
+    let out = hooks_status(&dir, home.path());
+    assert!(!String::from_utf8_lossy(&out.stderr).contains(warning));
 }

@@ -14,18 +14,25 @@ pub async fn status(dir: &Path) -> Result<()> {
     crate::preflight(dir)?;
     let token = secrets::read_secret(&dir.join("client.token"))?;
     let sock = socket_path(dir);
-    let stream = tokio::time::timeout(
+    let connected = tokio::time::timeout(
         Duration::from_secs(3),
         tokio::net::UnixStream::connect(&sock),
     )
-    .await
-    .context("timed out connecting to the local acd")?
-    .with_context(|| {
-        format!(
-            "cannot connect to {}; is `acd run` running?",
-            sock.display()
-        )
-    })?;
+    .await;
+    if !matches!(connected, Ok(Ok(_)))
+        && let Ok(cfg) = crate::config::Config::load(dir)
+        && let Some(w) = hook_port_warning(dir, cfg.hook_port)
+    {
+        eprintln!("warning: {w}");
+    }
+    let stream = connected
+        .context("timed out connecting to the local acd")?
+        .with_context(|| {
+            format!(
+                "cannot connect to {}; is `acd run` running?",
+                sock.display()
+            )
+        })?;
     let (mut ws, _) = tokio::time::timeout(
         Duration::from_secs(3),
         client_async("ws://localhost/", stream),
@@ -48,6 +55,25 @@ pub async fn status(dir: &Path) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), read_status(&mut ws))
         .await
         .context("timed out waiting for the daemon's snapshot")?
+}
+
+/// Best effort (amendment A1): when acd is not running but something holds
+/// the hook port, Claude would send that process its hooks and the token.
+/// Connects and test-binds the port; never sends a byte.
+pub fn hook_port_warning(dir: &Path, hook_port: u16) -> Option<String> {
+    if std::os::unix::net::UnixStream::connect(socket_path(dir)).is_ok() {
+        return None; // acd is running and holds the port itself
+    }
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], hook_port));
+    let held = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+        || std::net::TcpListener::bind(addr)
+            .err()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse);
+    held.then(|| {
+        format!(
+            "{addr} (hook_port) is held by another process while acd is not running; Claude hooks would send it the hook token and payloads, and it could answer Claude permission prompts. Stop that process, then start acd."
+        )
+    })
 }
 
 async fn read_status<S>(ws: &mut S) -> Result<()>

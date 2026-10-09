@@ -144,7 +144,6 @@ pub fn load(dir: &Path) -> Result<Store> {
     Ok(s)
 }
 
-#[allow(dead_code)] // public writer entry point; init uses ensure's locked migration
 pub fn migrate(dir: &Path) -> Result<Store> {
     let held = writer_lock::acquire(dir)?;
     migrate_locked(dir, &held)
