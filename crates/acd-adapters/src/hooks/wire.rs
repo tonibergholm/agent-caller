@@ -33,6 +33,7 @@ pub enum HookName {
     PostToolUse,
     Stop,
     SessionEnd,
+    /// Notification and anything newer: logged and ignored.
     Other,
 }
 
@@ -62,6 +63,7 @@ pub struct Payload {
     pub tool_response: Value,
     pub permission_suggestions: Vec<Value>,
     pub last_assistant_message: Option<String>,
+    /// Present on subagent payloads, which are always dropped (spec §6.2).
     pub agent_id: Option<String>,
 }
 
@@ -200,10 +202,18 @@ pub struct AlwaysRule {
     pub rule_content: String,
 }
 
+/// The single rule construction used for display and delivery (ruling Q2):
+/// a Bash request's exact command, else the first `addRules` suggestion.
+/// Claude reads `*` in a Bash rule as a wildcard and `(`, `)` delimit the
+/// rule, so a command holding any of them has no safe exact rule: no
+/// option is offered rather than a broader one than the user saw.
 pub fn always_rule(p: &Payload) -> Option<AlwaysRule> {
     if p.tool_name.as_deref() == Some("Bash")
         && let Some(c) = command_of(&p.tool_input)
     {
+        if c.contains(['*', '(', ')']) {
+            return None;
+        }
         return Some(AlwaysRule {
             tool_name: "Bash".into(),
             rule_content: c.into(),
@@ -266,6 +276,9 @@ mod tests {
             "codex/payload-PermissionRequest-Bash.json",
             "codex/payload-PostToolUse-Bash.json",
             "codex/payload-SessionStart.json",
+            "codex/payload-SessionStart-embedded-correct-env.json",
+            "codex/payload-SessionStart-fresh-app-server-other-pane-env.json",
+            "codex/payload-SessionStart-shared-daemon-stale-env.json",
             "codex/payload-UserPromptSubmit.json",
         ] {
             let p = payload(rel);
@@ -353,6 +366,32 @@ mod tests {
                 tool_name: "Edit".into(),
                 rule_content: "/x".into()
             })
+        );
+    }
+    #[test]
+    fn bash_commands_with_wildcard_or_paren_characters_get_no_always_rule() {
+        let mut p = payload("claude/payload-PermissionRequest-Bash.json");
+        for cmd in ["ls *", "foo :*", "echo (a)", "echo a)"] {
+            p.tool_input["command"] = cmd.into();
+            assert_eq!(always_rule(&p), None, "{cmd}");
+        }
+        p.tool_input["command"] = "ls /tmp".into();
+        assert_eq!(always_rule(&p).unwrap().rule_content, "ls /tmp");
+    }
+    #[test]
+    fn subagent_payloads_are_recognised() {
+        let mut p = payload("claude/payload-Stop.json");
+        assert!(!p.is_subagent());
+        p.agent_id = Some(String::new());
+        assert!(!p.is_subagent());
+        p.agent_id = Some("agent-1".into());
+        assert!(p.is_subagent());
+        let v = json!({"session_id":"s","agent_id":"a1"});
+        assert!(Payload::from_value(&v).unwrap().is_subagent());
+        assert!(
+            !Payload::from_value(&json!({"session_id":"s"}))
+                .unwrap()
+                .is_subagent()
         );
     }
     #[test]
