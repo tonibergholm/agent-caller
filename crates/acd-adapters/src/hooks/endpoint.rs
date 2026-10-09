@@ -26,10 +26,19 @@ use super::wire::{Hints, HookAgent, HookEvent, HookName, Payload};
 
 const MAX_REJECTED: usize = 256;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Credential {
     pub token: String,
     pub generation: u64,
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credential")
+            .field("token", &"<redacted>")
+            .field("generation", &self.generation)
+            .finish()
+    }
 }
 
 struct Creds {
@@ -542,4 +551,22 @@ pub async fn serve_unix(
     max_connections: usize,
 ) -> io::Result<()> {
     axum::serve(capped_unix(listener, max_connections), app).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Credential;
+
+    #[test]
+    fn credential_debug_redacts_the_token() {
+        let token = "secret-hook-token";
+        let credential = Credential {
+            token: token.into(),
+            generation: 42,
+        };
+        let debug = format!("{credential:?}");
+        assert!(!debug.contains(token), "{debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(debug.contains("42"), "{debug}");
+    }
 }

@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -22,7 +23,10 @@ fn exit_on_panic() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default(info);
-        eprintln!("acd: panic; exiting so the supervisor restarts acd");
+        let _ = writeln!(
+            std::io::stderr(),
+            "acd: panic; exiting so the supervisor restarts acd"
+        );
         std::process::exit(EXIT_PANIC);
     }));
 }
@@ -34,8 +38,12 @@ pub fn socket_path(dir: &Path) -> PathBuf {
 
 pub async fn run(dir: &Path) -> Result<()> {
     exit_on_panic();
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     #[cfg(debug_assertions)]
-    if let Some(ms) = std::env::var("ACD_TEST_PANIC_AFTER_MS").ok().and_then(|s| s.parse::<u64>().ok()) {
+    if let Some(ms) = std::env::var("ACD_TEST_PANIC_AFTER_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(ms)).await;
             panic!("test panic");
@@ -179,6 +187,7 @@ pub async fn run(dir: &Path) -> Result<()> {
     servers.spawn(async move {
         #[cfg(debug_assertions)]
         if stop_local {
+            tokio::time::sleep(Duration::from_millis(100)).await;
             return "local socket".to_string();
         }
         if let Err(e) = axum::serve(local, app).await {
@@ -248,7 +257,6 @@ pub async fn run(dir: &Path) -> Result<()> {
         }
     });
 
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let exit_code = tokio::select! {
         _ = tokio::signal::ctrl_c() => None,
         _ = term.recv() => None,

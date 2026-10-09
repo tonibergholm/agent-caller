@@ -2,13 +2,19 @@ use std::ffi::OsStr;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 /// 100.64.0.0/10 or fd7a:115c:a1e0::/48.
 pub fn in_tailscale_range(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => { let o = v4.octets(); o[0] == 100 && (o[1] & 0xC0) == 0x40 }
-        IpAddr::V6(v6) => { let s = v6.segments(); s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0 }
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xC0) == 0x40
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+        }
     }
 }
 
@@ -17,10 +23,22 @@ pub fn in_tailscale_range(ip: &IpAddr) -> bool {
 /// treat that as "no addresses".
 pub async fn tailscale_reported() -> Option<Vec<IpAddr>> {
     let mut cmd = tokio::process::Command::new(tailscale_cli()?);
-    cmd.arg("ip").kill_on_drop(true).stdin(std::process::Stdio::null());
-    let out = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output()).await.ok()?.ok()?;
-    if !out.status.success() { return None; }
-    Some(String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect())
+    cmd.arg("ip")
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null());
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect(),
+    )
 }
 
 /// Where the Tailscale CLI lives when it is not on PATH: the macOS app bundle,
@@ -33,11 +51,19 @@ const FALLBACK_CLIS: &[&str] = &[
     "/usr/local/bin/tailscale",
 ];
 #[cfg(not(target_os = "macos"))]
-const FALLBACK_CLIS: &[&str] = &["/usr/bin/tailscale", "/usr/sbin/tailscale", "/usr/local/bin/tailscale"];
+const FALLBACK_CLIS: &[&str] = &[
+    "/usr/bin/tailscale",
+    "/usr/sbin/tailscale",
+    "/usr/local/bin/tailscale",
+];
 
 /// The `tailscale` CLI: an absolute PATH entry first, then known app-bundle paths.
 pub fn tailscale_cli() -> Option<PathBuf> {
-    find_cli(std::env::var_os("PATH").as_deref(), FALLBACK_CLIS, Path::is_file)
+    find_cli(
+        std::env::var_os("PATH").as_deref(),
+        FALLBACK_CLIS,
+        Path::is_file,
+    )
 }
 
 /// Every location `tailscale_cli` looks at, for diagnostics.
@@ -47,7 +73,11 @@ pub fn tailscale_cli_searched() -> String {
     parts.join(", ")
 }
 
-fn find_cli(path: Option<&OsStr>, fallbacks: &[&str], is_file: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+fn find_cli(
+    path: Option<&OsStr>,
+    fallbacks: &[&str],
+    is_file: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     path.into_iter()
         .flat_map(std::env::split_paths)
         .filter(|dir| dir.is_absolute())
@@ -80,26 +110,44 @@ pub fn should_exit(
     current: &Vec<IpAddr>,
     bound: &Vec<IpAddr>,
 ) -> (bool, Option<Vec<IpAddr>>) {
-    if current == bound { return (false, None); }
-    if prev_pending == Some(current) { return (true, Some(current.clone())); }
+    if current == bound {
+        return (false, None);
+    }
+    if prev_pending == Some(current) {
+        return (true, Some(current.clone()));
+    }
     (false, Some(current.clone()))
 }
 
 /// Expands `listen` entries into addresses allowed by spec §7.1.
 pub fn resolve_listen(listen: &[String], reported: &[IpAddr]) -> Result<Vec<IpAddr>> {
     let mut out: Vec<IpAddr> = Vec::new();
-    let mut push = |ip: IpAddr| if !out.contains(&ip) { out.push(ip) };
+    let mut push = |ip: IpAddr| {
+        if !out.contains(&ip) {
+            out.push(ip)
+        }
+    };
     for entry in listen {
         match entry.as_str() {
-            "loopback" => { push("127.0.0.1".parse().unwrap()); push("::1".parse().unwrap()); }
+            "loopback" => {
+                push("127.0.0.1".parse().unwrap());
+                push("::1".parse().unwrap());
+            }
             "tailscale" => {
-                for ip in reported.iter().filter(|ip| in_tailscale_range(ip)) { push(*ip); }
+                for ip in reported.iter().filter(|ip| in_tailscale_range(ip)) {
+                    push(*ip);
+                }
             }
             other => {
-                let ip: IpAddr = other.parse().map_err(|_| anyhow::anyhow!("invalid listen entry {other:?}"))?;
-                let allowed = ip.is_loopback() || (in_tailscale_range(&ip) && reported.contains(&ip));
+                let ip: IpAddr = other
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid listen entry {other:?}"))?;
+                let allowed =
+                    ip.is_loopback() || (in_tailscale_range(&ip) && reported.contains(&ip));
                 if !allowed {
-                    bail!("refusing to listen on {ip}: only loopback and this machine's Tailscale addresses are allowed");
+                    bail!(
+                        "refusing to listen on {ip}: only loopback and this machine's Tailscale addresses are allowed"
+                    );
                 }
                 push(ip);
             }
@@ -111,9 +159,9 @@ pub fn resolve_listen(listen: &[String], reported: &[IpAddr]) -> Result<Vec<IpAd
 /// Whether any `listen` entry depends on `tailscale ip`: the `tailscale`
 /// keyword or an explicit address in the Tailscale ranges.
 pub fn needs_tailscale_probe(listen: &[String]) -> bool {
-    listen.iter().any(|e| {
-        e == "tailscale" || e.parse::<IpAddr>().is_ok_and(|ip| in_tailscale_range(&ip))
-    })
+    listen
+        .iter()
+        .any(|e| e == "tailscale" || e.parse::<IpAddr>().is_ok_and(|ip| in_tailscale_range(&ip)))
 }
 
 #[cfg(test)]
@@ -137,7 +185,17 @@ mod tests {
         assert!(super::FALLBACK_CLIS.contains(&"/usr/local/bin/tailscale"));
     }
 
-    fn ip(s: &str) -> IpAddr { s.parse().unwrap() }
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn distro_tailscale_is_a_fallback() {
+        assert!(super::FALLBACK_CLIS.contains(&"/usr/bin/tailscale"));
+        assert!(super::FALLBACK_CLIS.contains(&"/usr/sbin/tailscale"));
+        assert!(super::FALLBACK_CLIS.contains(&"/usr/local/bin/tailscale"));
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
 
     #[test]
     fn tailscale_ranges() {
@@ -153,7 +211,10 @@ mod tests {
     fn loopback_and_reported_tailscale_addresses_are_allowed() {
         let reported = [ip("100.123.157.75"), ip("fd7a:115c:a1e0::2f01:9db1")];
         let got = resolve_listen(&["loopback".into(), "tailscale".into()], &reported).unwrap();
-        assert_eq!(got, vec![ip("127.0.0.1"), ip("::1"), reported[0], reported[1]]);
+        assert_eq!(
+            got,
+            vec![ip("127.0.0.1"), ip("::1"), reported[0], reported[1]]
+        );
     }
 
     #[test]
@@ -161,7 +222,9 @@ mod tests {
         let reported = [ip("100.123.157.75")];
         assert!(resolve_listen(&["100.123.157.75".into()], &reported).is_ok());
         assert!(resolve_listen(&["127.0.0.1".into()], &reported).is_ok());
-        let unreported = resolve_listen(&["100.100.100.100".into()], &reported).unwrap_err().to_string();
+        let unreported = resolve_listen(&["100.100.100.100".into()], &reported)
+            .unwrap_err()
+            .to_string();
         assert!(unreported.contains("refusing to listen on 100.100.100.100"));
         assert!(resolve_listen(&["0.0.0.0".into()], &reported).is_err());
         assert!(resolve_listen(&["192.168.1.10".into()], &reported).is_err());
@@ -173,9 +236,18 @@ mod tests {
         let changed = vec![ip("127.0.0.1")];
         let other = vec![ip("127.0.0.1"), ip("100.2.2.2")];
         assert_eq!(should_exit(None, &bound, &bound), (false, None));
-        assert_eq!(should_exit(None, &changed, &bound), (false, Some(changed.clone())));
-        assert_eq!(should_exit(Some(&changed), &changed, &bound), (true, Some(changed.clone())));
-        assert_eq!(should_exit(Some(&changed), &other, &bound), (false, Some(other.clone())));
+        assert_eq!(
+            should_exit(None, &changed, &bound),
+            (false, Some(changed.clone()))
+        );
+        assert_eq!(
+            should_exit(Some(&changed), &changed, &bound),
+            (true, Some(changed.clone()))
+        );
+        assert_eq!(
+            should_exit(Some(&changed), &other, &bound),
+            (false, Some(other.clone()))
+        );
         assert_eq!(should_exit(Some(&changed), &bound, &bound), (false, None));
     }
 
@@ -188,7 +260,9 @@ mod tests {
         assert!(!should_exit_on_probe_failures(1000, &lo));
         // A success breaks the streak.
         let mut n = 0;
-        for _ in 0..9 { n = next_failure_count(n, false); }
+        for _ in 0..9 {
+            n = next_failure_count(n, false);
+        }
         assert!(!should_exit_on_probe_failures(n, &ts));
         n = next_failure_count(n, true);
         assert_eq!(n, 0);
@@ -214,7 +288,9 @@ mod tests {
     #[test]
     fn cli_path_miss_falls_back_to_app_path() {
         let path = std::env::join_paths(["/nope"]).unwrap();
-        let got = find_cli(Some(&path), &["/app/Tailscale"], |p| p == Path::new("/app/Tailscale"));
+        let got = find_cli(Some(&path), &["/app/Tailscale"], |p| {
+            p == Path::new("/app/Tailscale")
+        });
         assert_eq!(got, Some(PathBuf::from("/app/Tailscale")));
     }
 

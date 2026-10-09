@@ -1573,8 +1573,8 @@ fn an_unreadable_settings_file_is_a_reported_conflict() {
     assert!(!dir.join("hooks-journal.json").exists());
 }
 
-/// Spawns `acd run` on free ports without waiting for readiness, for tests
-/// where the daemon is expected to exit by itself.
+/// Spawns `acd run` on free ports, capturing stderr for tests where the daemon
+/// is expected to exit by itself.
 #[cfg(debug_assertions)]
 fn spawn_run(dir: &std::path::Path, env: &[(&str, &str)]) -> Daemon {
     std::fs::write(
@@ -1593,7 +1593,7 @@ fn spawn_run(dir: &std::path::Path, env: &[(&str, &str)]) -> Daemon {
     Daemon(
         cmd.arg("run")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap(),
     )
@@ -1615,11 +1615,37 @@ fn wait_for_exit(daemon: &mut Daemon, what: &str) -> std::process::ExitStatus {
 fn a_dead_server_task_exits_1_so_the_supervisor_restarts_acd() {
     let (_home, dir) = home_with_acd();
     let mut daemon = spawn_run(&dir, &[("ACD_TEST_STOP_SERVER", "local")]);
+    let sock = dir.join("acd.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !sock.exists() {
+        assert!(
+            daemon.0.try_wait().unwrap().is_none(),
+            "acd exited before binding its local socket"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "acd did not bind its local socket"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let status = wait_for_exit(
         &mut daemon,
         "acd kept running without its local socket server",
     );
     assert_eq!(status.code(), Some(1));
+    use std::io::Read as _;
+    let mut stderr = String::new();
+    daemon
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(
+        stderr.contains("a server task stopped; exiting"),
+        "{stderr}"
+    );
 }
 
 #[test]
