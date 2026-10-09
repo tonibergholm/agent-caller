@@ -1,7 +1,7 @@
 //! `acd hooks install|uninstall claude|codex` settings primitives.
 mod entries;
 mod git;
-mod journal;
+pub(crate) mod journal;
 mod json;
 
 use std::collections::BTreeMap;
@@ -381,6 +381,8 @@ fn edit_settings(
                 before: before_digest,
                 after: digest(text.as_deref()),
                 record_after: rec.clone(),
+                target: t,
+                conflict: None,
             },
         )?;
         // Until the rename the journal is only a promise: any early exit
@@ -561,6 +563,51 @@ pub fn uninstall(ctx: &Ctx, t: Target) -> Result<Report> {
     )
 }
 
+/// J2: how many entries are exactly acd's.
+pub fn owned_entries(text: &str) -> Result<usize> {
+    let v: Value = serde_json::from_str(text)?;
+    let Some(hooks) = v.get("hooks").and_then(Value::as_object) else {
+        return Ok(0);
+    };
+    Ok(hooks
+        .iter()
+        .flat_map(|(event, groups)| {
+            groups
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|g| {
+                    g.get("hooks")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                })
+                .filter(move |e| entries::classify(event, e) == Ownership::Owned)
+        })
+        .count())
+}
+
+/// `acd hooks status`: takes the writer lock, runs recovery, and reports the
+/// journal state and the recorded destinations. A conflict is reported in the
+/// text; installer commands are the ones that refuse.
+pub fn status(ctx: &Ctx) -> Result<String> {
+    let _held = lock_writers(&ctx.config_dir)?;
+    let mut out = String::new();
+    match journal::recover(&ctx.config_dir) {
+        Ok(()) => out.push_str("journal: none\n"),
+        Err(e) => out.push_str(&format!("journal: {e:#}\n")),
+    }
+    for (path, r) in Record::load(&ctx.config_dir)?.files {
+        let target = match r.target {
+            Target::Claude => "claude",
+            Target::Codex => "codex",
+        };
+        out.push_str(&format!("{target}: {}\n", path.display()));
+    }
+    Ok(out)
+}
+
+#[derive(Debug)]
 pub struct RewriteReport {
     pub updated: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, String)>,
@@ -638,8 +685,7 @@ pub fn rewrite_claude_token(
         failed: vec![],
     };
     let destinations = Record::load(&ctx.config_dir)?.claude_destinations();
-    let journal_path = ctx.config_dir.join(journal::JOURNAL_FILE);
-    for (i, recorded) in destinations.iter().enumerate() {
+    for recorded in &destinations {
         let result = canonical_destination(recorded, false).and_then(|dest| {
             if dest != *recorded {
                 bail!("the recorded destination now resolves to {}", dest.display());
@@ -683,20 +729,15 @@ pub fn rewrite_claude_token(
         });
         match result {
             Ok(_) => report.updated.push(recorded.clone()),
-            Err(e) => {
-                report.failed.push((recorded.clone(), format!("{e:#}")));
-                // J4: a failure that leaves a journal stops the batch, so
-                // the journal is never overwritten and the evidence stays.
-                if journal_path.symlink_metadata().is_ok() {
-                    for rest in &destinations[i + 1..] {
-                        report.failed.push((
-                            rest.clone(),
-                            "not attempted: an earlier destination left a journal".into(),
-                        ));
-                    }
-                    break;
-                }
+            // J4: a failure that left a journal is transactional: stop here,
+            // so the journal is never overwritten and the evidence stays.
+            Err(e) if journal::pending(&ctx.config_dir) => {
+                return Err(e.context(format!(
+                    "stopped at {}; run `acd hooks status`",
+                    recorded.display()
+                )));
             }
+            Err(e) => report.failed.push((recorded.clone(), format!("{e:#}"))),
         }
     }
     Ok(report)
@@ -790,6 +831,33 @@ mod tests {
     }
 
     #[test]
+    fn records_larger_than_4_kib_round_trip() {
+        let d = tempfile::tempdir().unwrap();
+        crate::secrets::ensure_private_dir(d.path()).unwrap();
+        let mut r = Record {
+            version: 2,
+            ..Default::default()
+        };
+        for i in 0..40 {
+            r.files.insert(
+                format!("/home/u/{}/{i}/settings.json", "x".repeat(150)).into(),
+                FileRecord {
+                    target: Target::Claude,
+                    created_file: false,
+                    created_hooks_key: true,
+                    created_events: vec!["Stop".into()],
+                },
+            );
+        }
+        r.save(d.path()).unwrap();
+        assert_eq!(
+            Record::load(d.path()).unwrap(),
+            r,
+            "F1: many canonical destinations"
+        );
+    }
+
+    #[test]
     fn a_batch_stops_at_the_first_failure_that_leaves_a_journal() {
         let mut f = fixture();
         let a = install_into(&mut f, "claude-a", None);
@@ -798,18 +866,14 @@ mod tests {
         let old_b = std::fs::read_to_string(&b).unwrap();
         let held = lock_writers(&f.ctx.config_dir).unwrap();
         INJECTED.with(|i| i.borrow_mut().push("record-write"));
-        let report = rewrite_claude_token(&f.ctx, &held, "new-token", FLAGS).unwrap();
+        let err = rewrite_claude_token(&f.ctx, &held, "new-token", FLAGS).unwrap_err();
         INJECTED.with(|i| i.borrow_mut().clear());
 
         let (first, second) = if a < b { (&a, &b) } else { (&b, &a) };
-        assert!(report.updated.is_empty());
-        assert_eq!(report.failed.len(), 2, "{:?}", report.failed);
         assert!(
-            report.failed[0]
-                .1
-                .contains("injected failure at record-write")
+            format!("{err:#}").contains("injected failure at record-write"),
+            "{err:#}"
         );
-        assert!(report.failed[1].1.contains("not attempted"));
         let old_of = |p: &PathBuf| if p == &a { &old_a } else { &old_b };
         assert_eq!(
             std::fs::read_to_string(second).unwrap(),
@@ -830,6 +894,27 @@ mod tests {
             first.to_str().unwrap(),
             "the first journal is intact"
         );
+        // Repair: recovery applies the journal, then a second pass covers both.
+        let report = rewrite_claude_token(&f.ctx, &held, "new-token", FLAGS).unwrap();
+        assert_eq!(report.updated.len(), 2, "{:?}", report.failed);
+        assert!(!journal::pending(&f.ctx.config_dir));
+        for p in [&a, &b] {
+            assert!(std::fs::read_to_string(p).unwrap().contains("new-token"));
+        }
+        assert_eq!(Record::load(&f.ctx.config_dir).unwrap().files.len(), 2);
+    }
+
+    #[test]
+    fn owned_entries_counts_only_acd_entries() {
+        let mut f = fixture();
+        let original =
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}"#;
+        let path = install_into(&mut f, "claude-a", Some(original));
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(owned_entries(&text).unwrap(), 7);
+        assert_eq!(owned_entries(original).unwrap(), 0);
+        assert_eq!(owned_entries("{}").unwrap(), 0);
+        assert!(owned_entries("nope").is_err());
     }
 
     #[test]

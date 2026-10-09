@@ -1022,7 +1022,7 @@ fn backups_never_collide() {
 }
 #[cfg(debug_assertions)]
 #[test]
-fn a_journal_with_a_foreign_rewrite_is_kept_and_blocks_new_edits() {
+fn a_journal_with_an_unparseable_rewrite_is_kept_and_blocks_new_edits() {
     let (home, dir) = home_with_acd();
     let p = home.path().join(".claude/settings.json");
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -1033,7 +1033,13 @@ fn a_journal_with_a_foreign_rewrite_is_kept_and_blocks_new_edits() {
         .output()
         .unwrap();
     assert!(!out.status.success());
-    std::fs::write(&p, r#"{"model": "claude rewrote me"}"#).unwrap();
+    std::fs::write(&p, "claude rewrote me").unwrap();
+    // The first refusal marks the journal; later ones leave it byte-identical.
+    assert!(
+        !install(&dir, home.path(), "claude", &["--allow-unknown-git"])
+            .status
+            .success()
+    );
     let journal = std::fs::read(dir.join("hooks-journal.json")).unwrap();
     for out in [
         install(&dir, home.path(), "claude", &["--allow-unknown-git"]),
@@ -1046,10 +1052,7 @@ fn a_journal_with_a_foreign_rewrite_is_kept_and_blocks_new_edits() {
             journal
         );
     }
-    assert_eq!(
-        std::fs::read_to_string(&p).unwrap(),
-        r#"{"model": "claude rewrote me"}"#
-    );
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "claude rewrote me");
 }
 #[cfg(debug_assertions)]
 #[test]
@@ -1127,4 +1130,97 @@ fn a_failed_directory_sync_after_an_unlink_keeps_the_journal() {
     );
     assert!(!dir.join("hooks-journal.json").exists());
     assert_eq!(owned_count(&json_of(&p)), 7);
+}
+
+fn rewrite_like_claude(path: &std::path::Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let mut v = json_of(path);
+    edit(&mut v);
+    let tmp = path.with_extension("tmp-claude");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::rename(&tmp, path).unwrap(); // an atomic rewrite, as Claude does
+}
+
+fn hooks_status(dir: &std::path::Path, home: &std::path::Path) -> std::process::Output {
+    acd_home(dir, home)
+        .args(["hooks", "status"])
+        .output()
+        .unwrap()
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_rewrite_after_a_record_failure_recovers_ownership_from_the_entries() {
+    let (home, dir) = home_with_acd();
+    let path = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, FOREIGN_CLAUDE).unwrap();
+    let out = acd_home(&dir, home.path())
+        .env("ACD_TEST_FAIL_AT", "record-write")
+        .args(["hooks", "install", "claude", "--allow-unknown-git"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("injected failure at record-write"));
+    rewrite_like_claude(&path, |v| v["model"] = "opus".into()); // neither before nor after now
+    let out = hooks_status(&dir, home.path());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !dir.join("hooks-journal.json").exists(),
+        "J2: recovered, not discarded"
+    );
+    let record = json_of(&dir.join("hooks-installed.json"));
+    assert_eq!(
+        record["files"].as_object().unwrap().len(),
+        1,
+        "the destination is recorded"
+    );
+    assert!(uninstall(&dir, home.path(), "claude").status.success());
+    let mut want: serde_json::Value = serde_json::from_str(FOREIGN_CLAUDE).unwrap();
+    want["model"] = "opus".into();
+    assert_eq!(
+        json_of(&path),
+        want,
+        "uninstall removed exactly acd's entries"
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn an_unreadable_settings_file_is_a_reported_conflict() {
+    let (home, dir) = home_with_acd();
+    let path = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, FOREIGN_CLAUDE).unwrap();
+    let out = acd_home(&dir, home.path())
+        .env("ACD_TEST_FAIL_AT", "record-write")
+        .args(["hooks", "install", "claude", "--allow-unknown-git"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("injected failure at record-write"));
+    let moved = home.path().join("elsewhere.json");
+    std::fs::rename(&path, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &path).unwrap();
+    let st = hooks_status(&dir, home.path());
+    let text = String::from_utf8_lossy(&st.stdout);
+    assert!(
+        text.contains("conflict") && text.contains("symlink"),
+        "{text}"
+    );
+    assert!(dir.join("hooks-journal.json").exists(), "J3: kept");
+    let out = install(&dir, home.path(), "claude", &["--allow-unknown-git"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("settings.json"));
+    std::fs::remove_file(&path).unwrap();
+    std::fs::rename(&moved, &path).unwrap();
+    assert!(
+        install(&dir, home.path(), "claude", &["--allow-unknown-git"])
+            .status
+            .success()
+    );
+    assert!(!dir.join("hooks-journal.json").exists());
 }

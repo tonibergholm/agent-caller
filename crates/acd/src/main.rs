@@ -69,6 +69,8 @@ enum HooksCmd {
     Uninstall {
         target: hooks_install::Target,
     },
+    /// Report the install records and any unresolved interrupted command.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -211,6 +213,7 @@ fn real_main() -> Result<()> {
                         ),
                     }
                 }
+                HooksCmd::Status => print!("{}", hooks_install::status(&ctx)?),
                 HooksCmd::Uninstall { target } => {
                     let r = hooks_install::uninstall(&ctx, target)?;
                     if r.removed_file {
