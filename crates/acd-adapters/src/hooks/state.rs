@@ -641,8 +641,6 @@ impl Reconciler {
                 continue;
             };
             let _guard = self.shared.occurrence_lock(&agent).await;
-            #[cfg(any(test, feature = "testing"))]
-            self.shared.gates.retire.pass().await;
             let Some(track) = self.tracks.get(&rid) else {
                 continue;
             };
@@ -657,7 +655,8 @@ impl Reconciler {
             if let Some(h) = &self.herdr {
                 h.keys_targets().remove(&rid);
             }
-            drop(_guard);
+            #[cfg(any(test, feature = "testing"))]
+            self.shared.gates.retire.pass().await;
             self.end(&rid, by);
         }
     }
@@ -700,41 +699,45 @@ impl Reconciler {
 
     async fn apply_evidence(&mut self, ev: &HookEvent) {
         let sid = ev.payload.session_id.clone();
-        let mut evidence_eligible = true;
+        let mut evidence_eligible = !self
+            .tracks
+            .values()
+            .filter(|t| t.session_id == sid && t.phase != Phase::Keys)
+            .any(|t| ev.at <= t.opened_at);
         let ids: Vec<String> = self
             .tracks
             .iter()
             .filter(|(_, t)| t.session_id == sid && t.phase != Phase::Keys && ev.at > t.opened_at)
             .map(|(id, _)| id.clone())
             .collect();
-        for rid in ids {
-            let Some(agent) = self.tracks.get(&rid).map(|t| t.agent_id.clone()) else {
+        for rid in &ids {
+            let Some(agent) = self.tracks.get(rid).map(|t| t.agent_id.clone()) else {
                 continue;
             };
             let _guard = self.shared.occurrence_lock(&agent).await;
-            let Some(opened_at) = self.tracks.get(&rid).map(|t| t.opened_at) else {
+            let Some(opened_at) = self.tracks.get(rid).map(|t| t.opened_at) else {
                 continue;
             };
-            let delivered_at = self.delivered(&rid).map(|(_, at)| at);
+            let delivered_at = self.delivered(rid).map(|(_, at)| at);
             if ev.at <= opened_at || delivered_at.is_some_and(|at| ev.at <= at) {
                 evidence_eligible = false;
                 continue;
             }
             let Some(seen) = self
                 .tracks
-                .get(&rid)
+                .get(rid)
                 .and_then(|t| evidence::observe_shadowed(&t.expect, ev, t.shadowed))
             else {
                 continue;
             };
             if evidence::is_identity(&seen)
-                && let Some(t) = self.tracks.get_mut(&rid)
+                && let Some(t) = self.tracks.get_mut(rid)
             {
                 t.identity_seen = true;
             }
-            let delivered = self.delivered(&rid);
+            let delivered = self.delivered(rid);
             let by = match delivered {
-                Some(_) if self.tracks.get(&rid).is_some_and(|t| t.shadowed) => {
+                Some(_) if self.tracks.get(rid).is_some_and(|t| t.shadowed) => {
                     ResolvedBy::Uncertain
                 }
                 Some((effect, _)) => {
@@ -745,14 +748,15 @@ impl Reconciler {
                 }
                 None => ResolvedBy::Terminal,
             };
-            self.end(&rid, by);
+            self.end(rid, by);
         }
-        if matches!(ev.name, HookName::Stop | HookName::UserPromptSubmit) {
+        if evidence_eligible && matches!(ev.name, HookName::Stop | HookName::UserPromptSubmit) {
             self.unconsumed.remove(&sid);
         } else if evidence_eligible
             && let Some(u) = self.unconsumed.get_mut(&sid)
-            && let Some(i) = u.entries.iter().position(|(e, _)| {
-                evidence::observe(e, ev).is_some_and(|s| evidence::is_identity(&s))
+            && let Some(i) = u.entries.iter().position(|(e, sent_at)| {
+                ev.at > *sent_at
+                    && evidence::observe(e, ev).is_some_and(|s| evidence::is_identity(&s))
             })
         {
             u.entries.remove(i);
@@ -940,7 +944,8 @@ impl Reconciler {
                 }
             });
             if expired {
-                drop(_guard);
+                #[cfg(any(test, feature = "testing"))]
+                self.shared.gates.retire.pass().await;
                 self.end(&rid, by);
             }
         }
@@ -1140,6 +1145,83 @@ mod tests {
         r.apply_evidence(&ev).await;
         assert!(!r.tracks["r1"].identity_seen);
         assert_eq!(r.unconsumed["s1"].entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pre_open_event_does_not_remove_matching_shadow_history() {
+        let mut r = reconciler(8);
+        r.on_event(hook("s1"), 1, None).await;
+        let now = Instant::now();
+        let older = track("s1", "r1", now - std::time::Duration::from_secs(2));
+        r.note_unconsumed(&older);
+        let opened_at = now - std::time::Duration::from_secs(1);
+        r.tracks.insert("r2".into(), track("s1", "r2", opened_at));
+
+        let mut ev = hook("s1");
+        ev.name = HookName::PostToolUse;
+        ev.payload.tool_name = Some("Bash".into());
+        ev.payload.tool_input = serde_json::json!({"command":"echo hi"});
+        ev.at = opened_at - std::time::Duration::from_millis(1);
+        r.apply_evidence(&ev).await;
+        assert_eq!(r.unconsumed["s1"].entries.len(), 1);
+
+        r.end("r2", ResolvedBy::Terminal);
+        let mut later = ev;
+        later.at = Instant::now();
+        r.tracks
+            .insert("r3".into(), track("s1", "r3", Instant::now()));
+        r.mark_shadow("r3");
+        assert!(r.tracks["r3"].shadowed);
+    }
+
+    #[tokio::test]
+    async fn timeout_retirement_keeps_occurrence_lock_through_sender_removal() {
+        use acd_protocol::Effect;
+
+        let mut r = reconciler(8);
+        r.on_event(hook("s1"), 1, None).await;
+        let now = Instant::now();
+        let mut t = track("s1", "r1", now - std::time::Duration::from_secs(10));
+        t.phase = Phase::Held;
+        r.tracks.insert("r1".into(), t);
+        r.core
+            .observe(Observation::RequestSeen(permission_obs("claude:s1", "r1")));
+        let rid = r
+            .core
+            .request_id_for("claude:s1", &CorrelationKey("r1".into()))
+            .unwrap();
+        let track = r.tracks.remove("r1").unwrap();
+        r.tracks.insert(rid.clone(), track);
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        r.shared.held.lock().unwrap().insert(
+            rid,
+            HeldReq {
+                hold: 1,
+                reply: Some(reply_tx),
+                rule: None,
+                delivered: Some((Effect::Allow, now - std::time::Duration::from_secs(10))),
+                permit: None,
+            },
+        );
+        r.cfg.evidence_window = std::time::Duration::from_millis(1);
+        let (retire_reached, retire_release) = r.shared.gates.retire.arm();
+        let shared = r.shared.clone();
+        let retiring = tokio::spawn(async move {
+            let mut r = r;
+            r.on_tick().await;
+            r
+        });
+        retire_reached.await.unwrap();
+        let contender = tokio::spawn(async move { shared.occurrence_lock("claude:s1").await });
+        tokio::task::yield_now().await;
+        assert!(
+            !contender.is_finished(),
+            "timeout retains the lock until removal"
+        );
+        retire_release.send(()).unwrap();
+        let _ = retiring.await.unwrap();
+        drop(contender.await.unwrap());
+        assert!(reply_rx.try_recv().is_err());
     }
 
     #[test]
