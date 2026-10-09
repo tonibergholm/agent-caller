@@ -42,7 +42,7 @@ fn explain(e: SecureFsError) -> anyhow::Error {
         SecureFsError::Mode { path, mode, want } => anyhow::anyhow!(
             "{} has mode {:o}, which lets other users read it. Fix with: chmod {:o} {}",
             path.display(),
-            mode & 0o777,
+            mode & 0o7777,
             want,
             path.display()
         ),
@@ -53,6 +53,9 @@ fn explain(e: SecureFsError) -> anyhow::Error {
             )
         }
         SecureFsError::Owner(p) => anyhow::anyhow!("{} is not owned by you", p.display()),
+        SecureFsError::NotRegular(p) => {
+            anyhow::anyhow!("{} is not a regular file", p.display())
+        }
         other => anyhow::anyhow!("{other}"),
     }
 }
@@ -84,13 +87,23 @@ pub fn write_secret(path: &Path, value: &str) -> Result<()> {
         f.write_all(b"\n")?;
         f.sync_all()?;
         fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-        fs::File::open(dir)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
+        return result;
     }
-    result
+    // The rename already happened: the new value is in place. A failure here
+    // only means durability is unconfirmed, so say so.
+    fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .with_context(|| {
+            format!(
+                "{} was written with the new value, but syncing {} failed; durability is unconfirmed",
+                path.display(),
+                dir.display()
+            )
+        })
 }
 
 /// Fails if `path` is a symlink, is not owned by the effective user, or
@@ -114,26 +127,18 @@ pub fn read_secret(path: &Path) -> Result<String> {
 }
 
 /// For `acd init`: tightens a loose mode on a regular file the user owns.
-/// Refuses symlinks and foreign owners. Returns whether it changed.
+/// Works on a no-follow descriptor, so symlinks, FIFOs, directories and
+/// foreign owners are refused and nothing can be swapped after the check.
+/// Returns whether it changed.
 pub fn repair_mode(path: &Path, mode: u32) -> Result<bool> {
     use std::os::unix::fs::MetadataExt;
-    let meta = fs::symlink_metadata(path).with_context(|| format!("reading {}", path.display()))?;
-    if meta.file_type().is_symlink() {
-        bail!(
-            "{} is a symlink; replace it with a regular file",
-            path.display()
-        );
-    }
-    if !meta.is_file() {
-        bail!("{} is not a regular file", path.display());
-    }
-    if meta.uid() != acd_securefs::euid() {
-        bail!("{} is not owned by you", path.display());
-    }
-    if meta.mode() & 0o777 & !mode == 0 {
+    let file = acd_securefs::open_owned_file(path).map_err(explain)?;
+    let meta = file.metadata().with_context(|| format!("reading {}", path.display()))?;
+    if meta.mode() & 0o7777 & !mode == 0 {
         return Ok(false);
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .with_context(|| format!("setting mode on {}", path.display()))?;
     Ok(true)
 }
 
@@ -213,5 +218,32 @@ mod tests {
         let link = dir.path().join("l");
         std::os::unix::fs::symlink(&p, &link).unwrap();
         assert!(repair_mode(&link, 0o600).is_err());
+    }
+
+    #[test]
+    fn repair_mode_refuses_directories_and_fifos() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("d");
+        fs::create_dir(&sub).unwrap();
+        let err = repair_mode(&sub, 0o600).unwrap_err().to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+        let fifo = dir.path().join("f");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        let err = repair_mode(&fifo, 0o600).unwrap_err().to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+    }
+
+    #[test]
+    fn repair_mode_clears_special_bits_and_reports_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t");
+        write_secret(&p, "x").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o4600)).unwrap();
+        let err = check_mode(&p, 0o600).unwrap_err().to_string();
+        assert!(err.contains("4600"), "{err}");
+        assert!(repair_mode(&p, 0o600).unwrap());
+        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o7777, 0o600);
+        check_mode(&p, 0o600).unwrap();
     }
 }

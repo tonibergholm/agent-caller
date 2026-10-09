@@ -511,3 +511,20 @@ fn an_empty_machine_id_is_refused_by_run_and_regenerated_by_init() {
     assert!(acd(&dir).arg("init").status().unwrap().success());
     assert!(!std::fs::read_to_string(dir.join("machine-id")).unwrap().trim().is_empty());
 }
+
+#[test]
+fn init_repairs_a_setuid_secret_and_a_loose_t3_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("acd");
+    assert!(acd(&dir).arg("init").status().unwrap().success());
+    std::fs::set_permissions(dir.join("client.token"), std::fs::Permissions::from_mode(0o4600)).unwrap();
+    std::fs::write(dir.join("t3.token"), "t\n").unwrap();
+    std::fs::set_permissions(dir.join("t3.token"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(acd(&dir).arg("run").output().unwrap().status.code() != Some(0));
+    let out = acd(&dir).arg("init").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("client.token") && text.contains("t3.token"), "{text}");
+    assert_eq!(std::fs::metadata(dir.join("client.token")).unwrap().permissions().mode() & 0o7777, 0o600);
+    assert_eq!(mode(dir.join("t3.token")), 0o600);
+}

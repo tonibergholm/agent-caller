@@ -164,7 +164,7 @@ fn init(dir: &Path, force: bool) -> Result<()> {
     secrets::ensure_private_dir(dir)?;
     let mut created = Vec::new();
     let mut repaired = Vec::new();
-    for file in ["client.token", "hook.token", "machine-id", "config.toml"] {
+    for file in ["client.token", "hook.token", "t3.token", "machine-id", "config.toml"] {
         let p = dir.join(file);
         if p.symlink_metadata().is_ok() && secrets::repair_mode(&p, 0o600)? {
             repaired.push(file);
@@ -186,7 +186,7 @@ fn init(dir: &Path, force: bool) -> Result<()> {
     let id_path = dir.join("machine-id");
     let id = match identity::machine_id(dir) {
         Ok(id) => id,
-        Err(_) if id_path.symlink_metadata().is_err() || std::fs::read_to_string(&id_path).is_ok_and(|s| s.trim().is_empty()) => {
+        Err(_) if id_path.symlink_metadata().is_err() || identity::machine_id_is_empty(dir) => {
             created.push("machine-id");
             identity::create_machine_id(dir)?
         }
