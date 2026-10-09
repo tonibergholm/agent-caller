@@ -1088,13 +1088,20 @@ async fn stray_keystroke_carries_its_reason() {
     r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
     let (_, mut rx) = r.core.attach(None);
     answer(&r, "a1", &rid, "allow").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
+        let msg = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("no resolution within 5 s");
+        if let Err(tokio::sync::broadcast::error::RecvError::Closed) = msg {
+            panic!("event channel closed before the resolution");
+        }
         if let Ok(ServerMessage::RequestResolved {
             request_id,
             by,
             reason,
             ..
-        }) = rx.recv().await
+        }) = msg
             && request_id == rid
         {
             assert_eq!(

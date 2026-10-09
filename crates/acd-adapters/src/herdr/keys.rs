@@ -173,7 +173,7 @@ impl TargetsInner {
 }
 
 /// Registered targets, by request id. A target is immutable for its
-/// request id: the content the user reviewed is the content the guard checks.
+/// request id (D8): the content the user reviewed is the content the guard checks.
 #[derive(Default)]
 pub struct KeysTargets(Mutex<TargetsInner>);
 
@@ -260,8 +260,11 @@ impl KeysTargets {
     }
 }
 
-/// One async lock per agent. The engine holds it from before its final guard
-/// read until the key write completes.
+/// One async lock per agent (D7). The engine holds it from before its
+/// final guard read until the key write completes, so waiting for the
+/// lock never ages a screen check (Sol B5). P3 holds it around every
+/// revalidation, observation and target registration on a herdr agent,
+/// so a lease check can never pass on a state P3 is about to change.
 #[derive(Default)]
 pub struct AgentLocks(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
 
