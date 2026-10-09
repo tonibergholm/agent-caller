@@ -293,6 +293,10 @@ impl Scanner {
             if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
                 continue;
             }
+            // A name that is not a valid pid (overflow, zero) is no session file.
+            if !stem.parse::<i32>().is_ok_and(|p| p > 0) {
+                continue;
+            }
             *seen += 1;
             if *seen > self.max_entries {
                 complete = false;
@@ -336,12 +340,10 @@ impl Scanner {
                 Some(ProcVerdict::Live) => live.push(entry),
                 Some(ProcVerdict::Gone) => {}
                 Some(ProcVerdict::Unverifiable) => {
-                    complete = false;
-                    self.log_once(name, "process metadata unverifiable");
+                    complete &= self.unreadable(name, stem, "process metadata unverifiable");
                 }
                 None => {
-                    complete = false;
-                    self.log_once(name, "procStart missing");
+                    complete &= self.unreadable(name, stem, "procStart missing");
                 }
             }
         }
@@ -602,13 +604,38 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_proc_start_is_incomplete_and_has_no_entry() {
+    fn a_missing_or_unparseable_proc_start_follows_the_dead_pid_rule() {
         let dir = tempfile::tempdir().unwrap();
         let mut e = fixture_entry();
         e.as_object_mut().unwrap().remove("procStart");
         write(dir.path(), "14517.json", &e.to_string());
-        let scan = scanner(vec![dir.path().into()], Some(false)).scan();
-        assert!(scan.live.is_empty() && !scan.complete);
+        let alive = scanner(vec![dir.path().into()], Some(true)).scan();
+        assert!(alive.live.is_empty() && !alive.complete);
+        let dead = scanner(vec![dir.path().into()], Some(false)).scan();
+        assert!(dead.live.is_empty() && dead.complete);
+        let mut s = Scanner::new(
+            vec![dir.path().into()],
+            Arc::new(Procs(ProcVerdict::Unverifiable, Some(false))),
+        );
+        e["procStart"] = "garbage".into();
+        write(dir.path(), "14517.json", &e.to_string());
+        let scan = s.scan();
+        assert!(scan.live.is_empty() && scan.complete);
+    }
+
+    #[test]
+    fn a_file_name_that_overflows_the_pid_type_is_not_a_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "99999999999.json", "garbage");
+        write(dir.path(), "0.json", "garbage");
+        let scan = scanner(vec![dir.path().into()], Some(true)).scan();
+        assert!(scan.live.is_empty() && scan.complete);
+    }
+
+    #[test]
+    fn the_system_check_reports_pid_existence() {
+        assert_eq!(SystemProc.exists(std::process::id() as i32), Some(true));
+        assert_eq!(SystemProc.exists(0x7fff_fff0), Some(false));
     }
 
     #[test]
