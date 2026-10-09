@@ -99,6 +99,8 @@
   // window.confirm silently returns false in Tauri's macOS webview, so
   // removal confirms inline; one machine at a time.
   let confirming = $state<string | null>(null);
+  /** Moves focus to Cancel, so a second Enter or Space cancels too. */
+  const focusNow = (node: HTMLElement) => node.focus();
 
   const remove = (m: MachineEntryView) => {
     if (confirming !== m.key) {
@@ -155,13 +157,13 @@
           {/if}
           {#if m.endpoint.kind !== "local"}
             {#if confirming === m.key}
-              <!-- Cancel takes Remove's place, so a double click cancels. -->
-              <button onclick={() => (confirming = null)}>Cancel</button>
+              <!-- Cancel takes Remove's place at the same width, so a double click cancels. -->
+              <button class="slot" use:focusNow onclick={() => (confirming = null)}>Cancel</button>
               <button onclick={() => remove(m)}>Confirm remove</button>
-              <span aria-live="polite">Remove {m.name}?</span>
             {:else}
-              <button onclick={() => remove(m)}>Remove</button>
+              <button class="slot" onclick={() => remove(m)}>Remove</button>
             {/if}
+            <span aria-live="polite">{confirming === m.key ? `Remove ${m.name}?` : ""}</span>
           {/if}
         </li>
       {/each}
@@ -193,6 +195,9 @@
 </main>
 
 <style>
+  .slot {
+    min-width: 6em;
+  }
   .settings {
     display: flex;
     flex-direction: column;

@@ -52,6 +52,8 @@ test("a double click on Remove lands on Cancel and removes nothing", async () =>
   await userEvent.click(remove);
   const same = row.querySelectorAll("button")[index] as HTMLButtonElement;
   expect(same.textContent).toBe("Cancel");
+  expect(document.activeElement).toBe(same);
+  expect(row.querySelector("[aria-live]")?.textContent).toBe("Remove devbox?");
   await userEvent.click(same);
   expect(api.calls.some((c) => c[0] === "removeMachine")).toBe(false);
   expect(screen.getByRole("button", { name: "Remove" })).toBeTruthy();

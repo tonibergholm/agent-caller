@@ -102,8 +102,26 @@ pub fn resolve_listen(listen: &[String], reported: &[IpAddr]) -> Result<Vec<IpAd
     Ok(out)
 }
 
+/// Whether any `listen` entry depends on `tailscale ip`: the `tailscale`
+/// keyword or an explicit address in the Tailscale ranges.
+pub fn needs_tailscale_probe(listen: &[String]) -> bool {
+    listen.iter().any(|e| {
+        e == "tailscale" || e.parse::<IpAddr>().is_ok_and(|ip| in_tailscale_range(&ip))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn probe_needed_for_the_keyword_or_an_explicit_tailscale_address() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(needs_tailscale_probe(&l(&["loopback", "tailscale"])));
+        assert!(needs_tailscale_probe(&l(&["loopback", "100.101.102.103"])));
+        assert!(needs_tailscale_probe(&l(&["fd7a:115c:a1e0::1"])));
+        assert!(!needs_tailscale_probe(&l(&["loopback"])));
+        assert!(!needs_tailscale_probe(&l(&["127.0.0.1", "::1"])));
+    }
+
     use super::*;
 
     fn ip(s: &str) -> IpAddr { s.parse().unwrap() }

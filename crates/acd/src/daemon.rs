@@ -83,9 +83,10 @@ pub async fn run(dir: &Path) -> Result<()> {
     );
 
     let listen_includes_tailscale = cfg.listen.iter().any(|e| e == "tailscale");
-    // Without a tailscale entry nothing depends on the probe: never run the
+    // Without a Tailscale entry nothing depends on the probe: never run the
     // external CLI.
-    let probe = if listen_includes_tailscale {
+    let needs_probe = bind::needs_tailscale_probe(&cfg.listen);
+    let probe = if needs_probe {
         bind::tailscale_reported().await
     } else {
         None
@@ -186,7 +187,7 @@ pub async fn run(dir: &Path) -> Result<()> {
     // the new bind set.
     let listen = cfg.listen.clone();
     let watch = tokio::spawn(async move {
-        if !listen_includes_tailscale {
+        if !needs_probe {
             return std::future::pending().await;
         }
         let mut pending: Option<Vec<IpAddr>> = None;
