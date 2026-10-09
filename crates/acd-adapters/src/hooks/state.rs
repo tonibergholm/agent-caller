@@ -16,7 +16,7 @@ use super::HooksConfig;
 use super::claude_sessions::{CompleteScan, ProcCheck, Scan, Scanner, map_status};
 use super::dialogs::{self, DialogMatch};
 use super::endpoint::{HoldId, HoldPermit, Inbound, Mailbox};
-use super::evidence::{self, Expect, Verdict};
+use super::evidence::{self, EvidenceHub, Expect, Verdict};
 use super::mapping;
 use super::owner::{Owner, PaneFact, claude_owner, header_pane, pane_facts};
 use super::tickets::{Now, ReadKind, ReadSlots, Ticket, still_valid};
@@ -150,6 +150,7 @@ enum Phase {
 }
 
 struct Track {
+    kind: TrackKind,
     agent_id: String,
     session_id: String,
     key: CorrelationKey,
@@ -168,6 +169,14 @@ struct Track {
     next_check: Instant,
     shadowed: bool,
     identity_seen: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrackKind {
+    Permission,
+    Question,
+    #[allow(dead_code)] // Codex tracks are introduced by the following task.
+    Codex,
 }
 
 #[derive(Default)]
@@ -226,9 +235,11 @@ pub(crate) struct Reconciler {
     holds: HashMap<HoldId, String>,
     next_op: u64,
     unconsumed: HashMap<String, Unconsumed>,
+    evidence: Arc<EvidenceHub>,
 }
 
 impl Reconciler {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         cfg: HooksConfig,
         core: Arc<Core>,
@@ -236,6 +247,7 @@ impl Reconciler {
         t3: Option<Arc<SessionMap>>,
         proc: Arc<dyn ProcCheck>,
         shared: Arc<Shared>,
+        evidence: Arc<EvidenceHub>,
         mailbox: Mailbox,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(cfg.max_reads + 2);
@@ -262,6 +274,7 @@ impl Reconciler {
             holds: HashMap::new(),
             next_op: 0,
             unconsumed: HashMap::new(),
+            evidence,
         }
     }
 
@@ -423,6 +436,7 @@ impl Reconciler {
         generation: u64,
         hold: Option<super::endpoint::HoldIn>,
     ) {
+        self.evidence.publish(&event);
         {
             let mut generations = self.shared.by_generation.lock().expect("shared");
             let ids = generations.entry(generation).or_default();
@@ -487,9 +501,13 @@ impl Reconciler {
         self.apply_owner(&sid, owner).await;
         if !t3_owned {
             self.apply_evidence(&event).await;
-            if event.name == HookName::PermissionRequest
-                && event.payload.tool_name.as_deref() != Some("AskUserQuestion")
-            {
+            let ask = matches!(
+                event.name,
+                HookName::PreToolUse | HookName::PermissionRequest
+            ) && event.payload.tool_name.as_deref() == Some("AskUserQuestion");
+            if ask {
+                self.open_claude_question(event).await;
+            } else if event.name == HookName::PermissionRequest {
                 self.open_claude_permission(event, hold).await;
             }
         }
@@ -592,6 +610,7 @@ impl Reconciler {
         self.tracks.insert(
             rid.clone(),
             Track {
+                kind: TrackKind::Permission,
                 agent_id,
                 session_id: sid.clone(),
                 key,
@@ -621,6 +640,151 @@ impl Reconciler {
             self.spawn_read(&rid, Purpose::Capture);
         }
         self.sweep();
+    }
+
+    async fn open_claude_question(&mut self, event: HookEvent) {
+        let sid = event.payload.session_id.clone();
+        let Some(agent_id) = self.sessions.get(&sid).and_then(|s| s.agent_id.clone()) else {
+            return;
+        };
+        let pane = self.bound_pane(&sid);
+        let Some(key) = claude_key(&event.payload) else {
+            return;
+        };
+        let open_same = self.core.request_id_for(&agent_id, &key).filter(|rid| {
+            self.tracks
+                .get(rid)
+                .is_some_and(|t| t.kind == TrackKind::Question)
+        });
+        if event.name == HookName::PermissionRequest && open_same.is_some() {
+            return;
+        }
+        self.end_session_occurrences(&sid).await;
+        let Some(obs) = mapping::claude_question(
+            &agent_id,
+            key.clone(),
+            self.fallback_key(&agent_id),
+            &event.payload,
+            pane.is_some(),
+        ) else {
+            return;
+        };
+        let answerable = obs.answer_path == AnswerPath::Keys;
+        self.observe_locked(&agent_id, pane.is_some(), Observation::RequestSeen(obs))
+            .await;
+        let Some(rid) = self.core.request_id_for(&agent_id, &key) else {
+            return;
+        };
+        let spec = mapping::question_specs(&event.payload.tool_input)
+            .ok()
+            .and_then(|v| v.into_iter().next());
+        let labels = spec
+            .as_ref()
+            .map(|q| {
+                q.options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (label, _))| (format!("o{}", i + 1), label.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let now = Instant::now();
+        self.next_op += 1;
+        self.tracks.insert(
+            rid.clone(),
+            Track {
+                kind: TrackKind::Question,
+                agent_id,
+                session_id: sid.clone(),
+                key,
+                op: self.next_op,
+                reads: ReadSlots::default(),
+                wanted_purpose: HashMap::new(),
+                hold_end_tries: 0,
+                expect: Expect::ClaudeQuestion {
+                    session_id: sid,
+                    question: spec
+                        .as_ref()
+                        .map(|q| q.question.clone())
+                        .unwrap_or_default(),
+                    labels,
+                },
+                matcher: spec
+                    .filter(|_| answerable)
+                    .map(|spec| DialogMatch::ClaudeQuestion { spec }),
+                pane: pane.clone(),
+                phase: Phase::ReadOnly,
+                opened_at: now,
+                payload: event.payload,
+                capture: None,
+                absent: 0,
+                next_check: now + self.cfg.held_dialog_poll,
+                shadowed: false,
+                identity_seen: false,
+            },
+        );
+        self.mark_shadow(&rid);
+        if answerable && pane.is_some() {
+            self.spawn_read(&rid, Purpose::Capture);
+        }
+        self.sweep();
+    }
+
+    /// Register a captured question while both delivery locks are held.
+    fn register_question_locked(&mut self, rid: &str, screen: Option<String>, incarnation: u64) {
+        let Some(herdr) = self.herdr.clone() else {
+            return;
+        };
+        let Some(track) = self.tracks.get_mut(rid) else {
+            return;
+        };
+        let Expect::ClaudeQuestion { labels, .. } = &track.expect else {
+            return;
+        };
+        let target = screen.and_then(|screen| {
+            KeysTarget::from_screen(
+                rid.to_owned(),
+                track.agent_id.clone(),
+                track.key.clone(),
+                &screen,
+                mapping::question_keys(labels.len()),
+            )
+            .ok()
+            .map(|target| target.for_incarnation(incarnation))
+        });
+        let open = self
+            .core
+            .request(rid)
+            .is_some_and(|r| r.status == RequestStatus::Open && r.answer_path == AnswerPath::Keys);
+        match target {
+            Some(target) if open && self.core.agent(&track.agent_id).is_some() => {
+                if herdr.keys_targets().set(target).is_err() {
+                    self.core.observe(Observation::RequestPath {
+                        agent_id: track.agent_id.clone(),
+                        key: track.key.clone(),
+                        answer_path: AnswerPath::None,
+                    });
+                    track.phase = Phase::ReadOnly;
+                    return;
+                }
+                self.core.observe(Observation::RequestReady {
+                    agent_id: track.agent_id.clone(),
+                    key: track.key.clone(),
+                    ready: true,
+                });
+                track.phase = Phase::Keys;
+                self.evidence
+                    .expect(rid, track.expect.clone(), track.shadowed);
+            }
+            _ => {
+                self.core.observe(Observation::RequestPath {
+                    agent_id: track.agent_id.clone(),
+                    key: track.key.clone(),
+                    answer_path: AnswerPath::None,
+                });
+                track.phase = Phase::ReadOnly;
+            }
+        }
     }
 
     fn read_target(&self, rid: &str) -> Option<(PaneRef, DialogMatch)> {
@@ -877,6 +1041,7 @@ impl Reconciler {
     }
 
     fn forget(&mut self, rid: &str) {
+        self.evidence.forget(rid);
         if let Some(h) = self.shared.held.lock().expect("held").remove(rid) {
             self.holds.remove(&h.hold);
         }
@@ -1036,22 +1201,32 @@ impl Reconciler {
             return;
         };
         match (purpose, result) {
-            (Purpose::Capture, ReadResult::Matched(screen)) => {
-                if let Some(held) = self.shared.held.lock().expect("held").get_mut(&rid) {
+            (Purpose::Capture, result) => {
+                let matched = match result {
+                    ReadResult::Matched(screen) => Some(screen),
+                    _ => None,
+                };
+                if matched.is_some()
+                    && let Some(held) = self.shared.held.lock().expect("held").get_mut(&rid)
+                {
                     held.bound_captured = true;
                 }
-                let unheld = self
-                    .tracks
-                    .get(&rid)
-                    .is_some_and(|track| track.phase == Phase::ReadOnly);
-                if let Some(track) = self.tracks.get_mut(&rid) {
-                    track.capture = Some(screen.clone());
-                }
-                if unheld {
-                    self.switch_to_keys_locked(&rid, screen, ticket.incarnation);
+                let Some((kind, phase)) = self.tracks.get_mut(&rid).map(|track| {
+                    track.capture = matched.clone();
+                    (track.kind, track.phase)
+                }) else {
+                    return;
+                };
+                match (kind, matched) {
+                    (TrackKind::Question, screen) => {
+                        self.register_question_locked(&rid, screen, ticket.incarnation)
+                    }
+                    (TrackKind::Permission, Some(screen)) if phase == Phase::ReadOnly => {
+                        self.switch_to_keys_locked(&rid, screen, ticket.incarnation)
+                    }
+                    _ => {}
                 }
             }
-            (Purpose::Capture, _) => {}
             (Purpose::Presence, ReadResult::Unavailable) => {}
             (Purpose::Presence, result) => {
                 let gone = if let Some(track) = self.tracks.get_mut(&rid) {
@@ -1175,6 +1350,10 @@ impl Reconciler {
                         ready: true,
                     });
                     track.phase = Phase::Keys;
+                    self.evidence
+                        .expect(rid, track.expect.clone(), track.shadowed);
+                    self.evidence
+                        .expect(rid, track.expect.clone(), track.shadowed);
                 } else {
                     self.core.observe(Observation::RequestPath {
                         agent_id: track.agent_id.clone(),
@@ -1506,6 +1685,7 @@ mod tests {
             None,
             Arc::new(Live),
             Arc::default(),
+            Arc::default(),
             mailbox,
         )
     }
@@ -1531,6 +1711,7 @@ mod tests {
             ..Default::default()
         };
         Track {
+            kind: TrackKind::Permission,
             agent_id: format!("claude:{sid}"),
             session_id: sid.into(),
             key: CorrelationKey(rid.into()),

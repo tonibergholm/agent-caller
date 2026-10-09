@@ -1,10 +1,14 @@
 //! Correlated outcome evidence (spec §5.1 Attribution, §6.2 step 3, §6.3
 //! Completion). Pure rules here; `EvidenceHub` (Task 16) feeds the keys
 //! engine with them.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
 
 use acd_protocol::Effect;
+use async_trait::async_trait;
 use serde_json::Value;
+use tokio::sync::broadcast;
+use tokio::time::Instant;
 
 use super::wire::{HookEvent, HookName, command_of, tool_digest};
 pub use crate::herdr::keys::Verdict;
@@ -181,6 +185,115 @@ pub fn verdict(sent: &Sent, seen: &Seen) -> Verdict {
     }
 }
 
+const RECENT: usize = 256;
+
+/// Per-request evidence provider for herdr's guarded keys engine.
+pub struct EvidenceHub {
+    expects: Mutex<HashMap<String, (Expect, bool)>>,
+    recent: Mutex<VecDeque<HookEvent>>,
+    tx: broadcast::Sender<HookEvent>,
+}
+
+impl Default for EvidenceHub {
+    fn default() -> Self {
+        Self {
+            expects: Mutex::default(),
+            recent: Mutex::default(),
+            tx: broadcast::channel(RECENT).0,
+        }
+    }
+}
+
+impl EvidenceHub {
+    pub fn expect(&self, request_id: &str, e: Expect, shadowed: bool) {
+        self.expects
+            .lock()
+            .expect("evidence")
+            .insert(request_id.to_owned(), (e, shadowed));
+    }
+
+    pub fn forget(&self, request_id: &str) {
+        self.expects.lock().expect("evidence").remove(request_id);
+    }
+
+    pub fn publish(&self, ev: &HookEvent) {
+        let mut recent = self.recent.lock().expect("evidence");
+        recent.push_back(ev.clone());
+        while recent.len() > RECENT {
+            recent.pop_front();
+        }
+        drop(recent);
+        let _ = self.tx.send(ev.clone());
+    }
+}
+
+pub fn sent_for_option(expect: &Expect, option_id: &str) -> Option<Sent> {
+    match expect {
+        Expect::ClaudeQuestion { labels, .. } => labels.get(option_id).cloned().map(Sent::Choose),
+        _ => match option_id {
+            "allow" | "allow_always" => Some(Sent::Allow),
+            "deny" => Some(Sent::Deny),
+            _ => None,
+        },
+    }
+}
+
+#[async_trait]
+impl crate::herdr::keys::Evidence for EvidenceHub {
+    async fn outcome(
+        &self,
+        target: &crate::herdr::keys::KeysTarget,
+        option_id: &str,
+        sent_at: Instant,
+    ) -> Verdict {
+        let Some((expect, shadowed)) = self
+            .expects
+            .lock()
+            .expect("evidence")
+            .get(target.request_id())
+            .cloned()
+        else {
+            return Verdict::NoEvidence;
+        };
+        let Some(sent) = sent_for_option(&expect, option_id) else {
+            return Verdict::NoEvidence;
+        };
+        let mut rx = self.tx.subscribe();
+        let backlog: Vec<_> = self
+            .recent
+            .lock()
+            .expect("evidence")
+            .iter()
+            .filter(|ev| ev.at >= sent_at)
+            .cloned()
+            .collect();
+        for ev in &backlog {
+            if let Some(seen) = observe_shadowed(&expect, ev, shadowed) {
+                return if shadowed {
+                    Verdict::NoEvidence
+                } else {
+                    verdict(&sent, &seen)
+                };
+            }
+        }
+        loop {
+            match rx.recv().await {
+                Ok(ev) if ev.at >= sent_at => {
+                    if let Some(seen) = observe_shadowed(&expect, &ev, shadowed) {
+                        return if shadowed {
+                            Verdict::NoEvidence
+                        } else {
+                            verdict(&sent, &seen)
+                        };
+                    }
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return Verdict::NoEvidence,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +321,81 @@ mod tests {
             tool_name: "Bash".into(),
             digest: crate::hooks::wire::tool_digest("Bash", &input),
         }
+    }
+
+    fn target(rid: &str) -> crate::herdr::keys::KeysTarget {
+        let dialog = std::fs::read_to_string(format!(
+            "{}/../../tests/fixtures/herdr/claude-permission-bash.txt",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        crate::herdr::keys::KeysTarget::from_screen(
+            rid.into(),
+            "a".into(),
+            acd_core::CorrelationKey("k".into()),
+            &dialog,
+            [
+                ("allow".to_string(), "1".to_string()),
+                ("deny".to_string(), "4".to_string()),
+            ]
+            .into(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn hub_correlates_only_post_send_evidence_to_its_request() {
+        use crate::herdr::keys::Evidence as _;
+        let hub = EvidenceHub::default();
+        hub.expect("r1", bash("touch /tmp/acp0/t2.txt"), false);
+        let mut post = ev(
+            "claude/payload-PostToolUse-Bash.json",
+            HookName::PostToolUse,
+        );
+        hub.publish(&post);
+        let sent_at = Instant::now();
+        post.at = Instant::now();
+        hub.publish(&post);
+        assert_eq!(
+            hub.outcome(&target("r1"), "allow", sent_at).await,
+            Verdict::Consistent
+        );
+        assert_eq!(
+            hub.outcome(&target("r1"), "deny", sent_at).await,
+            Verdict::Contradicts
+        );
+        assert_eq!(
+            hub.outcome(&target("r2"), "allow", sent_at).await,
+            Verdict::NoEvidence
+        );
+        hub.forget("r1");
+        assert_eq!(
+            hub.outcome(&target("r1"), "allow", sent_at).await,
+            Verdict::NoEvidence
+        );
+    }
+
+    #[tokio::test]
+    async fn hub_waits_for_live_evidence_and_ignores_shadowed_identity() {
+        use crate::herdr::keys::Evidence as _;
+        let hub = std::sync::Arc::new(EvidenceHub::default());
+        hub.expect("r1", bash("touch /tmp/acp0/t2.txt"), true);
+        let sent_at = Instant::now();
+        let h = hub.clone();
+        let waiting = tokio::spawn(async move { h.outcome(&target("r1"), "allow", sent_at).await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let mut post = ev(
+            "claude/payload-PostToolUse-Bash.json",
+            HookName::PostToolUse,
+        );
+        post.at = Instant::now();
+        hub.publish(&post);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(!waiting.is_finished());
+        let mut stop = ev("claude/payload-Stop.json", HookName::Stop);
+        stop.at = Instant::now();
+        hub.publish(&stop);
+        assert_eq!(waiting.await.unwrap(), Verdict::NoEvidence);
     }
 
     #[tokio::test]

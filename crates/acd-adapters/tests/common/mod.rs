@@ -91,6 +91,7 @@ pub async fn rig(panes: &[Value], tweak: impl FnOnce(&mut HooksConfig)) -> Rig {
     }
     let core = Core::new(test_machine(), adapters);
     if let Some(h) = &herdr {
+        h.set_evidence(hooks.evidence());
         h.start(core.clone());
     }
     hooks.start(core.clone());

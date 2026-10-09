@@ -7,6 +7,125 @@ use common::*;
 use serde_json::{Value, json};
 use std::time::Duration;
 
+fn herdr_screen(name: &str) -> String {
+    std::fs::read_to_string(format!(
+        "{}/../../tests/fixtures/herdr/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+async fn question_rig() -> (Rig, String) {
+    let r = rig(&[fake_agent("w1:p1", "claude", "blocked")], |_| {}).await;
+    let q = herdr_screen("claude-askuserquestion-single.txt");
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen("w1:p1", "detection", &q);
+    f.set_screen("w1:p1", "visible", &q);
+    f.on_keys(|f, pane, _| {
+        let idle = herdr_screen("claude-idle-detection.txt");
+        let prompt = herdr_screen("claude-idle-prompt.txt");
+        f.set_screen(pane, "detection", &idle);
+        f.set_screen(pane, "visible", &prompt);
+        f.set_status(pane, "working");
+    });
+    let agent = r
+        .herdr
+        .as_ref()
+        .unwrap()
+        .panes()
+        .read()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    (r, agent)
+}
+
+fn post_answer(label: &str) -> Value {
+    let mut p = fx("claude/payload-PostToolUse-AskUserQuestion.json");
+    p["tool_response"]["answers"]["Pick a color"] = label.into();
+    p["tool_input"]["answers"]["Pick a color"] = label.into();
+    p
+}
+
+#[tokio::test]
+async fn a_single_question_is_answered_with_its_number_key_and_attributed() {
+    let (r, agent) = question_rig().await;
+    let (_, mut rx) = r.core.attach(None);
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    r.hook(
+        "claude",
+        "PreToolUse",
+        &fx("claude/payload-PreToolUse-AskUserQuestion.json"),
+        &h,
+    )
+    .await;
+    r.hook(
+        "claude",
+        "PermissionRequest",
+        &fx("claude/payload-PermissionRequest-AskUserQuestion.json"),
+        &h,
+    )
+    .await;
+    let rid = until("question", || {
+        r.agent(&agent)
+            .and_then(|a| a.pending)
+            .filter(|p| p.kind == RequestKind::Question)
+            .map(|p| p.id)
+    })
+    .await;
+    assert_eq!(r.core.request(&rid).unwrap().answer_path, AnswerPath::Keys);
+    until("target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid)
+    })
+    .await;
+    assert!(answer(&r, "a1", &rid, "o1").await.ok);
+    assert_eq!(
+        r.fake
+            .as_ref()
+            .unwrap()
+            .keys_sent()
+            .last()
+            .map(|k| k.1.clone()),
+        Some(vec!["1".to_string()])
+    );
+    r.hook("claude", "PostToolUse", &post_answer("Red"), &h)
+        .await;
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Inbox);
+}
+
+#[tokio::test]
+async fn a_question_answered_with_another_option_is_terminal() {
+    let (r, agent) = question_rig().await;
+    let (_, mut rx) = r.core.attach(None);
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    r.hook(
+        "claude",
+        "PreToolUse",
+        &fx("claude/payload-PreToolUse-AskUserQuestion.json"),
+        &h,
+    )
+    .await;
+    let rid = until("question", || {
+        r.agent(&agent)
+            .and_then(|a| a.pending)
+            .filter(|p| p.kind == RequestKind::Question)
+            .map(|p| p.id)
+    })
+    .await;
+    until("target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&rid)
+    })
+    .await;
+    answer(&r, "a1", &rid, "o1").await;
+    r.hook("claude", "PostToolUse", &post_answer("Blue"), &h)
+        .await;
+    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Terminal);
+}
+
 #[tokio::test]
 async fn a_hooks_only_session_appears_on_its_first_hook() {
     let r = rig(&[], |_| {}).await;

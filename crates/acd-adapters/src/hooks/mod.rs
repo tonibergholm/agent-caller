@@ -130,6 +130,7 @@ pub struct HooksAdapter {
     t3: Option<Arc<SessionMap>>,
     proc: Arc<dyn ProcCheck>,
     shared: Arc<state::Shared>,
+    evidence: Arc<evidence::EvidenceHub>,
     opts: EndpointOptions,
     tx: MailboxTx,
     rx: Mutex<Option<Mailbox>>,
@@ -148,12 +149,14 @@ impl HooksAdapter {
             ..Default::default()
         };
         let (tx, rx) = endpoint::mailbox(&opts);
+        let evidence = Arc::new(evidence::EvidenceHub::default());
         Arc::new(Self {
             cfg,
             herdr,
             t3,
             proc,
             shared: Arc::default(),
+            evidence,
             opts,
             tx,
             rx: Mutex::new(Some(rx)),
@@ -176,12 +179,16 @@ impl HooksAdapter {
             self.t3.clone(),
             self.proc.clone(),
             self.shared.clone(),
+            self.evidence.clone(),
             rx,
         );
         tokio::spawn(r.run());
     }
     pub fn last_complete_scan(&self) -> Option<CompleteScan> {
         self.shared.last_scan.lock().expect("shared").clone()
+    }
+    pub fn evidence(&self) -> Arc<dyn crate::herdr::keys::Evidence> {
+        self.evidence.clone()
     }
     /// Session ids that were not recorded under a generation because it
     /// already held `max_generation_ids` (diagnostics).
