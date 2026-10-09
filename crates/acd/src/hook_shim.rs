@@ -160,31 +160,51 @@ fn ancestor_dir_safe(p: &Path, euid: u32) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_dir() && ancestor_safe(m.uid(), m.mode(), euid))
 }
 
-/// Like `ancestor_dir_safe` but by lstat: a symlink is never accepted. A
-/// canonical path holds none, so one here means tampering.
-fn ancestor_lstat_safe(p: &Path, euid: u32) -> bool {
-    std::fs::symlink_metadata(p)
-        .is_ok_and(|m| m.file_type().is_dir() && ancestor_safe(m.uid(), m.mode(), euid))
+/// Walks `canon` from "/" down to the config dir itself, calling
+/// `check(component, is_config_dir)` on each in that order and stopping at
+/// the first failure.
+///
+/// The order matters. Once a parent has been verified as protected (only
+/// root or the effective uid can change its entries, or it is sticky so
+/// others cannot rename root/euid-owned entries), an attacker cannot change
+/// the next component, so each check builds on the previous one. Checking
+/// leaf-first would let an attacker swap a higher component after a lower
+/// one passed.
+fn walk_root_first(canon: &Path, mut check: impl FnMut(&Path, bool) -> bool) -> bool {
+    let mut chain: Vec<&Path> = canon.ancestors().collect();
+    chain.reverse();
+    let last = chain.len().saturating_sub(1);
+    chain.iter().enumerate().all(|(i, p)| check(p, i == last))
+}
+
+/// One component of the canonical path, by lstat: a real directory (a
+/// symlink here means tampering), owned by root or the euid and not
+/// group/other-writable unless sticky; the config dir itself must be owned
+/// by the euid with mode exactly 0700.
+fn component_safe(p: &Path, is_config_dir: bool, euid: u32) -> bool {
+    let Ok(m) = std::fs::symlink_metadata(p) else {
+        return false;
+    };
+    if !m.file_type().is_dir() {
+        return false;
+    }
+    if is_config_dir {
+        m.uid() == euid && m.mode() & 0o7777 == 0o700
+    } else {
+        ancestor_safe(m.uid(), m.mode(), euid)
+    }
 }
 
 /// `<canon>/hook.sock` if `canon` (already canonical, taken as is and never
-/// resolved again) and its socket are what amendment A1 requires: `canon` is
-/// a directory (not a symlink) owned by the effective uid with mode 0700,
-/// every ancestor is unrenameable by others, and the socket is a socket (not
+/// resolved again) and its socket are what amendment A1 requires: every
+/// component from "/" down is checked root-first (`walk_root_first`), the
+/// config dir is euid-owned with mode 0700, and the socket is a socket (not
 /// a symlink) owned by the effective uid with mode 0600. Callers connect to
 /// the returned path: a canonical path holds no symlinks, so redirecting it
 /// needs a writable ancestor, which was just rejected.
 fn checked_socket(canon: &Path) -> Option<PathBuf> {
     let euid = euid();
-    if !canon
-        .ancestors()
-        .skip(1)
-        .all(|p| ancestor_lstat_safe(p, euid))
-    {
-        return None;
-    }
-    let d = std::fs::symlink_metadata(canon).ok()?;
-    if !d.file_type().is_dir() || d.uid() != euid || d.mode() & 0o7777 != 0o700 {
+    if !walk_root_first(canon, |p, last| component_safe(p, last, euid)) {
         return None;
     }
     let sock = canon.join("hook.sock");
@@ -389,6 +409,28 @@ mod tests {
         std::fs::rename(real.join("acd"), &canon).unwrap();
         // resolve() returns the canonical path.
         assert_eq!(resolve(&link), Some(canon));
+    }
+
+    #[test]
+    fn the_canonical_path_is_checked_root_first_and_stops_at_a_failure() {
+        let canon = Path::new("/a/b/c");
+        let mut seen = Vec::new();
+        assert!(walk_root_first(canon, |p, last| {
+            seen.push((p.to_owned(), last));
+            true
+        }));
+        let paths: Vec<_> = seen.iter().map(|(p, _)| p.to_str().unwrap()).collect();
+        assert_eq!(paths, ["/", "/a", "/a/b", "/a/b/c"]);
+        assert_eq!(
+            seen.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
+            [false, false, false, true]
+        );
+        let mut visited = 0;
+        assert!(!walk_root_first(canon, |p, _| {
+            visited += 1;
+            p != Path::new("/a")
+        }));
+        assert_eq!(visited, 2, "nothing below a failed component is checked");
     }
 
     #[test]
