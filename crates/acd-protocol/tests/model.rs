@@ -105,6 +105,18 @@ fn unknown_agent_state_maps_to_unknown() {
 }
 
 #[test]
+fn resolve_reason_uses_snake_case_and_tolerates_future_values() {
+    assert_eq!(
+        serde_json::to_value(ResolveReason::StrayKeystroke).unwrap(),
+        json!("stray_keystroke")
+    );
+    assert_eq!(
+        serde_json::from_value::<ResolveReason>(json!("cosmic_ray")).unwrap(),
+        ResolveReason::Unknown
+    );
+}
+
+#[test]
 fn answerability_rules() {
     assert!(permission().is_answerable());
     assert!(

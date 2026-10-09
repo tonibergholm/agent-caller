@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use acd_protocol::{Agent, AgentState, Effect, ErrorCode, RequestStatus, ResolvedBy};
+use acd_protocol::{
+    Agent, AgentState, Effect, ErrorCode, RequestStatus, ResolveReason, ResolvedBy,
+};
 use serde::Serialize;
 
 use crate::{
@@ -244,7 +246,15 @@ pub fn notice_for_outcome(outcome: &Outcome) -> Option<Notice> {
     }
 }
 
-pub fn resolution_notice(by: ResolvedBy) -> Option<Notice> {
+pub const NOTICE_STRAY_KEYSTROKE: &str = "A stray keystroke may be in the input box";
+
+pub fn resolution_notice(by: ResolvedBy, reason: Option<ResolveReason>) -> Option<Notice> {
+    if by == ResolvedBy::Uncertain && reason == Some(ResolveReason::StrayKeystroke) {
+        return Some(Notice {
+            tone: NoticeTone::Warning,
+            text: NOTICE_STRAY_KEYSTROKE.into(),
+        });
+    }
     match by {
         ResolvedBy::Terminal => Some(Notice {
             tone: NoticeTone::Info,
@@ -930,24 +940,42 @@ mod tests {
             NoticeTone::Info
         );
         assert_eq!(
-            resolution_notice(ResolvedBy::Uncertain).unwrap().text,
+            resolution_notice(ResolvedBy::Uncertain, None).unwrap().text,
             "Check the terminal"
         );
         assert_eq!(
-            resolution_notice(ResolvedBy::Lost).unwrap().text,
+            resolution_notice(ResolvedBy::Lost, None).unwrap().text,
             "Check the terminal"
         );
         assert_eq!(
-            resolution_notice(ResolvedBy::Unknown).unwrap().text,
+            resolution_notice(ResolvedBy::Unknown, None).unwrap().text,
             "Check the terminal"
         );
         assert_eq!(
-            resolution_notice(ResolvedBy::Terminal).unwrap().text,
+            resolution_notice(ResolvedBy::Terminal, None).unwrap().text,
             "Answered in the terminal"
         );
-        assert_eq!(resolution_notice(ResolvedBy::Inbox), None);
-        assert_eq!(resolution_notice(ResolvedBy::Agent), None);
-        assert_eq!(resolution_notice(ResolvedBy::Superseded), None);
+        assert_eq!(resolution_notice(ResolvedBy::Inbox, None), None);
+        assert_eq!(resolution_notice(ResolvedBy::Agent, None), None);
+        assert_eq!(resolution_notice(ResolvedBy::Superseded, None), None);
+    }
+
+    #[test]
+    fn stray_keystroke_reason_has_its_own_notice() {
+        let n =
+            resolution_notice(ResolvedBy::Uncertain, Some(ResolveReason::StrayKeystroke)).unwrap();
+        assert_eq!(n.text, "A stray keystroke may be in the input box");
+        assert_eq!(n.tone, NoticeTone::Warning);
+        assert_eq!(
+            resolution_notice(ResolvedBy::Uncertain, Some(ResolveReason::Unknown))
+                .unwrap()
+                .text,
+            "Check the terminal"
+        );
+        assert_eq!(
+            resolution_notice(ResolvedBy::Inbox, Some(ResolveReason::StrayKeystroke)),
+            None
+        );
     }
 
     #[test]

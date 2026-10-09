@@ -71,6 +71,12 @@ pub enum Observation {
         request_id: String,
         by: ResolvedBy,
     },
+    /// `RequestEndedById` with a reason for clients.
+    RequestEndedWithReason {
+        request_id: String,
+        by: ResolvedBy,
+        reason: ResolveReason,
+    },
     /// Like `RequestEndedById`, but only while the request is `open`: a no-op
     /// once it is claimed (`answering`) or resolved.
     RequestEndedIfOpen {
@@ -107,6 +113,7 @@ pub enum Change {
         agent_id: String,
         by: ResolvedBy,
         option_id: Option<String>,
+        reason: Option<ResolveReason>,
     },
     MachineUpdated(Machine),
 }
@@ -247,6 +254,22 @@ impl Registry {
                 }
                 self.resolve_request(&request_id, by)
             }
+            Observation::RequestEndedWithReason {
+                request_id,
+                by,
+                reason,
+            } => {
+                if !self.requests.contains_key(&request_id) {
+                    return vec![];
+                }
+                if matches!(
+                    by,
+                    ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent
+                ) {
+                    self.mark_gone_by_id(&request_id);
+                }
+                self.resolve_request_with(&request_id, by, Some(reason))
+            }
             Observation::RequestEndedIfOpen { request_id, by } => {
                 let open = self
                     .requests
@@ -301,6 +324,15 @@ impl Registry {
     /// decides between `Inbox` and `Terminal`. An `Inbox` resolution of a
     /// claimed request carries the claimed option.
     pub fn resolve_request(&mut self, request_id: &str, by: ResolvedBy) -> Vec<Change> {
+        self.resolve_request_with(request_id, by, None)
+    }
+
+    pub fn resolve_request_with(
+        &mut self,
+        request_id: &str,
+        by: ResolvedBy,
+        reason: Option<ResolveReason>,
+    ) -> Vec<Change> {
         let Some(e) = self.requests.remove(request_id) else {
             return vec![];
         };
@@ -318,6 +350,7 @@ impl Registry {
             agent_id: e.req.agent_id.clone(),
             by,
             option_id,
+            reason,
         }];
         if let Some(a) = self.agents.get_mut(&e.req.agent_id)
             && a.pending.as_ref().map(|p| p.id.as_str()) == Some(request_id)

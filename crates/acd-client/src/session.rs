@@ -1,7 +1,7 @@
 //! One connection's model of a daemon (spec §7.4). Pure: no I/O, no clock.
 use std::collections::BTreeMap;
 
-use acd_protocol::{Agent, Cursor, Machine, Request, ResolvedBy, ServerMessage};
+use acd_protocol::{Agent, Cursor, Machine, Request, ResolveReason, ResolvedBy, ServerMessage};
 
 #[derive(Clone, Debug, Default)]
 pub struct Session {
@@ -32,6 +32,7 @@ pub enum Applied {
         agent_id: String,
         by: ResolvedBy,
         option_id: Option<String>,
+        reason: Option<ResolveReason>,
     },
     Resync(&'static str),
 }
@@ -161,12 +162,14 @@ impl Session {
                 agent_id,
                 by,
                 option_id,
+                reason,
                 ..
             } => Applied::Resolved {
                 request_id: request_id.clone(),
                 agent_id: agent_id.clone(),
                 by: *by,
                 option_id: option_id.clone(),
+                reason: *reason,
             },
             _ => Applied::Ignored,
         }
@@ -351,13 +354,15 @@ mod tests {
                 request_id: "r1".into(),
                 agent_id: "a".into(),
                 by: ResolvedBy::Terminal,
-                option_id: None
+                option_id: None,
+                reason: None
             }),
             Applied::Resolved {
                 request_id: "r1".into(),
                 agent_id: "a".into(),
                 by: ResolvedBy::Terminal,
-                option_id: None
+                option_id: None,
+                reason: None
             }
         );
         let mut m2 = machine();

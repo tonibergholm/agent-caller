@@ -10,6 +10,7 @@ use acd_client::{
     settings::EndpointConfig,
     view::{InboxView, MachineEntryView},
 };
+use acd_protocol::ResolveReason;
 use ts_rs::{Config, TS};
 
 fn committed_dir() -> PathBuf {
@@ -41,6 +42,7 @@ fn bindings_are_current() {
     InboxView::export_all(&cfg).unwrap();
     MachineEntryView::export_all(&cfg).unwrap();
     EndpointConfig::export_all(&cfg).unwrap();
+    ResolveReason::export_all(&cfg).unwrap();
     let generated = read_dir(tmp.path());
     assert!(
         generated.contains_key("Agent.ts") && generated.contains_key("InboxView.ts"),
