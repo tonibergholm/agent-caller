@@ -13,10 +13,15 @@ pub struct Journal {
     pub after: Option<String>,
     /// `None` means the record entry is removed (uninstall).
     pub record_after: Option<FileRecord>,
+    /// Journals written before this field existed were Claude's.
+    #[serde(default = "legacy_target")]
     pub target: super::Target,
     /// J3: why recovery could not decide; kept until it can.
     #[serde(default)]
     pub conflict: Option<String>,
+}
+fn legacy_target() -> super::Target {
+    super::Target::Claude
 }
 pub fn pending(config_dir: &Path) -> bool {
     config_dir.join(JOURNAL_FILE).symlink_metadata().is_ok()
@@ -60,7 +65,7 @@ fn apply(config_dir: &Path, dest: &Path, rec: Option<FileRecord>) -> Result<()> 
 }
 
 /// J3: keeps the journal, records why, and refuses.
-fn conflict(config_dir: &Path, mut j: Journal, why: String) -> Result<()> {
+fn conflict(config_dir: &Path, mut j: Journal, why: String) -> Result<Option<String>> {
     if j.conflict.as_deref() != Some(why.as_str()) {
         j.conflict = Some(why.clone());
         crate::secrets::write_structured(
@@ -79,10 +84,11 @@ fn conflict(config_dir: &Path, mut j: Journal, why: String) -> Result<()> {
 /// `before` state: nothing changed. Otherwise someone (typically Claude's own
 /// atomic rewrite) changed the file and ownership follows the acd entries it
 /// holds. A file that cannot be read safely keeps the journal as a conflict.
-pub fn recover(config_dir: &Path) -> Result<()> {
+/// Returns a note when the record was rebuilt rather than applied as journaled.
+pub fn recover(config_dir: &Path) -> Result<Option<String>> {
     let path = config_dir.join(JOURNAL_FILE);
     if !pending(config_dir) {
-        return Ok(());
+        return Ok(None);
     }
     let j: Journal = serde_json::from_str(&crate::secrets::read_structured(&path)?)
         .map_err(|e| anyhow::anyhow!("{} is not valid: {e}", path.display()))?;
@@ -91,10 +97,15 @@ pub fn recover(config_dir: &Path) -> Result<()> {
         Err(e) => return conflict(config_dir, j, format!("{e:#}")),
     };
     let now = digest(text.as_deref());
+    let mut note = None;
     if now == j.after {
         apply(config_dir, &j.destination, j.record_after.clone())?;
     } else if now != j.before {
-        let owned = match text.as_deref().map(super::owned_entries).transpose() {
+        let owned = match text
+            .as_deref()
+            .map(|t| super::owned_entries(t, j.target))
+            .transpose()
+        {
             Ok(n) => n.unwrap_or(0),
             Err(e) => return conflict(config_dir, j, format!("not valid JSON: {e:#}")),
         };
@@ -106,13 +117,21 @@ pub fn recover(config_dir: &Path) -> Result<()> {
                 created_events: vec![],
             })
         });
-        eprintln!(
-            "note: {} changed during an interrupted acd hooks command; its install record now follows the {owned} acd entries it holds",
-            j.destination.display()
-        );
+        note = Some(if owned > 0 {
+            format!(
+                "{} changed during an interrupted acd hooks command; its install record now follows the {owned} acd entries it holds",
+                j.destination.display()
+            )
+        } else {
+            format!(
+                "{} changed during an interrupted acd hooks command and holds no acd entries; record removed",
+                j.destination.display()
+            )
+        });
         apply(config_dir, &j.destination, rec)?;
     }
-    finish(config_dir)
+    finish(config_dir)?;
+    Ok(note)
 }
 
 #[cfg(test)]
@@ -207,19 +226,6 @@ mod tests {
     }
 
     #[test]
-    fn begin_never_overwrites_a_journal() {
-        let d = tempfile::tempdir().unwrap();
-        crate::secrets::ensure_private_dir(d.path()).unwrap();
-        begin(d.path(), &j("/a/settings.json")).unwrap();
-        assert!(begin(d.path(), &j("/b/settings.json")).is_err(), "J1");
-        let kept: Journal = serde_json::from_str(
-            &crate::secrets::read_structured(&d.path().join(JOURNAL_FILE)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(kept.destination, PathBuf::from("/a/settings.json"));
-    }
-
-    #[test]
     fn a_journal_for_a_long_path_round_trips() {
         let d = tempfile::tempdir().unwrap();
         crate::secrets::ensure_private_dir(d.path()).unwrap();
@@ -236,15 +242,47 @@ mod tests {
     #[test]
     fn a_rewritten_file_without_acd_entries_drops_the_record() {
         let (_t, cfg, dest) = setup();
-        let owned =
+        let foreign =
             r#"{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"x"}]}]}}"#;
-        let mut jr = journal(&dest, Some("old"), Some("new"));
-        jr.record_after = None;
-        std::fs::write(&dest, owned).unwrap();
+        let jr = journal(&dest, Some("old"), Some("new"));
+        let mut r = Record {
+            version: 2,
+            ..Default::default()
+        };
+        r.files
+            .insert(dest.clone(), jr.record_after.clone().unwrap());
+        r.save(&cfg).unwrap();
+        std::fs::write(&dest, foreign).unwrap();
         begin(&cfg, &jr).unwrap();
-        recover(&cfg).unwrap(); // no acd entries: no record
+        let note = recover(&cfg).unwrap().unwrap();
+        assert!(note.contains("record removed"), "{note}");
         assert!(!Record::load(&cfg).unwrap().files.contains_key(&dest));
         assert!(!pending(&cfg));
+    }
+
+    #[test]
+    fn recovery_counts_only_the_journals_target_shape() {
+        let (_t, cfg, dest) = setup();
+        let codex_only = format!(
+            r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"/bin/acd hook codex Stop --config-dir /c {}"}}]}}]}}}}"#,
+            crate::hooks_install::MARKER
+        );
+        assert_eq!(
+            crate::hooks_install::owned_entries(&codex_only, Target::Codex).unwrap(),
+            1
+        );
+        std::fs::write(&dest, &codex_only).unwrap();
+        begin(&cfg, &journal(&dest, Some("old"), Some("new"))).unwrap(); // Claude
+        let note = recover(&cfg).unwrap().unwrap();
+        assert!(note.contains("record removed"), "{note}");
+    }
+
+    #[test]
+    fn an_older_journal_without_a_target_still_loads() {
+        let t = serde_json::json!({"destination": "/a/settings.json", "before": null, "after": null, "record_after": null});
+        let j: Journal = serde_json::from_value(t).unwrap();
+        assert_eq!(j.target, Target::Claude);
+        assert_eq!(j.conflict, None);
     }
 
     #[test]

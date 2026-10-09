@@ -193,6 +193,9 @@ fn real_main() -> Result<()> {
                             allow_unknown_git,
                         },
                     )?;
+                    if let Some(n) = &r.recovery_note {
+                        eprintln!("note: {n}");
+                    }
                     if r.suspicious > 0 {
                         eprintln!(
                             "warning: {} unexpected entries in {} carry the acd marker; acd left them alone",
@@ -216,6 +219,9 @@ fn real_main() -> Result<()> {
                 HooksCmd::Status => print!("{}", hooks_install::status(&ctx)?),
                 HooksCmd::Uninstall { target } => {
                     let r = hooks_install::uninstall(&ctx, target)?;
+                    if let Some(n) = &r.recovery_note {
+                        eprintln!("note: {n}");
+                    }
                     if r.removed_file {
                         println!("Removed {} (acd created it)", r.path.display());
                     } else {

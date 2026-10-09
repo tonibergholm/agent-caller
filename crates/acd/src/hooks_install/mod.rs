@@ -110,6 +110,8 @@ pub struct Report {
     pub backup: Option<PathBuf>,
     pub removed_file: bool,
     pub suspicious: usize,
+    /// Set when recovery rebuilt an install record before this command ran.
+    pub recovery_note: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -450,6 +452,7 @@ fn edit_settings(
             backup,
             removed_file: text.is_none(),
             suspicious,
+            recovery_note: None,
         });
     }
     bail!(
@@ -464,7 +467,7 @@ pub fn install(ctx: &Ctx, t: Target, flags: Flags) -> Result<Report> {
 
 fn install_entries(ctx: &Ctx, t: Target, flags: Flags) -> Result<Report> {
     let held = lock_writers(&ctx.config_dir)?;
-    journal::recover(&ctx.config_dir)?;
+    let recovery_note = journal::recover(&ctx.config_dir)?;
     let path = ctx.settings_path(t);
     let dest = canonical_destination(&path, true)?;
     let groups = groups_for(ctx, &held, t)?;
@@ -518,11 +521,15 @@ fn install_entries(ctx: &Ctx, t: Target, flags: Flags) -> Result<Report> {
             Ok(suspicious)
         },
     )
+    .map(|mut r| {
+        r.recovery_note = recovery_note;
+        r
+    })
 }
 
 pub fn uninstall(ctx: &Ctx, t: Target) -> Result<Report> {
     let _lock = lock_writers(&ctx.config_dir)?;
-    journal::recover(&ctx.config_dir)?;
+    let recovery_note = journal::recover(&ctx.config_dir)?;
     let path = ctx.settings_path(t);
     let dest = canonical_destination(&path, true)?;
     let rec = Record::load(&ctx.config_dir)?.files.get(&dest).cloned();
@@ -561,10 +568,14 @@ pub fn uninstall(ctx: &Ctx, t: Target) -> Result<Report> {
             Ok(suspicious)
         },
     )
+    .map(|mut r| {
+        r.recovery_note = recovery_note;
+        r
+    })
 }
 
-/// J2: how many entries are exactly acd's.
-pub fn owned_entries(text: &str) -> Result<usize> {
+/// J2: how many entries are exactly acd's for `target`.
+pub fn owned_entries(text: &str, target: Target) -> Result<usize> {
     let v: Value = serde_json::from_str(text)?;
     let Some(hooks) = v.get("hooks").and_then(Value::as_object) else {
         return Ok(0);
@@ -582,7 +593,7 @@ pub fn owned_entries(text: &str) -> Result<usize> {
                         .into_iter()
                         .flatten()
                 })
-                .filter(move |e| entries::classify(event, e) == Ownership::Owned)
+                .filter(move |e| entries::classify_for(target, event, e) == Ownership::Owned)
         })
         .count())
 }
@@ -594,7 +605,12 @@ pub fn status(ctx: &Ctx) -> Result<String> {
     let _held = lock_writers(&ctx.config_dir)?;
     let mut out = String::new();
     match journal::recover(&ctx.config_dir) {
-        Ok(()) => out.push_str("journal: none\n"),
+        Ok(note) => {
+            out.push_str("journal: none\n");
+            if let Some(n) = note {
+                out.push_str(&format!("note: {n}\n"));
+            }
+        }
         Err(e) => out.push_str(&format!("journal: {e:#}\n")),
     }
     for (path, r) in Record::load(&ctx.config_dir)?.files {
@@ -611,6 +627,8 @@ pub fn status(ctx: &Ctx) -> Result<String> {
 pub struct RewriteReport {
     pub updated: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, String)>,
+    #[allow(dead_code)] // Task 27 reports it
+    pub recovery_note: Option<String>,
 }
 
 /// Replaces the token in every owned entry of one event's groups. Only
@@ -679,10 +697,11 @@ pub fn rewrite_claude_token(
     token: &str,
     flags: Flags,
 ) -> Result<RewriteReport> {
-    journal::recover(&ctx.config_dir)?;
+    let recovery_note = journal::recover(&ctx.config_dir)?;
     let mut report = RewriteReport {
         updated: vec![],
         failed: vec![],
+        recovery_note,
     };
     let destinations = Record::load(&ctx.config_dir)?.claude_destinations();
     for recorded in &destinations {
@@ -911,10 +930,15 @@ mod tests {
             r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}"#;
         let path = install_into(&mut f, "claude-a", Some(original));
         let text = std::fs::read_to_string(path).unwrap();
-        assert_eq!(owned_entries(&text).unwrap(), 7);
-        assert_eq!(owned_entries(original).unwrap(), 0);
-        assert_eq!(owned_entries("{}").unwrap(), 0);
-        assert!(owned_entries("nope").is_err());
+        assert_eq!(owned_entries(&text, Target::Claude).unwrap(), 7);
+        assert_eq!(owned_entries(original, Target::Claude).unwrap(), 0);
+        assert_eq!(owned_entries("{}", Target::Claude).unwrap(), 0);
+        assert_eq!(
+            owned_entries(&text, Target::Codex).unwrap(),
+            0,
+            "Claude shape only"
+        );
+        assert!(owned_entries("nope", Target::Claude).is_err());
     }
 
     #[test]

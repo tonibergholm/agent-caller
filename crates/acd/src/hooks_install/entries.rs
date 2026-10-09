@@ -159,6 +159,21 @@ fn codex_owned(event: &str, entry: &Value) -> bool {
                && flag == "--config-dir" && dir.starts_with('/') && marker == MARKER)
 }
 
+/// Like `classify`, but only the given target's own shape is `Owned`.
+pub fn classify_for(target: super::Target, event: &str, entry: &Value) -> Ownership {
+    let owned = match target {
+        super::Target::Claude => claude_owned(event, entry),
+        super::Target::Codex => codex_owned(event, entry),
+    };
+    if owned {
+        Ownership::Owned
+    } else if entry.to_string().contains(MARKER) {
+        Ownership::Suspicious
+    } else {
+        Ownership::Foreign
+    }
+}
+
 pub fn classify(event: &str, entry: &Value) -> Ownership {
     if claude_owned(event, entry) || codex_owned(event, entry) {
         Ownership::Owned
