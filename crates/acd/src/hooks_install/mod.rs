@@ -182,6 +182,39 @@ pub(crate) fn read_settings(path: &Path) -> Result<Option<String>> {
     }
 }
 
+/// Reads `name` relative to the pinned directory, with the same refusals as
+/// `read_settings`. Also returns the file's permission bits.
+fn read_pinned(
+    dir: &crate::secrets::DirFd,
+    name: &std::ffi::OsStr,
+) -> Result<Option<(String, u32)>> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let shown = dir.path().join(name);
+    let mut f = match dir.open_nofollow(name) {
+        Ok(None) => return Ok(None),
+        Ok(Some(f)) => f,
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            bail!("refusing to edit {}: it is a symlink", shown.display())
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", shown.display())),
+    };
+    let m = f.metadata()?;
+    if m.uid() != acd_securefs::euid() {
+        bail!(
+            "refusing to edit {}: it is not owned by you",
+            shown.display()
+        );
+    }
+    if !m.is_file() {
+        bail!("refusing to edit {}: not a regular file", shown.display());
+    }
+    let mut text = String::new();
+    f.read_to_string(&mut text)
+        .with_context(|| format!("reading {}", shown.display()))?;
+    Ok(Some((text, m.permissions().mode() & 0o777)))
+}
+
 /// A private copy of the pre-edit text. Names are unique and never reused:
 /// `create_new` refuses an existing file or symlink.
 fn backup(ctx: &Ctx, path: &Path, text: &str) -> Result<PathBuf> {
@@ -216,13 +249,10 @@ fn backup(ctx: &Ctx, path: &Path, text: &str) -> Result<PathBuf> {
     Ok(b)
 }
 
-fn file_mode(path: &Path, t: Target) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
+fn file_mode(existing: Option<u32>, t: Target) -> u32 {
     match t {
         Target::Claude => 0o600,
-        Target::Codex => std::fs::metadata(path)
-            .map(|m| m.permissions().mode() & 0o777)
-            .unwrap_or(0o600),
+        Target::Codex => existing.unwrap_or(0o600),
     }
 }
 
@@ -268,17 +298,23 @@ const MAX_ATTEMPTS: usize = 3;
 
 /// Checks made after the temp file is staged and the journal exists, as late
 /// as possible before the rename. `Ok(false)` means the file changed since it
-/// was read, so the caller retries the whole edit.
+/// was read, so the caller retries the whole edit. Git is asked by path (it
+/// cannot take a descriptor); the content compare uses the pinned directory.
 fn verify_before_commit(
-    dest: &Path,
+    dir: &crate::secrets::DirFd,
+    name: &std::ffi::OsStr,
     before: Option<&str>,
     t: Target,
     flags: Flags,
 ) -> Result<bool> {
     if t == Target::Claude {
-        git::check(dest, flags.allow_tracked, flags.allow_unknown_git)?;
+        git::check(
+            &dir.path().join(name),
+            flags.allow_tracked,
+            flags.allow_unknown_git,
+        )?;
     }
-    Ok(read_settings(dest)?.as_deref() == before)
+    Ok(read_pinned(dir, name)?.map(|(text, _)| text).as_deref() == before)
 }
 
 /// Edits the settings file at `dest`, which the caller resolved once with
@@ -291,9 +327,17 @@ fn edit_settings(
     record_after: impl Fn(Option<&str>, &Obj) -> Option<FileRecord>,
     edit: impl Fn(&mut Obj) -> Result<usize>,
 ) -> Result<Report> {
+    // Pinned once: staging, compare, rename, unlink and fsync all go through
+    // this descriptor, so replacing the directory's path cannot redirect them.
+    let dir =
+        crate::secrets::DirFd::open(dest.parent().context("settings path has no parent")?, true)?;
+    let name = dest.file_name().context("settings path has no file name")?;
     let mut backed_up: Option<(Option<String>, PathBuf)> = None;
     for attempt in 0..MAX_ATTEMPTS {
-        let before = read_settings(dest)?;
+        let (before, existing_mode) = match read_pinned(&dir, name)? {
+            Some((text, mode)) => (Some(text), Some(mode)),
+            None => (None, None),
+        };
         if t == Target::Claude {
             git::check(dest, flags.allow_tracked, flags.allow_unknown_git)?;
         }
@@ -316,7 +360,7 @@ fn edit_settings(
         // content check, so that check sits right next to the rename.
         let staged = text
             .as_deref()
-            .map(|tx| crate::secrets::stage_atomic(dest, tx.as_bytes(), file_mode(dest, t)))
+            .map(|tx| dir.stage(name, tx.as_bytes(), file_mode(existing_mode, t)))
             .transpose()?;
         test_touch(dest, attempt);
         test_stage("after-stage");
@@ -341,7 +385,7 @@ fn edit_settings(
         )?;
         // Until the rename the journal is only a promise: any early exit
         // removes it, and dropping `staged` removes the temp file.
-        match verify_before_commit(dest, before.as_deref(), t, flags) {
+        match verify_before_commit(&dir, name, before.as_deref(), t, flags) {
             Ok(true) => {}
             Ok(false) => {
                 journal::finish(&ctx.config_dir)?;
@@ -362,9 +406,20 @@ fn edit_settings(
                         error,
                     })
                 }),
+            // B: the deletion is durable only once the directory is synced;
+            // until then (or if the sync fails) the journal stays.
             None => inject("settings-write")
-                .and_then(|()| std::fs::remove_file(dest).map_err(Into::into))
-                .map_err(CommitError::not_renamed),
+                .and_then(|()| dir.unlink(name))
+                .map_err(CommitError::not_renamed)
+                .and_then(|()| {
+                    dir.sync()
+                        .map_err(anyhow::Error::from)
+                        .and_then(|()| inject("settings-post-rename"))
+                        .map_err(|error| CommitError {
+                            renamed: true,
+                            error,
+                        })
+                }),
         };
         if let Err(e) = committed {
             if e.renamed {

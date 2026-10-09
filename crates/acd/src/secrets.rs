@@ -87,11 +87,147 @@ pub fn write_secret(path: &Path, value: &str) -> Result<()> {
     write_atomic(path, format!("{value}\n").as_bytes(), 0o600)
 }
 
-/// A fully written, fsynced temporary file waiting to replace `target`.
+/// A held descriptor for a directory. Every operation is relative to the
+/// descriptor (`openat`, `renameat`, `unlinkat`), so renaming or replacing
+/// the directory's path afterwards cannot redirect a write.
+pub struct DirFd {
+    dir: fs::File,
+    path: PathBuf,
+}
+
+fn cname(name: &std::ffi::OsStr) -> Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(name.as_bytes()).context("name contains a NUL byte")
+}
+
+fn cvt(r: i32) -> std::io::Result<i32> {
+    if r < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(r)
+    }
+}
+
+impl DirFd {
+    /// Opens `path` once. `strict` refuses a symlink as the last component
+    /// (the caller passes a canonical path) and requires a directory owned
+    /// by the effective user, checked on the descriptor.
+    pub fn open(path: &Path, strict: bool) -> Result<DirFd> {
+        use std::os::unix::fs::MetadataExt;
+        let mut flags = libc::O_DIRECTORY | libc::O_CLOEXEC;
+        if strict {
+            flags |= libc::O_NOFOLLOW;
+        }
+        let dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(flags)
+            .open(path)
+            .with_context(|| format!("opening directory {}", path.display()))?;
+        if strict {
+            let m = dir.metadata()?;
+            if !m.is_dir() || m.uid() != acd_securefs::euid() {
+                bail!(
+                    "refusing to use {}: not a directory owned by you",
+                    path.display()
+                );
+            }
+        }
+        Ok(DirFd {
+            dir,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Opens an existing file for reading without following a symlink.
+    /// `Ok(None)` when it does not exist; an error with `ELOOP` for a symlink.
+    pub fn open_nofollow(&self, name: &std::ffi::OsStr) -> std::io::Result<Option<fs::File>> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let c = cname(name).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+        // SAFETY: valid directory fd and NUL-terminated name.
+        match cvt(unsafe { libc::openat(self.dir.as_raw_fd(), c.as_ptr(), flags) }) {
+            // SAFETY: openat returned a fresh descriptor that we own.
+            Ok(fd) => Ok(Some(unsafe { fs::File::from_raw_fd(fd) })),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Removes a file relative to the descriptor. A missing file is fine.
+    pub fn unlink(&self, name: &std::ffi::OsStr) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        let c = cname(name)?;
+        // SAFETY: valid directory fd and NUL-terminated name.
+        match cvt(unsafe { libc::unlinkat(self.dir.as_raw_fd(), c.as_ptr(), 0) }) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(e).with_context(|| format!("removing {}", self.path.join(name).display()))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub fn sync(&self) -> std::io::Result<()> {
+        self.dir.sync_all()
+    }
+
+    /// A unique temporary file in this directory, created `O_EXCL|O_NOFOLLOW`
+    /// with the exact mode, written and fsynced. Nothing named `name` changes.
+    ///
+    /// The staged file holds the final contents, token included, until the
+    /// rename; if the directory sits in a Git work tree it could be added
+    /// concurrently for those milliseconds, exactly as the settings file can
+    /// be while untracked. That exposure is accepted.
+    pub fn stage(&self, name: &std::ffi::OsStr, bytes: &[u8], mode: u32) -> Result<Staged> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let mut rnd = [0u8; 8];
+        getrandom::fill(&mut rnd).expect("OS randomness is available");
+        let mut tmp = name.to_os_string();
+        tmp.push(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            rnd.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        ));
+        let ctmp = cname(&tmp)?;
+        let flags =
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: valid directory fd and NUL-terminated name.
+        let fd = cvt(unsafe {
+            libc::openat(
+                self.dir.as_raw_fd(),
+                ctmp.as_ptr(),
+                flags,
+                mode as libc::c_uint,
+            )
+        })
+        .with_context(|| format!("creating {}", self.path.join(&tmp).display()))?;
+        // SAFETY: openat returned a fresh descriptor that we own.
+        let mut f = unsafe { fs::File::from_raw_fd(fd) };
+        let staged = Staged {
+            dir: self.dir.try_clone()?,
+            tmp: ctmp,
+            target: cname(name)?,
+            shown: self.path.join(name),
+            live: true,
+        };
+        // `mode` above is masked by the umask; set it exactly on the fd.
+        f.set_permissions(fs::Permissions::from_mode(mode))?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        Ok(staged)
+    }
+}
+
+/// A fully written, fsynced temporary file waiting to replace its target.
 /// Dropping it without `commit` removes the temporary file.
 pub struct Staged {
-    tmp: PathBuf,
-    target: PathBuf,
+    dir: fs::File,
+    tmp: std::ffi::CString,
+    target: std::ffi::CString,
+    shown: PathBuf,
     live: bool,
 }
 
@@ -116,66 +252,47 @@ impl CommitError {
 impl Drop for Staged {
     fn drop(&mut self) {
         if self.live {
-            let _ = fs::remove_file(&self.tmp);
+            use std::os::fd::AsRawFd;
+            // SAFETY: valid directory fd and NUL-terminated name.
+            unsafe { libc::unlinkat(self.dir.as_raw_fd(), self.tmp.as_ptr(), 0) };
         }
     }
 }
 
-/// First half of `write_atomic`: a unique same-directory temporary file with
-/// the requested mode, written and fsynced. Nothing at `path` changes.
+/// First half of `write_atomic`: stages next to `path`, opening the parent
+/// directory once. Nothing at `path` changes.
 pub fn stage_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<Staged> {
-    let dir = path.parent().context("path has no parent")?;
-    let mut rnd = [0u8; 8];
-    getrandom::fill(&mut rnd).expect("OS randomness is available");
-    let name = path
-        .file_name()
-        .context("path has no file name")?
-        .to_string_lossy();
-    let tmp = dir.join(format!(
-        "{name}.{}.{}.tmp",
-        std::process::id(),
-        rnd.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    ));
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(&tmp)
-        .with_context(|| format!("creating {}", tmp.display()))?;
-    let staged = Staged {
-        tmp,
-        target: path.to_path_buf(),
-        live: true,
-    };
-    // `mode` above is masked by the umask; set it exactly on the fd.
-    f.set_permissions(fs::Permissions::from_mode(mode))?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    Ok(staged)
+    let dir = DirFd::open(path.parent().context("path has no parent")?, false)?;
+    dir.stage(
+        path.file_name().context("path has no file name")?,
+        bytes,
+        mode,
+    )
 }
 
 impl Staged {
-    /// Renames over the target, then fsyncs the directory.
+    /// `renameat` over the target, then fsyncs the directory.
     pub fn commit(mut self) -> std::result::Result<(), CommitError> {
-        if let Err(e) = fs::rename(&self.tmp, &self.target) {
+        use std::os::fd::AsRawFd;
+        let fd = self.dir.as_raw_fd();
+        // SAFETY: valid directory fd and NUL-terminated names.
+        if let Err(e) =
+            cvt(unsafe { libc::renameat(fd, self.tmp.as_ptr(), fd, self.target.as_ptr()) })
+        {
             return Err(CommitError::not_renamed(
-                anyhow::Error::new(e).context(format!("replacing {}", self.target.display())),
+                anyhow::Error::new(e).context(format!("replacing {}", self.shown.display())),
             ));
         }
         self.live = false;
         // The rename already happened: the new value is in place. A failure
         // here only means durability is unconfirmed, so say so.
-        let dir = self.target.parent().unwrap_or(Path::new("."));
-        fs::File::open(dir)
-            .and_then(|d| d.sync_all())
-            .map_err(|e| CommitError {
-                renamed: true,
-                error: anyhow::Error::new(e).context(format!(
-                    "{} was written with the new value, but syncing {} failed; durability is unconfirmed",
-                    self.target.display(),
-                    dir.display()
-                )),
-            })
+        self.dir.sync_all().map_err(|e| CommitError {
+            renamed: true,
+            error: anyhow::Error::new(e).context(format!(
+                "{} was written with the new value, but syncing its directory failed; durability is unconfirmed",
+                self.shown.display(),
+            )),
+        })
     }
 }
 

@@ -1051,3 +1051,80 @@ fn a_journal_with_a_foreign_rewrite_is_kept_and_blocks_new_edits() {
         r#"{"model": "claude rewrote me"}"#
     );
 }
+#[cfg(debug_assertions)]
+#[test]
+fn a_directory_replaced_after_it_is_pinned_does_not_receive_the_write() {
+    let (home, dir) = home_with_acd();
+    let c = home.path().join(".claude");
+    let other = home.path().join("other");
+    std::fs::create_dir_all(&c).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(c.join("settings.json"), "{}").unwrap();
+    std::fs::write(other.join("settings.json"), "{}").unwrap();
+    let moved = home.path().join("claude-moved");
+    let swap = format!(
+        "mv '{c}' '{m}' && ln -s '{o}' '{c}'",
+        c = c.display(),
+        m = moved.display(),
+        o = other.display()
+    );
+    let out = acd_home(&dir, home.path())
+        .env("ACD_TEST_RUN_AT", format!("after-stage={swap}"))
+        .args(["hooks", "install", "claude", "--allow-unknown-git"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join("settings.json")).unwrap(),
+        "{}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&other).unwrap().count(),
+        1,
+        "no temp file either"
+    );
+    assert_eq!(owned_count(&json_of(&moved.join("settings.json"))), 7);
+    assert_eq!(
+        std::fs::read_dir(&moved).unwrap().count(),
+        1,
+        "no temp file left"
+    );
+}
+#[cfg(debug_assertions)]
+#[test]
+fn a_failed_directory_sync_after_an_unlink_keeps_the_journal() {
+    let (home, dir) = home_with_acd();
+    let p = home.path().join(".claude/settings.json");
+    assert!(
+        install(&dir, home.path(), "claude", &["--allow-unknown-git"])
+            .status
+            .success()
+    );
+    let out = acd_home(&dir, home.path())
+        .env("ACD_TEST_FAIL_AT", "settings-post-rename")
+        .args(["hooks", "uninstall", "claude"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!p.exists(), "the file was removed");
+    assert!(dir.join("hooks-journal.json").exists());
+    assert!(
+        json_of(&dir.join("hooks-installed.json"))["files"]
+            .as_object()
+            .unwrap()
+            .len()
+            == 1,
+        "the record is saved only after the sync"
+    );
+    assert!(
+        install(&dir, home.path(), "claude", &["--allow-unknown-git"])
+            .status
+            .success()
+    );
+    assert!(!dir.join("hooks-journal.json").exists());
+    assert_eq!(owned_count(&json_of(&p)), 7);
+}
