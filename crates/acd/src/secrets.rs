@@ -90,12 +90,12 @@ pub fn write_secret(path: &Path, value: &str) -> Result<()> {
 /// Writes bytes atomically with the requested mode using a unique same-directory
 /// temporary file, fsync, rename, and directory fsync.
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    let dir = path.parent().context("secret path has no parent")?;
+    let dir = path.parent().context("path has no parent")?;
     let mut rnd = [0u8; 8];
     getrandom::fill(&mut rnd).expect("OS randomness is available");
     let name = path
         .file_name()
-        .context("secret path has no file name")?
+        .context("path has no file name")?
         .to_string_lossy();
     let tmp = dir.join(format!(
         "{name}.{}.{}.tmp",
@@ -109,6 +109,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
             .mode(mode)
             .open(&tmp)
             .with_context(|| format!("creating {}", tmp.display()))?;
+        // `mode` above is masked by the umask; set it exactly on the fd.
+        f.set_permissions(fs::Permissions::from_mode(mode))?;
         f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
@@ -203,6 +205,46 @@ mod tests {
             0o644
         );
         assert_eq!(fs::read(&path).unwrap(), b"x");
+    }
+
+    const UMASK_CHILD: &str = "ACD_TEST_UMASK_CHILD";
+
+    /// Runs only in the child process spawned below, so the process-wide
+    /// umask change never touches other tests.
+    #[test]
+    #[ignore = "run by write_atomic_mode_ignores_the_process_umask in a child"]
+    fn umask_child_checks_write_atomic_mode() {
+        if std::env::var_os(UMASK_CHILD).is_none() {
+            return;
+        }
+        unsafe { libc::umask(0o077) };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        write_atomic(&path, b"x", 0o644).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn write_atomic_mode_ignores_the_process_umask() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "secrets::tests::umask_child_checks_write_atomic_mode",
+                "--nocapture",
+            ])
+            .env(UMASK_CHILD, "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && text.contains("1 passed"),
+            "{text}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

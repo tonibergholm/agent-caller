@@ -3,8 +3,10 @@
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
+/// Keys are held decoded, so `render` re-escapes them; only values keep their
+/// original bytes (serde_json cannot expose raw object keys).
 #[derive(Debug, Default)]
-pub struct Obj(pub Vec<(String, Box<RawValue>)>);
+pub struct Obj(pub Vec<(String, Box<RawValue>)>, pub bool);
 
 impl<'de> serde::Deserialize<'de> for Obj {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -20,9 +22,12 @@ impl<'de> serde::Deserialize<'de> for Obj {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Obj, A::Error> {
                 let mut fields = Vec::new();
                 while let Some((key, value)) = map.next_entry::<String, Box<RawValue>>()? {
+                    if fields.iter().any(|(k, _)| *k == key) {
+                        return Err(serde::de::Error::custom(format!("duplicate key {key:?}")));
+                    }
                     fields.push((key, value));
                 }
-                Ok(Obj(fields))
+                Ok(Obj(fields, false))
             }
         }
 
@@ -35,7 +40,9 @@ impl Obj {
         if text.trim().is_empty() {
             return Ok(Self::default());
         }
-        Ok(serde_json::from_str(text)?)
+        let mut obj: Obj = serde_json::from_str(text)?;
+        obj.1 = text.ends_with('\n');
+        Ok(obj)
     }
 
     pub fn get(&self, key: &str) -> Option<&RawValue> {
@@ -62,8 +69,9 @@ impl Obj {
 
     /// Two-space indent at this level; nested values keep their bytes.
     pub fn render(&self) -> String {
+        let tail = if self.1 { "\n" } else { "" };
         if self.0.is_empty() {
-            return "{}".into();
+            return format!("{{}}{tail}");
         }
         let mut out = String::from("{\n");
         for (i, (key, value)) in self.0.iter().enumerate() {
@@ -74,6 +82,7 @@ impl Obj {
             out.push_str(if i + 1 < self.0.len() { ",\n" } else { "\n" });
         }
         out.push('}');
+        out.push_str(tail);
         out
     }
 }
@@ -161,6 +170,27 @@ mod tests {
         assert!(Obj::parse("  \n").unwrap().is_empty());
         assert!(Obj::parse("[1]").is_err());
         assert!(Obj::parse("{").is_err());
+    }
+
+    #[test]
+    fn duplicate_keys_are_refused() {
+        assert!(Obj::parse(r#"{"a": 1, "a": 2}"#).is_err());
+        let group = RawValue::from_string(
+            r#"{"hooks": [{"url": "OWNED"}], "hooks": [{"command": "x"}]}"#.into(),
+        )
+        .unwrap();
+        assert!(edit_group(&group, |v| v["url"] == "OWNED").is_err());
+    }
+
+    #[test]
+    fn render_keeps_a_trailing_newline_only_when_present() {
+        let with = Obj::parse("{\"a\": 1}\n").unwrap();
+        assert_eq!(with.render(), "{\n  \"a\": 1\n}\n");
+        assert_eq!(
+            Obj::parse("{\"a\": 1}").unwrap().render(),
+            "{\n  \"a\": 1\n}"
+        );
+        assert_eq!(Obj::parse("{}\n").unwrap().render(), "{}\n");
     }
 
     #[test]

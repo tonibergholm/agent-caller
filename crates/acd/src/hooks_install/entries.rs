@@ -11,6 +11,7 @@ pub fn claude_events(permission_hold: u64) -> Vec<(&'static str, Option<&'static
         ("PermissionRequest", None, permission_hold + 10),
         ("PreToolUse", Some("AskUserQuestion"), 1),
         ("PostToolUse", None, 1),
+        ("PostToolUseFailure", None, 1),
         ("Stop", None, 1),
         ("SessionEnd", None, 1),
     ]
@@ -92,7 +93,7 @@ pub fn sh_words(cmd: &str) -> Option<Vec<String>> {
                         ch => cur.push(ch),
                     }
                 }
-                if chars.peek() == Some(&'\\') {
+                while chars.peek() == Some(&'\\') {
                     chars.next();
                     if chars.next()? != '\'' {
                         return None;
@@ -135,7 +136,8 @@ fn claude_owned(event: &str, entry: &Value) -> bool {
     let Some((port, path)) = rest.split_once('/') else {
         return false;
     };
-    port.parse::<u16>().is_ok_and(|p| p > 0)
+    port.bytes().all(|b| b.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|p| p > 0)
         && !port.starts_with('0')
         && path == format!("hook/claude/{event}?marker={MARKER}")
 }
@@ -216,6 +218,10 @@ mod tests {
         );
         assert_eq!(claude_events(3600)[1], ("PermissionRequest", None, 3610));
         assert!(
+            claude_events(3600).contains(&("PostToolUseFailure", None, 1)),
+            "failed tools count as tool-ran evidence"
+        );
+        assert!(
             !claude_events(3600)
                 .iter()
                 .any(|(event, _, _)| *event == "SessionStart")
@@ -239,6 +245,7 @@ mod tests {
             json!({"type": "http", "url": "https://example.com/x?note=acd-managed:v1"}),
             json!({"type": "http", "url": "http://10.0.0.1:47801/hook/claude/Stop?marker=acd-managed:v1"}),
             json!({"type": "http", "url": "http://127.0.0.1:47801/hook/claude/Stop?marker=acd-managed:v1&x=1"}),
+            json!({"type": "http", "url": "http://127.0.0.1:+47801/hook/claude/Stop?marker=acd-managed:v1"}),
         ] {
             assert_eq!(classify("Stop", &entry), Ownership::Suspicious, "{entry}");
         }
@@ -254,6 +261,11 @@ mod tests {
             sh_words(&format!("{} hook", sh_quote("/opt/my tools/a'b"))).unwrap(),
             vec!["/opt/my tools/a'b", "hook"]
         );
+        let two = "/opt/a''b";
+        assert_eq!(sh_quote(two), "'/opt/a'\\'''\\''b'");
+        assert_eq!(sh_words(&sh_quote(two)).unwrap(), vec![two]);
+        let three = "'''";
+        assert_eq!(sh_words(&sh_quote(three)).unwrap(), vec![three]);
         for bad in ["a;b", "a $(x)", "a \"b\"", "a `b`", "a\\b", "'open"] {
             assert!(sh_words(bad).is_none(), "{bad}");
         }
