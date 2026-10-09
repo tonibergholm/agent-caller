@@ -4,6 +4,7 @@ pub mod dialogs;
 pub mod endpoint;
 pub mod evidence;
 pub mod mapping;
+pub mod owner;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod wire;
