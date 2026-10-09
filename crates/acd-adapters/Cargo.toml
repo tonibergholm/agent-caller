@@ -5,10 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-testing = ["dep:tempfile", "dep:axum"]
+testing = ["dep:tempfile"]
 
 [dependencies]
 acd-core.workspace = true
+acd-securefs.workspace = true
 acd-protocol.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
@@ -22,7 +23,9 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-axum = { workspace = true, optional = true }
+axum.workspace = true
+libc.workspace = true
+subtle.workspace = true
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
