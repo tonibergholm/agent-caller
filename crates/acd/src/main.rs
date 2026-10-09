@@ -1,6 +1,7 @@
 mod bind;
 mod config;
 mod daemon;
+mod hook_shim;
 mod hook_token;
 mod identity;
 mod pair;
@@ -85,6 +86,12 @@ fn below_frame_logging(meta: &tracing::Metadata<'_>) -> bool {
 }
 
 fn main() {
+    // The Codex shim runs before logging starts, so it never writes log
+    // lines to Codex's stderr.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|a| a == "hook") {
+        std::process::exit(hook_shim::main(&args[2..]));
+    }
     use tracing_subscriber::prelude::*;
     let env =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
