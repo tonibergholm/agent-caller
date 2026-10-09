@@ -29,7 +29,12 @@ const MAX_REJECTED: usize = 256;
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credential {
     pub token: String,
+    /// The tag every request matching this credential carries.
     pub generation: u64,
+    /// Wall-clock milliseconds from which this credential no longer
+    /// matches (the previous token's retention cap, T4). Checked on every
+    /// request, so an expiry needs no store write to take effect.
+    pub expires_at_ms: Option<i64>,
 }
 
 impl std::fmt::Debug for Credential {
@@ -37,6 +42,7 @@ impl std::fmt::Debug for Credential {
         f.debug_struct("Credential")
             .field("token", &"<redacted>")
             .field("generation", &self.generation)
+            .field("expires_at_ms", &self.expires_at_ms)
             .finish()
     }
 }
@@ -78,9 +84,15 @@ impl HookAuth {
     }
 
     pub fn check(&self, presented: &str) -> Option<u64> {
+        self.check_at(presented, super::claude_sessions::wall_ms())
+    }
+
+    /// `check` with the wall-clock time given (tests).
+    pub fn check_at(&self, presented: &str, now_ms: i64) -> Option<u64> {
         let creds = self.creds.read().expect("hook auth");
         let matches = |stored: &Credential| {
-            !stored.token.is_empty()
+            stored.expires_at_ms.is_none_or(|at| now_ms < at)
+                && !stored.token.is_empty()
                 && bool::from(stored.token.as_bytes().ct_eq(presented.as_bytes()))
         };
         if matches(&creds.current) {
@@ -618,10 +630,38 @@ mod tests {
         let credential = Credential {
             token: token.into(),
             generation: 42,
+            expires_at_ms: None,
         };
         let debug = format!("{credential:?}");
         assert!(!debug.contains(token), "{debug}");
         assert!(debug.contains("<redacted>"), "{debug}");
         assert!(debug.contains("42"), "{debug}");
+    }
+
+    fn cred(token: &str, generation: u64, expires_at_ms: Option<i64>) -> Credential {
+        Credential {
+            token: token.into(),
+            generation,
+            expires_at_ms,
+        }
+    }
+
+    #[test]
+    fn an_expired_credential_never_matches() {
+        let auth = super::HookAuth::new(cred("current-token", 2, None));
+        auth.set(
+            cred("current-token", 2, None),
+            Some(cred("previous-token", 1, Some(1_000))),
+        );
+        assert_eq!(auth.check_at("previous-token", 999), Some(1));
+        assert_eq!(auth.check_at("previous-token", 1_000), None, "expired");
+        assert_eq!(auth.check_at("previous-token", 5_000), None);
+        assert_eq!(auth.check_at("current-token", 5_000), Some(2));
+        // The real clock: a previous token that expired in the past.
+        auth.set(
+            cred("current-token", 2, None),
+            Some(cred("previous-token", 1, Some(1_000))),
+        );
+        assert_eq!(auth.check("previous-token"), None);
     }
 }

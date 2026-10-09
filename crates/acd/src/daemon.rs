@@ -63,17 +63,205 @@ pub fn claude_roots(
     roots
 }
 
-pub fn hook_credentials(s: &crate::hook_token::Store) -> (Credential, Option<Credential>) {
-    (
-        Credential {
-            token: s.current.clone(),
-            generation: s.generation,
-        },
-        s.previous.as_ref().map(|p| Credential {
+/// Daemon-local credential tags (T5). Each distinct token gets its own tag,
+/// which the hook endpoint attaches to every request it authenticates, so
+/// the sessions recorded under a tag used exactly that token. A store
+/// generation cannot scope them: a forced reset of an unreadable store
+/// starts again at generation 1, and events already queued keep the tag
+/// they were authenticated with. Only the store's current and previous
+/// tokens keep a tag; a token that comes back later gets a new one.
+#[derive(Default)]
+pub struct CredentialTags {
+    last: u64,
+    tags: Vec<(String, u64)>,
+}
+
+impl CredentialTags {
+    fn tag_into(&mut self, kept: &mut Vec<(String, u64)>, token: &str) -> u64 {
+        let tag = match self.tags.iter().find(|(t, _)| t == token) {
+            Some((_, tag)) => *tag,
+            None => {
+                self.last += 1;
+                self.last
+            }
+        };
+        kept.push((token.to_owned(), tag));
+        tag
+    }
+
+    /// The credentials of `s`. The previous one carries its expiry, which
+    /// the endpoint checks on every request (T4).
+    pub fn credentials(
+        &mut self,
+        s: &crate::hook_token::Store,
+    ) -> (Credential, Option<Credential>) {
+        let mut kept = Vec::new();
+        // The previous token first, so on first sight it gets the older tag.
+        let previous = s.previous.as_ref().map(|p| Credential {
             token: p.token.clone(),
-            generation: p.generation,
-        }),
-    )
+            generation: self.tag_into(&mut kept, &p.token),
+            expires_at_ms: Some(p.expires_at_ms),
+        });
+        let current = Credential {
+            token: s.current.clone(),
+            generation: self.tag_into(&mut kept, &s.current),
+            expires_at_ms: None,
+        };
+        self.tags = kept;
+        (current, previous)
+    }
+}
+
+/// The hook endpoint's credentials, loaded from the token store. Every
+/// update loads the store and sets the auth under one lock, so a slower
+/// reload never replaces the result of a newer one (T5).
+pub struct HookCredentials {
+    dir: PathBuf,
+    auth: Arc<HookAuth>,
+    applied: std::sync::Mutex<Applied>,
+}
+
+struct Applied {
+    tags: CredentialTags,
+    /// The tags of the accepted credentials and when they last changed.
+    accepted: (u64, Option<u64>),
+    changed_at: tokio::time::Instant,
+}
+
+impl HookCredentials {
+    pub fn new(dir: &Path, store: &crate::hook_token::Store) -> Self {
+        let mut tags = CredentialTags::default();
+        let (cur, prev) = tags.credentials(store);
+        let accepted = (cur.generation, prev.as_ref().map(|p| p.generation));
+        let auth = Arc::new(HookAuth::new(cur.clone()));
+        auth.set(cur, prev);
+        Self {
+            dir: dir.to_path_buf(),
+            auth,
+            applied: std::sync::Mutex::new(Applied {
+                tags,
+                accepted,
+                changed_at: tokio::time::Instant::now(),
+            }),
+        }
+    }
+
+    /// When the accepted credentials last changed. A request rejected
+    /// before that may only have come before the reload (a session that
+    /// read new headers first), so the status does not count it; a session
+    /// that really holds a retired token is rejected again.
+    pub fn changed_at(&self) -> tokio::time::Instant {
+        self.applied.lock().expect("hook credentials").changed_at
+    }
+
+    pub fn auth(&self) -> Arc<HookAuth> {
+        self.auth.clone()
+    }
+
+    /// Loads the store and applies it. Returns the store and the tag of its
+    /// current token. On an error the credentials stay as they were.
+    pub fn reload(&self) -> Result<(crate::hook_token::Store, u64)> {
+        let mut applied = self.applied.lock().expect("hook credentials");
+        let store = crate::hook_token::load(&self.dir)?;
+        let (cur, prev) = applied.tags.credentials(&store);
+        let accepted = (cur.generation, prev.as_ref().map(|p| p.generation));
+        if accepted != applied.accepted {
+            applied.accepted = accepted;
+            applied.changed_at = tokio::time::Instant::now();
+        }
+        self.auth.set(cur, prev);
+        Ok((store, accepted.0))
+    }
+}
+
+/// T4 caller contract: built only from a complete scan, with every live
+/// registry session. None is left out (not T3-owned, ignored or refused
+/// ones): any live Claude session may still hold the previous token.
+fn scan_view(c: acd_adapters::hooks::claude_sessions::CompleteScan) -> crate::hook_token::ScanView {
+    crate::hook_token::ScanView {
+        started_at_ms: c.started_at_ms,
+        finished_at_ms: c.finished_at_ms,
+        live: c
+            .live
+            .into_iter()
+            .map(|e| crate::hook_token::LiveSession {
+                session_id: e.session_id,
+                started_at_ms: e.started_at_ms,
+            })
+            .collect(),
+    }
+}
+
+/// One retirement attempt (T4, T5, T6) and the hooks source status it
+/// leads to. `rejected_since` bounds the count of rejected hook requests.
+async fn retire_once(
+    creds: &HookCredentials,
+    hooks: &acd_adapters::hooks::HooksAdapter,
+    fresh_within: Duration,
+    rejected_since: tokio::time::Instant,
+) -> SourceStatus {
+    use crate::hook_token::{Retire, retire_if_done, status_message};
+    let (store, tag) = match creds.reload() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "hook token store unreadable; keeping the current credentials");
+            return SourceStatus {
+                state: SourceState::Degraded,
+                message: Some(format!("hook token store unreadable: {e}")),
+            };
+        }
+    };
+    let scan = hooks.last_complete_scan().map(scan_view);
+    // T5: the sessions seen with this store's current token, by its tag.
+    let on_current = hooks.sessions_on_generation(tag);
+    let (dir, expected) = (creds.dir.clone(), store.clone());
+    // T6: `retire_if_done` takes the blocking writer lock and reads the
+    // clock after holding it.
+    let result = tokio::task::spawn_blocking(move || {
+        retire_if_done(
+            &dir,
+            &expected,
+            scan.as_ref(),
+            fresh_within,
+            &on_current,
+            &|| chrono::Utc::now().timestamp_millis(),
+        )
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("retirement task failed: {e}")));
+    let (kept, retire_error) = match result {
+        Ok(Retire::Kept(k)) => (Some(k), None),
+        Ok(Retire::Retired) => {
+            tracing::info!("previous hook token retired");
+            (None, None)
+        }
+        Ok(Retire::Nothing | Retire::Moved) => (None, None),
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "could not retire the previous hook token");
+            (None, Some(e.to_string()))
+        }
+    };
+    // T5: after a retirement the auth follows at once.
+    let store = match creds.reload() {
+        Ok((s, _)) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "hook token store unreadable; keeping the current credentials");
+            store
+        }
+    };
+    let rejected = creds
+        .auth
+        .rejected_since(rejected_since.max(creds.changed_at()));
+    match status_message(&store, kept.as_ref(), rejected, retire_error.as_deref()) {
+        Some((state, m)) => SourceStatus {
+            state,
+            message: Some(m),
+        },
+        None => SourceStatus {
+            state: SourceState::Ok,
+            message: None,
+        },
+    }
 }
 
 /// Debug builds only: `ACD_TEST_STOP_SERVER=<name>` ends that server task
@@ -192,8 +380,8 @@ pub async fn run(dir: &Path) -> Result<()> {
     if std::env::var_os("ACD_TEST_HOOKS_FAST").is_some() {
         hooks_cfg.scan_interval = Duration::from_millis(200);
     }
-    // Task 31 drives token retirement from the scan interval.
-    let _scan_interval = hooks_cfg.scan_interval;
+    // T4: a scan counts for retirement while it is at most two intervals old.
+    let fresh_within = hooks_cfg.scan_interval * 2;
     let hooks = acd_adapters::hooks::HooksAdapter::new(
         hooks_cfg,
         Some(herdr.clone()),
@@ -241,9 +429,7 @@ pub async fn run(dir: &Path) -> Result<()> {
     // D13: the hook endpoint binds first, so a taken hook port fails startup
     // before any socket file exists. One router serves both hook listeners,
     // so they share the hold cap and hold ids.
-    let (cur, prev) = hook_credentials(&store);
-    let hook_auth = Arc::new(HookAuth::new(cur.clone()));
-    hook_auth.set(cur, prev);
+    let hook_creds = Arc::new(HookCredentials::new(dir, &store));
     let hook_addr = SocketAddr::from(([127, 0, 0, 1], cfg.hook_port));
     let hook_listener = tokio::net::TcpListener::bind(hook_addr)
         .await
@@ -251,7 +437,7 @@ pub async fn run(dir: &Path) -> Result<()> {
     let hook_sock = hook_socket_path(dir);
     let (hook_unix, hook_sock_owned) = local_socket::bind(&lock, &hook_sock)?;
     let hook_unix = tokio::net::UnixListener::from_std(hook_unix)?;
-    let hook_app = hooks.router(hook_auth.clone());
+    let hook_app = hooks.router(hook_creds.auth());
 
     // Bind everything before serving; any failure is fatal except ::1 being
     // unavailable (IPv6 disabled).
@@ -318,8 +504,46 @@ pub async fn run(dir: &Path) -> Result<()> {
             message: None,
         },
     );
-    // Task 31 refreshes the credentials from the store.
-    let _hook_auth = hook_auth;
+    // T5: the credentials follow the store (rotation, retirement, reset)
+    // without a restart; retirement runs in its own task, so a CLI holding
+    // the writer lock never delays a refresh.
+    #[allow(unused_mut)]
+    let (mut refresh_every, mut retire_every) = (Duration::from_secs(2), Duration::from_secs(30));
+    #[cfg(debug_assertions)]
+    if std::env::var_os("ACD_TEST_HOOKS_FAST").is_some() {
+        (refresh_every, retire_every) = (Duration::from_millis(200), Duration::from_secs(1));
+    }
+    let refresh = hook_creds.clone();
+    tokio::spawn(async move {
+        let mut failing = false;
+        loop {
+            tokio::time::sleep(refresh_every).await;
+            match refresh.reload() {
+                Ok(_) => failing = false,
+                Err(e) => {
+                    if !failing {
+                        tracing::error!(error = %e, "hook token store unreadable; keeping the current credentials");
+                    }
+                    failing = true;
+                }
+            }
+        }
+    });
+    let (retire_creds, retire_hooks, retire_core) =
+        (hook_creds.clone(), hooks.clone(), core.clone());
+    tokio::spawn(async move {
+        let started = tokio::time::Instant::now();
+        loop {
+            tokio::time::sleep(retire_every).await;
+            // Rejections of the last 10 minutes.
+            let now = tokio::time::Instant::now();
+            let since = now
+                .checked_sub(Duration::from_secs(600))
+                .map_or(started, |t| t.max(started));
+            let status = retire_once(&retire_creds, &retire_hooks, fresh_within, since).await;
+            retire_core.set_source_status(Source::Hooks, status);
+        }
+    });
     for (addr, listener) in listeners {
         tracing::info!(%addr, "listening");
         let app = app.clone();
@@ -488,18 +712,80 @@ mod tests {
         assert_eq!(roots, vec![custom.join("sessions")], "deduplicated");
     }
 
+    fn rotated_store(d: &Path) -> crate::hook_token::Store {
+        let held = crate::writer_lock::acquire(d).unwrap();
+        crate::hook_token::rotate_store_locked(d, &held, 1_000).unwrap()
+    }
+
     #[test]
-    fn hook_credentials_follow_the_store_generations() {
+    fn credentials_carry_the_previous_expiry_and_a_tag_per_token() {
         let d = tempfile::tempdir().unwrap();
         crate::hook_token::ensure(d.path(), false).unwrap();
-        let held = crate::writer_lock::acquire(d.path()).unwrap();
-        let s = crate::hook_token::rotate_store_locked(d.path(), &held, 1_000).unwrap();
-        let (cur, prev) = hook_credentials(&s);
-        assert_eq!(
-            (cur.generation, prev.as_ref().map(|p| p.generation)),
-            (2, Some(1))
-        );
+        let first = crate::hook_token::load(d.path()).unwrap();
+        let mut tags = CredentialTags::default();
+        let (cur1, prev1) = tags.credentials(&first);
+        assert!(prev1.is_none());
+        assert_eq!(cur1.expires_at_ms, None);
+        let s = rotated_store(d.path());
+        let (cur, prev) = tags.credentials(&s);
+        let prev = prev.unwrap();
         assert_eq!(cur.token, s.current);
-        assert_eq!(prev.unwrap().token, s.previous.unwrap().token);
+        assert_eq!(prev.token, s.previous.as_ref().unwrap().token);
+        assert_eq!(
+            prev.expires_at_ms,
+            Some(1_000 + crate::hook_token::MAX_RETENTION_MS)
+        );
+        assert_eq!(
+            prev.generation, cur1.generation,
+            "a rotation keeps the old token's tag"
+        );
+        assert!(cur.generation > prev.generation);
+        assert_eq!(tags.credentials(&s).0.generation, cur.generation, "stable");
+    }
+
+    #[test]
+    fn rejections_before_a_credential_change_are_not_counted() {
+        let d = tempfile::tempdir().unwrap();
+        crate::hook_token::ensure(d.path(), false).unwrap();
+        let store = crate::hook_token::load(d.path()).unwrap();
+        let creds = HookCredentials::new(d.path(), &store);
+        let start = tokio::time::Instant::now();
+        creds.auth().note_rejected(Some("pane"));
+        creds.reload().unwrap();
+        let unchanged = creds.changed_at();
+        assert!(unchanged <= start, "an unchanged reload keeps the cutoff");
+        assert_eq!(creds.auth().rejected_since(unchanged), 1);
+        rotated_store(d.path());
+        creds.reload().unwrap();
+        let cutoff = creds.changed_at();
+        assert!(cutoff >= start);
+        assert_eq!(
+            creds.auth().rejected_since(cutoff),
+            0,
+            "before the rotation"
+        );
+        creds.auth().note_rejected(Some("other pane"));
+        assert_eq!(creds.auth().rejected_since(cutoff), 1, "after it");
+        creds.reload().unwrap();
+        assert_eq!(creds.changed_at(), cutoff);
+    }
+
+    #[test]
+    fn a_reset_store_that_reuses_a_generation_gets_a_new_tag() {
+        let d = tempfile::tempdir().unwrap();
+        crate::hook_token::ensure(d.path(), false).unwrap();
+        let mut tags = CredentialTags::default();
+        let s = rotated_store(d.path());
+        let (cur, _) = tags.credentials(&s);
+        // The same generation with another token (a forced reset).
+        let mut reset = s.clone();
+        reset.current = crate::secrets::new_token();
+        reset.previous = None;
+        let (after, _) = tags.credentials(&reset);
+        assert_eq!(reset.generation, s.generation);
+        assert_ne!(after.generation, cur.generation);
+        // A token that left the store and came back is new as well.
+        let (back, _) = tags.credentials(&s);
+        assert!(back.generation > after.generation);
     }
 }

@@ -109,6 +109,7 @@ pub async fn rig_with(
     let auth = Arc::new(HookAuth::new(Credential {
         token: TOKEN.into(),
         generation: 1,
+        expires_at_ms: None,
     }));
     let app = hooks.router(auth);
     tokio::spawn(async move {

@@ -15,6 +15,7 @@ fn cred(token: &str, generation: u64) -> Credential {
     Credential {
         token: token.into(),
         generation,
+        expires_at_ms: None,
     }
 }
 

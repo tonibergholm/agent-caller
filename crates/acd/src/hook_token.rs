@@ -58,7 +58,6 @@ pub fn fail_at(stage: &str) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)] // consumed by later hook-retention and race-test tasks
 pub fn pause_at(stage: &str) {
     #[cfg(debug_assertions)]
     if let Ok(v) = std::env::var("ACD_TEST_PAUSE_AT")
@@ -319,7 +318,6 @@ pub fn rotate(
 /// that read the old headers.
 pub const REGISTRY_GRACE_MS: i64 = 5_000;
 
-#[allow(dead_code)] // used from Task 31
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveSession {
     pub session_id: String,
@@ -331,10 +329,9 @@ pub struct LiveSession {
 /// Caller contract: build one only from a scan that completed (never a
 /// partial one); `live` must list every session that may still hold the
 /// previous token; and the `on_current` set passed with it must be scoped
-/// to the store being evaluated (cleared when the store is reset or
-/// rotated). `retire_if_done` additionally requires
-/// `started_at_ms <= finished_at_ms <= now`.
-#[allow(dead_code)] // used from Task 31
+/// to the store being evaluated (the daemon tags each token separately,
+/// so a reset or rotated store starts with an empty set). `retire_if_done`
+/// additionally requires `started_at_ms <= finished_at_ms <= now`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanView {
     pub started_at_ms: i64,
@@ -346,7 +343,6 @@ pub struct ScanView {
 /// observed on the current generation is released; one that started
 /// after the headers were updated read the new token; the rest (older,
 /// or of unknown start) are pending.
-#[allow(dead_code)] // used from Task 31
 pub fn pending(store: &Store, live: &[LiveSession], on_current: &HashSet<String>) -> usize {
     live.iter()
         .filter(|s| !on_current.contains(&s.session_id))
@@ -357,7 +353,6 @@ pub fn pending(store: &Store, live: &[LiveSession], on_current: &HashSet<String>
         .count()
 }
 
-#[allow(dead_code)] // used from Task 31
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeepReason {
     HeadersNotDone,
@@ -365,7 +360,6 @@ pub enum KeepReason {
     Pending(usize),
 }
 
-#[allow(dead_code)] // used from Task 31
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Retire {
     Nothing,
@@ -382,7 +376,6 @@ pub enum Retire {
 /// every field: a generation number alone proves nothing, since a forced
 /// reset reuses generation 1. A write failure is an error and keeps the
 /// previous token.
-#[allow(dead_code)] // used from Task 31
 pub fn retire_if_done(
     dir: &Path,
     expected: &Store,
@@ -428,7 +421,6 @@ pub fn retire_if_done(
     Ok(Retire::Retired)
 }
 
-#[allow(dead_code)] // used from Task 31
 pub fn status_message(
     store: &Store,
     kept: Option<&KeepReason>,

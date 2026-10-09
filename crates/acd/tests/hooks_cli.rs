@@ -2332,3 +2332,358 @@ fn both_hook_listeners_share_one_hold_cap_and_distinct_hold_ids() {
         assert!(unanswered(s.as_mut()), "hold {} was released", n + 1);
     }
 }
+
+// Task 31: hook token refresh and retirement in the daemon (T4, T5).
+
+const LIVE_SID: &str = "0b5e1c2a-0000-4000-8000-000000000001";
+
+/// A child process killed and reaped when dropped, so a failing test never
+/// leaves it behind.
+struct Sleeper(std::process::Child);
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A registry entry for a real child process, so `SystemProc` sees a live
+/// session that started before the rotation.
+fn live_registry_session(home: &std::path::Path) -> Sleeper {
+    let child = std::process::Command::new("sleep")
+        .arg("120")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let sleeper = Sleeper(child);
+    let out = std::process::Command::new("ps")
+        .env("TZ", "UTC")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let lstart = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+    let sessions = home.join(".claude/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let entry = serde_json::json!({
+        "pid": pid, "sessionId": LIVE_SID, "cwd": "/tmp", "procStart": lstart,
+        "startedAt": chrono::Utc::now().timestamp_millis() - 60_000,
+        "entrypoint": "cli", "status": "idle", "kind": "interactive",
+    });
+    let p = sessions.join(format!("{pid}.json"));
+    std::fs::write(&p, entry.to_string()).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+    sleeper
+}
+
+fn until_true(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while !f() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_until_ms(at_ms: i64) {
+    while chrono::Utc::now().timestamp_millis() < at_ms {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Replaces the token store the way acd does: a 0600 file renamed into place.
+fn write_store(dir: &std::path::Path, store: &serde_json::Value) {
+    let tmp = dir.join("hook-tokens.json.test-tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(store).unwrap()).unwrap();
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::rename(&tmp, dir.join("hook-tokens.json")).unwrap();
+}
+
+fn stop_body(session_id: &str) -> String {
+    let mut body: serde_json::Value =
+        serde_json::from_str(&claude_fixture("payload-Stop.json")).unwrap();
+    body["session_id"] = session_id.into();
+    body.to_string()
+}
+
+fn home_env(home: &std::path::Path) -> [(&str, &str); 1] {
+    [("HOME", home.to_str().unwrap())]
+}
+
+#[cfg(debug_assertions)] // ACD_TEST_HOOKS_FAST is debug-only
+#[test]
+fn a_live_session_keeps_the_previous_token_until_it_is_seen_on_the_new_one() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let _sleeper = live_registry_session(home.path());
+    let started = start_daemon(
+        &dir,
+        None,
+        "",
+        &[("ACD_TEST_HOOKS_FAST", "1"), home_env(home.path())[0]],
+    );
+    let old = store_token(&dir);
+    std::thread::sleep(Duration::from_millis(600)); // a complete scan sees the session
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    let new = store_token(&dir);
+    let body = stop_body(LIVE_SID);
+    // Another session (the fixture's own id) proves the daemon reloaded the store.
+    let other = claude_fixture("payload-Stop.json");
+    until_true("the new token", 5, || {
+        post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &other).0 == 200
+    });
+
+    // Several retirement periods pass: the session started before the
+    // headers changed and has not used the new token.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0,
+        200,
+        "pending session keeps working"
+    );
+    assert!(store_of(&dir)["previous"].is_object());
+    until_true("pending status", 5, || {
+        status_text(&dir).contains("rotation pending: 1 Claude sessions")
+    });
+
+    // The same session authenticates with the new token (for example after /clear).
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0,
+        200
+    );
+    // T4: the deciding scan starts at least REGISTRY_GRACE_MS (5 s) after the header update.
+    until_true("retirement", 10, || store_of(&dir)["previous"].is_null());
+    until_true("auth updated", 5, || {
+        post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0 == 401
+    });
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn an_exited_session_releases_the_previous_token() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let mut sleeper = live_registry_session(home.path());
+    let _started = start_daemon(
+        &dir,
+        None,
+        "",
+        &[("ACD_TEST_HOOKS_FAST", "1"), home_env(home.path())[0]],
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    // Sol R3-4: wait past the registry grace until an eligible retirement
+    // attempt kept the token because of this session (the pending status
+    // needs done headers and a fresh scan that started after the grace).
+    until_true("an eligible attempt kept it", 15, || {
+        status_text(&dir).contains("rotation pending: 1 Claude sessions")
+    });
+    assert!(
+        store_of(&dir)["previous"].is_object(),
+        "kept while the session lives"
+    );
+    sleeper.0.kill().unwrap();
+    sleeper.0.wait().unwrap();
+    until_true("retirement after exit", 10, || {
+        store_of(&dir)["previous"].is_null()
+    });
+}
+
+/// Restores a directory's mode when dropped, so a failing test leaves a
+/// removable temp dir.
+struct RestoreMode(std::path::PathBuf);
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn without_a_registry_scan_the_previous_token_stays() {
+    // An unreadable sessions root makes every scan incomplete (T4).
+    if acd_securefs::euid() == 0 {
+        return;
+    }
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let sessions = home.path().join(".claude/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let restore = RestoreMode(sessions.clone());
+    let started = start_daemon(
+        &dir,
+        None,
+        "",
+        &[("ACD_TEST_HOOKS_FAST", "1"), home_env(home.path())[0]],
+    );
+    let old = store_token(&dir);
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    // Sol R3-4: wait until retirement would be eligible but for the scan
+    // (past the 5 s grace, plus two retirement periods), and see why it kept the token.
+    let updated = store_of(&dir)["headers"]["updated_at_ms"].as_i64().unwrap();
+    wait_until_ms(updated + 5_000 + 2_000);
+    until_true("kept for want of a scan", 5, || {
+        status_text(&dir).contains("waiting for a complete registry scan")
+    });
+    assert!(store_of(&dir)["previous"].is_object());
+    assert_eq!(
+        post_hook(
+            started.hook_port,
+            "/hook/claude/Stop",
+            &old,
+            &[],
+            &claude_fixture("payload-Stop.json")
+        )
+        .0,
+        200
+    );
+    drop(restore);
+    // With the root readable again and no live session, it retires: the
+    // earlier retention was the scan rule, not a test that cannot retire.
+    until_true("retired once scans complete", 15, || {
+        store_of(&dir)["previous"].is_null()
+    });
+}
+
+/// Rotates, then moves the previous token's rotation and expiry to
+/// `rotated_at_ms` and `expires_at_ms`. Returns (old, new) tokens.
+fn rotated_with_expiry(
+    dir: &std::path::Path,
+    home: &std::path::Path,
+    rotated_at_ms: i64,
+    expires_at_ms: i64,
+) -> (String, String) {
+    assert!(install(dir, home, "claude", &[]).status.success());
+    assert!(rotate(dir, home, &[]).status.success());
+    let mut store = store_of(dir);
+    store["previous"]["rotated_at_ms"] = rotated_at_ms.into();
+    store["previous"]["expires_at_ms"] = expires_at_ms.into();
+    write_store(dir, &store);
+    let old = store["previous"]["token"].as_str().unwrap().to_owned();
+    (old, store_token(dir))
+}
+
+#[test]
+fn a_previous_token_that_expired_before_the_start_is_rejected() {
+    let (home, dir) = home_with_acd();
+    let now = chrono::Utc::now().timestamp_millis();
+    let (old, new) = rotated_with_expiry(&dir, home.path(), now - 2_000, now - 1_000);
+    // Normal periods: no retirement runs in the first 30 s, so the
+    // rejection comes from authentication itself.
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let body = claude_fixture("payload-Stop.json");
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0,
+        401
+    );
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0,
+        200
+    );
+    assert!(
+        store_of(&dir)["previous"].is_object(),
+        "not retired yet: authentication rejected it"
+    );
+}
+
+#[test]
+fn a_previous_token_is_rejected_as_soon_as_it_expires() {
+    let (home, dir) = home_with_acd();
+    let now = chrono::Utc::now().timestamp_millis();
+    // Room for install, rotation and start; no retirement runs in the
+    // daemon's first 30 s.
+    let expires = now + 15_000;
+    let (old, _) = rotated_with_expiry(&dir, home.path(), now - 1_000, expires);
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let body = claude_fixture("payload-Stop.json");
+    assert!(
+        chrono::Utc::now().timestamp_millis() < expires - 500,
+        "the daemon took too long to start"
+    );
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0,
+        200
+    );
+    wait_until_ms(expires);
+    // No retirement runs in the first 30 s and the store still holds the
+    // token: authentication checks the expiry on every request.
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0,
+        401
+    );
+    assert!(store_of(&dir)["previous"].is_object());
+}
+
+/// A well-formed token (43 base64url characters, 32 bytes) for hand-written stores.
+fn fixed_token(c: char) -> String {
+    format!("{}A", c.to_string().repeat(42))
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn sessions_seen_before_a_reset_do_not_count_for_the_new_store() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let _sleeper = live_registry_session(home.path());
+    let started = start_daemon(
+        &dir,
+        None,
+        "",
+        &[("ACD_TEST_HOOKS_FAST", "1"), home_env(home.path())[0]],
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    let rotated = store_of(&dir);
+    let new = store_token(&dir);
+    let body = stop_body(LIVE_SID);
+    std::thread::sleep(Duration::from_secs(1));
+    // The live session is seen on the store's current generation...
+    until_true("the new token", 5, || {
+        post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0 == 200
+    });
+    until_true("retirement", 15, || store_of(&dir)["previous"].is_null());
+
+    // ...then the store is replaced by one that reuses that generation
+    // with other tokens (as a forced reset of an unreadable store can).
+    let generation = rotated["generation"].as_u64().unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let (reset_prev, reset_cur) = (fixed_token('C'), fixed_token('D'));
+    write_store(
+        &dir,
+        &serde_json::json!({
+            "version": 1,
+            "generation": generation,
+            "current": reset_cur,
+            "previous": {
+                "token": reset_prev, "generation": generation - 1,
+                "rotated_at_ms": now, "expires_at_ms": now + 86_400_000,
+            },
+            "headers": {
+                "generation": generation, "state": "done",
+                "updated_at_ms": now, "failed": [],
+            },
+        }),
+    );
+    // Past the grace plus several retirement periods: the session was seen
+    // on the old store, not with this store's current token, so it is
+    // still pending.
+    wait_until_ms(now + 5_000 + 3_000);
+    assert!(
+        store_of(&dir)["previous"].is_object(),
+        "an observation from before the reset counted"
+    );
+    // Seen with the new store's current token, it releases the previous one.
+    assert_eq!(
+        post_hook(
+            started.hook_port,
+            "/hook/claude/Stop",
+            &reset_cur,
+            &[],
+            &body
+        )
+        .0,
+        200
+    );
+    until_true("retirement for the new store", 10, || {
+        store_of(&dir)["previous"].is_null()
+    });
+}
