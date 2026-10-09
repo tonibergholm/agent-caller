@@ -1,20 +1,26 @@
 //! The hooks reconciler: the only code that changes hook-derived state.
 //! It drains the endpoint mailbox and its internal channel; it never awaits a herdr call itself.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use acd_core::{AgentObs, Core, Observation};
-use acd_protocol::{AgentKind, AgentState, Effect, Source};
+use acd_core::{AgentObs, Core, CorrelationKey, Observation};
+use acd_protocol::{AgentKind, AgentState, AnswerPath, Effect, RequestKind, ResolvedBy, Source};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use super::HooksConfig;
 use super::claude_sessions::{CompleteScan, ProcCheck, Scan, Scanner, map_status};
+use super::dialogs::{self, DialogMatch};
 use super::endpoint::{HoldId, HoldPermit, Inbound, Mailbox};
+use super::evidence::{self, Expect, Verdict};
+use super::mapping;
 use super::owner::{Owner, PaneFact, claude_owner, header_pane, pane_facts};
-use super::wire::{AlwaysRule, Hints, HookAgent, HookEvent, HookName};
+use super::wire::{
+    AlwaysRule, Hints, HookAgent, HookEvent, HookName, Payload, always_rule, claude_key,
+    command_of, tool_digest,
+};
 use crate::herdr::HerdrAdapter;
 use crate::t3::sessions::SessionMap;
 use crate::text::{LAST_MESSAGE_CHARS, TITLE_CHARS, cap_chars, clean_display};
@@ -53,6 +59,44 @@ struct HeaderBind {
 
 /// Largest `cwd` kept per session.
 const CWD_MAX_BYTES: usize = 4096;
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Held,
+    Delivered,
+    HoldEnded { since: Instant },
+    Keys,
+    ReadOnly,
+}
+
+#[allow(dead_code)]
+struct Track {
+    agent_id: String,
+    session_id: String,
+    key: CorrelationKey,
+    op: u64,
+    read_seq: u64,
+    payload: Payload,
+    expect: Expect,
+    matcher: Option<DialogMatch>,
+    pane: Option<PaneFact>,
+    phase: Phase,
+    opened_at: Instant,
+    capture: Option<String>,
+    absent: u8,
+    next_check: Instant,
+    shadowed: bool,
+    identity_seen: bool,
+}
+
+#[derive(Default)]
+struct Unconsumed {
+    entries: VecDeque<(Expect, Instant)>,
+    shadow_all: Option<Instant>,
+}
+
+const MAX_UNCONSUMED: usize = 8;
 
 fn cap_bytes(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -95,6 +139,10 @@ pub(crate) struct Reconciler {
     scan_in_flight: Arc<AtomicBool>,
     // TODO(A8, Task 19): bound this map to `max_sessions`.
     sessions: HashMap<String, Session>,
+    tracks: HashMap<String, Track>,
+    holds: HashMap<HoldId, String>,
+    next_op: u64,
+    unconsumed: HashMap<String, Unconsumed>,
 }
 
 impl Reconciler {
@@ -124,6 +172,10 @@ impl Reconciler {
             scanner,
             scan_in_flight: Arc::new(AtomicBool::new(false)),
             sessions: HashMap::new(),
+            tracks: HashMap::new(),
+            holds: HashMap::new(),
+            next_op: 0,
+            unconsumed: HashMap::new(),
         }
     }
 
@@ -262,15 +314,27 @@ impl Reconciler {
         match message {
             Inbound::Event {
                 event, generation, ..
-            } => self.on_event(event, generation).await,
+            } => self.on_event(event, generation, None).await,
             Inbound::Held {
-                event, generation, ..
-            } => self.on_event(event, generation).await,
+                event,
+                hold,
+                reply,
+                generation,
+                permit,
+            } => {
+                self.on_event(event, generation, Some((hold, reply, permit)))
+                    .await
+            }
             Inbound::HoldClosed { .. } | Inbound::HoldExpired { .. } => {}
         }
     }
 
-    async fn on_event(&mut self, event: HookEvent, generation: u64) {
+    async fn on_event(
+        &mut self,
+        event: HookEvent,
+        generation: u64,
+        hold: Option<super::endpoint::HoldIn>,
+    ) {
         {
             let mut generations = self.shared.by_generation.lock().expect("shared");
             let ids = generations.entry(generation).or_default();
@@ -291,12 +355,12 @@ impl Reconciler {
             return;
         }
         match event.agent {
-            HookAgent::Claude => self.on_claude(event).await,
+            HookAgent::Claude => self.on_claude(event, hold).await,
             HookAgent::Codex => self.on_codex(event).await,
         }
     }
 
-    async fn on_claude(&mut self, event: HookEvent) {
+    async fn on_claude(&mut self, event: HookEvent, hold: Option<super::endpoint::HoldIn>) {
         let sid = event.payload.session_id.clone();
         let entrypoint = event.hints.entrypoint.clone();
         let now = Instant::now();
@@ -333,6 +397,283 @@ impl Reconciler {
             }
         }
         self.apply_owner(&sid, owner).await;
+        if !t3_owned {
+            self.apply_evidence(&event);
+            if event.name == HookName::PermissionRequest
+                && event.payload.tool_name.as_deref() != Some("AskUserQuestion")
+            {
+                self.open_claude_permission(event, hold).await;
+            }
+        }
+    }
+
+    fn fallback_key(&self, agent_id: &str) -> Option<CorrelationKey> {
+        self.core
+            .pending_key(agent_id)
+            .filter(|(_, _, kind)| *kind == RequestKind::BlockedUnparsed)
+            .map(|(_, key, _)| key)
+    }
+
+    async fn observe_locked(&self, agent_id: &str, herdr_agent: bool, obs: Observation) {
+        let locks = self
+            .herdr
+            .as_ref()
+            .filter(|_| herdr_agent)
+            .map(|h| h.agent_locks());
+        let _guard = match &locks {
+            Some(l) => Some(l.lock(agent_id).await),
+            None => None,
+        };
+        self.core.observe(obs);
+    }
+
+    fn bound_pane(&self, sid: &str) -> Option<PaneFact> {
+        let Owner::Herdr(agent) = &self.sessions.get(sid)?.owner else {
+            return None;
+        };
+        self.panes().into_iter().find(|p| p.agent_id == *agent)
+    }
+
+    async fn open_claude_permission(
+        &mut self,
+        event: HookEvent,
+        hold: Option<super::endpoint::HoldIn>,
+    ) {
+        let sid = event.payload.session_id.clone();
+        let Some(agent_id) = self.sessions.get(&sid).and_then(|s| s.agent_id.clone()) else {
+            return;
+        };
+        let pane = self.bound_pane(&sid);
+        let Some(key) = claude_key(&event.payload) else {
+            return;
+        };
+        self.end_session_occurrences(&sid).await;
+        let mut obs = mapping::claude_permission(
+            &agent_id,
+            key.clone(),
+            self.fallback_key(&agent_id),
+            &event.payload,
+        );
+        if hold.is_none() {
+            if pane.is_none() {
+                return;
+            }
+            obs.answer_path = AnswerPath::Keys;
+            obs.options = mapping::claude_keys_options();
+            obs.ready = false;
+        }
+        self.observe_locked(&agent_id, pane.is_some(), Observation::RequestSeen(obs))
+            .await;
+        let Some(rid) = self.core.request_id_for(&agent_id, &key) else {
+            return;
+        };
+        let tool_name = event.payload.tool_name.clone().unwrap_or_default();
+        let matcher = command_of(&event.payload.tool_input)
+            .filter(|c| tool_name == "Bash" && dialogs::single_row(c))
+            .map(|c| DialogMatch::ClaudeBash {
+                command: c.to_owned(),
+            });
+        let rule = always_rule(&event.payload)
+            .filter(|r| mapping::rule_displayable(&mapping::rule_text(r)));
+        let phase = match hold {
+            Some((hold_id, reply, permit)) => {
+                self.shared.held.lock().expect("held").insert(
+                    rid.clone(),
+                    HeldReq {
+                        hold: hold_id,
+                        reply: Some(reply),
+                        rule,
+                        delivered: None,
+                        permit: Some(permit),
+                    },
+                );
+                self.holds.insert(hold_id, rid.clone());
+                Phase::Held
+            }
+            None => Phase::ReadOnly,
+        };
+        let now = Instant::now();
+        self.next_op += 1;
+        self.tracks.insert(
+            rid.clone(),
+            Track {
+                agent_id,
+                session_id: sid.clone(),
+                key,
+                op: self.next_op,
+                read_seq: 0,
+                expect: Expect::ClaudeTool {
+                    session_id: sid,
+                    digest: tool_digest(&tool_name, &event.payload.tool_input),
+                    tool_name,
+                },
+                matcher,
+                pane,
+                phase,
+                opened_at: now,
+                payload: event.payload,
+                capture: None,
+                absent: 0,
+                next_check: now + self.cfg.held_dialog_poll,
+                shadowed: false,
+                identity_seen: false,
+            },
+        );
+        self.mark_shadow(&rid);
+        self.sweep();
+    }
+
+    fn mark_shadow(&mut self, rid: &str) {
+        let shadowed = self.tracks.get(rid).is_some_and(|t| {
+            self.unconsumed.get(&t.session_id).is_some_and(|u| {
+                u.shadow_all.is_some()
+                    || u.entries
+                        .iter()
+                        .any(|(e, _)| evidence::same_identity(e, &t.expect))
+            })
+        });
+        if let Some(t) = self.tracks.get_mut(rid) {
+            t.shadowed = shadowed;
+        }
+    }
+
+    fn note_unconsumed(&mut self, t: &Track) {
+        if t.identity_seen {
+            return;
+        }
+        let u = self.unconsumed.entry(t.session_id.clone()).or_default();
+        u.entries.push_back((t.expect.clone(), Instant::now()));
+        if u.entries.len() > MAX_UNCONSUMED {
+            u.entries.pop_front();
+            u.shadow_all = Some(Instant::now());
+        }
+    }
+
+    fn delivered(&self, rid: &str) -> Option<(Effect, Instant)> {
+        self.shared
+            .held
+            .lock()
+            .expect("held")
+            .get(rid)
+            .and_then(|h| h.delivered)
+    }
+
+    fn phase(&self, rid: &str) -> Option<Phase> {
+        let t = self.tracks.get(rid)?;
+        Some(match t.phase {
+            Phase::Held if self.delivered(rid).is_some() => Phase::Delivered,
+            p => p,
+        })
+    }
+
+    async fn end_session_occurrences(&mut self, sid: &str) {
+        let ids: Vec<String> = self
+            .tracks
+            .iter()
+            .filter(|(_, t)| t.session_id == sid)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for rid in ids {
+            let by = if self.phase(&rid) == Some(Phase::Delivered) {
+                ResolvedBy::Uncertain
+            } else {
+                ResolvedBy::Terminal
+            };
+            let agent = self
+                .tracks
+                .get(&rid)
+                .map(|t| t.agent_id.clone())
+                .unwrap_or_default();
+            let locks = self.herdr.as_ref().map(|h| h.agent_locks());
+            let _guard = match &locks {
+                Some(l) => Some(l.lock(&agent).await),
+                None => None,
+            };
+            if let Some(h) = &self.herdr {
+                h.keys_targets().remove(&rid);
+            }
+            self.end(&rid, by);
+        }
+    }
+
+    fn end(&mut self, rid: &str, by: ResolvedBy) {
+        self.core.observe(Observation::RequestEndedById {
+            request_id: rid.to_owned(),
+            by,
+        });
+        self.forget(rid);
+    }
+
+    fn forget(&mut self, rid: &str) {
+        if let Some(h) = self.shared.held.lock().expect("held").remove(rid) {
+            self.holds.remove(&h.hold);
+        }
+        self.core.observe(Observation::DialogGoneById {
+            request_id: rid.to_owned(),
+        });
+        if let Some(t) = self.tracks.remove(rid) {
+            self.note_unconsumed(&t);
+        }
+    }
+
+    fn sweep(&mut self) {
+        let dead: Vec<String> = self
+            .tracks
+            .keys()
+            .filter(|rid| self.core.request(rid).is_none())
+            .cloned()
+            .collect();
+        for rid in dead {
+            self.forget(&rid);
+        }
+    }
+
+    fn apply_evidence(&mut self, ev: &HookEvent) {
+        let sid = ev.payload.session_id.clone();
+        let ids: Vec<String> = self
+            .tracks
+            .iter()
+            .filter(|(_, t)| t.session_id == sid && t.phase != Phase::Keys && ev.at > t.opened_at)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for rid in ids {
+            let Some(seen) = self
+                .tracks
+                .get(&rid)
+                .and_then(|t| evidence::observe_shadowed(&t.expect, ev, t.shadowed))
+            else {
+                continue;
+            };
+            if evidence::is_identity(&seen)
+                && let Some(t) = self.tracks.get_mut(&rid)
+            {
+                t.identity_seen = true;
+            }
+            let delivered = self.delivered(&rid);
+            let by = match delivered {
+                Some((_, at)) if ev.at <= at => continue,
+                Some(_) if self.tracks.get(&rid).is_some_and(|t| t.shadowed) => {
+                    ResolvedBy::Uncertain
+                }
+                Some((effect, _)) => {
+                    match evidence::sent_for_effect(effect).map(|s| evidence::verdict(&s, &seen)) {
+                        Some(Verdict::Consistent) => ResolvedBy::Inbox,
+                        _ => ResolvedBy::Terminal,
+                    }
+                }
+                None => ResolvedBy::Terminal,
+            };
+            self.end(&rid, by);
+        }
+        if matches!(ev.name, HookName::Stop | HookName::UserPromptSubmit) {
+            self.unconsumed.remove(&sid);
+        } else if let Some(u) = self.unconsumed.get_mut(&sid)
+            && let Some(i) = u.entries.iter().position(|(e, _)| {
+                evidence::observe(e, ev).is_some_and(|s| evidence::is_identity(&s))
+            })
+        {
+            u.entries.remove(i);
+        }
     }
 
     async fn on_codex(&mut self, _event: HookEvent) {}
@@ -393,6 +734,7 @@ impl Reconciler {
                     .observe(Observation::AgentUpsert(hooks_only_obs(&hooks_id, session)));
             }
         }
+        self.sweep();
     }
 
     async fn reevaluate_all(&mut self) {
@@ -477,6 +819,34 @@ impl Reconciler {
     async fn on_tick(&mut self) {
         self.retry_migrations().await;
         let now = Instant::now();
+        self.sweep();
+        let window = self.cfg.evidence_window;
+        let mut ends = Vec::new();
+        for (rid, track) in &self.tracks {
+            let delivered = self.delivered(rid);
+            match (track.phase, delivered) {
+                (_, Some((_, at)))
+                    if now.duration_since(at) >= window && track.phase != Phase::Keys =>
+                {
+                    ends.push((rid.clone(), ResolvedBy::Uncertain));
+                }
+                (Phase::HoldEnded { since }, None) if now.duration_since(since) >= window => {
+                    ends.push((rid.clone(), ResolvedBy::Uncertain));
+                }
+                _ => {}
+            }
+        }
+        for (rid, by) in ends {
+            self.end(&rid, by);
+        }
+        let ttl = self.cfg.unconsumed_ttl;
+        self.unconsumed.retain(|_, u| {
+            u.entries.retain(|(_, at)| now.duration_since(*at) < ttl);
+            if u.shadow_all.is_some_and(|at| now.duration_since(at) >= ttl) {
+                u.shadow_all = None;
+            }
+            !u.entries.is_empty() || u.shadow_all.is_some()
+        });
         let gone: Vec<String> = self
             .sessions
             .iter()
@@ -629,7 +999,7 @@ mod tests {
     #[tokio::test]
     async fn a_binding_to_an_agent_core_lacks_keeps_the_hooks_agent_until_it_appears() {
         let mut r = reconciler(8);
-        r.on_event(hook("s1"), 1).await;
+        r.on_event(hook("s1"), 1, None).await;
         let hooks_id = "claude:s1".to_string();
         assert!(r.core.agent(&hooks_id).is_some());
         let key = CorrelationKey("k".into());
@@ -659,10 +1029,10 @@ mod tests {
     #[tokio::test]
     async fn bind_gen_changes_only_with_the_owner() {
         let mut r = reconciler(8);
-        r.on_event(hook("s1"), 1).await;
+        r.on_event(hook("s1"), 1, None).await;
         let g = r.sessions["s1"].bind_gen;
         assert_eq!(g, 1, "Unknown to Hooks");
-        r.on_event(hook("s1"), 1).await;
+        r.on_event(hook("s1"), 1, None).await;
         assert_eq!(r.sessions["s1"].bind_gen, g, "same owner");
         r.apply_owner("s1", Owner::T3("t3:x".into())).await;
         assert_eq!(r.sessions["s1"].bind_gen, g + 1);
@@ -704,11 +1074,11 @@ mod tests {
         let mut r = reconciler(8);
         let mut end = hook("s1");
         end.name = HookName::SessionEnd;
-        r.on_event(end.clone(), 1).await;
+        r.on_event(end.clone(), 1, None).await;
         assert!(r.sessions["s1"].ended.is_some());
-        r.on_event(hook("s1"), 1).await;
+        r.on_event(hook("s1"), 1, None).await;
         assert!(r.sessions["s1"].ended.is_none(), "any other hook");
-        r.on_event(end, 1).await;
+        r.on_event(end, 1, None).await;
         r.on_scan(scan(false, &["s1"])).await;
         assert!(
             r.sessions["s1"].ended.is_some(),
@@ -725,13 +1095,13 @@ mod tests {
     async fn generations_keep_four_and_count_dropped_ids() {
         let mut r = reconciler(2);
         for (gen_, sid) in [(1, "a"), (1, "b"), (1, "c"), (1, "a")] {
-            r.on_event(hook(sid), gen_).await;
+            r.on_event(hook(sid), gen_, None).await;
         }
         let ids = r.shared.by_generation.lock().unwrap()[&1].clone();
         assert_eq!(ids.len(), 2);
         assert_eq!(r.shared.dropped_generation_ids.load(Ordering::Relaxed), 1);
         for g in 2..=6 {
-            r.on_event(hook("a"), g).await;
+            r.on_event(hook("a"), g, None).await;
         }
         let keys: Vec<u64> = r
             .shared
@@ -747,7 +1117,7 @@ mod tests {
     #[tokio::test]
     async fn t3_owned_sessions_keep_hook_state_untouched() {
         let mut r = reconciler(8);
-        r.on_event(hook("s1"), 1).await;
+        r.on_event(hook("s1"), 1, None).await;
         assert_eq!(r.sessions["s1"].state, AgentState::Working);
         r.apply_owner("s1", Owner::T3("t3:x".into())).await;
         let t3 = Arc::new(crate::t3::sessions::SessionMap::default());
@@ -756,7 +1126,7 @@ mod tests {
         let mut stop = hook("s1");
         stop.name = HookName::Stop;
         stop.payload.last_assistant_message = Some("hello".into());
-        r.on_event(stop, 1).await;
+        r.on_event(stop, 1, None).await;
         assert_eq!(r.sessions["s1"].state, AgentState::Working);
         assert!(r.sessions["s1"].last_message.is_none());
     }

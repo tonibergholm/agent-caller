@@ -208,8 +208,35 @@ impl Adapter for HooksAdapter {
     fn sources(&self) -> &[Source] {
         &[Source::Hooks]
     }
-    async fn deliver(&self, _request: &Request, _answer: &Answer) -> Result<(), DeliverError> {
-        Err(DeliverError::NotDelivered(ErrorCode::RequestGone))
+    async fn deliver(&self, request: &Request, answer: &Answer) -> Result<(), DeliverError> {
+        use acd_protocol::Effect;
+
+        let Answer::Option(option_id) = answer else {
+            return Err(DeliverError::NotDelivered(ErrorCode::NotSupported));
+        };
+        let Some(effect) = request.options.iter().find(|o| &o.id == option_id).map(|o| o.effect) else {
+            return Err(DeliverError::NotDelivered(ErrorCode::BadRequest));
+        };
+        let mut held = self.shared.held.lock().expect("held");
+        let Some(h) = held.get_mut(&request.id) else {
+            return Err(DeliverError::NotDelivered(ErrorCode::RequestGone));
+        };
+        let body = match (effect, &h.rule) {
+            (Effect::Allow, _) => wire::reply_allow(),
+            (Effect::Deny, _) => wire::reply_deny(),
+            (Effect::AllowAlways, Some(rule)) => wire::reply_allow_always(rule),
+            _ => return Err(DeliverError::NotDelivered(ErrorCode::BadRequest)),
+        };
+        let Some(reply) = h.reply.take() else {
+            return Err(DeliverError::NotDelivered(ErrorCode::RequestGone));
+        };
+        h.delivered = Some((effect, tokio::time::Instant::now()));
+        if reply.send(body).is_err() {
+            h.delivered = None;
+            return Err(DeliverError::NotDelivered(ErrorCode::RequestGone));
+        }
+        h.permit = None;
+        Ok(())
     }
     async fn send(&self, _agent: &Agent, _text: &str) -> Result<(), DeliverError> {
         Err(DeliverError::NotDelivered(ErrorCode::NotSupported))
