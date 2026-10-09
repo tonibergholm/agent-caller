@@ -469,3 +469,45 @@ fn second_daemon_on_another_port_leaves_the_live_socket_alone() {
     let out = String::from_utf8_lossy(&acd(&dir).arg("status").output().unwrap().stdout).into_owned();
     assert!(out.contains("machine: first"), "{out}");
 }
+
+#[test]
+fn init_repairs_loose_modes_of_files_it_keeps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init_dir(tmp.path());
+    let before = std::fs::read_to_string(dir.join("client.token")).unwrap();
+    for f in ["client.token", "hook.token", "machine-id", "config.toml"] {
+        std::fs::set_permissions(dir.join(f), std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let out = acd(&dir).arg("init").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    for f in ["client.token", "hook.token", "machine-id", "config.toml"] {
+        assert_eq!(mode(dir.join(f)), 0o600, "{f}");
+    }
+    assert_eq!(before, std::fs::read_to_string(dir.join("client.token")).unwrap(), "kept, not replaced");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("repaired"));
+}
+
+#[test]
+fn init_and_run_refuse_a_symlinked_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init_dir(tmp.path());
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::rename(dir.join("hook.token"), &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.join("hook.token")).unwrap();
+    let out = acd(&dir).arg("init").output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("symlink"));
+    let (status, err) = run_expecting_exit(&dir);
+    assert!(!status.success() && err.contains("symlink"), "{err}");
+}
+
+#[test]
+fn an_empty_machine_id_is_refused_by_run_and_regenerated_by_init() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init_dir(tmp.path());
+    std::fs::write(dir.join("machine-id"), "\n").unwrap();
+    let (status, err) = run_expecting_exit(&dir);
+    assert!(!status.success() && err.contains("machine-id is empty"), "{err}");
+    assert!(acd(&dir).arg("init").status().unwrap().success());
+    assert!(!std::fs::read_to_string(dir.join("machine-id")).unwrap().trim().is_empty());
+}

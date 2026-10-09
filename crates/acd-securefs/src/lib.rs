@@ -126,6 +126,12 @@ pub fn check_private_dir(dir: &Path, max_mode: u32) -> Result<(), SecureFsError>
     verify(&file, dir, true, max_mode)
 }
 
+/// No-follow open, regular file, owned by the euid, mode within `max_mode`.
+pub fn check_private_file(path: &Path, max_mode: u32) -> Result<(), SecureFsError> {
+    let file = open_path(path, false)?;
+    verify(&file, path, false, max_mode)
+}
+
 pub fn read_private(path: &Path, max_mode: u32, max_len: u64) -> Result<Vec<u8>, SecureFsError> {
     let mut file = open_path(path, false)?;
     verify(&file, path, false, max_mode)?;

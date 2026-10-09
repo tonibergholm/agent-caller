@@ -153,7 +153,7 @@ fn preflight_prerequisites(dir: &Path) -> Result<()> {
     secrets::check_mode(dir, 0o700)?;
     for f in ["client.token", "hook.token", "t3.token", "config.toml"] {
         let p = dir.join(f);
-        if p.exists() {
+        if p.symlink_metadata().is_ok() {
             secrets::check_mode(&p, 0o600)?;
         }
     }
@@ -163,11 +163,18 @@ fn preflight_prerequisites(dir: &Path) -> Result<()> {
 fn init(dir: &Path, force: bool) -> Result<()> {
     secrets::ensure_private_dir(dir)?;
     let mut created = Vec::new();
+    let mut repaired = Vec::new();
+    for file in ["client.token", "hook.token", "machine-id", "config.toml"] {
+        let p = dir.join(file);
+        if p.symlink_metadata().is_ok() && secrets::repair_mode(&p, 0o600)? {
+            repaired.push(file);
+        }
+    }
     let had_tls = dir.join("tls.pem").exists();
     let mut client = None;
     for (file, is_client) in [("client.token", true), ("hook.token", false)] {
         let path = dir.join(file);
-        if force || !path.exists() {
+        if force || path.symlink_metadata().is_err() {
             let token = secrets::new_token();
             secrets::write_secret(&path, &token)?;
             created.push(file);
@@ -177,14 +184,16 @@ fn init(dir: &Path, force: bool) -> Result<()> {
         }
     }
     let id_path = dir.join("machine-id");
-    let id = if id_path.exists() {
-        identity::machine_id(dir)?
-    } else {
-        created.push("machine-id");
-        identity::create_machine_id(dir)?
+    let id = match identity::machine_id(dir) {
+        Ok(id) => id,
+        Err(_) if id_path.symlink_metadata().is_err() || std::fs::read_to_string(&id_path).is_ok_and(|s| s.trim().is_empty()) => {
+            created.push("machine-id");
+            identity::create_machine_id(dir)?
+        }
+        Err(e) => return Err(e),
     };
     let cfg_path = dir.join("config.toml");
-    if !cfg_path.exists() {
+    if cfg_path.symlink_metadata().is_err() {
         secrets::write_secret(&cfg_path, &toml::to_string(&config::Config::default())?)?;
         created.push("config.toml");
     }
@@ -194,6 +203,9 @@ fn init(dir: &Path, force: bool) -> Result<()> {
     }
     println!("Initialized acd in {}", dir.display());
     println!("created: {}", created.join(", "));
+    if !repaired.is_empty() {
+        println!("repaired: {}", repaired.join(", "));
+    }
     println!("machine id: {id}");
     if let Some(client) = client {
         println!("client token (add it to the Mac app): {client}");
