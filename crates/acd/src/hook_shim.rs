@@ -160,6 +160,13 @@ fn ancestor_dir_safe(p: &Path, euid: u32) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_dir() && ancestor_safe(m.uid(), m.mode(), euid))
 }
 
+/// Like `ancestor_dir_safe` but by lstat: a symlink is never accepted. A
+/// canonical path holds none, so one here means tampering.
+fn ancestor_lstat_safe(p: &Path, euid: u32) -> bool {
+    std::fs::symlink_metadata(p)
+        .is_ok_and(|m| m.file_type().is_dir() && ancestor_safe(m.uid(), m.mode(), euid))
+}
+
 /// `<canon>/hook.sock` if `canon` (already canonical, taken as is and never
 /// resolved again) and its socket are what amendment A1 requires: `canon` is
 /// a directory (not a symlink) owned by the effective uid with mode 0700,
@@ -172,7 +179,7 @@ fn checked_socket(canon: &Path) -> Option<PathBuf> {
     if !canon
         .ancestors()
         .skip(1)
-        .all(|p| ancestor_dir_safe(p, euid))
+        .all(|p| ancestor_lstat_safe(p, euid))
     {
         return None;
     }
@@ -371,6 +378,15 @@ mod tests {
         let link = canon.parent().unwrap().join("link");
         std::os::unix::fs::symlink(&canon, &link).unwrap();
         assert_eq!(checked_socket(&link), None);
+        // A symlinked intermediate component is tampering: refused.
+        let real = canon.parent().unwrap().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let bridge = canon.parent().unwrap().join("bridge");
+        std::os::unix::fs::symlink(&real, &bridge).unwrap();
+        std::fs::rename(&canon, real.join("acd")).unwrap();
+        assert!(checked_socket(&real.join("acd")).is_some());
+        assert_eq!(checked_socket(&bridge.join("acd")), None);
+        std::fs::rename(real.join("acd"), &canon).unwrap();
         // resolve() returns the canonical path.
         assert_eq!(resolve(&link), Some(canon));
     }
