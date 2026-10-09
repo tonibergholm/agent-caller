@@ -39,96 +39,125 @@ its name.
 
 ## P3: hooks and service
 
-- Answer revisions (docs/superpowers/plans/2026-10-08-p5-answer-revision.md):
+Status, 2026-10-09: each bullet is tagged with the task of
+`docs/superpowers/plans/2026-10-09-p3-hooks.md` that resolved it. Tasks 1
+to 16 and 20 to 29 are approved in the SDD ledger. A tag of the form
+`[pending: Task N]` names a task that is not approved yet (Tasks 17 to 19
+and 30 to 32); flip those tags when the ledger marks the task approved.
+The leftovers are under "P3 deferred" below.
+
+- [done: Task 4 (set-once targets) and Task 6 (targets bound to a pane
+  incarnation); D8] Answer revisions (docs/superpowers/plans/2026-10-08-p5-answer-revision.md):
   a herdr keys target must stay immutable for the life of an occurrence,
   or be bound to the revision or digest that was claimed. Today the
   target is fetched after the claim from a replaceable map
   (crates/acd-adapters/src/herdr/keys.rs), so the revision check alone
   does not cover it.
 
-- P3 ownership rule 1: read `T3Adapter::sessions()` (`SessionMap`). For each
+- [done: Tasks 10, 11 and 16 (map, re-evaluation, T3 takeover forgets hub
+  expectations); [pending: Task 18] revoking live requests on every owner
+  transition] P3 ownership rule 1: read `T3Adapter::sessions()` (`SessionMap`). For each
   Claude session, if `SessionMap::owner(session_id)` is `Some`, drop the
   hook-side and discovery state for that session. Re-evaluate sessions whose
   ownership is unknown (spec §6.2 rule 4) on every `SessionMap::changes()`
   tick. The map publishes ownership when shell and detail agree and the
   native id is set, the first claim for a session id wins, and ownership is
   invalidated only by identity evidence.
-- `project.removed` uses an inferred `projectId` field; the live runs could not
+- [still open: T3, out of scope for P3; needs a live T3] `project.removed`
+  uses an inferred `projectId` field; the live runs could not
   produce one (`t3 project remove` returned `invalid_command`), so it is still
   unconfirmed.
-- T3 decode-error degradation clears after 10 minutes without new errors.
-- Reuse `text::redact_log` for hook payload logging so secret patterns stay
+- [done: P4, D21] T3 decode-error degradation clears after 10 minutes without new errors.
+- [done: Task 7] Reuse `text::redact_log` for hook payload logging so secret patterns stay
   consistent.
 
-- `acd service install`:
-  - restart on exit code 75;
-  - handle SIGTERM gracefully;
-  - make a dead serve task fatal;
-  - exit the process when a mutex is poisoned;
-  - resolve `tailscale` by absolute path, because launchd's PATH is minimal.
-- `check_mode`: do not follow symlinks, and check the file owner. Clean up
+- `acd service install` [done: Task 28 (the service), Task 29 (exit codes)]:
+  - restart on exit code 75 [done: Tasks 28, 29; launchd
+    `SuccessfulExit = false`, systemd `Restart=on-failure`];
+  - handle SIGTERM gracefully [done: Task 29; held hook requests get an
+    empty reply before `run` returns: pending, Task 30];
+  - make a dead serve task fatal [done: Task 29 (exit 1); the hook
+    listeners joining the supervised set: pending, Task 30];
+  - exit the process when a mutex is poisoned [done: Task 29 (panic exits
+    70)];
+  - resolve `tailscale` by absolute path, because launchd's PATH is minimal
+    [done: Task 29, `FALLBACK_CLIS`].
+- [done: Task 20] `check_mode`: do not follow symlinks, and check the file owner. Clean up
   temp files on failure and fsync the directory after the rename.
-- `init` repair: check the mode of files it keeps, and reject an empty
+- [done: Task 20] `init` repair: check the mode of files it keeps, and reject an empty
   `machine-id`.
-- Superseding an `answering` Claude request when the next permission
+- [done: Task 14 (O1, D10)] Superseding an `answering` Claude request when the next permission
   arrives before `PostToolUse` (see spec §6.2 attribution).
-- Spec §11 gates 2, 4, 5 and 7 block P3.
-- Implement `Evidence`: correlation with PostToolUse, Stop and
+- [done: gates confirmed in a6e08dd; spec updated in Task 32 Step 2;
+  live checks 10 to 14 remain open, 14 is a release gate] Spec §11 gates 2,
+  4, 5 and 7 block P3.
+- [done: Tasks 12 and 16] Implement `Evidence`: correlation with PostToolUse, Stop and
   UserPromptSubmit.
   - Use only evidence for `target.request_id` that arrived after
     `sent_at`.
   - Never reuse a verdict across request ids.
   - Answer within `evidence_timeout`.
-- After opening each keys-answerable request, register a `KeysTarget` with
+- [done for Claude: Tasks 15 and 16; [pending: Task 17] Codex] After
+  opening each keys-answerable request, register a `KeysTarget` with
   `request_id = core.request_id_for(agent_id, &key)`. Targets of resolved
   requests are dropped by the P2 target watch.
-- Build keys targets only with `KeysTarget::from_screen` (its fields are
+- [done for Claude: Tasks 15 and 16; [pending: Task 17] Codex] Build keys
+  targets only with `KeysTarget::from_screen` (its fields are
   sealed). Register only after `core.agent(agent_id)` is Some.
-- Option keys may only be "1".."9" or "esc", never Enter. The guard
+- [done: Tasks 4, 15, 16; [pending: Task 17] Codex] Option keys may only be
+  "1".."9" or "esc", never Enter. The guard
   digest blanks the cursor, so it cannot tell which option Enter picks.
-- Never decide an approval from `Dialog::text` or `Dialog::identity`. Forged
+- [done: Task 13 (dialog match contract M1 to M5, raw rows only)] Never
+  decide an approval from `Dialog::text` or `Dialog::identity`. Forged
   rule lines in command text can shorten the text, and the identity folds
   whitespace. The guard digest (full sha256 of the whole screen through the
   footer) is the only security-relevant value.
-- Never switch a held hook's request to `keys` while the hook is still held.
-- When a hook request belongs to the dialog already shown as a
+- [done: Task 15] Never switch a held hook's request to `keys` while the hook is still held.
+- [done for Claude: Tasks 2, 14, 16; [pending: Task 17] Codex] When a hook
+  request belongs to the dialog already shown as a
   `blocked_unparsed` fallback, upgrade it in place (`upgrade_from` =
   `herdr::fallback::key(..)`), never supersede it; otherwise the pane can
   show no request until the screen changes. After an upgrade, the fallback
   only emits `DialogGone` and never resolves the request. Use the key the
   fallback recorded when it opened, not one recomputed from a later screen:
   the fallback keeps its open-time key across redraws.
-- A malformed `agent.get` reply still drops the herdr connection (agents go
+- [done: Task 5] A malformed `agent.get` reply still drops the herdr connection (agents go
   `unknown`, then reconnect). Decode it leniently, as `agent.list` now is.
-- Dialog identity keeps `Tip:` lines (so a wrapped tip doesn't look like a
+- [open: live check 10, Task 32 Step 6] Dialog identity keeps `Tip:` lines (so a wrapped tip doesn't look like a
   new dialog). If a Claude tip ever changes while the same dialog stays up,
   the watch would publish a false `terminal` and a confirmation could count
   the dialog closed. Check tip behaviour live before keys requests go live,
   and drop tip lines from the identity if they rotate.
-- The target watch removes the target and emits `DialogGoneById` before
+- [done: Task 5] The target watch removes the target and emits `DialogGoneById` before
   `RequestEndedIfOpen`. A claim landing in that window leaves the request
   with no target: the delivery fails its lease and the request reopens with
   no watcher. Reorder (end first, then remove) or re-check under one step.
-- If a dialog with the same identity reappears within about 2 polls after a
+- [done for Claude: Tasks 14 to 16 (O1 to O3, a new request id and a fresh
+  target); [pending: Task 17] Codex] If a dialog with the same identity
+  reappears within about 2 polls after a
   terminal answer, the old occurrence stays open (answers get
   `screen_mismatch`). Re-register with `from_screen` when the hook reports a
   new request. Identity is whitespace-folded (region text and labels with
   their continuation lines), so a dialog that differs from the old one only
   in whitespace or line breaks also counts as the same identity.
-- A pane id that is closed and re-detected before its `agent.get` keeps the
+- [done: Task 5 (pane incarnation, identity change)] A pane id that is
+  closed and re-detected before its `agent.get` keeps the
   old agent: its agent id, pending request and key state carry over, and an
   old structured request resolves `terminal` through the watch instead of
   `lost`. A kind change under the same pane id behaves the same way. Track
   `Hint::Closed` per pane and emit `AgentGone` before re-adding; also track
   `terminal_id` / `agent_session.value` per pane and treat a change as a new
   agent.
-- Spec §6.4 counts a pane whose `state_change_seq` rose without an event as
+- [decided: log-only, D19] Spec §6.4 counts a pane whose
+  `state_change_seq` rose without an event as
   a missed change. The reconciler only compares states, and only logs it.
   The periodic list applies every pane anyway, so this affects the log only.
-- A dialog is recognized only when its footer is the last non-empty screen
+- [decided: stays fail-closed, D20] A dialog is recognized only when its
+  footer is the last non-empty screen
   line. If a future Claude or Codex version draws a status line below the
   footer, update `screen::find_dialog`. It fails closed until then.
-- **Cross-path lease.** The P2 lease check covers `Answering` status, the
+- [done: Tasks 4 and 6 (D7, per-agent delivery lock; lock order R11 in
+  Task 15)] **Cross-path lease.** The P2 lease check covers `Answering` status, the
   answer path and the presence of the target, and it runs after connect and
   before the write.
   - If P3 can activate a hook path or open a structured request for an
@@ -136,15 +165,114 @@ its name.
     and its write, P3 must hold off until `deliver` returns. Use a
     per-agent async mutex shared with the herdr adapter.
   - Otherwise P3 records why the window cannot occur.
-- **Stray-keystroke reason** (spec §6.2). Before any keys request goes live,
+- [done: Tasks 3 and 4] **Stray-keystroke reason** (spec §6.2). Before any keys request goes live,
   add an optional `reason` to `request.resolved` (for example
   `"stray_keystroke"`). Today it reports only `by: uncertain`. This touches
   `acd-protocol` and its schema, so coordinate it with P5.
-- Bind Codex sessions with `agent_session.value`, which `AgentInfo` now
+- [done: Tasks 5 and 10 (`codex_bind`); [pending: Task 17] the caller with
+  mandatory screen checks] Bind Codex sessions with `agent_session.value`, which `AgentInfo` now
   carries.
-- When adding `reason` to `request.resolved`, map it in
+- [done: Task 3] When adding `reason` to `request.resolved`, map it in
   `acd_client::view::resolution_notice`. `stray_keystroke` maps to "A stray
   keystroke may be in the input box". Regenerate the bindings.
+
+### P3 deferred
+
+From the gates and the plan (`docs/superpowers/plans/2026-10-09-p3-hooks.md`,
+"Out of scope"):
+
+- `PostToolUseFailure` is installed and counted as "the tool ran", but its
+  payload is unverified. `PermissionDenied` evidence is not installed or
+  checked.
+- Codex in the shared managed daemon: `agent_session` is missing and the hook
+  environment is wrong, so only a single Codex pane in a cwd can be bound.
+  Upstream fix; restarting the managed daemon is unverified.
+- Binding commands that wrap or span several rows (D26). They get no screen
+  binding and no keys target. Needs live check 12 and a separate review of a
+  width-aware rule.
+- A command-hook shim for Claude, to remove the loopback port-squatting
+  exposure of the `http` hooks (ruling R7, post-v1). Needs gate 2 re-tested
+  for command hooks.
+- Free text in `AskUserQuestion` on the keys path, multi-select and
+  multi-question answers (spec §11 item 1, §2).
+
+Open live checks (Task 32 Step 6): 10 (`Tip:` lines), 11 (Codex hook review),
+12 (wrapped commands), 13 (parallel `PermissionRequest`), 14 (registry entry
+delay, **release gate**; `REGISTRY_GRACE_MS` is an assumption until then).
+
+Not owned by any task in the plan (amendment A1 mitigations for the Claude
+`http` hooks): `acd init` choosing a random free `hook_port`, the best-effort
+"hook port is held by another process" warning in `acd status` and
+`acd hooks status`, and a trust-model line in the install output (the Codex
+install note exists; the Claude one does not mention port squatting). The
+spec (§9) describes them as required.
+
+Pending P3 work recorded in the ledger as carries:
+
+- Task 30: hook listeners go into the daemon's `servers` JoinSet (loss is
+  fatal); held hook requests get an empty reply or a clean close before `run`
+  returns on SIGTERM; `rt.shutdown_timeout` so blocking scanner tasks cannot
+  delay exit.
+- Task 31: the daemon clears its `on_current` set (sessions seen on the
+  current credential generation) when the store is reset or regenerated, for
+  example by `ensure --force`; the retirement caller passes complete scans
+  and the sessions seen on the current generation (Task 26 contract).
+- Task 17: callers run the T3 ownership check before `codex_bind` and apply
+  the screen checks for `Session` and `OnlyInCwd` bindings. In the recorded
+  misbound fixture all panes share one cwd, so the cwd check cannot reject
+  the app-server pane; the screen checks are the only guard.
+- Task 19 (A8): the history map's global cap; cache the canonical header
+  socket path per binding (or record the discovery aliases), because it is
+  canonicalized synchronously on the reconciler for each event and scan, and
+  a stalled mount could block it. Minor: a hooks-only agent's state stays
+  frozen while a migration waits for the target agent.
+- Task 4: `KeysTargets::remove` retires ids even when no live target exists,
+  so callers must not remove before setting; watch for a self-deadlock if a
+  P3 holder re-enters `deliver` for the same agent.
+
+Minors and residuals accepted in review:
+
+- Task 1: some CLI tests inherit stdout and print throwaway tokens (for
+  example `acd init`, `token rotate`); capture the output in the harness.
+- Task 5: no test pins `lost()` clearing `closed`.
+- Task 7: strong RTL characters in command lines are not escaped (natural RTL
+  letters reorder the display), and herdr or T3 details may start lines with
+  spaces. Escape strong RTL characters or document the residual.
+- Task 9: a stale registry entry whose pid was reused by another process
+  keeps the scan incomplete (conservative).
+- Task 20: `repair_mode` on a file the owner cannot read (mode 0o000 or
+  0o200) fails with a plain permission error; give a clearer message.
+- Task 21: no failure injection for the writer stage; the `--force`
+  generation-1 fallback reuses a generation number (no old token is accepted
+  by it; watch the retention history, Task 26).
+- Task 22: surplus reply bytes in a later read are ignored; the shim's
+  `catch_unwind` wrapper has no test.
+- Task 24: the Git check is path-based (it gates the write, it does not
+  bind it); the gap between canonicalizing and opening the directory lands on
+  a user-owned directory; the temp file can be `git add`ed in a short window;
+  compare-then-rename has no compare-and-swap; Codex targets get no Git
+  check.
+- Task 25: a Codex journal written before Task 25 loads as Claude
+  (branch-only, pre-release).
+- Task 8: the brief's tests for the full event queue, disconnected holds and
+  churn were defective (a dropped `Held` temporary; closing before the server
+  accepted). Later hook-endpoint tests must use the `settle` and
+  `hold_and_close` helpers in `crates/acd-adapters/tests/hooks_endpoint.rs`.
+
+Flakes and environment:
+
+- `crates/acd-adapters/tests/t3_conn.rs`
+  `a_peer_that_stops_reading_trips_the_write_timeout` (P4) failed once in a
+  full run under heavy load and passes alone; consider widening its 5 s
+  bound.
+- `herdr_e2e` failed once in a workspace run and passed on rerun (seen in
+  Task 22).
+- `secrets::tests::repair_mode_clears_special_bits_and_reports_them`,
+  `init_repairs_a_setuid_secret_and_a_loose_t3_token` and
+  `hooks::claude_sessions::tests::the_system_check_recognises_this_process`
+  fail only inside the Codex sandbox (special bits and `ps` are not honoured
+  there). They pass outside it.
+- Luna dispatches reformat unrelated files; revert at commit time.
 
 ## P5: Mac app
 
