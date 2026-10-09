@@ -194,6 +194,11 @@ From the 2026-10-09 production-bundle checklist:
   replies need T3 or P3 hooks. Say so in the setup docs.
 - On a remote Mac, the macOS firewall prompts for the unsigned `acd`
   binary on first incoming connection. Say so in the setup docs.
+- With an explicit Tailscale IP in `listen` and no Tailscale CLI, acd
+  refuses the address without saying the CLI is missing. Key the startup
+  warnings on `needs_tailscale_probe`, not the `tailscale` keyword.
+- After Cancel in the inline remove confirmation, focus falls to the page
+  body. Return it to the restored Remove button.
 
 ## Process
 
