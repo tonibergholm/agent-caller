@@ -93,6 +93,10 @@ enum Reply {
     Stall,
     /// Sends a complete reply with Content-Length but keeps the connection open.
     KeepOpen,
+    /// Accepts, never reads and never answers.
+    NoRead,
+    /// Sends this raw reply, then closes.
+    Raw(&'static str),
 }
 
 fn set_mode(p: &std::path::Path, m: u32) {
@@ -113,6 +117,10 @@ fn one_shot(
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let Ok((mut s, _)) = l.accept() else { return };
+        if reply == Reply::NoRead {
+            std::thread::sleep(Duration::from_secs(5));
+            return;
+        }
         s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let mut req = Vec::new();
         let mut buf = [0u8; 65536];
@@ -141,6 +149,10 @@ fn one_shot(
         let _ = tx.send(String::from_utf8_lossy(&req).into_owned());
         if reply == Reply::Stall {
             std::thread::sleep(Duration::from_secs(5));
+            return;
+        }
+        if let Reply::Raw(raw) = reply {
+            let _ = s.write_all(raw.as_bytes());
             return;
         }
         let _ = write!(
@@ -397,4 +409,39 @@ fn the_shim_gives_up_when_stdin_never_closes() {
         t.elapsed()
     );
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+}
+
+#[test]
+fn the_shim_refuses_a_short_or_ambiguous_reply() {
+    for raw in [
+        "HTTP/1.1 200 X\r\nContent-Length: 100\r\n\r\n{}",
+        "HTTP/1.1 200 X\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
+    ] {
+        let (_tmp, dir) = shim_dir();
+        let _rx = one_shot(&dir, 200, "", Reply::Raw(raw));
+        let (out, _) = run_shim(&dir, "Stop", b"{}", &[]);
+        assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty());
+    }
+}
+
+#[test]
+fn the_shim_refuses_a_writable_ancestor_unless_sticky() {
+    let (tmp, dir) = shim_dir();
+    let rx = one_shot(&dir, 200, "ok", Reply::Normal);
+    set_mode(tmp.path(), 0o777);
+    assert_refused(&dir, &rx);
+    // The refused run never connected, so the server still waits.
+    set_mode(tmp.path(), 0o1777);
+    let (out, _) = run_shim(&dir, "Stop", b"{}", &[]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ok");
+}
+
+#[test]
+fn a_write_stall_is_bounded_by_the_deadline() {
+    let (_tmp, dir) = shim_dir();
+    let _rx = one_shot(&dir, 200, "x", Reply::NoRead);
+    let big = vec![b'a'; 1 << 20];
+    let (out, took) = run_shim(&dir, "PermissionRequest", &big, &[]);
+    assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty());
+    assert!(took < Duration::from_millis(1200), "{took:?}");
 }
