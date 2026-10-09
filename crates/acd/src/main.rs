@@ -1,12 +1,14 @@
 mod bind;
 mod config;
 mod daemon;
+mod hook_token;
 mod identity;
 mod pair;
 mod paths;
 mod secrets;
 mod status;
 mod tls;
+mod writer_lock;
 
 use std::path::Path;
 
@@ -109,14 +111,19 @@ fn real_main() -> Result<()> {
                 bail!("{} not initialized; run `acd init`", dir.display());
             }
             preflight(&dir)?;
-            let file = match which {
-                TokenKind::Client => "client.token",
-                TokenKind::Hook => "hook.token",
-            };
-            let token = secrets::new_token();
-            secrets::write_secret(&dir.join(file), &token)?;
-            println!("{token}");
-            Ok(())
+            match which {
+                TokenKind::Client => {
+                    let token = secrets::new_token();
+                    secrets::write_secret(&dir.join("client.token"), &token)?;
+                    println!("{token}");
+                    Ok(())
+                }
+                TokenKind::Hook => {
+                    let s = hook_token::rotate_store(&dir, chrono::Utc::now().timestamp_millis())?;
+                    println!("Hook token rotated to generation {}.", s.generation);
+                    Ok(())
+                }
+            }
         }
         Cmd::Tls {
             cmd: TlsCmd::Rotate,
@@ -151,7 +158,15 @@ pub(crate) fn preflight(dir: &Path) -> Result<()> {
 
 fn preflight_prerequisites(dir: &Path) -> Result<()> {
     secrets::check_mode(dir, 0o700)?;
-    for f in ["client.token", "hook.token", "t3.token", "config.toml"] {
+    for f in [
+        "client.token",
+        "hook.token",
+        "hook-tokens.json",
+        "hooks-installed.json",
+        "hooks-journal.json",
+        "t3.token",
+        "config.toml",
+    ] {
         let p = dir.join(f);
         if p.symlink_metadata().is_ok() {
             secrets::check_mode(&p, 0o600)?;
@@ -164,7 +179,13 @@ fn init(dir: &Path, force: bool) -> Result<()> {
     secrets::ensure_private_dir(dir)?;
     let mut created = Vec::new();
     let mut repaired = Vec::new();
-    for file in ["client.token", "hook.token", "t3.token", "machine-id", "config.toml"] {
+    for file in [
+        "client.token",
+        "t3.token",
+        "machine-id",
+        "config.toml",
+        hook_token::STORE_FILE,
+    ] {
         let p = dir.join(file);
         if p.symlink_metadata().is_ok() && secrets::repair_mode(&p, 0o600)? {
             repaired.push(file);
@@ -172,16 +193,16 @@ fn init(dir: &Path, force: bool) -> Result<()> {
     }
     let had_tls = dir.join("tls.pem").exists();
     let mut client = None;
-    for (file, is_client) in [("client.token", true), ("hook.token", false)] {
-        let path = dir.join(file);
-        if force || path.symlink_metadata().is_err() {
-            let token = secrets::new_token();
-            secrets::write_secret(&path, &token)?;
-            created.push(file);
-            if is_client {
-                client = Some(token);
-            }
-        }
+    let file = "client.token";
+    let path = dir.join(file);
+    if force || path.symlink_metadata().is_err() {
+        let token = secrets::new_token();
+        secrets::write_secret(&path, &token)?;
+        created.push(file);
+        client = Some(token);
+    }
+    if hook_token::ensure(dir, force)? {
+        created.push(hook_token::STORE_FILE);
     }
     let id_path = dir.join("machine-id");
     let id = match identity::machine_id(dir) {

@@ -222,7 +222,7 @@ fn init_creates_private_files_and_is_repeatable() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(mode(dir.clone()), 0o700);
-    for f in ["client.token", "hook.token", "config.toml", "machine-id"] {
+    for f in ["client.token", "hook-tokens.json", "config.toml", "machine-id"] {
         assert_eq!(mode(dir.join(f)), 0o600, "{f}");
     }
     let token = std::fs::read_to_string(dir.join("client.token")).unwrap();
@@ -313,15 +313,15 @@ fn init_repairs_partial_dir_and_force_keeps_machine_id() {
     assert!(acd(&dir).arg("init").status().unwrap().success());
     let client = std::fs::read_to_string(dir.join("client.token")).unwrap();
     let id = std::fs::read_to_string(dir.join("machine-id")).unwrap();
-    std::fs::remove_file(dir.join("hook.token")).unwrap();
+    std::fs::remove_file(dir.join("hook-tokens.json")).unwrap();
     let out = acd(&dir).arg("init").output().unwrap();
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("hook.token"));
-    assert_eq!(mode(dir.join("hook.token")), 0o600);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("hook-tokens.json"));
+    assert_eq!(mode(dir.join("hook-tokens.json")), 0o600);
     assert_eq!(
         client,
         std::fs::read_to_string(dir.join("client.token")).unwrap()
@@ -603,7 +603,12 @@ fn init_repairs_loose_modes_of_files_it_keeps() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = common::init_dir(tmp.path());
     let before = std::fs::read_to_string(dir.join("client.token")).unwrap();
-    for f in ["client.token", "hook.token", "machine-id", "config.toml"] {
+    for f in [
+        "client.token",
+        "hook-tokens.json",
+        "machine-id",
+        "config.toml",
+    ] {
         std::fs::set_permissions(dir.join(f), std::fs::Permissions::from_mode(0o644)).unwrap();
     }
     let out = acd(&dir).arg("init").output().unwrap();
@@ -612,7 +617,12 @@ fn init_repairs_loose_modes_of_files_it_keeps() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    for f in ["client.token", "hook.token", "machine-id", "config.toml"] {
+    for f in [
+        "client.token",
+        "hook-tokens.json",
+        "machine-id",
+        "config.toml",
+    ] {
         assert_eq!(mode(dir.join(f)), 0o600, "{f}");
     }
     assert_eq!(
@@ -628,8 +638,8 @@ fn init_and_run_refuse_a_symlinked_token() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = common::init_dir(tmp.path());
     let elsewhere = tmp.path().join("elsewhere");
-    std::fs::rename(dir.join("hook.token"), &elsewhere).unwrap();
-    std::os::unix::fs::symlink(&elsewhere, dir.join("hook.token")).unwrap();
+    std::fs::rename(dir.join("hook-tokens.json"), &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.join("hook-tokens.json")).unwrap();
     let out = acd(&dir).arg("init").output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("symlink"));

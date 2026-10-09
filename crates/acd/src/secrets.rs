@@ -60,6 +60,26 @@ fn explain(e: SecureFsError) -> anyhow::Error {
     }
 }
 
+/// F1: maximum size for structured install records, journals and token stores.
+pub const STRUCTURED_MAX: usize = 256 * 1024;
+
+pub fn read_structured(path: &Path) -> Result<String> {
+    let bytes = acd_securefs::read_private(path, 0o600, STRUCTURED_MAX as u64).map_err(explain)?;
+    String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))
+}
+
+/// Refuses, before writing, anything `read_structured` could not read back.
+pub fn write_structured(path: &Path, text: &str) -> Result<()> {
+    if text.len() + 1 > STRUCTURED_MAX {
+        bail!(
+            "{} would be too large ({} bytes, at most {STRUCTURED_MAX})",
+            path.display(),
+            text.len() + 1
+        );
+    }
+    write_secret(path, text)
+}
+
 /// Writes `value` atomically with mode 0600: a unique temp file in the
 /// same directory, fsync, rename, fsync of the directory. The temp file is
 /// removed on any failure.
