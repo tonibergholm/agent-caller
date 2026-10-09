@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use acd_securefs::SecureFsError;
 use anyhow::{Context, Result, bail};
@@ -87,9 +87,43 @@ pub fn write_secret(path: &Path, value: &str) -> Result<()> {
     write_atomic(path, format!("{value}\n").as_bytes(), 0o600)
 }
 
-/// Writes bytes atomically with the requested mode using a unique same-directory
-/// temporary file, fsync, rename, and directory fsync.
-pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+/// A fully written, fsynced temporary file waiting to replace `target`.
+/// Dropping it without `commit` removes the temporary file.
+pub struct Staged {
+    tmp: PathBuf,
+    target: PathBuf,
+    live: bool,
+}
+
+/// A failed `Staged::commit`. `renamed` says whether the target may already
+/// hold the new bytes: false means it is untouched, true means the rename
+/// happened (or may have) and only a later step, such as the directory
+/// fsync, failed.
+pub struct CommitError {
+    pub renamed: bool,
+    pub error: anyhow::Error,
+}
+
+impl CommitError {
+    pub fn not_renamed(error: anyhow::Error) -> Self {
+        Self {
+            renamed: false,
+            error,
+        }
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if self.live {
+            let _ = fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+/// First half of `write_atomic`: a unique same-directory temporary file with
+/// the requested mode, written and fsynced. Nothing at `path` changes.
+pub fn stage_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<Staged> {
     let dir = path.parent().context("path has no parent")?;
     let mut rnd = [0u8; 8];
     getrandom::fill(&mut rnd).expect("OS randomness is available");
@@ -102,35 +136,55 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         std::process::id(),
         rnd.iter().map(|b| format!("{b:02x}")).collect::<String>()
     ));
-    let result = (|| -> Result<()> {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
-        // `mode` above is masked by the umask; set it exactly on the fd.
-        f.set_permissions(fs::Permissions::from_mode(mode))?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-        return result;
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    let staged = Staged {
+        tmp,
+        target: path.to_path_buf(),
+        live: true,
+    };
+    // `mode` above is masked by the umask; set it exactly on the fd.
+    f.set_permissions(fs::Permissions::from_mode(mode))?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(staged)
+}
+
+impl Staged {
+    /// Renames over the target, then fsyncs the directory.
+    pub fn commit(mut self) -> std::result::Result<(), CommitError> {
+        if let Err(e) = fs::rename(&self.tmp, &self.target) {
+            return Err(CommitError::not_renamed(
+                anyhow::Error::new(e).context(format!("replacing {}", self.target.display())),
+            ));
+        }
+        self.live = false;
+        // The rename already happened: the new value is in place. A failure
+        // here only means durability is unconfirmed, so say so.
+        let dir = self.target.parent().unwrap_or(Path::new("."));
+        fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| CommitError {
+                renamed: true,
+                error: anyhow::Error::new(e).context(format!(
+                    "{} was written with the new value, but syncing {} failed; durability is unconfirmed",
+                    self.target.display(),
+                    dir.display()
+                )),
+            })
     }
-    // The rename already happened: the new value is in place. A failure here
-    // only means durability is unconfirmed, so say so.
-    fs::File::open(dir)
-        .and_then(|d| d.sync_all())
-        .with_context(|| {
-            format!(
-                "{} was written with the new value, but syncing {} failed; durability is unconfirmed",
-                path.display(),
-                dir.display()
-            )
-        })
+}
+
+/// Writes bytes atomically with the requested mode using a unique same-directory
+/// temporary file, fsync, rename, and directory fsync.
+pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    stage_atomic(path, bytes, mode)?
+        .commit()
+        .map_err(|e| e.error)
 }
 
 /// Fails if `path` is a symlink, is not owned by the effective user, or

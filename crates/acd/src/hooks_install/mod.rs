@@ -15,6 +15,7 @@ use serde_json::value::RawValue;
 use self::entries::Ownership;
 use self::journal::{Journal, digest};
 use self::json::{GroupEdit, Obj, edit_group, raw, raw_text, render_array};
+use crate::secrets::CommitError;
 
 pub const MARKER: &str = "acd-managed:v1";
 
@@ -55,7 +56,7 @@ impl Record {
         Ok(serde_json::from_str(&crate::secrets::read_structured(&p)?)?)
     }
     pub fn save(&self, dir: &Path) -> Result<()> {
-        crate::hook_token::fail_at("record-write")?;
+        inject("record-write")?;
         crate::secrets::write_structured(
             &dir.join(RECORD_FILE),
             &serde_json::to_string_pretty(self)?,
@@ -82,11 +83,26 @@ pub fn recorded_claude_roots(config_dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-fn canonical_destination(path: &Path) -> Result<PathBuf> {
+/// Resolves the parent directory once. Every later step (Git check, backup,
+/// journal, staging, rename) uses the returned path, so a parent symlink
+/// retargeted afterwards cannot move the write. The parent must be a real
+/// directory owned by the user.
+fn canonical_destination(path: &Path, create: bool) -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
     let parent = path.parent().context("settings path has no parent")?;
-    std::fs::create_dir_all(parent)?;
-    Ok(std::fs::canonicalize(parent)?
-        .join(path.file_name().context("settings path has no file name")?))
+    if create {
+        std::fs::create_dir_all(parent)?;
+    }
+    let parent = std::fs::canonicalize(parent)
+        .with_context(|| format!("resolving the directory of {}", path.display()))?;
+    let meta = std::fs::symlink_metadata(&parent)?;
+    if !meta.is_dir() || meta.uid() != acd_securefs::euid() {
+        bail!(
+            "refusing to edit in {}: not a directory owned by you",
+            parent.display()
+        );
+    }
+    Ok(parent.join(path.file_name().context("settings path has no file name")?))
 }
 
 pub struct Report {
@@ -166,18 +182,37 @@ pub(crate) fn read_settings(path: &Path) -> Result<Option<String>> {
     }
 }
 
+/// A private copy of the pre-edit text. Names are unique and never reused:
+/// `create_new` refuses an existing file or symlink.
 fn backup(ctx: &Ctx, path: &Path, text: &str) -> Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let dir = ctx.config_dir.join("backups");
     crate::secrets::ensure_private_dir(&dir)?;
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis();
+    let mut rnd = [0u8; 6];
+    getrandom::fill(&mut rnd).expect("OS randomness is available");
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let b = dir.join(format!("{name}.{ms}.bak"));
-    crate::secrets::write_atomic(&b, text.as_bytes(), 0o600)?;
+    let b = dir.join(format!(
+        "{name}.{ms}.{}.bak",
+        rnd.iter().map(|x| format!("{x:02x}")).collect::<String>()
+    ));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&b)
+        .with_context(|| format!("creating {}", b.display()))?;
+    let written = f.write_all(text.as_bytes()).and_then(|()| f.sync_all());
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&b);
+        return Err(e.into());
+    }
     Ok(b)
 }
 
@@ -201,88 +236,160 @@ fn test_touch(path: &Path, attempt: usize) {
     let _ = (path, attempt);
 }
 
+/// Debug builds only: `ACD_TEST_RUN_AT=<stage>=<shell command>` runs the
+/// command when the installer reaches `stage`.
+fn test_stage(stage: &str) {
+    #[cfg(debug_assertions)]
+    if let Ok(v) = std::env::var("ACD_TEST_RUN_AT")
+        && let Some((s, cmd)) = v.split_once('=')
+        && s == stage
+    {
+        let _ = std::process::Command::new("sh").arg("-c").arg(cmd).status();
+    }
+    let _ = stage;
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Failure injection: `ACD_TEST_FAIL_AT` in debug builds, or the
+/// thread-local list in unit tests.
+fn inject(stage: &str) -> Result<()> {
+    #[cfg(test)]
+    if INJECTED.with(|i| i.borrow().contains(&stage)) {
+        bail!("injected failure at {stage}");
+    }
+    crate::hook_token::fail_at(stage)
+}
+
+const MAX_ATTEMPTS: usize = 3;
+
+/// Checks made after the temp file is staged and the journal exists, as late
+/// as possible before the rename. `Ok(false)` means the file changed since it
+/// was read, so the caller retries the whole edit.
+fn verify_before_commit(
+    dest: &Path,
+    before: Option<&str>,
+    t: Target,
+    flags: Flags,
+) -> Result<bool> {
+    if t == Target::Claude {
+        git::check(dest, flags.allow_tracked, flags.allow_unknown_git)?;
+    }
+    Ok(read_settings(dest)?.as_deref() == before)
+}
+
+/// Edits the settings file at `dest`, which the caller resolved once with
+/// `canonical_destination`.
 fn edit_settings(
     ctx: &Ctx,
     t: Target,
-    path: &Path,
+    dest: &Path,
     flags: Flags,
     record_after: impl Fn(Option<&str>, &Obj) -> Option<FileRecord>,
     edit: impl Fn(&mut Obj) -> Result<usize>,
 ) -> Result<Report> {
-    let dest = canonical_destination(path)?;
-    for attempt in 0..3 {
-        let before = read_settings(path)?;
+    let mut backed_up: Option<(Option<String>, PathBuf)> = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        let before = read_settings(dest)?;
         if t == Target::Claude {
-            git::check(path, flags.allow_tracked, flags.allow_unknown_git)?;
+            git::check(dest, flags.allow_tracked, flags.allow_unknown_git)?;
         }
         let mut doc = Obj::parse(before.as_deref().unwrap_or_default())
-            .with_context(|| format!("{} is not a JSON object", path.display()))?;
+            .with_context(|| format!("{} is not a JSON object", dest.display()))?;
         let suspicious = edit(&mut doc)?;
+        let rec = record_after(before.as_deref(), &doc);
         let remove = doc.is_empty()
-            && record_after(before.as_deref(), &doc).is_none()
+            && rec.is_none()
             && Record::load(&ctx.config_dir)?
                 .files
-                .get(&dest)
+                .get(dest)
                 .is_some_and(|r| r.created_file);
         let text = if remove {
             None
         } else {
             Some(format!("{}\n", doc.render()))
         };
-        let backup = before
+        // Stage first: the temp file is written and fsynced before the last
+        // content check, so that check sits right next to the rename.
+        let staged = text
             .as_deref()
-            .map(|b| backup(ctx, path, b))
+            .map(|tx| crate::secrets::stage_atomic(dest, tx.as_bytes(), file_mode(dest, t)))
             .transpose()?;
-        let rec = record_after(before.as_deref(), &doc);
+        test_touch(dest, attempt);
+        test_stage("after-stage");
+        let before_digest = digest(before.as_deref());
+        let backup = match (&before, &backed_up) {
+            (None, _) => None,
+            (Some(_), Some((d, b))) if *d == before_digest => Some(b.clone()),
+            (Some(b), _) => {
+                let made = backup(ctx, dest, b)?;
+                backed_up = Some((before_digest.clone(), made.clone()));
+                Some(made)
+            }
+        };
         journal::begin(
             &ctx.config_dir,
             &Journal {
-                destination: dest.clone(),
-                before: digest(before.as_deref()),
+                destination: dest.to_path_buf(),
+                before: before_digest,
                 after: digest(text.as_deref()),
                 record_after: rec.clone(),
             },
         )?;
-        test_touch(path, attempt);
-        let current = read_settings(path)?;
-        if current != before {
-            journal::finish(&ctx.config_dir)?;
-            continue;
-        }
-        if let Ok(meta) = std::fs::symlink_metadata(path) {
-            use std::os::unix::fs::MetadataExt;
-            if meta.file_type().is_symlink()
-                || meta.uid() != acd_securefs::euid()
-                || !meta.is_file()
-            {
+        // Until the rename the journal is only a promise: any early exit
+        // removes it, and dropping `staged` removes the temp file.
+        match verify_before_commit(dest, before.as_deref(), t, flags) {
+            Ok(true) => {}
+            Ok(false) => {
                 journal::finish(&ctx.config_dir)?;
-                bail!(
-                    "refusing to edit {}: destination changed to an unsafe file",
-                    path.display()
-                );
+                continue;
+            }
+            Err(e) => {
+                journal::finish(&ctx.config_dir)?;
+                return Err(e);
             }
         }
-        let written = crate::hook_token::fail_at("settings-write").and_then(|()| match &text {
-            Some(text) => crate::secrets::write_atomic(path, text.as_bytes(), file_mode(path, t)),
-            None => std::fs::remove_file(path).map_err(Into::into),
-        });
-        if let Err(e) = written {
+        let committed = match staged {
+            Some(s) => inject("settings-write")
+                .map_err(CommitError::not_renamed)
+                .and_then(|()| s.commit())
+                .and_then(|()| {
+                    inject("settings-post-rename").map_err(|error| CommitError {
+                        renamed: true,
+                        error,
+                    })
+                }),
+            None => inject("settings-write")
+                .and_then(|()| std::fs::remove_file(dest).map_err(Into::into))
+                .map_err(CommitError::not_renamed),
+        };
+        if let Err(e) = committed {
+            if e.renamed {
+                // The file may already hold the new text: keep the journal.
+                return Err(e.error.context(format!(
+                    "{} may have been replaced; the journal was kept and the next acd hooks command recovers it",
+                    dest.display()
+                )));
+            }
             journal::finish(&ctx.config_dir)?;
-            return Err(e);
+            return Err(e.error);
         }
         let mut record = Record::load(&ctx.config_dir)?;
         match rec {
             Some(r) => {
-                record.files.insert(dest.clone(), r);
+                record.files.insert(dest.to_path_buf(), r);
             }
             None => {
-                record.files.remove(&dest);
+                record.files.remove(dest);
             }
         }
         record.save(&ctx.config_dir)?;
         journal::finish(&ctx.config_dir)?;
         return Ok(Report {
-            path: path.to_path_buf(),
+            path: dest.to_path_buf(),
             backup,
             removed_file: text.is_none(),
             suspicious,
@@ -290,7 +397,7 @@ fn edit_settings(
     }
     bail!(
         "{} kept changing while acd edited it; try again",
-        path.display()
+        dest.display()
     )
 }
 
@@ -302,15 +409,14 @@ fn install_entries(ctx: &Ctx, t: Target, flags: Flags) -> Result<Report> {
     let held = lock_writers(&ctx.config_dir)?;
     journal::recover(&ctx.config_dir)?;
     let path = ctx.settings_path(t);
-    let dest = canonical_destination(&path);
-    let dest = dest?;
+    let dest = canonical_destination(&path, true)?;
     let groups = groups_for(ctx, &held, t)?;
     let prior = Record::load(&ctx.config_dir)?.files.get(&dest).cloned();
     let created = std::cell::RefCell::new((false, Vec::<String>::new()));
     edit_settings(
         ctx,
         t,
-        &path,
+        &dest,
         flags,
         |before, _| {
             let (hooks_key, events) = created.borrow().clone();
@@ -361,7 +467,7 @@ pub fn uninstall(ctx: &Ctx, t: Target) -> Result<Report> {
     let _lock = lock_writers(&ctx.config_dir)?;
     journal::recover(&ctx.config_dir)?;
     let path = ctx.settings_path(t);
-    let dest = canonical_destination(&path)?;
+    let dest = canonical_destination(&path, true)?;
     let rec = Record::load(&ctx.config_dir)?.files.get(&dest).cloned();
     let events = rec
         .as_ref()
@@ -371,7 +477,7 @@ pub fn uninstall(ctx: &Ctx, t: Target) -> Result<Report> {
     edit_settings(
         ctx,
         t,
-        &path,
+        &dest,
         Flags {
             allow_tracked: true,
             allow_unknown_git: true,
@@ -405,6 +511,65 @@ pub struct RewriteReport {
     pub failed: Vec<(PathBuf, String)>,
 }
 
+/// Replaces the token in every owned entry of one event's groups. Only
+/// groups holding such an entry are rewritten; every other group, and every
+/// foreign entry inside a rewritten one, keeps its bytes. Returns the new
+/// array text when something changed.
+fn rewrite_event_token(
+    event: &str,
+    groups_raw: &RawValue,
+    token: &str,
+    suspicious: &mut usize,
+) -> Result<Option<Box<RawValue>>> {
+    let Ok(groups) = serde_json::from_str::<Vec<Box<RawValue>>>(groups_raw.get()) else {
+        return Ok(None);
+    };
+    let mut out = Vec::with_capacity(groups.len());
+    let mut changed = false;
+    for g in groups {
+        let value: Value = serde_json::from_str(g.get())?;
+        let Some(items) = value.get("hooks").and_then(Value::as_array) else {
+            out.push(g);
+            continue;
+        };
+        let owned: Vec<bool> = items
+            .iter()
+            .map(|e| match entries::classify(event, e) {
+                Ownership::Owned => e.get("headers").is_some(),
+                Ownership::Suspicious => {
+                    *suspicious += 1;
+                    false
+                }
+                Ownership::Foreign => false,
+            })
+            .collect();
+        if !owned.contains(&true) {
+            out.push(g);
+            continue;
+        }
+        let mut group = Obj::parse(g.get())?;
+        let list = group.get("hooks").context("group lost its hooks")?;
+        let raw_items: Vec<Box<RawValue>> = serde_json::from_str(list.get())?;
+        let mut rebuilt = Vec::with_capacity(raw_items.len());
+        for (item, is_owned) in raw_items.into_iter().zip(&owned) {
+            if !is_owned {
+                rebuilt.push(item);
+                continue;
+            }
+            let mut entry = Obj::parse(item.get())?;
+            let headers = entry.get("headers").context("entry lost its headers")?;
+            let mut headers = Obj::parse(headers.get())?;
+            headers.set("X-Acd-Token", raw(&Value::String(token.to_owned())));
+            entry.set("headers", raw_text(headers.render())?);
+            rebuilt.push(raw_text(entry.render())?);
+        }
+        group.set("hooks", raw_text(render_array(&rebuilt))?);
+        out.push(raw_text(group.render())?);
+        changed = true;
+    }
+    changed.then(|| raw_text(render_array(&out))).transpose()
+}
+
 #[allow(dead_code)]
 pub fn rewrite_claude_token(
     ctx: &Ctx,
@@ -417,62 +582,66 @@ pub fn rewrite_claude_token(
         updated: vec![],
         failed: vec![],
     };
-    for dest in Record::load(&ctx.config_dir)?.claude_destinations() {
-        let result = edit_settings(
-            ctx,
-            Target::Claude,
-            &dest,
-            flags,
-            |_, _| {
-                Record::load(&ctx.config_dir)
-                    .ok()
-                    .and_then(|r| r.files.get(&dest).cloned())
-            },
-            |doc| {
-                let Some(h) = doc.get("hooks") else {
-                    return Ok(0);
-                };
-                let mut hooks = Obj::parse(h.get())?;
-                let mut suspicious = 0;
-                for (event, groups_raw) in hooks.0.iter_mut() {
-                    let Ok(mut groups) = serde_json::from_str::<Vec<Value>>(groups_raw.get())
-                    else {
-                        continue;
+    let destinations = Record::load(&ctx.config_dir)?.claude_destinations();
+    let journal_path = ctx.config_dir.join(journal::JOURNAL_FILE);
+    for (i, recorded) in destinations.iter().enumerate() {
+        let result = canonical_destination(recorded, false).and_then(|dest| {
+            if dest != *recorded {
+                bail!("the recorded destination now resolves to {}", dest.display());
+            }
+            edit_settings(
+                ctx,
+                Target::Claude,
+                &dest,
+                flags,
+                |_, _| {
+                    Record::load(&ctx.config_dir)
+                        .ok()
+                        .and_then(|r| r.files.get(&dest).cloned())
+                },
+                |doc| {
+                    let Some(h) = doc.get("hooks") else {
+                        return Ok(0);
                     };
+                    let mut hooks = Obj::parse(h.get())?;
+                    let mut suspicious = 0;
                     let mut touched = false;
-                    for g in groups.iter_mut() {
-                        for e in g
-                            .get_mut("hooks")
-                            .and_then(Value::as_array_mut)
-                            .into_iter()
-                            .flatten()
+                    for (event, groups_raw) in hooks.0.iter_mut() {
+                        if let Some(new) =
+                            rewrite_event_token(event, groups_raw, token, &mut suspicious)?
                         {
-                            match entries::classify(event, e) {
-                                Ownership::Owned if e.get("headers").is_some() => {
-                                    e["headers"]["X-Acd-Token"] = token.into();
-                                    touched = true
-                                }
-                                Ownership::Suspicious => suspicious += 1,
-                                _ => {}
-                            }
+                            *groups_raw = new;
+                            touched = true;
                         }
                     }
-                    if touched {
-                        *groups_raw = raw(&Value::Array(groups));
+                    if suspicious > 0 {
+                        bail!(
+                            "{suspicious} unexpected entries carry the acd marker; remove them by hand"
+                        );
                     }
-                }
-                if suspicious > 0 {
-                    bail!(
-                        "{suspicious} unexpected entries carry the acd marker; remove them by hand"
-                    );
-                }
-                doc.set("hooks", raw_text(hooks.render())?);
-                Ok(0)
-            },
-        );
+                    if touched {
+                        doc.set("hooks", raw_text(hooks.render())?);
+                    }
+                    Ok(0)
+                },
+            )
+        });
         match result {
-            Ok(_) => report.updated.push(dest),
-            Err(e) => report.failed.push((dest, format!("{e:#}"))),
+            Ok(_) => report.updated.push(recorded.clone()),
+            Err(e) => {
+                report.failed.push((recorded.clone(), format!("{e:#}")));
+                // J4: a failure that leaves a journal stops the batch, so
+                // the journal is never overwritten and the evidence stays.
+                if journal_path.symlink_metadata().is_ok() {
+                    for rest in &destinations[i + 1..] {
+                        report.failed.push((
+                            rest.clone(),
+                            "not attempted: an earlier destination left a journal".into(),
+                        ));
+                    }
+                    break;
+                }
+            }
         }
     }
     Ok(report)
@@ -514,5 +683,117 @@ impl Ctx {
             Target::Claude => self.claude_dir.join("settings.json"),
             Target::Codex => self.codex_dir.join("hooks.json"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture {
+        _root: tempfile::TempDir,
+        root: PathBuf,
+        ctx: Ctx,
+    }
+
+    fn fixture() -> Fixture {
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let cfg = root.join("cfg");
+        crate::secrets::ensure_private_dir(&cfg).unwrap();
+        crate::hook_token::ensure(&cfg, false).unwrap();
+        let ctx = Ctx {
+            home: root.clone(),
+            claude_dir: root.join("claude-a"),
+            codex_dir: root.join("codex"),
+            config_dir: cfg,
+            exe: PathBuf::from("/bin/acd"),
+            hook_port: 47999,
+            permission_hold: 3600,
+        };
+        Fixture {
+            _root: t,
+            root,
+            ctx,
+        }
+    }
+
+    const FLAGS: Flags = Flags {
+        allow_tracked: false,
+        allow_unknown_git: true,
+    };
+
+    fn install_into(f: &mut Fixture, dir: &str, original: Option<&str>) -> PathBuf {
+        f.ctx.claude_dir = f.root.join(dir);
+        let path = f.ctx.settings_path(Target::Claude);
+        if let Some(text) = original {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+        }
+        install(&f.ctx, Target::Claude, FLAGS).unwrap();
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    #[test]
+    fn a_batch_stops_at_the_first_failure_that_leaves_a_journal() {
+        let mut f = fixture();
+        let a = install_into(&mut f, "claude-a", None);
+        let b = install_into(&mut f, "claude-b", None);
+        let old_a = std::fs::read_to_string(&a).unwrap();
+        let old_b = std::fs::read_to_string(&b).unwrap();
+        let held = lock_writers(&f.ctx.config_dir).unwrap();
+        INJECTED.with(|i| i.borrow_mut().push("record-write"));
+        let report = rewrite_claude_token(&f.ctx, &held, "new-token", FLAGS).unwrap();
+        INJECTED.with(|i| i.borrow_mut().clear());
+
+        let (first, second) = if a < b { (&a, &b) } else { (&b, &a) };
+        assert!(report.updated.is_empty());
+        assert_eq!(report.failed.len(), 2, "{:?}", report.failed);
+        assert!(
+            report.failed[0]
+                .1
+                .contains("injected failure at record-write")
+        );
+        assert!(report.failed[1].1.contains("not attempted"));
+        let old_of = |p: &PathBuf| if p == &a { &old_a } else { &old_b };
+        assert_eq!(
+            std::fs::read_to_string(second).unwrap(),
+            *old_of(second),
+            "the second destination is untouched"
+        );
+        assert!(
+            std::fs::read_to_string(first)
+                .unwrap()
+                .contains("new-token")
+        );
+        let j: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(f.ctx.config_dir.join(journal::JOURNAL_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            j["destination"],
+            first.to_str().unwrap(),
+            "the first journal is intact"
+        );
+    }
+
+    #[test]
+    fn a_token_rewrite_keeps_foreign_bytes() {
+        let mut f = fixture();
+        let foreign_a = r#"{"type":"command",   "command":"keep-me", "n": 1, "n": 2}"#;
+        let foreign_b =
+            r#"{ "matcher" : "Bash",  "hooks":[ {"type":"command","command":"guard"} ] }"#;
+        let original = format!(
+            "{{\n \"hooks\": {{\n  \"Stop\": [{{\"hooks\": [{foreign_a}]}}],\n  \"PreToolUse\": [{foreign_b}]\n }},\n \"model\": \"opus\"\n}}\n"
+        );
+        let path = install_into(&mut f, "claude-a", Some(&original));
+        let held = lock_writers(&f.ctx.config_dir).unwrap();
+        let report = rewrite_claude_token(&f.ctx, &held, "fresh-token", FLAGS).unwrap();
+        assert_eq!(report.updated, vec![path.clone()], "{:?}", report.failed);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(foreign_a), "{text}");
+        assert!(text.contains(foreign_b), "{text}");
+        assert_eq!(text.matches("fresh-token").count(), 7);
+        assert!(text.contains(" \"model\": \"opus\""), "{text}");
     }
 }
