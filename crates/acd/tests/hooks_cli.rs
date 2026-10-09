@@ -363,10 +363,23 @@ fn the_shim_refuses_a_symlinked_socket() {
 }
 
 #[test]
-fn the_shim_refuses_a_symlinked_config_dir() {
+fn the_shim_follows_a_symlinked_config_dir_to_a_safe_canonical_dir() {
+    let (tmp, dir) = shim_dir();
+    let _rx = one_shot(&dir, 200, "ok", Reply::Normal);
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    let (out, _) = run_shim(&link, "Stop", b"{}", &[]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ok");
+}
+
+#[test]
+fn the_shim_refuses_a_symlink_chain_through_a_writable_directory() {
     let (tmp, dir) = shim_dir();
     let rx = one_shot(&dir, 200, "x", Reply::Normal);
-    let link = tmp.path().join("link");
+    let bridge = tmp.path().join("bridge");
+    std::fs::create_dir(&bridge).unwrap();
+    set_mode(&bridge, 0o777);
+    let link = bridge.join("link");
     std::os::unix::fs::symlink(&dir, &link).unwrap();
     assert_refused(&link, &rx);
 }

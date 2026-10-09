@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 pub const MAX_BODY: usize = 1 << 20;
 
+// The reply is written to stdout without a bound of its own: this relies on
+// the caller (Codex) draining stdout and enforcing its own hook timeout.
 pub fn main(args: &[OsString]) -> i32 {
     // Silent panic hook: the shim must never write to stderr.
     std::panic::set_hook(Box::new(|_| {}));
@@ -77,7 +79,8 @@ fn run(args: &[OsString]) -> Option<String> {
             Some(d) => d,
             None => crate::paths::config_dir().ok()?,
         };
-        let sock = checked_socket(&dir)?;
+        // Everything below uses the resolved directory, never the given path.
+        let (dir, sock) = checked_socket(&dir)?;
         let token = crate::hook_token::load(&dir).ok()?.current;
         let mut headers = vec![("X-Acd-Token".to_string(), token)];
         // Hints only (D17): acd never binds Codex with them.
@@ -155,25 +158,30 @@ fn ancestors_safe(dir: &Path, euid: u32) -> bool {
     canon.ancestors().skip(1).all(check)
 }
 
-/// `<dir>/hook.sock` if the directory and the socket are what amendment A1
-/// requires: no symlinks, owned by the effective uid, modes 0700 and 0600,
-/// and no ancestor that others could rename.
-fn checked_socket(dir: &Path) -> Option<PathBuf> {
+/// Resolves `dir` once and returns the canonical directory and its
+/// `hook.sock` if both are what amendment A1 requires: the canonical dir is
+/// owned by the effective uid with mode 0700, every ancestor (given path and
+/// canonical path) is unrenameable by others, and the socket is a socket
+/// (not a symlink) owned by the effective uid with mode 0600. Callers must
+/// connect to the returned path: a canonical path holds no symlinks, so
+/// redirecting it needs a writable ancestor, which was just rejected.
+fn checked_socket(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     // SAFETY: geteuid has no preconditions.
     let euid = unsafe { libc::geteuid() };
-    let d = std::fs::symlink_metadata(dir).ok()?;
-    if !d.file_type().is_dir() || d.uid() != euid || d.mode() & 0o7777 != 0o700 {
-        return None;
-    }
     if !ancestors_safe(dir, euid) {
         return None;
     }
-    let sock = dir.join("hook.sock");
+    let canon = std::fs::canonicalize(dir).ok()?;
+    let d = std::fs::symlink_metadata(&canon).ok()?;
+    if !d.file_type().is_dir() || d.uid() != euid || d.mode() & 0o7777 != 0o700 {
+        return None;
+    }
+    let sock = canon.join("hook.sock");
     let m = std::fs::symlink_metadata(&sock).ok()?;
     if !m.file_type().is_socket() || m.uid() != euid || m.mode() & 0o7777 != 0o600 {
         return None;
     }
-    Some(sock)
+    Some((canon, sock))
 }
 
 fn post(
@@ -210,8 +218,8 @@ fn post(
                 if resp.len() > MAX_BODY + 8192 {
                     return None;
                 }
-                if let Some(end) = response_end(&resp)? {
-                    resp.truncate(end);
+                if response_end(&resp)?.is_some() {
+                    // Complete; any surplus bytes make parse_response reject.
                     break;
                 }
             }
@@ -230,7 +238,12 @@ fn content_length(head: &str) -> Result<Option<usize>, ()> {
             if found.is_some() {
                 return Err(());
             }
-            found = Some(v.trim().parse::<usize>().map_err(|_| ())?);
+            // ASCII digits only (optional surrounding blanks): no sign.
+            let v = v.trim_matches([' ', '\t']);
+            if v.is_empty() || v.len() > 10 || !v.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(());
+            }
+            found = Some(v.parse::<usize>().map_err(|_| ())?);
         }
     }
     Ok(found)
@@ -313,6 +326,10 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}"
         ));
         assert!(!ok(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n{}"));
+        assert!(!ok(b"HTTP/1.1 200 OK\r\nContent-Length: +2\r\n\r\n{}"));
+        assert!(!ok(b"HTTP/1.1 200 OK\r\nContent-Length: 2 2\r\n\r\n{}"));
+        assert!(!ok(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}extra"));
+        assert!(ok(b"HTTP/1.1 200 OK\r\nContent-Length:2\r\n\r\n{}"));
         assert!(
             response_end(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n")
                 .is_none()
