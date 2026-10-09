@@ -1,6 +1,6 @@
 //! `~/.claude/sessions/<pid>.json` discovery (spec §6.2, gate 5). Read
 //! only `<digits>.json`; never open the `.key` files. Best effort: an
-//! entry that cannot be read or verified is skipped and logged once.
+//! entry that cannot be read or verified is skipped and logged once per reason.
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,6 +13,10 @@ use super::wire::valid_id;
 const MAX_ENTRY_BYTES: u64 = 64 * 1024;
 /// Owner-only writes: a group- or world-writable entry is not trusted.
 const MAX_ENTRY_MODE: u32 = 0o755;
+const MAX_DIR_MODE: u32 = 0o755;
+/// Registry entries examined per scan, across all roots.
+const DEFAULT_MAX_ENTRIES: usize = 4096;
+const MAX_LOGGED: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegistryEntry {
@@ -58,6 +62,10 @@ pub enum ProcVerdict {
 
 pub trait ProcCheck: Send + Sync {
     fn check(&self, pid: i32, proc_start: &str) -> ProcVerdict;
+    /// Whether any process has this pid; `None` when unknown.
+    fn exists(&self, _pid: i32) -> Option<bool> {
+        None
+    }
 }
 
 /// `ps -o lstart=` in UTC (gate 5): `Fri Oct  9 07:29:36 2026`.
@@ -88,6 +96,10 @@ impl ProcCheck for SystemProc {
             Ok(_) => ProcVerdict::Gone,
             Err(()) => ProcVerdict::Unverifiable,
         }
+    }
+
+    fn exists(&self, pid: i32) -> Option<bool> {
+        process_start_secs(pid).ok().map(|s| s.is_some())
     }
 }
 
@@ -180,10 +192,16 @@ pub struct Scan {
     pub finished_at_ms: i64,
 }
 
+#[cfg(test)]
+type BeforeRead = Box<dyn Fn(&Path) + Send>;
+
 pub struct Scanner {
     dirs: Vec<PathBuf>,
     proc: Arc<dyn ProcCheck>,
     logged: HashSet<String>,
+    max_entries: usize,
+    #[cfg(test)]
+    before_read: Option<BeforeRead>,
 }
 
 impl Scanner {
@@ -192,7 +210,14 @@ impl Scanner {
             dirs,
             proc,
             logged: HashSet::new(),
+            max_entries: DEFAULT_MAX_ENTRIES,
+            #[cfg(test)]
+            before_read: None,
         }
+    }
+
+    pub fn set_max_entries(&mut self, max: usize) {
+        self.max_entries = max;
     }
 
     pub fn set_dirs(&mut self, dirs: Vec<PathBuf>) {
@@ -203,8 +228,9 @@ impl Scanner {
         let started_at_ms = wall_ms();
         let mut live: Vec<RegistryEntry> = Vec::new();
         let mut complete = true;
+        let mut seen = 0usize;
         for dir in self.dirs.clone() {
-            let (found, ok) = self.scan_dir(&dir);
+            let (found, ok) = self.scan_dir(&dir, &mut seen);
             complete &= ok;
             for e in found {
                 if !live.iter().any(|l| l.session_id == e.session_id) {
@@ -222,22 +248,43 @@ impl Scanner {
     }
 
     fn log_once(&mut self, what: &str, why: &str) {
+        if self.logged.len() >= MAX_LOGGED {
+            self.logged.clear();
+        }
         if self.logged.insert(format!("{what}:{why}")) {
             tracing::info!(entry = %what, %why, "skipping a Claude session registry entry");
         }
     }
 
-    fn scan_dir(&mut self, dir: &Path) -> (Vec<RegistryEntry>, bool) {
+    fn scan_dir(&mut self, dir: &Path, seen: &mut usize) -> (Vec<RegistryEntry>, bool) {
+        if let Err(e) = acd_securefs::check_private_dir(dir, MAX_DIR_MODE) {
+            self.log_once(&dir.display().to_string(), fs_reason(&e));
+            return (vec![], false);
+        }
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => {
-                self.log_once(&dir.display().to_string(), "unreadable");
+                self.log_once(&dir.display().to_string(), "directory unreadable");
                 return (vec![], false);
             }
         };
+        self.scan_entries(dir, entries, seen)
+    }
+
+    fn scan_entries(
+        &mut self,
+        dir: &Path,
+        entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
+        seen: &mut usize,
+    ) -> (Vec<RegistryEntry>, bool) {
         let mut live = Vec::new();
         let mut complete = true;
-        for e in entries.flatten() {
+        for e in entries {
+            let Ok(e) = e else {
+                complete = false;
+                self.log_once(&dir.display().to_string(), "directory listing failed");
+                continue;
+            };
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
             let Some(stem) = name.strip_suffix(".json") else {
@@ -246,17 +293,41 @@ impl Scanner {
             if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
                 continue;
             }
-            let entry =
-                acd_securefs::read_private(&dir.join(name), MAX_ENTRY_MODE, MAX_ENTRY_BYTES)
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                    .and_then(|v| RegistryEntry::from_value(&v))
-                    .filter(|e| e.pid.to_string() == stem);
-            let Some(entry) = entry else {
+            *seen += 1;
+            if *seen > self.max_entries {
                 complete = false;
-                self.log_once(name, "unreadable");
+                self.log_once(&dir.display().to_string(), "too many registry entries");
+                break;
+            }
+            #[cfg(test)]
+            if let Some(hook) = &self.before_read {
+                hook(&dir.join(name));
+            }
+            let bytes = match acd_securefs::read_private(
+                &dir.join(name),
+                MAX_ENTRY_MODE,
+                MAX_ENTRY_BYTES,
+            ) {
+                Ok(b) => b,
+                // The session ended between the listing and the read.
+                Err(acd_securefs::SecureFsError::Missing(_)) => continue,
+                Err(e) => {
+                    complete &= self.unreadable(name, stem, fs_reason(&e));
+                    continue;
+                }
+            };
+            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                complete &= self.unreadable(name, stem, "parse error");
                 continue;
             };
+            let Some(entry) = RegistryEntry::from_value(&value) else {
+                complete &= self.unreadable(name, stem, "invalid pid or sessionId");
+                continue;
+            };
+            if entry.pid.to_string() != stem {
+                complete &= self.unreadable(name, stem, "pid does not match the file name");
+                continue;
+            }
             match entry
                 .proc_start
                 .as_deref()
@@ -264,13 +335,42 @@ impl Scanner {
             {
                 Some(ProcVerdict::Live) => live.push(entry),
                 Some(ProcVerdict::Gone) => {}
-                Some(ProcVerdict::Unverifiable) | None => {
+                Some(ProcVerdict::Unverifiable) => {
                     complete = false;
                     self.log_once(name, "process metadata unverifiable");
+                }
+                None => {
+                    complete = false;
+                    self.log_once(name, "procStart missing");
                 }
             }
         }
         (live, complete)
+    }
+
+    /// An entry that cannot be read or parsed. Returns whether the scan may
+    /// stay complete: only when the pid in the file name is provably dead.
+    fn unreadable(&mut self, name: &str, stem: &str, why: &str) -> bool {
+        let dead = stem
+            .parse::<i32>()
+            .is_ok_and(|pid| self.proc.exists(pid) == Some(false));
+        if !dead {
+            self.log_once(name, why);
+        }
+        dead
+    }
+}
+
+fn fs_reason(e: &acd_securefs::SecureFsError) -> &'static str {
+    use acd_securefs::SecureFsError as E;
+    match e {
+        E::Missing(_) => "missing",
+        E::Symlink(_) => "symlink",
+        E::NotRegular(_) => "not a regular file",
+        E::Owner(_) => "wrong owner",
+        E::Mode { .. } => "unsafe permissions",
+        E::TooLarge(_) => "too large",
+        E::Io(..) => "io error",
     }
 }
 
@@ -431,6 +531,161 @@ mod tests {
         .unwrap();
         let mut s = Scanner::new(vec![dir.path().into()], Arc::new(Fixed(ProcVerdict::Live)));
         assert!(s.scan().live.is_empty());
+    }
+
+    struct Procs(ProcVerdict, Option<bool>);
+    impl ProcCheck for Procs {
+        fn check(&self, _: i32, _: &str) -> ProcVerdict {
+            self.0
+        }
+        fn exists(&self, _: i32) -> Option<bool> {
+            self.1
+        }
+    }
+
+    fn scanner(dirs: Vec<PathBuf>, exists: Option<bool>) -> Scanner {
+        Scanner::new(dirs, Arc::new(Procs(ProcVerdict::Live, exists)))
+    }
+
+    #[test]
+    fn a_listing_error_makes_the_scan_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "14517.json", &fixture_entry().to_string());
+        let listing = std::fs::read_dir(dir.path())
+            .unwrap()
+            .chain(std::iter::once(Err(std::io::Error::other("boom"))));
+        let mut s = scanner(vec![], None);
+        let (live, complete) = s.scan_entries(dir.path(), listing, &mut 0);
+        assert_eq!(live.len(), 1);
+        assert!(!complete);
+    }
+
+    #[test]
+    fn a_file_that_vanishes_after_listing_is_gone_not_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "14517.json", &fixture_entry().to_string());
+        let mut s = scanner(vec![dir.path().into()], None);
+        s.before_read = Some(Box::new(|p| std::fs::remove_file(p).unwrap()));
+        let scan = s.scan();
+        assert!(scan.live.is_empty() && scan.complete);
+    }
+
+    #[test]
+    fn a_broken_entry_with_a_dead_pid_is_skipped_but_a_live_pid_stays_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "333.json", "{\"pid\": 333, \"sess");
+        write(dir.path(), "444.json", "");
+        let dead = scanner(vec![dir.path().into()], Some(false)).scan();
+        assert!(dead.complete && dead.live.is_empty());
+        let alive = scanner(vec![dir.path().into()], Some(true)).scan();
+        assert!(!alive.complete);
+        let unknown = scanner(vec![dir.path().into()], None).scan();
+        assert!(!unknown.complete);
+    }
+
+    #[test]
+    fn a_mode_zero_or_mismatched_entry_follows_the_same_pid_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "14517.json", &fixture_entry().to_string());
+        std::fs::set_permissions(
+            dir.path().join("14517.json"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        write(dir.path(), "999.json", &fixture_entry().to_string()); // pid 14517
+        assert!(
+            scanner(vec![dir.path().into()], Some(false))
+                .scan()
+                .complete
+        );
+        assert!(!scanner(vec![dir.path().into()], Some(true)).scan().complete);
+    }
+
+    #[test]
+    fn a_missing_proc_start_is_incomplete_and_has_no_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = fixture_entry();
+        e.as_object_mut().unwrap().remove("procStart");
+        write(dir.path(), "14517.json", &e.to_string());
+        let scan = scanner(vec![dir.path().into()], Some(false)).scan();
+        assert!(scan.live.is_empty() && !scan.complete);
+    }
+
+    #[test]
+    fn a_symlinked_entry_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        write(other.path(), "real.json", &fixture_entry().to_string());
+        std::os::unix::fs::symlink(
+            other.path().join("real.json"),
+            dir.path().join("14517.json"),
+        )
+        .unwrap();
+        let scan = scanner(vec![dir.path().into()], Some(true)).scan();
+        assert!(scan.live.is_empty() && !scan.complete);
+    }
+
+    #[test]
+    fn a_symlinked_sessions_directory_is_not_trusted() {
+        let real = tempfile::tempdir().unwrap();
+        write(real.path(), "14517.json", &fixture_entry().to_string());
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("sessions");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        let scan = scanner(vec![link], None).scan();
+        assert!(scan.live.is_empty() && !scan.complete);
+    }
+
+    #[test]
+    fn too_many_entries_make_the_scan_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        for pid in [14517, 15000, 15001] {
+            let mut e = fixture_entry();
+            e["pid"] = pid.into();
+            e["sessionId"] = format!("s-{pid}").into();
+            write(dir.path(), &format!("{pid}.json"), &e.to_string());
+        }
+        let mut s = scanner(vec![dir.path().into()], None);
+        s.set_max_entries(2);
+        let scan = s.scan();
+        assert!(!scan.complete && scan.live.len() <= 2);
+    }
+
+    #[test]
+    fn a_stale_first_copy_does_not_hide_the_live_second_copy() {
+        struct PerPid;
+        impl ProcCheck for PerPid {
+            fn check(&self, pid: i32, _: &str) -> ProcVerdict {
+                if pid == 100 {
+                    ProcVerdict::Gone
+                } else {
+                    ProcVerdict::Live
+                }
+            }
+        }
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        for (d, pid) in [(&a, 100), (&b, 200)] {
+            let mut e = fixture_entry();
+            e["pid"] = pid.into();
+            write(d.path(), &format!("{pid}.json"), &e.to_string());
+        }
+        let mut s = Scanner::new(vec![a.path().into(), b.path().into()], Arc::new(PerPid));
+        let scan = s.scan();
+        assert_eq!(
+            scan.live.iter().map(|e| e.pid).collect::<Vec<_>>(),
+            vec![200]
+        );
+        assert!(scan.complete);
+    }
+
+    #[test]
+    fn the_logged_set_stays_bounded() {
+        let mut s = scanner(vec![], None);
+        for i in 0..(MAX_LOGGED * 2) {
+            s.log_once(&format!("{i}.json"), "x");
+        }
+        assert!(s.logged.len() <= MAX_LOGGED);
     }
 
     #[test]
