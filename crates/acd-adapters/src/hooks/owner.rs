@@ -63,6 +63,13 @@ fn claude_reporters<'a>(session_id: &str, panes: &'a [PaneFact]) -> Vec<&'a Pane
         .collect()
 }
 
+/// herdr reports `/tmp/...` where the hook env can say `/private/tmp/...`
+/// (macOS), so both sides are compared after resolving symlinks. A
+/// discovered socket that no longer resolves keeps its raw path.
+fn canonical(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
 /// The Claude pane the headers name, before any conflict check. The socket
 /// header is only compared through `socket_hash` with sockets herdr
 /// discovery already knows; acd never opens a path taken from a header. A
@@ -73,11 +80,12 @@ fn header_candidate<'a>(
     panes: &'a [PaneFact],
 ) -> Option<&'a PaneFact> {
     let pane = hints.herdr_pane.as_deref().filter(|p| valid_id(p))?;
-    let hash = socket_hash(Path::new(hints.herdr_socket.as_deref()?));
+    // Fail closed: a header path that does not resolve binds nothing.
+    let hash = socket_hash(&std::fs::canonicalize(hints.herdr_socket.as_deref()?).ok()?);
     panes.iter().find(|f| {
         f.pane_id == pane
             && f.kind == AgentKind::Claude
-            && socket_hash(&f.socket) == hash
+            && socket_hash(&canonical(&f.socket)) == hash
             && f.session.as_deref().is_none_or(|s| s == session_id)
     })
 }
@@ -206,13 +214,29 @@ mod tests {
         }
     }
 
+    /// Real files: header paths are canonicalized and must resolve.
+    fn socks() -> &'static (tempfile::TempDir, String, String) {
+        static DIR: std::sync::OnceLock<(tempfile::TempDir, String, String)> =
+            std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let a = dir.path().join("herdr.sock");
+            let b = dir.path().join("other.sock");
+            std::fs::write(&a, "").unwrap();
+            std::fs::write(&b, "").unwrap();
+            let a = a.to_string_lossy().into_owned();
+            let b = b.to_string_lossy().into_owned();
+            (dir, a, b)
+        })
+    }
+    fn sock() -> &'static str {
+        &socks().1
+    }
+
     fn pane(id: &str, kind: AgentKind, session: Option<&str>, cwd: Option<&str>) -> PaneFact {
         PaneFact {
-            agent_id: format!(
-                "herdr:{}:{id}",
-                socket_hash(Path::new("/h/.config/herdr/herdr.sock"))
-            ),
-            socket: "/h/.config/herdr/herdr.sock".into(),
+            agent_id: format!("herdr:{}:{id}", socket_hash(Path::new(sock()))),
+            socket: sock().into(),
             pane_id: id.into(),
             kind,
             session: session.map(Into::into),
@@ -227,7 +251,6 @@ mod tests {
             entrypoint: None,
         }
     }
-    const SOCK: &str = "/h/.config/herdr/herdr.sock";
 
     #[test]
     fn t3_wins_over_every_other_rule() {
@@ -236,7 +259,7 @@ mod tests {
         assert_eq!(
             claude_owner(
                 "s",
-                &hints("w1:p1", SOCK),
+                &hints("w1:p1", sock()),
                 Some("cli"),
                 Some(&t3),
                 &panes,
@@ -253,25 +276,57 @@ mod tests {
             pane("w1:p2", AgentKind::Codex, None, None),
         ];
         assert_eq!(
-            claude_owner("s", &hints("w1:p1", SOCK), None, None, &panes, &[]),
+            claude_owner("s", &hints("w1:p1", sock()), None, None, &panes, &[]),
+            Owner::Herdr(panes[0].agent_id.clone())
+        );
+        assert_eq!(
+            claude_owner("s", &hints("w1:p1", &socks().2), None, None, &panes, &[]),
+            Owner::Hooks,
+            "a pane id from another herdr session must not bind (ids repeat across sessions)"
+        );
+        assert_eq!(
+            claude_owner("s", &hints("w1:p2", sock()), None, None, &panes, &[]),
+            Owner::Hooks,
+            "not a claude pane"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_header_socket_path_binds_and_an_unresolvable_one_does_not() {
+        let panes = [pane("w1:p1", AgentKind::Claude, None, None)];
+        let link_dir = tempfile::tempdir().unwrap();
+        let link = link_dir.path().join("link.sock");
+        std::os::unix::fs::symlink(sock(), &link).unwrap();
+        assert_eq!(
+            claude_owner(
+                "s",
+                &hints("w1:p1", &link.to_string_lossy()),
+                None,
+                None,
+                &panes,
+                &[]
+            ),
+            Owner::Herdr(panes[0].agent_id.clone()),
+            "the header path resolves to the discovered socket"
+        );
+        // The discovered side is a symlink too (herdr reports /tmp, the hook /private/tmp).
+        let mut via_link = panes[0].clone();
+        via_link.socket = link.clone();
+        assert_eq!(
+            claude_owner("s", &hints("w1:p1", sock()), None, None, &[via_link], &[]),
             Owner::Herdr(panes[0].agent_id.clone())
         );
         assert_eq!(
             claude_owner(
                 "s",
-                &hints("w1:p1", "/other/herdr.sock"),
+                &hints("w1:p1", "/nonexistent/dir/herdr.sock"),
                 None,
                 None,
                 &panes,
                 &[]
             ),
             Owner::Hooks,
-            "a pane id from another herdr session must not bind (ids repeat across sessions)"
-        );
-        assert_eq!(
-            claude_owner("s", &hints("w1:p2", SOCK), None, None, &panes, &[]),
-            Owner::Hooks,
-            "not a claude pane"
+            "an unresolvable header path is treated as no header"
         );
     }
 
@@ -279,7 +334,7 @@ mod tests {
     fn a_header_pane_reporting_another_session_does_not_bind() {
         let panes = [pane("w1:p1", AgentKind::Claude, Some("other"), None)];
         assert_eq!(
-            claude_owner("s", &hints("w1:p1", SOCK), None, None, &panes, &[]),
+            claude_owner("s", &hints("w1:p1", sock()), None, None, &panes, &[]),
             Owner::Hooks
         );
     }
@@ -380,7 +435,7 @@ mod tests {
     }
 
     fn claude_hints() -> Hints {
-        hints("w1:p1", SOCK)
+        hints("w1:p1", sock())
     }
 
     #[test]

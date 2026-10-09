@@ -26,25 +26,42 @@ use crate::t3::sessions::SessionMap;
 
 #[derive(Clone, Debug)]
 pub struct HooksConfig {
+    /// `claude.permission_hold` (spec §9); holds end here with an empty reply.
     pub permission_hold: Duration,
     pub ignored_entrypoints: Vec<String>,
+    /// Registry roots (`<claude config dir>/sessions`), asked before every
+    /// scan; empty disables the scan.
     pub sessions_dirs: SessionRoots,
     pub scan_interval: Duration,
     pub tick: Duration,
+    /// Correlated outcome evidence window (spec §5.1, §6.2: 30 s).
     pub evidence_window: Duration,
+    /// Fingerprint capture after a request opens (spec §6.2 step 6: 2 s).
     pub capture_window: Duration,
     pub capture_poll: Duration,
+    /// Codex dialog wait (spec §6.3: 1 s).
     pub codex_window: Duration,
+    /// Presence checks of a held request's captured dialog.
     pub held_dialog_poll: Duration,
+    /// Removal after `SessionEnd` or the registry entry disappearing (10 min).
     pub end_grace: Duration,
+    /// Removal after no event at all (24 h).
     pub idle_expiry: Duration,
     pub max_holds: usize,
+    /// A3: screen reads running at once.
     pub max_reads: usize,
+    /// A5: open tracks.
     pub max_tracks: usize,
+    /// A7: the longest the reconciler waits for a delivery lock to apply a read result.
     pub lock_wait: Duration,
+    /// A6: items per queue per loop turn.
     pub batch: usize,
+    /// O7: how long an unconsumed identity can shadow a new occurrence.
     pub unconsumed_ttl: Duration,
+    /// A8: Claude sessions, Codex sessions and sessions with unconsumed
+    /// identities, each.
     pub max_sessions: usize,
+    /// A8: session ids per credential generation.
     pub max_generation_ids: usize,
 }
 
@@ -161,6 +178,13 @@ impl HooksAdapter {
     }
     pub fn last_complete_scan(&self) -> Option<CompleteScan> {
         self.shared.last_scan.lock().expect("shared").clone()
+    }
+    /// Session ids that were not recorded under a generation because it
+    /// already held `max_generation_ids` (diagnostics).
+    pub fn dropped_generation_ids(&self) -> u64 {
+        self.shared
+            .dropped_generation_ids
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
     pub fn sessions_on_generation(&self, generation: u64) -> HashSet<String> {
         self.shared

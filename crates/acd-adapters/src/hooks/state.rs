@@ -2,6 +2,7 @@
 //! It drains the endpoint mailbox and its internal channel; it never awaits a herdr call itself.
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use acd_core::{AgentObs, Core, Observation};
@@ -12,8 +13,8 @@ use tokio::time::Instant;
 use super::HooksConfig;
 use super::claude_sessions::{CompleteScan, ProcCheck, Scan, Scanner, map_status};
 use super::endpoint::{HoldId, HoldPermit, Inbound, Mailbox};
-use super::owner::{Owner, PaneFact, claude_owner, pane_facts};
-use super::wire::{AlwaysRule, HookAgent, HookEvent, HookName};
+use super::owner::{Owner, PaneFact, claude_owner, header_pane, pane_facts};
+use super::wire::{AlwaysRule, Hints, HookAgent, HookEvent, HookName};
 use crate::herdr::HerdrAdapter;
 use crate::t3::sessions::SessionMap;
 use crate::text::{LAST_MESSAGE_CHARS, TITLE_CHARS, cap_chars, clean_display};
@@ -24,6 +25,8 @@ pub(crate) struct Shared {
     pub held: Mutex<HashMap<String, HeldReq>>,
     pub last_scan: Mutex<Option<CompleteScan>>,
     pub by_generation: Mutex<BTreeMap<u64, HashSet<String>>>,
+    /// Session ids not recorded under a generation because it was full.
+    pub dropped_generation_ids: AtomicU64,
 }
 
 #[allow(dead_code)] // The Task 14 delivery path consumes these fields.
@@ -39,8 +42,32 @@ pub(crate) enum Internal {
     Scanned(Scan),
 }
 
+/// The last valid header binding (G1): the pane the hook headers named,
+/// kept while that pane's incarnation lives. The headers only arrive with
+/// hooks, so scans and T3 changes re-evaluate with this.
+struct HeaderBind {
+    hints: Hints,
+    agent_id: String,
+    incarnation: u64,
+}
+
+/// Largest `cwd` kept per session.
+const CWD_MAX_BYTES: usize = 4096;
+
+fn cap_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_owned()
+}
+
 struct Session {
     owner: Owner,
+    binding: Option<HeaderBind>,
     bind_gen: u64,
     agent_id: Option<String>,
     hooks_only: bool,
@@ -65,6 +92,8 @@ pub(crate) struct Reconciler {
     internal_tx: mpsc::UnboundedSender<Internal>,
     internal_rx: mpsc::UnboundedReceiver<Internal>,
     scanner: Option<Arc<Mutex<Scanner>>>,
+    scan_in_flight: Arc<AtomicBool>,
+    // TODO(A8, Task 19): bound this map to `max_sessions`.
     sessions: HashMap<String, Session>,
 }
 
@@ -93,6 +122,7 @@ impl Reconciler {
             internal_tx,
             internal_rx,
             scanner,
+            scan_in_flight: Arc::new(AtomicBool::new(false)),
             sessions: HashMap::new(),
         }
     }
@@ -132,8 +162,19 @@ impl Reconciler {
         if dirs.is_empty() {
             return;
         }
+        if self.scan_in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let tx = self.internal_tx.clone();
+        let in_flight = self.scan_in_flight.clone();
         tokio::task::spawn_blocking(move || {
+            struct Done(Arc<AtomicBool>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _done = Done(in_flight);
             let mut scanner = scanner.lock().expect("scanner");
             scanner.set_dirs(dirs);
             let scan = scanner.scan();
@@ -148,24 +189,73 @@ impl Reconciler {
             .unwrap_or_default()
     }
 
+    /// The session's owner. `event` is the header hints of the hook being
+    /// handled; a valid header binding is remembered on the session and
+    /// reused by every later re-evaluation until its pane's incarnation
+    /// changes or the pane disappears.
     fn owner_of(
-        &self,
+        &mut self,
         session_id: &str,
-        hints: &super::wire::Hints,
+        event: Option<&Hints>,
         entrypoint: Option<&str>,
     ) -> Owner {
+        let panes = self.panes();
+        let fresh = event.and_then(|h| {
+            header_pane(h, session_id, &panes).map(|p| HeaderBind {
+                hints: h.clone(),
+                agent_id: p.agent_id.clone(),
+                incarnation: p.incarnation,
+            })
+        });
+        let mut hints = event.cloned().unwrap_or_default();
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            if fresh.is_some() {
+                session.binding = fresh;
+            } else if session.binding.as_ref().is_some_and(|b| {
+                !panes
+                    .iter()
+                    .any(|p| p.agent_id == b.agent_id && p.incarnation == b.incarnation)
+            }) {
+                session.binding = None;
+            }
+            if let Some(b) = &session.binding {
+                hints = b.hints.clone();
+            }
+        }
         let t3 = self
             .t3
             .as_deref()
             .map(|m| m as &dyn super::owner::SessionOwners);
         claude_owner(
             session_id,
-            hints,
+            &hints,
             entrypoint,
             t3,
-            &self.panes(),
+            &panes,
             &self.cfg.ignored_entrypoints,
         )
+    }
+
+    fn new_session(&mut self, sid: &str, state: AgentState, in_registry: bool, now: Instant) {
+        // TODO(A8, Task 19): refuse or evict at `max_sessions`.
+        self.sessions
+            .entry(sid.to_owned())
+            .or_insert_with(|| Session {
+                owner: Owner::Unknown,
+                binding: None,
+                bind_gen: 0,
+                agent_id: None,
+                hooks_only: false,
+                cwd: None,
+                name: None,
+                entrypoint: None,
+                state,
+                last_message: None,
+                last_hook: None,
+                last_event: now,
+                in_registry,
+                ended: None,
+            });
     }
 
     async fn on_inbound(&mut self, message: Inbound) {
@@ -184,8 +274,13 @@ impl Reconciler {
         {
             let mut generations = self.shared.by_generation.lock().expect("shared");
             let ids = generations.entry(generation).or_default();
-            if ids.len() < self.cfg.max_generation_ids {
+            if ids.contains(&event.payload.session_id) {
+            } else if ids.len() < self.cfg.max_generation_ids {
                 ids.insert(event.payload.session_id.clone());
+            } else {
+                self.shared
+                    .dropped_generation_ids
+                    .fetch_add(1, Ordering::Relaxed);
             }
             while generations.len() > 4 {
                 let oldest = *generations.keys().next().expect("non-empty");
@@ -204,43 +299,38 @@ impl Reconciler {
     async fn on_claude(&mut self, event: HookEvent) {
         let sid = event.payload.session_id.clone();
         let entrypoint = event.hints.entrypoint.clone();
-        let owner = self.owner_of(&sid, &event.hints, entrypoint.as_deref());
         let now = Instant::now();
-        let session = self.sessions.entry(sid.clone()).or_insert_with(|| Session {
-            owner: Owner::Unknown,
-            bind_gen: 0,
-            agent_id: None,
-            hooks_only: false,
-            cwd: None,
-            name: None,
-            entrypoint: None,
-            state: AgentState::Idle,
-            last_message: None,
-            last_hook: None,
-            last_event: now,
-            in_registry: false,
-            ended: None,
-        });
+        self.new_session(&sid, AgentState::Idle, false, now);
+        let owner = self.owner_of(&sid, Some(&event.hints), entrypoint.as_deref());
+        let t3_owned = matches!(owner, Owner::T3(_));
+        let session = self.sessions.get_mut(&sid).expect("inserted above");
         session.last_event = now;
         session.last_hook = Some(now);
-        if event.payload.cwd.is_some() {
-            session.cwd = event.payload.cwd.clone();
+        if let Some(cwd) = &event.payload.cwd {
+            session.cwd = Some(cap_bytes(cwd, CWD_MAX_BYTES));
         }
         if entrypoint.is_some() {
             session.entrypoint = entrypoint;
         }
-        match event.name {
-            HookName::UserPromptSubmit => session.state = AgentState::Working,
-            HookName::Stop => {
-                session.state = AgentState::Done;
-                session.last_message = event
-                    .payload
-                    .last_assistant_message
-                    .as_deref()
-                    .map(|m| cap_chars(&clean_display(m, usize::MAX), LAST_MESSAGE_CHARS));
+        if event.name == HookName::SessionEnd {
+            session.ended = Some(now);
+        } else {
+            session.ended = None;
+        }
+        // A T3-owned session is shown by T3; hook-side state stays untouched.
+        if !t3_owned {
+            match event.name {
+                HookName::UserPromptSubmit => session.state = AgentState::Working,
+                HookName::Stop => {
+                    session.state = AgentState::Done;
+                    session.last_message = event
+                        .payload
+                        .last_assistant_message
+                        .as_deref()
+                        .map(|m| cap_chars(&clean_display(m, usize::MAX), LAST_MESSAGE_CHARS));
+                }
+                _ => {}
             }
-            HookName::SessionEnd => session.ended = Some(now),
-            _ => {}
         }
         self.apply_owner(&sid, owner).await;
     }
@@ -275,16 +365,25 @@ impl Reconciler {
             Owner::Herdr(agent) => {
                 session.agent_id = Some(agent.clone());
                 session.hooks_only = false;
-                if was_hooks_only && self.core.agent(&agent).is_some() {
+                if was_hooks_only {
                     let locks = self.herdr.as_ref().map(|h| h.agent_locks());
                     let _guard = match &locks {
                         Some(locks) => Some(locks.lock(&agent).await),
                         None => None,
                     };
-                    self.core.observe(Observation::AgentMigrated {
-                        from: hooks_id,
-                        to: agent,
-                    });
+                    // Checked under the delivery lock. Without the target in
+                    // core the hooks-only agent stays, and a later event or
+                    // tick retries (the owner is unchanged, so only
+                    // `retry_migrations` revisits it).
+                    if self.core.agent(&agent).is_some() {
+                        self.core.observe(Observation::AgentMigrated {
+                            from: hooks_id,
+                            to: agent,
+                        });
+                    } else {
+                        session.agent_id = Some(hooks_id);
+                        session.hooks_only = true;
+                    }
                 }
             }
             Owner::Hooks => {
@@ -303,10 +402,24 @@ impl Reconciler {
             .map(|(id, s)| (id.clone(), s.entrypoint.clone()))
             .collect();
         for (sid, entrypoint) in ids {
-            let owner = self.owner_of(&sid, &Default::default(), entrypoint.as_deref());
+            let owner = self.owner_of(&sid, None, entrypoint.as_deref());
             if self.sessions.get(&sid).is_some_and(|s| s.owner != owner) {
                 self.apply_owner(&sid, owner).await;
             }
+        }
+    }
+
+    /// Sessions bound to a herdr agent that core did not have yet when the
+    /// binding was found still show their hooks-only agent; try again.
+    async fn retry_migrations(&mut self) {
+        let pending: Vec<(String, Owner)> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.hooks_only && matches!(s.owner, Owner::Herdr(_)))
+            .map(|(id, s)| (id.clone(), s.owner.clone()))
+            .collect();
+        for (sid, owner) in pending {
+            self.apply_owner(&sid, owner).await;
         }
     }
 
@@ -318,27 +431,19 @@ impl Reconciler {
             .map(|entry| entry.session_id.clone())
             .collect();
         for entry in &scan.live {
+            self.new_session(&entry.session_id, AgentState::Unknown, true, now);
             let session = self
                 .sessions
-                .entry(entry.session_id.clone())
-                .or_insert_with(|| Session {
-                    owner: Owner::Unknown,
-                    bind_gen: 0,
-                    agent_id: None,
-                    hooks_only: false,
-                    cwd: None,
-                    name: None,
-                    entrypoint: None,
-                    state: AgentState::Unknown,
-                    last_message: None,
-                    last_hook: None,
-                    last_event: now,
-                    in_registry: true,
-                    ended: None,
-                });
+                .get_mut(&entry.session_id)
+                .expect("inserted above");
             session.in_registry = true;
             session.last_event = now;
-            session.cwd = session.cwd.clone().or_else(|| entry.cwd.clone());
+            if session.cwd.is_none() {
+                session.cwd = entry.cwd.as_deref().map(|c| cap_bytes(c, CWD_MAX_BYTES));
+            }
+            if scan.complete {
+                session.ended = None;
+            }
             session.name = entry.name.clone().or(session.name.take());
             if session.entrypoint.is_none() {
                 session.entrypoint = entry.entrypoint.clone();
@@ -364,16 +469,13 @@ impl Reconciler {
             });
         }
         for entry in &scan.live {
-            let owner = self.owner_of(
-                &entry.session_id,
-                &Default::default(),
-                entry.entrypoint.as_deref(),
-            );
+            let owner = self.owner_of(&entry.session_id, None, entry.entrypoint.as_deref());
             self.apply_owner(&entry.session_id, owner).await;
         }
     }
 
     async fn on_tick(&mut self) {
+        self.retry_migrations().await;
         let now = Instant::now();
         let gone: Vec<String> = self
             .sessions
@@ -429,9 +531,241 @@ fn hooks_only_obs(id: &str, session: &Session) -> AgentObs {
 }
 
 async fn changed(rx: &mut Option<watch::Receiver<u64>>) {
-    if let Some(receiver) = rx {
-        let _ = receiver.changed().await;
-    } else {
-        std::future::pending::<()>().await;
+    if let Some(r) = rx
+        && r.changed().await.is_ok()
+    {
+        return;
+    }
+    // No watcher, or its sender is closed: never fire again.
+    std::future::pending::<()>().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hooks::claude_sessions::{ProcVerdict, RegistryEntry};
+    use crate::hooks::endpoint::{self, EndpointOptions};
+    use crate::hooks::wire::Payload;
+    use acd_core::CorrelationKey;
+    use acd_core::testing::{permission_obs, test_machine};
+
+    struct Live;
+    impl ProcCheck for Live {
+        fn check(&self, _: i32, _: &str) -> ProcVerdict {
+            ProcVerdict::Live
+        }
+    }
+
+    fn reconciler(max_generation_ids: usize) -> Reconciler {
+        let mut cfg = HooksConfig::new(
+            std::time::Duration::from_secs(3600),
+            vec![],
+            super::super::SessionRoots::none(),
+        );
+        cfg.max_generation_ids = max_generation_ids;
+        let (_tx, mailbox) = endpoint::mailbox(&EndpointOptions::default());
+        Reconciler::new(
+            cfg,
+            Core::new(test_machine(), vec![]),
+            None,
+            None,
+            Arc::new(Live),
+            Arc::default(),
+            mailbox,
+        )
+    }
+
+    fn hook(sid: &str) -> HookEvent {
+        HookEvent {
+            agent: HookAgent::Claude,
+            name: HookName::UserPromptSubmit,
+            payload: Payload {
+                session_id: sid.into(),
+                ..Default::default()
+            },
+            hints: Hints::default(),
+            at: Instant::now(),
+        }
+    }
+
+    fn herdr_obs(id: &str) -> AgentObs {
+        AgentObs {
+            id: id.into(),
+            source: Source::Herdr,
+            kind: AgentKind::Claude,
+            title: "pane".into(),
+            cwd: None,
+            project: None,
+            state: AgentState::Idle,
+            failed: false,
+            last_message: None,
+            can_send: true,
+        }
+    }
+
+    fn scan(complete: bool, sessions: &[&str]) -> Scan {
+        Scan {
+            live: sessions
+                .iter()
+                .map(|s| RegistryEntry {
+                    pid: 1,
+                    session_id: (*s).into(),
+                    cwd: None,
+                    started_at_ms: None,
+                    proc_start: None,
+                    entrypoint: Some("cli".into()),
+                    name: None,
+                    status: Some("busy".into()),
+                    waiting_for: None,
+                })
+                .collect(),
+            complete,
+            scanned_at: Instant::now(),
+            started_at_ms: 10,
+            finished_at_ms: 20,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_binding_to_an_agent_core_lacks_keeps_the_hooks_agent_until_it_appears() {
+        let mut r = reconciler(8);
+        r.on_event(hook("s1"), 1).await;
+        let hooks_id = "claude:s1".to_string();
+        assert!(r.core.agent(&hooks_id).is_some());
+        let key = CorrelationKey("k".into());
+        r.core
+            .observe(Observation::RequestSeen(permission_obs(&hooks_id, "k")));
+        let rid = r.core.request_id_for(&hooks_id, &key).unwrap();
+
+        r.apply_owner("s1", Owner::Herdr("herdr:abc:w1:p1".into()))
+            .await;
+        assert!(r.core.agent(&hooks_id).is_some(), "not orphaned");
+        assert!(r.sessions["s1"].hooks_only);
+
+        r.retry_migrations().await;
+        assert!(
+            r.core.agent(&hooks_id).is_some(),
+            "still waiting for the target"
+        );
+
+        r.core
+            .observe(Observation::AgentUpsert(herdr_obs("herdr:abc:w1:p1")));
+        r.retry_migrations().await;
+        assert!(r.core.agent(&hooks_id).is_none());
+        assert!(!r.sessions["s1"].hooks_only);
+        assert_eq!(r.core.request_id_for("herdr:abc:w1:p1", &key), Some(rid));
+    }
+
+    #[tokio::test]
+    async fn bind_gen_changes_only_with_the_owner() {
+        let mut r = reconciler(8);
+        r.on_event(hook("s1"), 1).await;
+        let g = r.sessions["s1"].bind_gen;
+        assert_eq!(g, 1, "Unknown to Hooks");
+        r.on_event(hook("s1"), 1).await;
+        assert_eq!(r.sessions["s1"].bind_gen, g, "same owner");
+        r.apply_owner("s1", Owner::T3("t3:x".into())).await;
+        assert_eq!(r.sessions["s1"].bind_gen, g + 1);
+        r.apply_owner("s1", Owner::T3("t3:x".into())).await;
+        assert_eq!(r.sessions["s1"].bind_gen, g + 1);
+        r.apply_owner("s1", Owner::Hooks).await;
+        assert_eq!(r.sessions["s1"].bind_gen, g + 2);
+    }
+
+    #[tokio::test]
+    async fn only_complete_scans_are_recorded() {
+        let mut r = reconciler(8);
+        r.on_scan(scan(false, &["a"])).await;
+        assert!(r.shared.last_scan.lock().unwrap().is_none());
+        r.on_scan(scan(true, &["a", "b"])).await;
+        let last = r.shared.last_scan.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            (last.started_at_ms, last.finished_at_ms, last.live.len()),
+            (10, 20, 2)
+        );
+        r.on_scan(scan(false, &[])).await;
+        assert_eq!(
+            r.shared
+                .last_scan
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap()
+                .live
+                .len(),
+            2,
+            "an incomplete scan leaves the last complete one"
+        );
+        assert!(r.sessions["a"].ended.is_none(), "and never ends a session");
+    }
+
+    #[tokio::test]
+    async fn activity_and_complete_scans_clear_the_end_mark() {
+        let mut r = reconciler(8);
+        let mut end = hook("s1");
+        end.name = HookName::SessionEnd;
+        r.on_event(end.clone(), 1).await;
+        assert!(r.sessions["s1"].ended.is_some());
+        r.on_event(hook("s1"), 1).await;
+        assert!(r.sessions["s1"].ended.is_none(), "any other hook");
+        r.on_event(end, 1).await;
+        r.on_scan(scan(false, &["s1"])).await;
+        assert!(
+            r.sessions["s1"].ended.is_some(),
+            "an incomplete scan proves nothing"
+        );
+        r.on_scan(scan(true, &["s1"])).await;
+        assert!(
+            r.sessions["s1"].ended.is_none(),
+            "a complete scan lists it live"
+        );
+    }
+
+    #[tokio::test]
+    async fn generations_keep_four_and_count_dropped_ids() {
+        let mut r = reconciler(2);
+        for (gen_, sid) in [(1, "a"), (1, "b"), (1, "c"), (1, "a")] {
+            r.on_event(hook(sid), gen_).await;
+        }
+        let ids = r.shared.by_generation.lock().unwrap()[&1].clone();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(r.shared.dropped_generation_ids.load(Ordering::Relaxed), 1);
+        for g in 2..=6 {
+            r.on_event(hook("a"), g).await;
+        }
+        let keys: Vec<u64> = r
+            .shared
+            .by_generation
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        assert_eq!(keys, vec![3, 4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn t3_owned_sessions_keep_hook_state_untouched() {
+        let mut r = reconciler(8);
+        r.on_event(hook("s1"), 1).await;
+        assert_eq!(r.sessions["s1"].state, AgentState::Working);
+        r.apply_owner("s1", Owner::T3("t3:x".into())).await;
+        let t3 = Arc::new(crate::t3::sessions::SessionMap::default());
+        t3.set_for_tests("t3:x", Some("s1"));
+        r.t3 = Some(t3);
+        let mut stop = hook("s1");
+        stop.name = HookName::Stop;
+        stop.payload.last_assistant_message = Some("hello".into());
+        r.on_event(stop, 1).await;
+        assert_eq!(r.sessions["s1"].state, AgentState::Working);
+        assert!(r.sessions["s1"].last_message.is_none());
+    }
+
+    #[test]
+    fn cwd_is_capped_on_a_char_boundary() {
+        let s = "é".repeat(3000);
+        let c = cap_bytes(&s, CWD_MAX_BYTES);
+        assert!(c.len() <= CWD_MAX_BYTES && c.len() >= CWD_MAX_BYTES - 1);
+        assert_eq!(cap_bytes("abc", 10), "abc");
     }
 }

@@ -1,5 +1,6 @@
 mod common;
 use acd_adapters::herdr::fake::fake_agent;
+use acd_core::{CorrelationKey, Observation};
 use acd_protocol::*;
 use common::*;
 use serde_json::json;
@@ -163,6 +164,28 @@ async fn a_binding_that_appears_later_migrates_the_agent() {
     )
     .await;
     until("hooks-only", || r.agent(&format!("claude:{SID}"))).await;
+    // A pending request only migration carries over (same id, new agent).
+    let hooks_id = format!("claude:{SID}");
+    let key = CorrelationKey("k1".into());
+    r.core
+        .observe(Observation::RequestSeen(acd_core::testing::permission_obs(
+            &hooks_id, "k1",
+        )));
+    let rid = r
+        .core
+        .request_id_for(&hooks_id, &key)
+        .expect("request on the hooks-only agent");
+    let herdr_id = r
+        .herdr
+        .as_ref()
+        .unwrap()
+        .panes()
+        .read()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
     pane["agent_session"] = json!({"value": SID});
     r.fake.as_ref().unwrap().set_agent(pane);
     r.fake
@@ -191,4 +214,71 @@ async fn a_binding_that_appears_later_migrates_the_agent() {
         r.agent(&format!("claude:{SID}")).is_none().then_some(())
     })
     .await;
+    assert_eq!(
+        r.core.request_id_for(&herdr_id, &key),
+        Some(rid.clone()),
+        "the pending request moved to the herdr agent with its id"
+    );
+    assert_eq!(r.core.request(&rid).unwrap().agent_id, herdr_id);
+}
+
+fn hooks_only_id() -> String {
+    format!("claude:{SID}")
+}
+
+#[tokio::test]
+async fn a_header_bound_session_stays_bound_across_scans() {
+    // The pane does not report agent_session: only the headers bind.
+    let r = rig(&[fake_agent("w1:p1", "claude", "idle")], |_| {}).await;
+    let herdr_id = until("pane", || {
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .panes()
+            .read()
+            .unwrap()
+            .keys()
+            .next()
+            .cloned()
+    })
+    .await;
+    until("herdr agent", || r.agent(&herdr_id)).await;
+    let sock = r.sock();
+    registry_entry(&r, "busy");
+    r.hook(
+        "claude",
+        "UserPromptSubmit",
+        &fx("claude/payload-UserPromptSubmit.json"),
+        &[
+            ("X-Claude-Entrypoint", "cli"),
+            ("X-Herdr-Pane", "w1:p1"),
+            ("X-Herdr-Socket", &sock),
+        ],
+    )
+    .await;
+    // Several scan intervals (100 ms) and tick cycles.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        r.agent(&hooks_only_id()).is_none(),
+        "no duplicate hooks-only agent"
+    );
+    assert!(r.agent(&herdr_id).is_some());
+}
+
+#[tokio::test]
+async fn activity_after_session_end_cancels_the_removal() {
+    let r = rig(&[], |_| {}).await;
+    let up = fx("claude/payload-UserPromptSubmit.json");
+    r.hook("claude", "UserPromptSubmit", &up, &CLI).await;
+    until("agent", || r.agent(&hooks_only_id())).await;
+    let mut end = fx("claude/payload-Stop.json");
+    end["hook_event_name"] = "SessionEnd".into();
+    r.hook("claude", "SessionEnd", &end, &CLI).await;
+    r.hook("claude", "UserPromptSubmit", &up, &CLI).await;
+    // end_grace is 200 ms.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        r.agent(&hooks_only_id()).is_some(),
+        "later activity clears the end mark"
+    );
 }
