@@ -17,6 +17,22 @@ pub struct Config {
     pub allowed_origins: Vec<String>,
     pub herdr: HerdrSection,
     pub t3: T3Section,
+    pub claude: ClaudeSection,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct ClaudeSection {
+    /// Seconds acd holds a Claude permission prompt (spec §9).
+    pub permission_hold: u64,
+}
+
+impl Default for ClaudeSection {
+    fn default() -> Self {
+        Self {
+            permission_hold: 3600,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -69,6 +85,7 @@ impl Default for Config {
             allowed_origins: vec![],
             herdr: HerdrSection::default(),
             t3: T3Section::default(),
+            claude: ClaudeSection::default(),
         }
     }
 }

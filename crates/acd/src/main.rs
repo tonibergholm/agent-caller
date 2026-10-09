@@ -3,6 +3,7 @@ mod config;
 mod daemon;
 mod hook_shim;
 mod hook_token;
+mod hooks_install;
 mod identity;
 mod pair;
 mod paths;

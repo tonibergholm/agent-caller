@@ -84,6 +84,12 @@ pub fn write_structured(path: &Path, text: &str) -> Result<()> {
 /// same directory, fsync, rename, fsync of the directory. The temp file is
 /// removed on any failure.
 pub fn write_secret(path: &Path, value: &str) -> Result<()> {
+    write_atomic(path, format!("{value}\n").as_bytes(), 0o600)
+}
+
+/// Writes bytes atomically with the requested mode using a unique same-directory
+/// temporary file, fsync, rename, and directory fsync.
+pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let dir = path.parent().context("secret path has no parent")?;
     let mut rnd = [0u8; 8];
     getrandom::fill(&mut rnd).expect("OS randomness is available");
@@ -100,11 +106,10 @@ pub fn write_secret(path: &Path, value: &str) -> Result<()> {
         let mut f = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .mode(mode)
             .open(&tmp)
             .with_context(|| format!("creating {}", tmp.display()))?;
-        f.write_all(value.as_bytes())?;
-        f.write_all(b"\n")?;
+        f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
         Ok(())
@@ -186,6 +191,18 @@ mod tests {
         assert!(parse_token("short").is_err());
         assert!(parse_token(&format!("{t}A")).is_err());
         assert!(parse_token(&"!".repeat(43)).is_err());
+    }
+
+    #[test]
+    fn write_atomic_uses_the_requested_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        write_atomic(&path, b"x", 0o644).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"x");
     }
 
     #[test]
