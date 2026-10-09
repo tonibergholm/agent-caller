@@ -80,7 +80,8 @@ fn run(args: &[OsString]) -> Option<String> {
             None => crate::paths::config_dir().ok()?,
         };
         // Everything below uses the resolved directory, never the given path.
-        let (dir, sock) = checked_socket(&dir)?;
+        let dir = resolve(&dir)?;
+        let sock = checked_socket(&dir)?;
         let token = crate::hook_token::load(&dir).ok()?.current;
         let mut headers = vec![("X-Acd-Token".to_string(), token)];
         // Hints only (D17): acd never binds Codex with them.
@@ -131,48 +132,51 @@ fn ancestor_safe(uid: u32, mode: u32, euid: u32) -> bool {
     (uid == 0 || uid == euid) && (mode & 0o022 == 0 || mode & 0o1000 != 0)
 }
 
-/// Every ancestor of `dir`, lexically and after resolving symlinks, is a
-/// safe directory, and each symlink on the way belongs to root or us.
-fn ancestors_safe(dir: &Path, euid: u32) -> bool {
-    let check = |p: &Path| {
-        std::fs::metadata(p).is_ok_and(|m| m.is_dir() && ancestor_safe(m.uid(), m.mode(), euid))
-    };
-    let Ok(abs) = std::path::absolute(dir) else {
-        return false;
-    };
-    let Ok(canon) = std::fs::canonicalize(dir) else {
-        return false;
-    };
-    for p in abs.ancestors().skip(1) {
-        if !check(p) {
-            return false;
-        }
-        match std::fs::symlink_metadata(p) {
-            Ok(m) if m.file_type().is_symlink() && m.uid() != 0 && m.uid() != euid => {
-                return false;
-            }
-            Ok(_) => {}
-            Err(_) => return false,
-        }
-    }
-    canon.ancestors().skip(1).all(check)
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions.
+    unsafe { libc::geteuid() }
 }
 
-/// Resolves `dir` once and returns the canonical directory and its
-/// `hook.sock` if both are what amendment A1 requires: the canonical dir is
-/// owned by the effective uid with mode 0700, every ancestor (given path and
-/// canonical path) is unrenameable by others, and the socket is a socket
-/// (not a symlink) owned by the effective uid with mode 0600. Callers must
-/// connect to the returned path: a canonical path holds no symlinks, so
-/// redirecting it needs a writable ancestor, which was just rejected.
-fn checked_socket(dir: &Path) -> Option<(PathBuf, PathBuf)> {
-    // SAFETY: geteuid has no preconditions.
-    let euid = unsafe { libc::geteuid() };
-    if !ancestors_safe(dir, euid) {
+/// Resolves the configured dir exactly once. Every ancestor of the path as
+/// given must be a safe directory and each symlink on the way must belong
+/// to root or us; the result is the canonical path. Nothing after this may
+/// resolve or use the given path again.
+fn resolve(given: &Path) -> Option<PathBuf> {
+    let euid = euid();
+    let abs = std::path::absolute(given).ok()?;
+    for p in abs.ancestors().skip(1) {
+        if !ancestor_dir_safe(p, euid) {
+            return None;
+        }
+        let m = std::fs::symlink_metadata(p).ok()?;
+        if m.file_type().is_symlink() && m.uid() != 0 && m.uid() != euid {
+            return None;
+        }
+    }
+    std::fs::canonicalize(given).ok()
+}
+
+fn ancestor_dir_safe(p: &Path, euid: u32) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.is_dir() && ancestor_safe(m.uid(), m.mode(), euid))
+}
+
+/// `<canon>/hook.sock` if `canon` (already canonical, taken as is and never
+/// resolved again) and its socket are what amendment A1 requires: `canon` is
+/// a directory (not a symlink) owned by the effective uid with mode 0700,
+/// every ancestor is unrenameable by others, and the socket is a socket (not
+/// a symlink) owned by the effective uid with mode 0600. Callers connect to
+/// the returned path: a canonical path holds no symlinks, so redirecting it
+/// needs a writable ancestor, which was just rejected.
+fn checked_socket(canon: &Path) -> Option<PathBuf> {
+    let euid = euid();
+    if !canon
+        .ancestors()
+        .skip(1)
+        .all(|p| ancestor_dir_safe(p, euid))
+    {
         return None;
     }
-    let canon = std::fs::canonicalize(dir).ok()?;
-    let d = std::fs::symlink_metadata(&canon).ok()?;
+    let d = std::fs::symlink_metadata(canon).ok()?;
     if !d.file_type().is_dir() || d.uid() != euid || d.mode() & 0o7777 != 0o700 {
         return None;
     }
@@ -181,7 +185,7 @@ fn checked_socket(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     if !m.file_type().is_socket() || m.uid() != euid || m.mode() & 0o7777 != 0o600 {
         return None;
     }
-    Some((canon, sock))
+    Some(sock)
 }
 
 fn post(
@@ -219,7 +223,10 @@ fn post(
                     return None;
                 }
                 if response_end(&resp)?.is_some() {
-                    // Complete; any surplus bytes make parse_response reject.
+                    // Complete: stop at the declared length like any HTTP/1.1
+                    // client with `Connection: close`. Surplus bytes that
+                    // arrive in a later read are never read; surplus in the
+                    // same read makes parse_response reject.
                     break;
                 }
             }
@@ -347,6 +354,25 @@ mod tests {
         assert!(!ancestor_safe(me, 0o757, me));
         assert!(!ancestor_safe(502, 0o755, me), "another user's directory");
         assert!(!ancestor_safe(502, 0o1777, me));
+    }
+
+    #[test]
+    fn checked_socket_uses_the_given_canonical_path_as_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let canon = std::fs::canonicalize(tmp.path()).unwrap().join("acd");
+        std::fs::create_dir(&canon).unwrap();
+        std::fs::set_permissions(&canon, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sock = canon.join("hook.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(checked_socket(&canon), Some(sock));
+        // A symlink to the same directory is not re-resolved: it is refused.
+        let link = canon.parent().unwrap().join("link");
+        std::os::unix::fs::symlink(&canon, &link).unwrap();
+        assert_eq!(checked_socket(&link), None);
+        // resolve() returns the canonical path.
+        assert_eq!(resolve(&link), Some(canon));
     }
 
     #[test]
