@@ -457,11 +457,9 @@ impl Reconciler {
         }
         match event.agent {
             HookAgent::Claude => {
-                let sid = event.payload.session_id.clone();
-                let owner =
-                    self.owner_of(&sid, Some(&event.hints), event.hints.entrypoint.as_deref());
-                let t3_owned = matches!(owner, Owner::T3(_));
-                self.on_claude(event.clone(), hold).await;
+                // One ownership decision per event, shared by the held path and
+                // the evidence hub, so a concurrent T3 claim can't split them.
+                let t3_owned = self.on_claude(event.clone(), hold).await;
                 if !t3_owned {
                     self.evidence.publish(&event);
                 }
@@ -473,7 +471,9 @@ impl Reconciler {
         }
     }
 
-    async fn on_claude(&mut self, event: HookEvent, hold: Option<super::endpoint::HoldIn>) {
+    /// Applies a Claude event and returns whether the session was T3-owned
+    /// for this event.
+    async fn on_claude(&mut self, event: HookEvent, hold: Option<super::endpoint::HoldIn>) -> bool {
         let sid = event.payload.session_id.clone();
         let entrypoint = event.hints.entrypoint.clone();
         let now = Instant::now();
@@ -522,6 +522,7 @@ impl Reconciler {
                 self.open_claude_permission(event, hold).await;
             }
         }
+        t3_owned
     }
 
     fn fallback_key(&self, agent_id: &str) -> Option<CorrelationKey> {
