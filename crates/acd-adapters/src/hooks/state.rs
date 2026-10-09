@@ -457,8 +457,14 @@ impl Reconciler {
         }
         match event.agent {
             HookAgent::Claude => {
+                let sid = event.payload.session_id.clone();
+                let owner =
+                    self.owner_of(&sid, Some(&event.hints), event.hints.entrypoint.as_deref());
+                let t3_owned = matches!(owner, Owner::T3(_));
                 self.on_claude(event.clone(), hold).await;
-                self.evidence.publish(&event);
+                if !t3_owned {
+                    self.evidence.publish(&event);
+                }
             }
             HookAgent::Codex => {
                 self.on_codex(event.clone()).await;
@@ -1384,6 +1390,24 @@ impl Reconciler {
     async fn apply_owner(&mut self, sid: &str, owner: Owner) {
         let hooks_id = format!("claude:{sid}");
         let mut migrated_to = None;
+        let becoming_t3 = matches!(owner, Owner::T3(_));
+        let Some(previous_owner) = self.sessions.get(sid).map(|session| session.owner.clone())
+        else {
+            return;
+        };
+        if becoming_t3 && !matches!(previous_owner, Owner::T3(_)) {
+            let pending: Vec<(String, String)> = self
+                .tracks
+                .iter()
+                .filter(|(_, track)| track.session_id == sid)
+                .map(|(rid, track)| (rid.clone(), track.agent_id.clone()))
+                .collect();
+            for (rid, agent) in pending {
+                let _agent_guard = self.agent_guard(&agent).await;
+                let _occurrence_guard = self.shared.occurrence_lock(&agent).await;
+                self.evidence.forget(&rid);
+            }
+        }
         let Some(session) = self.sessions.get_mut(sid) else {
             return;
         };

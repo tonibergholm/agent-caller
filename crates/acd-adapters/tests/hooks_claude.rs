@@ -396,6 +396,68 @@ async fn subagent_post_tool_use_does_not_resolve_keys_request_as_inbox() {
 }
 
 #[tokio::test]
+async fn t3_owned_post_tool_use_does_not_resolve_keys_request() {
+    let (r, agent) = bound_rig().await;
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let (_, mut rx) = r.core.attach(None);
+    let q = until("held permission", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(held);
+    until("keys target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&q)
+    })
+    .await;
+    assert!(answer(&r, "a1", &q, "allow").await.ok);
+    r.t3.set_for_tests("t3:thread-1", Some(SID));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut post = fx("claude/payload-PostToolUse-Bash.json");
+    post["tool_input"] = fx("claude/payload-PermissionRequest-Bash.json")["tool_input"].clone();
+    r.hook("claude", "PostToolUse", &post, &CLI).await;
+    assert_eq!(resolution(&mut rx, &q).await, ResolvedBy::Uncertain);
+}
+
+#[tokio::test]
+async fn taking_over_a_keys_session_forgets_its_hub_expectation() {
+    let (r, agent) = bound_rig().await;
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let held = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let (_, mut rx) = r.core.attach(None);
+    let q = until("held permission", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(held);
+    until("keys target", || {
+        r.herdr.as_ref().unwrap().keys_targets().get(&q)
+    })
+    .await;
+    assert!(answer(&r, "a1", &q, "allow").await.ok);
+    r.t3.set_for_tests("t3:thread-1", Some(SID));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut post = fx("claude/payload-PostToolUse-Bash.json");
+    post["tool_input"] = fx("claude/payload-PermissionRequest-Bash.json")["tool_input"].clone();
+    r.hook("claude", "PostToolUse", &post, &CLI).await;
+    assert_eq!(resolution(&mut rx, &q).await, ResolvedBy::Uncertain);
+}
+
+#[tokio::test]
 async fn a_hooks_only_session_appears_on_its_first_hook() {
     let r = rig(&[], |_| {}).await;
     r.hook(
