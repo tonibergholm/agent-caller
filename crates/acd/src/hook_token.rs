@@ -1,7 +1,10 @@
 //! The hook token store: `hook-tokens.json` is the single source of truth
 //! and the rotation transaction. Later tasks add retention and header rewrites.
+use std::collections::HashSet;
 use std::path::Path;
+use std::time::Duration;
 
+use acd_protocol::SourceState;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -228,6 +231,161 @@ pub fn rotate_store_locked(dir: &Path, held: &WriterLock, now_ms: i64) -> Result
     Ok(s)
 }
 
+/// T4: Claude writes its registry entry shortly after it starts; a scan
+/// must start this long after the header update to see every session
+/// that read the old headers.
+pub const REGISTRY_GRACE_MS: i64 = 5_000;
+
+#[allow(dead_code)] // used from Task 31
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveSession {
+    pub session_id: String,
+    pub started_at_ms: Option<i64>,
+}
+
+/// A complete registry scan (T4), with wall-clock times.
+#[allow(dead_code)] // used from Task 31
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScanView {
+    pub started_at_ms: i64,
+    pub finished_at_ms: i64,
+    pub live: Vec<LiveSession>,
+}
+
+/// T4: sessions that may still carry the previous token. A session
+/// observed on the current generation is released; one that started
+/// after the headers were updated read the new token; the rest (older,
+/// or of unknown start) are pending.
+#[allow(dead_code)] // used from Task 31
+pub fn pending(store: &Store, live: &[LiveSession], on_current: &HashSet<String>) -> usize {
+    live.iter()
+        .filter(|s| !on_current.contains(&s.session_id))
+        .filter(|s| {
+            s.started_at_ms
+                .is_none_or(|t| t < store.headers.updated_at_ms)
+        })
+        .count()
+}
+
+#[allow(dead_code)] // used from Task 31
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeepReason {
+    HeadersNotDone,
+    NoFreshScan,
+    Pending(usize),
+}
+
+#[allow(dead_code)] // used from Task 31
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Retire {
+    Nothing,
+    /// The store differs from the one the caller evaluated (T5).
+    Moved,
+    Kept(KeepReason),
+    Retired,
+}
+
+/// T4, T5 and T6. The 30-day cap always wins; otherwise headers must be
+/// done for the current generation and the scan must have started after
+/// the header update (plus the grace) and be fresh by a clock read taken
+/// after the lock is held. The store on disk must equal `expected` in
+/// every field: a generation number alone proves nothing, since a forced
+/// reset reuses generation 1. A write failure is an error and keeps the
+/// previous token.
+#[allow(dead_code)] // used from Task 31
+pub fn retire_if_done(
+    dir: &Path,
+    expected: &Store,
+    scan: Option<&ScanView>,
+    fresh_within: Duration,
+    on_current: &HashSet<String>,
+    clock: &dyn Fn() -> i64,
+) -> Result<Retire> {
+    let held = writer_lock::acquire(dir)?;
+    let now_ms = clock(); // after the lock: waiting may have taken long
+    let mut s = load(dir)?;
+    if s != *expected {
+        return Ok(Retire::Moved);
+    }
+    let Some(prev) = s.previous.clone() else {
+        return Ok(Retire::Nothing);
+    };
+    if now_ms < prev.expires_at_ms {
+        if s.headers.state != HeaderState::Done || s.headers.generation != s.generation {
+            return Ok(Retire::Kept(KeepReason::HeadersNotDone));
+        }
+        let fresh_ms = i64::try_from(fresh_within.as_millis()).unwrap_or(i64::MAX);
+        let fresh = |sc: &&ScanView| {
+            sc.started_at_ms >= s.headers.updated_at_ms.saturating_add(REGISTRY_GRACE_MS)
+                && now_ms.saturating_sub(sc.finished_at_ms) <= fresh_ms
+        };
+        let Some(sc) = scan.filter(fresh) else {
+            return Ok(Retire::Kept(KeepReason::NoFreshScan));
+        };
+        let n = pending(&s, &sc.live, on_current);
+        if n > 0 {
+            return Ok(Retire::Kept(KeepReason::Pending(n)));
+        }
+    }
+    s.previous = None;
+    save_locked(dir, &held, &s)?;
+    Ok(Retire::Retired)
+}
+
+#[allow(dead_code)] // used from Task 31
+pub fn status_message(
+    store: &Store,
+    kept: Option<&KeepReason>,
+    rejected: usize,
+    retire_error: Option<&str>,
+) -> Option<(SourceState, String)> {
+    if let Some(e) = retire_error {
+        return Some((
+            SourceState::Degraded,
+            format!("could not retire the previous hook token: {e}"),
+        ));
+    }
+    match store.headers.state {
+        HeaderState::Failed => {
+            return Some((
+                SourceState::Degraded,
+                format!(
+                    "hook token headers could not be updated in {}: run `acd hooks install claude`",
+                    store.headers.failed.join(", ")
+                ),
+            ));
+        }
+        HeaderState::Pending => {
+            return Some((
+                SourceState::Degraded,
+                "hook token rotation incomplete: run `acd hooks install claude`".into(),
+            ));
+        }
+        HeaderState::Done => {}
+    }
+    if rejected > 0 {
+        return Some((
+            SourceState::Degraded,
+            format!(
+                "{rejected} Claude session(s) use a retired hook token; restart them or run /clear in them"
+            ),
+        ));
+    }
+    match kept {
+        Some(KeepReason::Pending(n)) => Some((
+            SourceState::Ok,
+            format!(
+                "hook token rotation pending: {n} Claude sessions still use the previous token"
+            ),
+        )),
+        Some(KeepReason::NoFreshScan) => Some((
+            SourceState::Ok,
+            "hook token rotation waiting for a complete registry scan".into(),
+        )),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +556,295 @@ mod tests {
             );
             write_store(d.path(), &good);
         }
+    }
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    fn live(id: &str, started: Option<i64>) -> LiveSession {
+        LiveSession {
+            session_id: id.into(),
+            started_at_ms: started,
+        }
+    }
+
+    /// Generation 2 with a previous token; headers done at `done_at` if given.
+    fn rotated_at(d: &Path, done_at: Option<i64>) -> Store {
+        ensure(d, false).unwrap();
+        let held = crate::writer_lock::acquire(d).unwrap();
+        let mut s = rotate_store_locked(d, &held, 1_000).unwrap();
+        if let Some(t) = done_at {
+            s.headers = Headers {
+                generation: s.generation,
+                state: HeaderState::Done,
+                updated_at_ms: t,
+                failed: vec![],
+            };
+            save_locked(d, &held, &s).unwrap();
+        }
+        s
+    }
+
+    fn scan(started: i64, finished: i64, live: Vec<LiveSession>) -> ScanView {
+        ScanView {
+            started_at_ms: started,
+            finished_at_ms: finished,
+            live,
+        }
+    }
+
+    const FRESH: Duration = Duration::from_secs(60);
+    const DONE: i64 = 2_000;
+    const AFTER: i64 = DONE + REGISTRY_GRACE_MS; // the first scan start that counts
+
+    fn at(t: i64) -> impl Fn() -> i64 {
+        move || t
+    }
+
+    #[test]
+    fn retention_excludes_only_sessions_seen_on_the_new_generation() {
+        // Sol I1: a session that authenticated before the rotation stays on
+        // the old token; only seeing it on the new generation releases it.
+        let d = dir();
+        let s = rotated_at(d.path(), Some(DONE));
+        let sessions = [
+            live("a", Some(500)),
+            live("b", Some(3_000)),
+            live("c", None),
+        ];
+        let mut on_new = HashSet::new();
+        assert_eq!(
+            pending(&s, &sessions, &on_new),
+            2,
+            "a (older than the headers) and c (unknown start)"
+        );
+        on_new.insert("a".to_string());
+        assert_eq!(
+            pending(&s, &sessions, &on_new),
+            1,
+            "a moved to the new token (for example after /clear)"
+        );
+    }
+
+    #[test]
+    fn retirement_needs_done_headers_and_a_complete_scan_that_started_after_them() {
+        let none = HashSet::new();
+        let d = dir();
+        let s = rotated_at(d.path(), None); // headers still pending
+        assert_eq!(
+            retire_if_done(
+                d.path(),
+                &s,
+                Some(&scan(AFTER, AFTER, vec![])),
+                FRESH,
+                &none,
+                &at(AFTER)
+            )
+            .unwrap(),
+            Retire::Kept(KeepReason::HeadersNotDone)
+        );
+        let d = dir();
+        let s = rotated_at(d.path(), Some(DONE));
+        let r = |sc: Option<&ScanView>, now: i64| {
+            retire_if_done(d.path(), &s, sc, FRESH, &none, &at(now)).unwrap()
+        };
+        assert_eq!(r(None, AFTER), Retire::Kept(KeepReason::NoFreshScan));
+        assert_eq!(
+            r(Some(&scan(DONE - 1, AFTER, vec![])), AFTER),
+            Retire::Kept(KeepReason::NoFreshScan),
+            "Sol N5: a scan that started before the headers changed does not count"
+        );
+        assert_eq!(
+            r(Some(&scan(AFTER - 1, AFTER, vec![])), AFTER),
+            Retire::Kept(KeepReason::NoFreshScan),
+            "a scan within the registry grace does not count either"
+        );
+        assert_eq!(
+            r(Some(&scan(AFTER, AFTER, vec![])), AFTER + 61_000),
+            Retire::Kept(KeepReason::NoFreshScan),
+            "stale"
+        );
+        assert_eq!(
+            r(Some(&scan(AFTER, AFTER, vec![live("a", Some(10))])), AFTER),
+            Retire::Kept(KeepReason::Pending(1))
+        );
+        assert_eq!(r(Some(&scan(AFTER, AFTER, vec![])), AFTER), Retire::Retired);
+        assert!(load(d.path()).unwrap().previous.is_none());
+    }
+
+    #[test]
+    fn freshness_is_measured_after_the_lock_is_held() {
+        // Sol N5: the scan is fresh when retirement is called, but the lock
+        // is held elsewhere until it no longer is.
+        let d = dir();
+        let s = rotated_at(d.path(), Some(DONE));
+        let clock = Arc::new(AtomicI64::new(AFTER));
+        let held = crate::writer_lock::acquire(d.path()).unwrap();
+        let (p, c, s2) = (d.path().to_path_buf(), clock.clone(), s.clone());
+        let t = std::thread::spawn(move || {
+            retire_if_done(
+                &p,
+                &s2,
+                Some(&scan(AFTER, AFTER, vec![])),
+                FRESH,
+                &HashSet::new(),
+                &|| c.load(Ordering::SeqCst),
+            )
+            .unwrap()
+        });
+        // Sol R3-4: advance the clock only once the worker provably waits in
+        // `acquire`; a clock read before the lock would see the old time.
+        let lock_path = d.path().join(crate::writer_lock::LOCK_FILE);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !crate::writer_lock::tests_support::contended(&lock_path) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never reached the contested lock"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        clock.store(AFTER + 120_000, Ordering::SeqCst); // two minutes pass while it waits
+        drop(held);
+        assert_eq!(t.join().unwrap(), Retire::Kept(KeepReason::NoFreshScan));
+        assert!(load(d.path()).unwrap().previous.is_some());
+    }
+
+    #[test]
+    fn retirement_does_nothing_when_any_field_of_the_store_changed() {
+        // Same generation, different header state: still "moved" (Sol N5).
+        let d = dir();
+        let s = rotated_at(d.path(), Some(DONE));
+        let mut changed = s.clone();
+        changed.headers.updated_at_ms = DONE + 10;
+        {
+            let held = crate::writer_lock::acquire(d.path()).unwrap();
+            save_locked(d.path(), &held, &changed).unwrap();
+        }
+        assert_eq!(
+            retire_if_done(
+                d.path(),
+                &s,
+                Some(&scan(AFTER + 10, AFTER + 10, vec![])),
+                FRESH,
+                &HashSet::new(),
+                &at(AFTER + 10)
+            )
+            .unwrap(),
+            Retire::Moved
+        );
+        assert_eq!(load(d.path()).unwrap(), changed, "untouched");
+    }
+
+    #[test]
+    fn a_forced_reset_that_reuses_a_generation_is_a_moved_store() {
+        // `ensure --force` falls back to generation 1 when the old store
+        // fails to load. Evidence gathered for the old generation 1 must
+        // not retire anything in the new one.
+        let d = dir();
+        ensure(d.path(), false).unwrap();
+        let old = load(d.path()).unwrap();
+        assert_eq!(old.generation, 1);
+        // A generation-1 store that carries a previous token is invalid, so
+        // evaluate a rotated store, then reset it to generation 1 and make
+        // the new generation-1 store look identical except for its token.
+        let evaluated = rotated_at(d.path(), Some(DONE));
+        std::fs::write(d.path().join(STORE_FILE), b"{corrupt").unwrap();
+        assert!(ensure(d.path(), true).unwrap());
+        let reset = load(d.path()).unwrap();
+        assert_eq!(reset.generation, 1, "history keyed by generation is stale");
+        assert_eq!(
+            retire_if_done(
+                d.path(),
+                &evaluated,
+                Some(&scan(AFTER, AFTER, vec![])),
+                FRESH,
+                &HashSet::new(),
+                &at(AFTER)
+            )
+            .unwrap(),
+            Retire::Moved
+        );
+        // Same generation number, different tokens: still moved.
+        let mut lookalike = reset.clone();
+        lookalike.current = crate::secrets::new_token();
+        assert_eq!(
+            retire_if_done(
+                d.path(),
+                &lookalike,
+                None,
+                FRESH,
+                &HashSet::new(),
+                &at(AFTER)
+            )
+            .unwrap(),
+            Retire::Moved
+        );
+        assert_eq!(load(d.path()).unwrap(), reset, "untouched");
+    }
+
+    #[test]
+    fn the_30_day_cap_always_wins() {
+        let d = dir();
+        let s = rotated_at(d.path(), None); // headers pending, no scan
+        let later = 1_000 + MAX_RETENTION_MS;
+        assert_eq!(
+            retire_if_done(d.path(), &s, None, FRESH, &HashSet::new(), &at(later)).unwrap(),
+            Retire::Retired
+        );
+        // One millisecond earlier it still holds.
+        let d = dir();
+        let s = rotated_at(d.path(), None);
+        assert_eq!(
+            retire_if_done(d.path(), &s, None, FRESH, &HashSet::new(), &at(later - 1)).unwrap(),
+            Retire::Kept(KeepReason::HeadersNotDone)
+        );
+    }
+
+    #[test]
+    fn a_failed_retirement_is_an_error_and_keeps_the_previous_token() {
+        if acd_securefs::euid() == 0 {
+            return; // root writes into a read-only directory anyway
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir();
+        let s = rotated_at(d.path(), Some(DONE));
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let r = retire_if_done(
+            d.path(),
+            &s,
+            Some(&scan(AFTER, AFTER, vec![])),
+            FRESH,
+            &HashSet::new(),
+            &at(AFTER),
+        );
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(r.is_err());
+        assert!(load(d.path()).unwrap().previous.is_some());
+    }
+
+    #[test]
+    fn status_messages() {
+        let d = dir();
+        let s = rotated_at(d.path(), Some(DONE));
+        let (st, m) = status_message(&s, Some(&KeepReason::Pending(2)), 0, None).unwrap();
+        assert_eq!(st, SourceState::Ok);
+        assert!(m.contains("2 Claude sessions"), "{m}");
+        let (st, m) = status_message(&s, Some(&KeepReason::NoFreshScan), 0, None).unwrap();
+        assert_eq!(st, SourceState::Ok);
+        assert!(m.contains("waiting for a complete registry scan"), "{m}");
+        let (st, m) = status_message(&s, None, 3, None).unwrap();
+        assert_eq!(st, SourceState::Degraded);
+        assert!(m.contains("retired hook token"), "{m}");
+        let (st, m) = status_message(&s, None, 0, Some("disk full")).unwrap();
+        assert_eq!(st, SourceState::Degraded);
+        assert!(m.contains("could not retire"), "{m}");
+        let mut failed = s.clone();
+        failed.headers.state = HeaderState::Failed;
+        let (st, m) = status_message(&failed, None, 0, None).unwrap();
+        assert_eq!(st, SourceState::Degraded);
+        assert!(m.contains("acd hooks install claude"), "{m}");
+        let mut done = s.clone();
+        done.previous = None;
+        assert_eq!(status_message(&done, None, 0, None), None);
     }
 }
