@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use acd_protocol::Effect;
+use serde_json::Value;
 
 use super::wire::{HookEvent, HookName, command_of, tool_digest};
 pub use crate::herdr::keys::Verdict;
@@ -63,7 +64,11 @@ pub fn observe(expect: &Expect, ev: &HookEvent) -> Option<Seen> {
         return None;
     }
     let turn_end = matches!(ev.name, HookName::Stop | HookName::UserPromptSubmit);
-    let post = ev.name == HookName::PostToolUse;
+    // A failed or interrupted tool still ran: it was allowed.
+    let post = matches!(
+        ev.name,
+        HookName::PostToolUse | HookName::PostToolUseFailure
+    );
     let tool = ev.payload.tool_name.as_deref();
     match expect {
         Expect::ClaudeTool {
@@ -83,14 +88,15 @@ pub fn observe(expect: &Expect, ev: &HookEvent) -> Option<Seen> {
                 // Sol R3-2: identity evidence only when the answers map has
                 // this question with a string answer; another question's
                 // outcome is no evidence at all.
-                [&ev.payload.tool_response, &ev.payload.tool_input]
-                    .into_iter()
-                    .find_map(|v| {
-                        v.get("answers")?
-                            .get(question.as_str())?
-                            .as_str()
-                            .map(str::to_owned)
-                    })
+                let answers = ev
+                    .payload
+                    .tool_response
+                    .get("answers")
+                    .or_else(|| ev.payload.tool_input.get("answers"));
+                answers
+                    .and_then(|a| a.get(question.as_str()))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
                     .map(Seen::Answered)
             } else {
                 turn_end.then_some(Seen::TurnEnded)
@@ -313,6 +319,32 @@ mod tests {
             observe(&question("Pick a color", &[("o1", "Red")]), &bad),
             None,
             "not a string answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_tool_still_counts_as_run() {
+        let mut fail = ev(
+            "claude/payload-PostToolUse-Bash.json",
+            HookName::PostToolUseFailure,
+        );
+        fail.payload.tool_response = serde_json::json!({});
+        let e = bash("touch /tmp/acp0/t2.txt");
+        let seen = observe(&e, &fail);
+        assert_eq!(seen, Some(Seen::ToolRan));
+        assert_eq!(
+            verdict(&Sent::Allow, &seen.clone().unwrap()),
+            Verdict::Consistent
+        );
+        assert_eq!(verdict(&Sent::Deny, &seen.unwrap()), Verdict::Contradicts);
+        assert_eq!(observe(&bash("other"), &fail), None);
+    }
+
+    #[test]
+    fn choose_with_a_turn_end_contradicts() {
+        assert_eq!(
+            verdict(&Sent::Choose("Red".into()), &Seen::TurnEnded),
+            Verdict::Contradicts
         );
     }
 }

@@ -31,6 +31,8 @@ pub enum HookName {
     PermissionRequest,
     PreToolUse,
     PostToolUse,
+    /// An allowed tool failed or was interrupted (Claude).
+    PostToolUseFailure,
     Stop,
     SessionEnd,
     /// Notification and anything newer: logged and ignored.
@@ -45,6 +47,7 @@ impl HookName {
             "PermissionRequest" => Self::PermissionRequest,
             "PreToolUse" => Self::PreToolUse,
             "PostToolUse" => Self::PostToolUse,
+            "PostToolUseFailure" => Self::PostToolUseFailure,
             "Stop" => Self::Stop,
             "SessionEnd" => Self::SessionEnd,
             _ => Self::Other,
