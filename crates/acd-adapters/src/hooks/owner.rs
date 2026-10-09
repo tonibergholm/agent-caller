@@ -56,11 +56,18 @@ pub enum Owner {
     Unknown,
 }
 
-/// The pane named by the Claude headers. The socket header is only
-/// compared through `socket_hash` with sockets herdr discovery already
-/// knows; acd never opens a path taken from a header. A pane that reports
-/// a different session is not this session's pane.
-pub fn header_pane<'a>(
+fn claude_reporters<'a>(session_id: &str, panes: &'a [PaneFact]) -> Vec<&'a PaneFact> {
+    panes
+        .iter()
+        .filter(|p| p.kind == AgentKind::Claude && p.session.as_deref() == Some(session_id))
+        .collect()
+}
+
+/// The Claude pane the headers name, before any conflict check. The socket
+/// header is only compared through `socket_hash` with sockets herdr
+/// discovery already knows; acd never opens a path taken from a header. A
+/// pane that reports a different session is not this session's pane.
+fn header_candidate<'a>(
     hints: &Hints,
     session_id: &str,
     panes: &'a [PaneFact],
@@ -75,7 +82,23 @@ pub fn header_pane<'a>(
     })
 }
 
-/// Spec §6.2 Ownership, rules 1 to 4, in order.
+/// The pane named by the Claude headers, unless a different Claude pane
+/// reports this session: that conflict binds neither.
+pub fn header_pane<'a>(
+    hints: &Hints,
+    session_id: &str,
+    panes: &'a [PaneFact],
+) -> Option<&'a PaneFact> {
+    let c = header_candidate(hints, session_id, panes)?;
+    let conflict = claude_reporters(session_id, panes)
+        .iter()
+        .any(|r| r.agent_id != c.agent_id);
+    (!conflict).then_some(c)
+}
+
+/// Spec §6.2 Ownership, rules 1 to 4, in order. A header/session conflict
+/// or two Claude panes reporting the session leave the session unbound
+/// (it falls to rule 4), never preferring either pane.
 pub fn claude_owner(
     session_id: &str,
     hints: &Hints,
@@ -87,13 +110,18 @@ pub fn claude_owner(
     if let Some(agent) = t3.and_then(|m| m.owner(session_id)) {
         return Owner::T3(agent);
     }
-    if let Some(p) = header_pane(hints, session_id, panes) {
-        return Owner::Herdr(p.agent_id.clone());
-    }
-    if let Some(p) = panes
-        .iter()
-        .find(|p| p.kind == AgentKind::Claude && p.session.as_deref() == Some(session_id))
-    {
+    let reporters = claude_reporters(session_id, panes);
+    let bound = match header_candidate(hints, session_id, panes) {
+        Some(c) => reporters
+            .iter()
+            .all(|r| r.agent_id == c.agent_id)
+            .then_some(c),
+        None => match reporters.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        },
+    };
+    if let Some(p) = bound {
         return Owner::Herdr(p.agent_id.clone());
     }
     match entrypoint {
@@ -104,6 +132,10 @@ pub fn claude_owner(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodexBind {
+    /// Carries no more trust than `OnlyInCwd`: herdr's reported session can
+    /// come from a stale env (gate 4, an app-server pane reporting another
+    /// pane's session). Callers must still apply the screen checks (M2, and
+    /// no other Codex pane showing the same command; Task 17).
     Session(PaneFact),
     OnlyInCwd(PaneFact),
     Ambiguous,
@@ -126,7 +158,13 @@ pub fn codex_bind(session_id: &str, cwd: Option<&str>, panes: &[PaneFact]) -> Co
         .filter(|p| p.session.as_deref() == Some(session_id))
         .collect();
     match by_session.as_slice() {
-        [one] => return CodexBind::Session((**one).clone()),
+        [one] => {
+            // A payload cwd that contradicts the pane's cwd is not a bind.
+            return match (cwd, one.cwd.as_deref()) {
+                (Some(c), Some(pc)) if !same_dir(pc, c) => CodexBind::Ambiguous,
+                _ => CodexBind::Session((**one).clone()),
+            };
+        }
         [_, _, ..] => return CodexBind::Ambiguous,
         [] => {}
     }
@@ -145,7 +183,11 @@ pub fn codex_bind(session_id: &str, cwd: Option<&str>, panes: &[PaneFact]) -> Co
 }
 
 /// herdr reports `/tmp/...`, Codex `/private/tmp/...` (D5).
+/// Relative paths never match: they would canonicalize against acd's own cwd.
 pub fn same_dir(a: &str, b: &str) -> bool {
+    if !Path::new(a).is_absolute() || !Path::new(b).is_absolute() {
+        return false;
+    }
     let canon = |s: &str| {
         std::fs::canonicalize(s).unwrap_or_else(|_| PathBuf::from(s.trim_end_matches('/')))
     };
@@ -335,5 +377,175 @@ mod tests {
         assert!(same_dir(link.to_str().unwrap(), real.to_str().unwrap()));
         assert!(same_dir("/nonexistent/x/", "/nonexistent/x"));
         assert!(!same_dir("/nonexistent/x", "/nonexistent/y"));
+    }
+
+    fn claude_hints() -> Hints {
+        hints("w1:p1", SOCK)
+    }
+
+    #[test]
+    fn two_claude_panes_reporting_the_session_do_not_bind() {
+        let panes = [
+            pane("w1:p1", AgentKind::Claude, Some("s"), None),
+            pane("w1:p2", AgentKind::Claude, Some("s"), None),
+        ];
+        assert_eq!(
+            claude_owner("s", &Hints::default(), None, None, &panes, &[]),
+            Owner::Hooks
+        );
+        let ignored = vec!["sdk-ts".to_string()];
+        assert_eq!(
+            claude_owner(
+                "s",
+                &Hints::default(),
+                Some("sdk-ts"),
+                None,
+                &panes,
+                &ignored
+            ),
+            Owner::Unknown
+        );
+    }
+
+    #[test]
+    fn a_codex_pane_reporting_the_session_does_not_count_for_claude() {
+        let panes = [
+            pane("w1:p1", AgentKind::Claude, Some("s"), None),
+            pane("w1:p2", AgentKind::Codex, Some("s"), None),
+        ];
+        assert!(matches!(
+            claude_owner("s", &Hints::default(), None, None, &panes, &[]),
+            Owner::Herdr(_)
+        ));
+    }
+
+    #[test]
+    fn header_conflicts_with_another_claude_pane_reporting_the_session() {
+        let hdr = pane("w1:p1", AgentKind::Claude, None, None);
+        let other = pane("w1:p2", AgentKind::Claude, Some("s"), None);
+        for panes in [[hdr.clone(), other.clone()], [other.clone(), hdr.clone()]] {
+            assert_eq!(
+                claude_owner("s", &claude_hints(), None, None, &panes, &[]),
+                Owner::Hooks
+            );
+            assert!(header_pane(&claude_hints(), "s", &panes).is_none());
+        }
+        // The header pane itself reporting the session is no conflict.
+        let both = pane("w1:p1", AgentKind::Claude, Some("s"), None);
+        assert_eq!(
+            claude_owner(
+                "s",
+                &claude_hints(),
+                None,
+                None,
+                std::slice::from_ref(&both),
+                &[]
+            ),
+            Owner::Herdr(both.agent_id)
+        );
+    }
+
+    #[test]
+    fn a_claude_pane_does_not_take_part_in_codex_binding() {
+        let claude_same = pane("w1:p1", AgentKind::Claude, Some("s"), Some("/p"));
+        let claude_cwd = pane("w1:p2", AgentKind::Claude, None, Some("/p"));
+        let codex = pane("w1:p3", AgentKind::Codex, None, Some("/p"));
+        assert_eq!(
+            codex_bind("s", Some("/p"), &[claude_same, claude_cwd, codex.clone()]),
+            CodexBind::OnlyInCwd(codex)
+        );
+    }
+
+    #[test]
+    fn a_session_pane_in_another_cwd_is_ambiguous() {
+        let a = pane("w1:p1", AgentKind::Codex, Some("s"), Some("/p"));
+        assert_eq!(
+            codex_bind("s", Some("/q"), std::slice::from_ref(&a)),
+            CodexBind::Ambiguous
+        );
+        assert_eq!(
+            codex_bind("s", None, std::slice::from_ref(&a)),
+            CodexBind::Session(a)
+        );
+    }
+
+    #[test]
+    fn same_dir_rejects_relative_paths() {
+        assert!(!same_dir("rel", "rel"));
+        assert!(!same_dir("", ""));
+        assert!(!same_dir(".", "."));
+    }
+
+    fn fixture_panes(name: &str) -> Vec<PaneFact> {
+        let path = format!(
+            "{}/../../tests/fixtures/herdr/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let result = &v["result"];
+        let agents: Vec<&serde_json::Value> = match result.get("agents") {
+            Some(list) => list.as_array().unwrap().iter().collect(),
+            None => vec![&result["agent"]],
+        };
+        agents
+            .into_iter()
+            .map(|a| {
+                let cwd = a["foreground_cwd"].as_str().or(a["cwd"].as_str());
+                let kind = if a["agent"] == "codex" {
+                    AgentKind::Codex
+                } else {
+                    AgentKind::Claude
+                };
+                pane(
+                    a["pane_id"].as_str().unwrap(),
+                    kind,
+                    a["agent_session"]["value"].as_str(),
+                    cwd,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gate_4_fixtures() {
+        // Single pane reporting its session.
+        let with = fixture_panes("agent-info-codex-with-agent-session.json");
+        let sid = "01a11f87-cf06-79d1-a06c-ad853a2b34f1";
+        assert!(matches!(
+            codex_bind(sid, Some("/private/tmp/acp3/codex/d1"), &with),
+            CodexBind::Session(_)
+        ));
+        assert_eq!(
+            codex_bind(sid, Some("/nonexistent/other"), &with),
+            CodexBind::Ambiguous
+        );
+
+        // No session reported: the only pane in the cwd binds.
+        let shared = fixture_panes("agent-info-codex-shared-daemon-no-agent-session.json");
+        assert!(
+            matches!(codex_bind("any", Some("/private/tmp/acp3/codex/d1"), &shared), CodexBind::OnlyInCwd(p) if p.pane_id == "w1:p1")
+        );
+
+        // Four Codex panes in one cwd; the app-server pane (p3) reports a
+        // session. By session it binds p3 (callers must screen-check); by cwd
+        // alone it is ambiguous; a payload from another cwd never binds it.
+        let mis = fixture_panes("agent-list-codex-fresh-app-server-misbound.json");
+        let cwd = "/private/tmp/acp3/codex/d1";
+        assert!(
+            matches!(codex_bind("01a11f8b-4cd7-7ad0-8b21-cfd40e5ccbde", Some(cwd), &mis), CodexBind::Session(p) if p.pane_id == "w1:p3")
+        );
+        assert_eq!(
+            codex_bind(
+                "01a11f8b-4cd7-7ad0-8b21-cfd40e5ccbde",
+                Some("/private/tmp/acp3/codex/other"),
+                &mis
+            ),
+            CodexBind::Ambiguous
+        );
+        assert_eq!(
+            codex_bind("fresh-session", Some(cwd), &mis),
+            CodexBind::Ambiguous
+        );
     }
 }
