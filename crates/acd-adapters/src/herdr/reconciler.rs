@@ -869,6 +869,9 @@ impl Reconciler {
         self.incarnations.remove(pane_id);
         self.fallback.forget(pane_id);
         self.fb_open.remove(pane_id);
+        for t in self.keys.for_agent(&agent_id) {
+            self.watch_absent.remove(&t.request_id);
+        }
         self.keys.remove_agent(&agent_id);
         if self.known.remove(pane_id).is_some() {
             self.subs_changed = true;
@@ -937,6 +940,12 @@ pub fn retire_target(
     if core.request(request_id).map(|r| r.status) == Some(RequestStatus::Answering) {
         return false;
     }
+    // A claim can be released and a new one made between the checks above;
+    // end the request again so no open request is left without its target.
+    core.observe(Observation::RequestEndedIfOpen {
+        request_id: request_id.to_owned(),
+        by: ResolvedBy::Terminal,
+    });
     keys.remove(request_id);
     core.observe(Observation::DialogGoneById {
         request_id: request_id.to_owned(),

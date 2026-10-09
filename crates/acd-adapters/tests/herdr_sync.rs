@@ -906,14 +906,9 @@ async fn incarnation_is_stable_across_updates_and_new_after_replacement() {
     let mut info = fake_agent("w1:p1", "claude", "idle");
     info["terminal_id"] = "term_new".into();
     r.fake.set_agent(info);
-    r.fake
-        .push_event(serde_json::json!({"event": "pane_updated", "data": {"pane_id": "w1:p1"}}));
-    // The first terminal id seen is not a replacement; a second one is.
-    let mut info = fake_agent("w1:p1", "claude", "idle");
-    info["terminal_id"] = "term_newer".into();
-    r.fake.set_agent(info);
-    r.fake
-        .push_event(serde_json::json!({"event": "pane_updated", "data": {"pane_id": "w1:p1"}}));
+    r.fake.push_event(
+        serde_json::json!({"event": "pane_updated", "data": {"pane": {"pane_id": "w1:p1"}}}),
+    );
     until("new incarnation", || {
         incarnation(&r, "w1:p1").filter(|n| *n != first).map(|_| ())
     })
@@ -937,9 +932,8 @@ async fn a_pane_closed_and_redetected_is_a_new_agent() {
     let (_, mut rx) = r.core.attach(None);
     // The close and the re-detection land before the next fetch, so the
     // pane id is never seen absent.
-    let mut info = fake_agent("w1:p1", "claude", "idle");
-    info["terminal_id"] = "term_new".into();
-    r.fake.set_agent(info);
+    // Same terminal id, no session: only the close makes it a new agent.
+    r.fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
     r.fake
         .push_event(serde_json::json!({"event": "pane_closed", "data": {"pane_id": "w1:p1"}}));
     r.fake.push_event(
@@ -984,13 +978,15 @@ async fn a_changed_session_is_a_new_agent_but_a_first_session_is_not() {
     let mut info = fake_agent("w1:p1", "claude", "idle");
     info["agent_session"] = serde_json::json!({"value": "s-1"});
     r.fake.set_agent(info.clone());
-    r.fake
-        .push_event(serde_json::json!({"event": "pane_updated", "data": {"pane_id": "w1:p1"}}));
+    r.fake.push_event(
+        serde_json::json!({"event": "pane_updated", "data": {"pane": {"pane_id": "w1:p1"}}}),
+    );
     until("session known", || session(&r)).await;
     info["agent_session"] = serde_json::json!({"value": "s-2"});
     r.fake.set_agent(info);
-    r.fake
-        .push_event(serde_json::json!({"event": "pane_updated", "data": {"pane_id": "w1:p1"}}));
+    r.fake.push_event(
+        serde_json::json!({"event": "pane_updated", "data": {"pane": {"pane_id": "w1:p1"}}}),
+    );
     let mut removals = 0;
     while let Ok(Ok(m)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
         if matches!(m, ServerMessage::AgentRemoved { ref agent_id, .. } if *agent_id == id) {
@@ -1009,11 +1005,21 @@ async fn a_malformed_agent_get_keeps_the_connection() {
     fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
     let r = rig(fake).await;
     until("pane", || r.state("w1:p1")).await;
+    // A dropped connection shows as `Down` for at least the backoff.
+    let mut health = r.handle.health();
+    let watcher = tokio::spawn(async move {
+        let mut left = false;
+        while health.changed().await.is_ok() {
+            left |= *health.borrow() != Health::Connected;
+        }
+        left
+    });
     let mut bad = fake_agent("w1:p1", "claude", "working");
     bad["revision"] = "not a number".into();
     r.fake.set_agent(bad);
-    r.fake
-        .push_event(serde_json::json!({"event": "pane_updated", "data": {"pane_id": "w1:p1"}}));
+    r.fake.push_event(
+        serde_json::json!({"event": "pane_updated", "data": {"pane": {"pane_id": "w1:p1"}}}),
+    );
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_ne!(
         r.state("w1:p1"),
@@ -1021,4 +1027,6 @@ async fn a_malformed_agent_get_keeps_the_connection() {
         "the connection was not dropped"
     );
     assert_eq!(*r.handle.health().borrow(), Health::Connected);
+    r.handle.shutdown(false).await;
+    assert!(!watcher.await.unwrap(), "health never left Connected");
 }
