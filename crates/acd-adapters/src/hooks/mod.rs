@@ -10,6 +10,9 @@ mod state;
 pub mod testing;
 pub mod wire;
 
+#[cfg(any(test, feature = "testing"))]
+pub use state::{Gate, Gates};
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -195,6 +198,11 @@ impl HooksAdapter {
             .cloned()
             .unwrap_or_default()
     }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn gates(&self) -> &state::Gates {
+        &self.shared.gates
+    }
 }
 
 #[async_trait]
@@ -214,13 +222,24 @@ impl Adapter for HooksAdapter {
         let Answer::Option(option_id) = answer else {
             return Err(DeliverError::NotDelivered(ErrorCode::NotSupported));
         };
-        let Some(effect) = request.options.iter().find(|o| &o.id == option_id).map(|o| o.effect) else {
+        let Some(effect) = request
+            .options
+            .iter()
+            .find(|o| &o.id == option_id)
+            .map(|o| o.effect)
+        else {
             return Err(DeliverError::NotDelivered(ErrorCode::BadRequest));
         };
+        #[cfg(any(test, feature = "testing"))]
+        self.shared.gates.deliver.pass().await;
+        let _guard = self.shared.occurrence_lock(&request.agent_id).await;
         let mut held = self.shared.held.lock().expect("held");
         let Some(h) = held.get_mut(&request.id) else {
             return Err(DeliverError::NotDelivered(ErrorCode::RequestGone));
         };
+        if h.reply.is_none() {
+            return Err(DeliverError::NotDelivered(ErrorCode::RequestGone));
+        }
         let body = match (effect, &h.rule) {
             (Effect::Allow, _) => wire::reply_allow(),
             (Effect::Deny, _) => wire::reply_deny(),

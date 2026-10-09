@@ -540,6 +540,48 @@ async fn an_identical_command_before_evidence_opens_a_new_occurrence() {
 }
 
 #[tokio::test]
+async fn delivery_racing_supersession_is_serialized_before_terminal_retirement() {
+    let r = rig(&[], |_| {}).await;
+    let (_, mut rx) = r.core.attach(None);
+    let p = fx("claude/payload-PermissionRequest-Bash.json");
+    let held1 = r.hold(&p, &CLI).await;
+    let rid1 = until("R1", || {
+        r.agent(HOOKS_ONLY).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    let _ = r.core.request(&rid1).expect("R1 registered");
+    let (retire_reached, retire_release) = r.hooks.gates().retire.arm();
+    let held2 = r.hold(&p, &CLI).await;
+    retire_reached.await.unwrap();
+    let core = r.core.clone();
+    let request_id = rid1.clone();
+    let answer = tokio::spawn(async move {
+        core.handle(
+            "a1",
+            ClientMessage::RequestAnswer {
+                id: "a1".into(),
+                request_id,
+                revision: None,
+                option_id: Some("allow".into()),
+                text: None,
+            },
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !answer.is_finished(),
+        "answer waits behind the retirement lock"
+    );
+    retire_release.send(()).unwrap();
+    let result = answer.await.unwrap();
+    assert_eq!(result.error_code(), Some(ErrorCode::RequestGone));
+    assert_eq!(resolution(&mut rx, &rid1).await, ResolvedBy::Terminal);
+    assert_eq!(read_response(held1).await, (200, String::new()));
+    drop(held2);
+}
+
+#[tokio::test]
 async fn a_delayed_outcome_of_an_older_identical_request_does_not_resolve_the_newer_one() {
     // Sol N4, O7: R1 delivered, identical R2 opens, then R1's PostToolUse
     // arrives. It cannot be told apart from R2's, so R2 stays open.
