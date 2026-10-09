@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import type { InboxView } from "../lib/bindings/InboxView";
   import type { Api } from "../lib/ipc";
+  import { statusKind, statusReason, statusText } from "../lib/format";
   import { fromEvent, normalize, onKey, type Effect, type KeyState } from "../lib/keys";
   import Card from "./Card.svelte";
   import ReplyBox from "./ReplyBox.svelte";
@@ -87,7 +88,8 @@
     });
   }
 
-  const statusText = (s: InboxView["machines"][number]["status"]) => s.kind.replace(/_/g, " ");
+  // Transient states read fine as just the kind; the rest show their reason.
+  const quiet = new Set(["online", "connecting", "syncing"]);
 </script>
 
 <svelte:window onkeydown={handle} />
@@ -95,7 +97,10 @@
 <main class="panel">
   <header>
     {#each view.machines as m (m.key)}
-      <span class="chip" data-status={m.status.kind}>{m.name}: {statusText(m.status)}</span>
+      {@const reason = quiet.has(m.status.kind) ? null : statusReason(m.status)}
+      <span class="chip" data-status={m.status.kind} title="{m.name}: {statusText(m.status)}"
+        >{m.name}: {statusKind(m.status)}{#if reason}<span class="reason">: {reason}</span>{/if}</span
+      >
     {/each}
   </header>
 
@@ -150,6 +155,14 @@
     margin-right: 6px;
     font-size: 11px;
     opacity: 0.8;
+  }
+  .reason {
+    display: inline-block;
+    max-width: 14em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
   }
   .error {
     color: #c00;

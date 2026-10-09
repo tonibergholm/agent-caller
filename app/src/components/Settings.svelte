@@ -3,6 +3,7 @@
   import type { MachineEntryView } from "../lib/bindings/MachineEntryView";
   import type { MachineStatus } from "../lib/bindings/MachineStatus";
   import type { Api } from "../lib/ipc";
+  import { statusText } from "../lib/format";
 
   let { api }: { api: Api } = $props();
 
@@ -15,9 +16,6 @@
   let added = $state<string | null>(null);
 
   const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
-  const statusText = (s: MachineStatus | undefined) =>
-    s ? s.kind.replace(/_/g, " ") + ("message" in s ? `: ${s.message}` : "") + ("error" in s ? `: ${s.error}` : "") : "";
 
   const pairingText = {
     paired: "paired",
@@ -98,8 +96,16 @@
     return act(() => api.renameMachine(m.key, name), "Could not rename");
   };
 
+  // window.confirm silently returns false in Tauri's macOS webview, so
+  // removal confirms inline; one machine at a time.
+  let confirming = $state<string | null>(null);
+
   const remove = (m: MachineEntryView) => {
-    if (!window.confirm(`Remove ${m.name}?`)) return;
+    if (confirming !== m.key) {
+      confirming = m.key;
+      return;
+    }
+    confirming = null;
     return act(() => api.removeMachine(m.key), "Could not remove");
   };
 
@@ -144,9 +150,14 @@
           <div class="status">{statusText(statuses[m.key])}</div>
           <input aria-label={`Name for ${m.name}`} bind:value={names[m.key]} />
           <button onclick={() => rename(m)}>Rename</button>
-          <button onclick={() => act(() => api.retryMachine(m.key), "Could not retry")}>Retry</button>
+          {#if statuses[m.key]?.kind !== "online"}
+            <button onclick={() => act(() => api.retryMachine(m.key), "Could not retry")}>Retry</button>
+          {/if}
           {#if m.endpoint.kind !== "local"}
-            <button onclick={() => remove(m)}>Remove</button>
+            <button onclick={() => remove(m)}>{confirming === m.key ? "Confirm remove" : "Remove"}</button>
+            {#if confirming === m.key}
+              <button onclick={() => (confirming = null)}>Cancel</button>
+            {/if}
           {/if}
         </li>
       {/each}

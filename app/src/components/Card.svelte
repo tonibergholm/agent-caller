@@ -18,6 +18,9 @@
 
   const pending = $derived(card.agent.pending);
   const seconds = $derived(card.action ? Math.max(0, Math.ceil((card.action.fires_at_ms - now) / 1000)) : 0);
+  const hints = $derived(
+    [card.can_reply ? "R reply" : null, card.can_mark_seen ? "E mark seen" : null].filter((h) => h !== null),
+  );
   const question = $derived(pending?.questions?.[0]?.text ?? null);
 </script>
 
@@ -83,6 +86,10 @@
     </button>
   {/if}
 
+  {#if selected && hints.length > 0}
+    <div class="keys">{hints.join(" · ")}</div>
+  {/if}
+
   {#if card.notice}
     <div class="notice {card.notice.tone}" role="status" data-tone={card.notice.tone}>
       {card.notice.text}
@@ -110,6 +117,10 @@
   .state {
     font-size: 11px;
     opacity: 0.7;
+  }
+  .keys {
+    font-size: 11px;
+    opacity: 0.6;
   }
   pre {
     max-height: 160px;

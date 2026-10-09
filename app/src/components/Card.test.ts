@@ -128,3 +128,18 @@ test("answer in terminal is not shown while busy or answering", () => {
   const r = render(Card, props(c));
   expect(r.container.textContent).not.toMatch(/answer in terminal/i);
 });
+
+test("the selected card hints only at the keys it accepts", () => {
+  const both = card({ key: "m/x", can_reply: true, can_mark_seen: true });
+  const { container, unmount } = render(Card, { ...props(both), selected: true });
+  expect(container.querySelector(".keys")?.textContent).toBe("R reply · E mark seen");
+  unmount();
+  const reply = render(Card, { ...props(card({ key: "m/x", can_reply: true })), selected: true });
+  expect(reply.container.querySelector(".keys")?.textContent).toBe("R reply");
+  reply.unmount();
+  const none = render(Card, { ...props(card({ key: "m/x" })), selected: true });
+  expect(none.container.querySelector(".keys")).toBeNull();
+  none.unmount();
+  const unselected = render(Card, props(both));
+  expect(unselected.container.querySelector(".keys")).toBeNull();
+});

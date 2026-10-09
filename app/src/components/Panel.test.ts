@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test } from "vitest";
 import Panel from "./Panel.svelte";
 import { card, view, fakeApi } from "../lib/fixtures";
+import type { InboxView } from "../lib/bindings/InboxView";
 import { MAX_REPLY_BYTES } from "../lib/limits";
 
 afterEach(cleanup);
@@ -218,4 +219,24 @@ test("rejected footer, card-button and countdown-cancel calls are shown", async 
   render(Panel, { view: view({ cards: [a] }), api });
   await userEvent.click(screen.getByRole("button", { name: /sending yes/i }));
   expect((await screen.findByRole("alert")).textContent).toContain("denied");
+});
+
+test("a failed machine chip keeps the kind short and exposes the reason", () => {
+  const m = (key: string, status: InboxView["machines"][number]["status"]) => ({
+    key, name: key, machine_id: key, status, is_local: false, duplicate_of: null,
+  });
+  const v = view({
+    machines: [
+      m("local", { kind: "local_unavailable", message: "socket missing" }),
+      m("box", { kind: "offline", since_ms: 0, error: "refused" }),
+      m("ok", { kind: "online" }),
+    ],
+  });
+  const { container } = render(Panel, { view: v, api: fakeApi() });
+  const chips = [...container.querySelectorAll(".chip")];
+  expect(chips[0].getAttribute("title")).toBe("local: local unavailable: socket missing");
+  expect(chips[0].querySelector(".reason")?.textContent).toBe(": socket missing");
+  expect(chips[1].getAttribute("title")).toBe("box: offline: refused");
+  expect(chips[2].getAttribute("title")).toBe("ok: online");
+  expect(chips[2].querySelector(".reason")).toBeNull();
 });

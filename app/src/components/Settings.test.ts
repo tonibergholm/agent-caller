@@ -30,7 +30,6 @@ test("adding a machine never touches a secret in the webview", async () => {
 
 test("rename and remove", async () => {
   const api = fakeApi({ machines: [devbox()] });
-  vi.spyOn(window, "confirm").mockReturnValue(true);
   render(Settings, { api });
   const input = await screen.findByLabelText("Name for devbox");
   await userEvent.clear(input);
@@ -38,15 +37,48 @@ test("rename and remove", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Rename" }));
   expect(api.calls).toContainEqual(["renameMachine", "m1", "build box"]);
   await userEvent.click(screen.getByRole("button", { name: "Remove" }));
+  expect(api.calls.some((c) => c[0] === "removeMachine")).toBe(false);
+  await userEvent.click(screen.getByRole("button", { name: "Confirm remove" }));
   expect(api.calls).toContainEqual(["removeMachine", "m1"]);
+  expect(screen.queryByRole("button", { name: "Confirm remove" })).toBeNull();
 });
 
-test("declining the remove confirmation sends nothing", async () => {
+test("cancelling the inline remove confirmation sends nothing", async () => {
   const api = fakeApi({ machines: [devbox()] });
-  vi.spyOn(window, "confirm").mockReturnValue(false);
   render(Settings, { api });
   await userEvent.click(await screen.findByRole("button", { name: "Remove" }));
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.getByRole("button", { name: "Remove" })).toBeTruthy();
   expect(api.calls.some((c) => c[0] === "removeMachine")).toBe(false);
+});
+
+test("only one machine is pending remove confirmation", async () => {
+  const api = fakeApi({
+    machines: [
+      { ...devbox(), key: "a", name: "A" },
+      { ...devbox(), key: "b", name: "B" },
+    ],
+  });
+  render(Settings, { api });
+  const [first, second] = await screen.findAllByRole("button", { name: "Remove" });
+  await userEvent.click(first);
+  await userEvent.click(second);
+  expect(screen.getAllByRole("button", { name: "Confirm remove" }).length).toBe(1);
+  expect(api.calls.some((c) => c[0] === "removeMachine")).toBe(false);
+});
+
+test("Retry is hidden for an online machine and shown otherwise", async () => {
+  const api = fakeApi({ machines: [{ ...devbox(), key: "m1" }] });
+  api.getView = async () => view({ machines: [{ key: "m1", name: "devbox", machine_id: "x", status: { kind: "online" }, is_local: false, duplicate_of: null }] });
+  const { unmount } = render(Settings, { api });
+  await screen.findByText("online");
+  expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  unmount();
+  const api2 = fakeApi({ machines: [devbox()] });
+  api2.getView = async () => view({ machines: [{ key: "m1", name: "devbox", machine_id: "x", status: { kind: "offline", since_ms: 0, error: "refused" }, is_local: false, duplicate_of: null }] });
+  render(Settings, { api: api2 });
+  await screen.findByText("offline: refused");
+  expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
 });
 
 test("all three pairing states are shown, unreadable suggests re-pairing", async () => {
@@ -112,7 +144,6 @@ test("a successful hotkey change calls setHotkey with the typed value", async ()
 });
 
 test("rejected rename, remove, retry, import and show-idle are each shown", async () => {
-  vi.spyOn(window, "confirm").mockReturnValue(true);
   const cases: [keyof ReturnType<typeof fakeApi>, string | RegExp, string][] = [
     ["renameMachine", "Rename", "name taken"],
     ["removeMachine", "Remove", "locked"],
@@ -126,6 +157,7 @@ test("rejected rename, remove, retry, import and show-idle are each shown", asyn
     };
     const { unmount } = render(Settings, { api });
     await userEvent.click(await screen.findByRole("button", { name: button }));
+    if (method === "removeMachine") await userEvent.click(screen.getByRole("button", { name: "Confirm remove" }));
     expect((await screen.findByRole("alert")).textContent).toContain(reason);
     unmount();
   }
