@@ -213,6 +213,9 @@ pub enum CodexBind {
     OnlyInCwd(PaneFact),
     Ambiguous,
     Unbound,
+    /// A directory the rules need is not resolved yet: no binding, and a
+    /// live binding is neither kept ready nor revoked until it is known.
+    Unresolved,
 }
 
 /// Gate 4 and ruling B4: the hook env is never used. Exactly one Codex
@@ -222,6 +225,27 @@ pub enum CodexBind {
 /// requires that pane's own screen to match (M2) and no competing pane
 /// to show the same command (Task 17).
 pub fn codex_bind(session_id: &str, cwd: Option<&str>, panes: &[PaneFact]) -> CodexBind {
+    codex_bind_with(session_id, cwd, panes, &direct_dir_key)
+}
+
+/// A directory's comparable form: its canonical path, or the raw path
+/// without trailing slashes when it does not resolve; `None` while that is
+/// not known yet (resolution pending or stuck).
+pub type DirKey<'a> = &'a dyn Fn(&str) -> Option<PathBuf>;
+
+fn direct_dir_key(s: &str) -> Option<PathBuf> {
+    Some(std::fs::canonicalize(s).unwrap_or_else(|_| PathBuf::from(s.trim_end_matches('/'))))
+}
+
+/// `codex_bind` with directories compared through `key`. An unknown
+/// directory never counts as different: any unknown one the rules need
+/// gives `Unresolved` (no binding).
+pub fn codex_bind_with(
+    session_id: &str,
+    cwd: Option<&str>,
+    panes: &[PaneFact],
+    key: DirKey<'_>,
+) -> CodexBind {
     let codex: Vec<&PaneFact> = panes
         .iter()
         .filter(|p| p.kind == AgentKind::Codex)
@@ -234,7 +258,11 @@ pub fn codex_bind(session_id: &str, cwd: Option<&str>, panes: &[PaneFact]) -> Co
         [one] => {
             // A payload cwd that contradicts the pane's cwd is not a bind.
             return match (cwd, one.cwd.as_deref()) {
-                (Some(c), Some(pc)) if !same_dir(pc, c) => CodexBind::Ambiguous,
+                (Some(c), Some(pc)) => match same_dir_with(pc, c, key) {
+                    Some(true) => CodexBind::Session((**one).clone()),
+                    Some(false) => CodexBind::Ambiguous,
+                    None => CodexBind::Unresolved,
+                },
                 _ => CodexBind::Session((**one).clone()),
             };
         }
@@ -244,13 +272,19 @@ pub fn codex_bind(session_id: &str, cwd: Option<&str>, panes: &[PaneFact]) -> Co
     let Some(cwd) = cwd else {
         return CodexBind::Unbound;
     };
-    let same: Vec<&&PaneFact> = codex
-        .iter()
-        .filter(|p| p.cwd.as_deref().is_some_and(|c| same_dir(c, cwd)))
-        .collect();
+    let mut same: Vec<&PaneFact> = Vec::new();
+    for p in &codex {
+        if let Some(c) = p.cwd.as_deref() {
+            match same_dir_with(c, cwd, key) {
+                Some(true) => same.push(p),
+                Some(false) => {}
+                None => return CodexBind::Unresolved,
+            }
+        }
+    }
     match same.as_slice() {
         [] => CodexBind::Unbound,
-        [one] => CodexBind::OnlyInCwd((**one).clone()),
+        [one] => CodexBind::OnlyInCwd((*one).clone()),
         _ => CodexBind::Ambiguous,
     }
 }
@@ -258,13 +292,15 @@ pub fn codex_bind(session_id: &str, cwd: Option<&str>, panes: &[PaneFact]) -> Co
 /// herdr reports `/tmp/...`, Codex `/private/tmp/...` (D5).
 /// Relative paths never match: they would canonicalize against acd's own cwd.
 pub fn same_dir(a: &str, b: &str) -> bool {
+    same_dir_with(a, b, &direct_dir_key).unwrap_or(false)
+}
+
+/// `same_dir` through `key`; `None` while either side is unknown.
+pub fn same_dir_with(a: &str, b: &str, key: DirKey<'_>) -> Option<bool> {
     if !Path::new(a).is_absolute() || !Path::new(b).is_absolute() {
-        return false;
+        return Some(false);
     }
-    let canon = |s: &str| {
-        std::fs::canonicalize(s).unwrap_or_else(|_| PathBuf::from(s.trim_end_matches('/')))
-    };
-    canon(a) == canon(b)
+    Some(key(a)? == key(b)?)
 }
 
 #[cfg(test)]

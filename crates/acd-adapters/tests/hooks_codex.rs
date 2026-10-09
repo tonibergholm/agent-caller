@@ -1027,3 +1027,57 @@ async fn a_generation_stale_recheck_result_keeps_the_target_not_ready_until_a_fr
     assert!(answer(&r, &rid, "allow").await.ok);
     assert_eq!(f.keys_sent().len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unresolved_cwd_withdraws_readiness_without_revoking_until_known() {
+    // Sol (Task 19 review): an OnlyInCwd binding needs every Codex pane's
+    // cwd. While a new pane's cwd cannot be resolved (a dead mount), the
+    // live target is neither kept ready nor revoked; once it resolves, the
+    // usual rules apply (here: a rival recheck that passes).
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let stall = Stall::new();
+    let resolver = stall.resolver("stall-dir");
+    stall.watchdog(Duration::from_secs(8));
+    let r = rig(&[pane("w1:p1", &cwd, None)], |c| {
+        c.path_resolver = resolver;
+        c.resolve_wait = Duration::from_millis(100);
+    })
+    .await;
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    let other = tempfile::tempdir().unwrap();
+    let stuck = other.path().join("stall-dir");
+    std::fs::create_dir(&stuck).unwrap();
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen("w1:p2", "detection", &screen("codex-idle-detection.txt"));
+    f.set_agent(pane("w1:p2", stuck.to_str().unwrap(), None));
+    until("the cwd resolution is stuck", || {
+        (stall.entered() >= 1).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await; // several ticks
+    assert_eq!(
+        answer_refused_by_readiness(&r, &rid).await,
+        Some(ErrorCode::RequestNotReady),
+        "not ready while the binding is unknown"
+    );
+    assert_eq!(
+        r.core.request(&rid).map(|q| q.status),
+        Some(RequestStatus::Open),
+        "unknown never revokes"
+    );
+    assert!(f.keys_sent().is_empty());
+    stall.release();
+    let p2 = agent(&r, "w1:p2");
+    until("a passing recheck stored the new inventory", || {
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .keys_targets()
+            .rivals(&rid)
+            .filter(|v| v.iter().any(|(id, _)| *id == p2))
+    })
+    .await;
+    assert!(answer(&r, &rid, "allow").await.ok);
+    assert_eq!(f.keys_sent().len(), 1);
+}

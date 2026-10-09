@@ -144,12 +144,8 @@ fn agent_of(r: &Rig, pane: &str) -> String {
         .clone()
 }
 
-#[tokio::test]
-async fn queued_holds_cannot_delay_a_takeover_past_one_batch() {
-    // A6: a T3 change is served at the start of the next turn, so at most
-    // `batch` control messages run between it and the takeover. The
-    // reconciler is stalled at the first item of a batch (`x`, on p2's
-    // delivery lock) when the change arrives.
+/// Two blocked Claude panes with the dialog, `batch = 2`.
+async fn batch_rig() -> Rig {
     let r = rig(
         &[
             fake_agent("w1:p1", "claude", "blocked"),
@@ -161,10 +157,28 @@ async fn queued_holds_cannot_delay_a_takeover_past_one_batch() {
         },
     )
     .await;
-    let f = r.fake.as_ref().unwrap();
     for p in ["w1:p1", "w1:p2"] {
-        f.set_screen(p, "detection", &dialog());
+        r.fake
+            .as_ref()
+            .unwrap()
+            .set_screen(p, "detection", &dialog());
     }
+    r
+}
+
+/// Stalls the reconciler at the first item of a batch: `w` stalls the idle
+/// reconciler on p1's delivery lock while `x` (bound to p2) and six
+/// hooks-only holds queue behind it; releasing p1 lets the next turn's
+/// batch take `x`, which stalls on p2. `base` is the control depth before.
+/// Returns the queued sessions, the open streams and p2's lock.
+async fn stall_in_batch(
+    r: &Rig,
+    base: usize,
+) -> (
+    Vec<String>,
+    Vec<TcpStream>,
+    tokio::sync::OwnedMutexGuard<()>,
+) {
     let sock = r.sock();
     let on = |pane: &'static str| {
         vec![
@@ -173,6 +187,60 @@ async fn queued_holds_cannot_delay_a_takeover_past_one_batch() {
             ("X-Claude-Entrypoint", "cli"),
         ]
     };
+    let locks = r.herdr.as_ref().unwrap().agent_locks();
+    let l1 = locks.lock(&agent_of(r, "w1:p1")).await;
+    let l2 = locks.lock(&agent_of(r, "w1:p2")).await;
+    let mut streams = Vec::new();
+    let w = permission("5f4996ff-0000-4000-8000-0000000000a0", "touch /tmp/w");
+    streams.push(send(r.port, PR, TOKEN, &on("w1:p1"), &w.to_string()).await);
+    control_at(r, base + 1).await;
+    let x = permission("5f4996ff-0000-4000-8000-0000000000b0", "touch /tmp/x");
+    streams.push(send(r.port, PR, TOKEN, &on("w1:p2"), &x.to_string()).await);
+    control_at(r, base + 3).await;
+    let queued: Vec<String> = (1..=6)
+        .map(|i| format!("5f4996ff-0000-4000-8000-00000000000{i}"))
+        .collect();
+    for (i, sid) in queued.iter().enumerate() {
+        let body = permission(sid, "touch /tmp/c").to_string();
+        streams.push(send(r.port, PR, TOKEN, &CLI, &body).await);
+        control_at(r, base + 3 + 2 * (i + 1)).await;
+    }
+    drop(l1);
+    control_at(r, base + 14).await;
+    (queued, streams, l2)
+}
+
+/// The order in which `rid` resolves and the second queued hold opens.
+async fn order_after(
+    rx: &mut tokio::sync::broadcast::Receiver<ServerMessage>,
+    rid: &str,
+    second: &str,
+) -> Vec<&'static str> {
+    let mut order = Vec::new();
+    let collect = async {
+        while order.len() < 2 {
+            match rx.recv().await.unwrap() {
+                ServerMessage::RequestResolved { request_id, .. } if request_id == rid => {
+                    order.push("served")
+                }
+                ServerMessage::RequestOpened { request, .. } if request.agent_id == second => {
+                    order.push("second queued hold")
+                }
+                _ => {}
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), collect)
+        .await
+        .expect("both observed");
+    order
+}
+
+#[tokio::test]
+async fn queued_holds_cannot_delay_a_takeover_past_one_batch() {
+    // A6: a T3 change is served at the start of the next turn, so at most
+    // `batch` control messages run between it and the takeover.
+    let r = batch_rig().await;
     // The takeover target: a hooks-only session with an open hold.
     let target = r
         .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &CLI)
@@ -185,58 +253,59 @@ async fn queued_holds_cannot_delay_a_takeover_past_one_batch() {
     .await;
     control_at(&r, 1).await;
     let (_, mut rx) = r.core.attach(None);
-    let locks = r.herdr.as_ref().unwrap().agent_locks();
-    let l1 = locks.lock(&agent_of(&r, "w1:p1")).await;
-    let l2 = locks.lock(&agent_of(&r, "w1:p2")).await;
-    // `w` stalls the idle reconciler on p1's lock...
-    let w = permission("5f4996ff-0000-4000-8000-0000000000a0", "touch /tmp/w");
-    let _w = send(r.port, PR, TOKEN, &on("w1:p1"), &w.to_string()).await;
-    control_at(&r, 2).await;
-    // ...while `x` (bound to p2) and six hooks-only holds queue behind it.
-    let x = permission("5f4996ff-0000-4000-8000-0000000000b0", "touch /tmp/x");
-    let _x = send(r.port, PR, TOKEN, &on("w1:p2"), &x.to_string()).await;
-    control_at(&r, 4).await;
-    let queued: Vec<String> = (1..=6)
-        .map(|i| format!("5f4996ff-0000-4000-8000-00000000000{i}"))
-        .collect();
-    let mut streams = Vec::new();
-    for (i, sid) in queued.iter().enumerate() {
-        let body = permission(sid, "touch /tmp/c").to_string();
-        streams.push(send(r.port, PR, TOKEN, &CLI, &body).await);
-        control_at(&r, 4 + 2 * (i + 1)).await;
-    }
-    // `w` finishes; the next turn's batch takes `x`, which stalls on p2.
-    drop(l1);
-    control_at(&r, 15).await;
+    let (queued, _streams, l2) = stall_in_batch(&r, 1).await;
     r.t3.set_for_tests("t3:thread-1", Some(SID));
     drop(l2);
     let second = format!("claude:{}", queued[1]);
-    let mut order = Vec::new();
-    let collect = async {
-        while order.len() < 2 {
-            match rx.recv().await.unwrap() {
-                ServerMessage::RequestResolved { request_id, .. } if request_id == rid => {
-                    order.push("takeover")
-                }
-                ServerMessage::RequestOpened { request, .. } if request.agent_id == second => {
-                    order.push("second queued hold")
-                }
-                _ => {}
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(10), collect)
-        .await
-        .expect("both observed");
     assert_eq!(
-        order,
-        ["takeover", "second queued hold"],
+        order_after(&mut rx, &rid, &second).await,
+        ["served", "second queued hold"],
         "A6: the takeover is served after at most `batch` queued holds"
     );
     assert_eq!(
         reply_within(target, Duration::from_secs(5)).await,
         (200, String::new()),
         "the takeover released the hold"
+    );
+}
+
+#[tokio::test]
+async fn queued_holds_cannot_delay_a_due_timer_past_one_batch() {
+    // A6, the tick half: a timer that falls due while control traffic is
+    // queued fires after at most `batch` of it.
+    let r = batch_rig().await;
+    let window = Duration::from_millis(400); // `fast` evidence window
+    // A hooks-only hold closed without capture: the tick retires it
+    // `uncertain` once the evidence window has passed.
+    let sid = "5f4996ff-0000-4000-8000-0000000000c0";
+    let t = r.hold(&permission(sid, "touch /tmp/t"), &CLI).await;
+    let rid = until("request", || {
+        r.agent(&format!("claude:{sid}"))
+            .and_then(|a| a.pending)
+            .map(|p| p.id)
+    })
+    .await;
+    control_at(&r, 1).await;
+    drop(t);
+    until("closed", || {
+        let st = r.hooks.stats();
+        (st.holds == 0 && st.control_queued == 0).then_some(())
+    })
+    .await;
+    let closed_at = Instant::now();
+    let (_, mut rx) = r.core.attach(None);
+    let (queued, _streams, l2) = stall_in_batch(&r, 0).await;
+    tokio::time::sleep_until(closed_at + window + Duration::from_millis(200)).await;
+    assert!(
+        r.core.request(&rid).is_some(),
+        "setup too slow: the timer fired before the reconciler stalled"
+    );
+    drop(l2);
+    let second = format!("claude:{}", queued[1]);
+    assert_eq!(
+        order_after(&mut rx, &rid, &second).await,
+        ["served", "second queued hold"],
+        "A6: the due timer fires after at most `batch` queued holds"
     );
 }
 
@@ -450,11 +519,10 @@ async fn holds_beyond_the_track_cap_are_released_at_once() {
 }
 
 #[tokio::test]
-async fn reevaluations_reuse_the_resolved_socket_paths() {
-    // Task 11 follow-up: a header socket is resolved once per session and
-    // header value, a pane socket once per path; scans, T3 changes and later
-    // hooks of the session reuse them, so a stalled mount is not touched on
-    // every re-evaluation.
+async fn reevaluations_reuse_the_resolved_header_socket() {
+    // Task 11 follow-up: a header socket path is resolved once (in a
+    // worker) and cached; pane sockets need no resolution (discovery
+    // canonicalized them). Scans, T3 changes and later hooks reuse it.
     let r = rig(&[fake_agent("w1:p1", "claude", "working")], |_| {}).await;
     let (agent, h) = bound(&r);
     let h = refs(&h);
@@ -466,15 +534,15 @@ async fn reevaluations_reuse_the_resolved_socket_paths() {
     })
     .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let n = r.hooks.socket_resolutions();
-    assert!(n > 0);
+    let n = r.hooks.path_resolutions();
+    assert_eq!(n, 1, "one header path, nothing else");
     for i in 0..5 {
         r.hook("claude", "UserPromptSubmit", &p, &h).await;
         r.t3.set_for_tests(&format!("t3:other-{i}"), Some(&format!("other-{i}")));
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(r.hooks.socket_resolutions(), n, "nothing resolved again");
+    assert_eq!(r.hooks.path_resolutions(), n, "nothing resolved again");
     assert!(r.agent(&format!("claude:{SID}")).is_none(), "still bound");
 }
 
@@ -587,4 +655,88 @@ async fn a_real_keys_holder_stalled_in_its_key_write_releases_within_l1() {
     assert!(f.keys_sent().is_empty(), "the held write never took effect");
     let _ = answer.await;
     drop(gate);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stuck_path_resolution_never_delays_expiry_or_a_takeover() {
+    // Sol (Task 19 review): resolving a header socket path can hang on a
+    // dead mount. It runs in at most `max_resolvers` workers; the
+    // reconciler waits `resolve_wait` once, binds nothing meanwhile, and
+    // keeps serving expiries and takeovers.
+    let stall = Stall::new();
+    let resolver = stall.resolver("");
+    stall.watchdog(Duration::from_secs(8));
+    let r = rig(&[fake_agent("w1:p1", "claude", "blocked")], |c| {
+        c.path_resolver = resolver;
+        c.max_resolvers = 2;
+        c.resolve_wait = Duration::from_millis(100);
+        c.permission_hold = Duration::from_secs(1);
+    })
+    .await;
+    let (agent, h) = bound(&r);
+    let h = refs(&h);
+    let a = r
+        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
+        .await;
+    let hooks_id = format!("claude:{SID}");
+    let rid = until("the request, unbound", || {
+        r.agent(&hooks_id).and_then(|q| q.pending).map(|q| q.id)
+    })
+    .await;
+    let opened = Instant::now();
+    assert!(
+        stall.entered() >= 1,
+        "the header resolution is stuck in its worker"
+    );
+    assert!(
+        r.agent(&agent).and_then(|q| q.pending).is_none(),
+        "no herdr binding while the socket path is unresolved"
+    );
+    // More sessions with distinct stuck header paths: two workers at most.
+    for i in 0..10 {
+        let mut p = fx("claude/payload-UserPromptSubmit.json");
+        p["session_id"] = format!("6d000000-0000-4000-8000-{i:012}").into();
+        let socket = format!("/stuck/{i}/herdr.sock");
+        let hh = [
+            ("X-Herdr-Pane", "w1:p1"),
+            ("X-Herdr-Socket", socket.as_str()),
+            ("X-Claude-Entrypoint", "cli"),
+        ];
+        r.hook("claude", "UserPromptSubmit", &p, &hh).await;
+    }
+    // Expiry: the reconciler ends the request when the hold expires.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while r.core.request(&rid).is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the expiry was served");
+    assert!(
+        opened.elapsed()
+            < Duration::from_secs(1) + 2 * Duration::from_millis(100) + Duration::from_secs(1),
+        "expiry within hold + max_resolvers x resolve_wait + slack ({:?})",
+        opened.elapsed()
+    );
+    assert_eq!(
+        reply_within(a, Duration::from_secs(2)).await,
+        (200, String::new())
+    );
+    // A takeover of another session completes too.
+    let b_sid = "6d000000-0000-4000-8000-0000000000bb";
+    let b = r.hold(&permission(b_sid, "touch /tmp/b"), &CLI).await;
+    until("B", || {
+        r.agent(&format!("claude:{b_sid}")).and_then(|q| q.pending)
+    })
+    .await;
+    let t = Instant::now();
+    r.t3.set_for_tests("t3:thread-2", Some(b_sid));
+    assert_eq!(
+        reply_within(b, Duration::from_secs(2)).await,
+        (200, String::new()),
+        "the takeover released the hold"
+    );
+    assert!(t.elapsed() < Duration::from_secs(1));
+    assert_eq!(stall.entered(), 2, "only two workers ever started");
+    assert!(stall.max_inside() <= 2);
 }

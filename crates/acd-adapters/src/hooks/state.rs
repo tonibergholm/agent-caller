@@ -1,7 +1,7 @@
 //! The hooks reconciler: the only code that changes hook-derived state.
 //! It drains the endpoint mailbox and its internal channel; it never awaits a herdr call itself.
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -20,9 +20,10 @@ use super::endpoint::{HoldId, HoldPermit, Inbound, Mailbox};
 use super::evidence::{self, EvidenceHub, Expect, Verdict};
 use super::mapping;
 use super::owner::{
-    CodexBind, HeaderRef, Owner, PaneFact, claude_owner_resolved, codex_bind, header_pane_resolved,
-    header_socket_hash, pane_facts,
+    CodexBind, HeaderRef, Owner, PaneFact, claude_owner_resolved, codex_bind_with,
+    header_pane_resolved, pane_facts,
 };
+use super::paths::{Paths, Resolved};
 use super::tickets::{Now, ReadKind, ReadSlots, Ticket, still_valid};
 use super::wire::{
     AlwaysRule, Hints, HookAgent, HookEvent, HookName, Payload, always_rule, claude_key, codex_key,
@@ -51,8 +52,8 @@ pub(crate) struct Shared {
     pub read_tasks: AtomicUsize,
     /// A clone of the reconciler's internal sender, for live queue depth.
     pub internal_tx: OnceLock<mpsc::Sender<Internal>>,
-    /// Socket paths resolved on the filesystem (headers and panes).
-    pub socket_resolutions: AtomicU64,
+    /// Paths given to the resolver (`Paths`).
+    pub path_resolutions: Arc<AtomicU64>,
     #[cfg(any(test, feature = "testing"))]
     pub gates: Gates,
     /// While set, `on_tick` returns at once (tests only).
@@ -296,9 +297,6 @@ struct Unconsumed {
 
 const MAX_UNCONSUMED: usize = 8;
 
-/// Cached pane socket resolutions; cleared beyond this (sockets are few).
-const MAX_PANE_SOCKETS: usize = 64;
-
 /// A8: a `cwd` longer than `CWD_MAX_BYTES` is not stored (a truncated
 /// path would name the wrong project).
 fn stored_cwd(cwd: &str) -> Option<String> {
@@ -320,9 +318,6 @@ struct Session {
     last_event: Instant,
     in_registry: bool,
     ended: Option<Instant>,
-    /// The last header socket path that resolved, and its hash: a later
-    /// hook with the same header is not resolved again.
-    header_socket: Option<(String, String)>,
 }
 
 pub(crate) struct Reconciler {
@@ -350,8 +345,8 @@ pub(crate) struct Reconciler {
     /// ambiguity; every new occurrence is shadowed until `unconsumed_ttl`.
     shadow_all: Option<Instant>,
     sessions_refused: u64,
-    /// Discovered pane socket paths and their resolved `socket_hash`.
-    pane_sockets: HashMap<std::path::PathBuf, String>,
+    /// Path resolution off the reconciler (header sockets, cwds).
+    paths: Paths,
     evidence: Arc<EvidenceHub>,
 }
 
@@ -370,6 +365,12 @@ impl Reconciler {
         let (internal_tx, internal_rx) = mpsc::channel(cfg.max_reads + 2);
         let _ = shared.internal_tx.set(internal_tx.clone());
         let reads = Arc::new(Semaphore::new(cfg.max_reads));
+        let paths = Paths::new(
+            cfg.path_resolver.clone(),
+            cfg.max_resolvers,
+            cfg.resolve_wait,
+            shared.path_resolutions.clone(),
+        );
         let scanner = Some(Arc::new(Mutex::new(Scanner::new(
             cfg.sessions_dirs.get(),
             proc,
@@ -395,7 +396,7 @@ impl Reconciler {
             unconsumed: HashMap::new(),
             shadow_all: None,
             sessions_refused: 0,
-            pane_sockets: HashMap::new(),
+            paths,
             evidence,
         }
     }
@@ -539,46 +540,44 @@ impl Reconciler {
             .unwrap_or_default()
     }
 
-    /// `socket_hash` of every pane socket that resolves, resolved once per
-    /// path and then cached (Task 11 follow-up), so re-evaluations stay off
-    /// the filesystem. Discovery already canonicalizes these paths.
-    fn pane_socket_hashes(&mut self, panes: &[PaneFact]) -> HashMap<std::path::PathBuf, String> {
-        if self.pane_sockets.len() > MAX_PANE_SOCKETS {
-            self.pane_sockets.clear();
+    /// The resolved header socket of `hints` from the path cache; `None`
+    /// while it is unknown or does not resolve (fail closed: no header).
+    fn header_hash(&self, hints: &Hints) -> Option<String> {
+        let raw = hints.herdr_socket.as_deref()?;
+        match self.paths.get(Path::new(raw)) {
+            Resolved::Canonical(c) => Some(socket_hash(&c)),
+            Resolved::Missing | Resolved::Unknown => None,
         }
-        for p in panes {
-            if !self.pane_sockets.contains_key(&p.socket) {
-                self.shared
-                    .socket_resolutions
-                    .fetch_add(1, Ordering::SeqCst);
-                // Only a path that resolves is cached; one that does not
-                // keeps its raw form and is tried again next time.
-                if let Ok(c) = std::fs::canonicalize(&p.socket) {
-                    self.pane_sockets.insert(p.socket.clone(), socket_hash(&c));
-                }
-            }
-        }
-        self.pane_sockets.clone()
     }
 
-    /// The resolved header socket of `hints`: the session's cached
-    /// resolution when the raw header is unchanged, else resolved now.
-    fn header_hash(&mut self, session_id: &str, hints: &Hints) -> Option<String> {
-        let raw = hints.herdr_socket.as_ref()?;
-        let session = self.sessions.get_mut(session_id);
-        if let Some((cached, hash)) = session.as_ref().and_then(|s| s.header_socket.as_ref())
-            && cached == raw
-        {
-            return Some(hash.clone());
+    /// A directory's comparable form for `codex_bind_with`, from the path
+    /// cache; `None` while unknown.
+    fn dir_key(&self, s: &str) -> Option<PathBuf> {
+        match self.paths.get(Path::new(s)) {
+            Resolved::Canonical(c) => Some(c),
+            Resolved::Missing => Some(PathBuf::from(s.trim_end_matches('/'))),
+            Resolved::Unknown => None,
         }
-        self.shared
-            .socket_resolutions
-            .fetch_add(1, Ordering::SeqCst);
-        let hash = header_socket_hash(hints)?;
-        if let Some(session) = session {
-            session.header_socket = Some((raw.clone(), hash.clone()));
-        }
-        Some(hash)
+    }
+
+    fn codex_bind(&self, sid: &str, cwd: Option<&str>, panes: &[PaneFact]) -> CodexBind {
+        codex_bind_with(sid, cwd, panes, &|s| self.dir_key(s))
+    }
+
+    /// Resolves the directories the Codex binding rules compare: `cwds` and
+    /// every Codex pane's cwd. Call only where no lock is held.
+    async fn prefetch_dirs<'a>(&self, cwds: impl IntoIterator<Item = Option<&'a str>>) {
+        let mut dirs: Vec<PathBuf> = cwds.into_iter().flatten().map(PathBuf::from).collect();
+        dirs.extend(
+            self.panes()
+                .into_iter()
+                .filter(|p| p.kind == AgentKind::Codex)
+                .filter_map(|p| p.cwd.map(PathBuf::from)),
+        );
+        dirs.retain(|d| d.is_absolute());
+        dirs.sort();
+        dirs.dedup();
+        self.paths.prefetch(dirs).await;
     }
 
     /// The session's owner. `event` is the header hints of the hook being
@@ -592,9 +591,10 @@ impl Reconciler {
         entrypoint: Option<&str>,
     ) -> Owner {
         let panes = self.panes();
-        let hashes = self.pane_socket_hashes(&panes);
-        let pane_hash = |p: &Path| hashes.get(p).cloned().unwrap_or_else(|| socket_hash(p));
-        let event_hash = event.and_then(|h| self.header_hash(session_id, h));
+        // Discovery already canonicalized every herdr socket path: it is
+        // the path hashed into the agent id, so no filesystem call here.
+        let pane_hash = |p: &Path| socket_hash(p);
+        let event_hash = event.and_then(|h| self.header_hash(h));
         let fresh = event.and_then(|h| {
             let header = HeaderRef {
                 pane: h.herdr_pane.as_deref(),
@@ -720,7 +720,6 @@ impl Reconciler {
                 last_event: now,
                 in_registry,
                 ended: None,
-                header_socket: None,
             });
         true
     }
@@ -796,6 +795,9 @@ impl Reconciler {
         if !self.new_session(&sid, AgentState::Idle, false, now) {
             // A8: dropping `hold` replies empty at once and frees its permit.
             return true;
+        }
+        if let Some(raw) = &event.hints.herdr_socket {
+            self.paths.prefetch([PathBuf::from(raw)]).await;
         }
         let owner = self.owner_of(&sid, Some(&event.hints), entrypoint.as_deref());
         let t3_owned = matches!(owner, Owner::T3(_));
@@ -1477,22 +1479,41 @@ impl Reconciler {
     /// locks before the recheck (C1 bind read) is scheduled; only a passing
     /// recheck restores it (`on_codex_bound`).
     async fn codex_transitions(&mut self) {
+        // Resolve the directories the rules compare before any lock.
+        let cwds: Vec<String> = self
+            .tracks
+            .values()
+            .filter(|t| t.kind == TrackKind::Codex)
+            .filter_map(|t| t.payload.cwd.clone())
+            .collect();
+        self.prefetch_dirs(cwds.iter().map(|c| Some(c.as_str())))
+            .await;
         let panes = self.panes();
         let t3_owns = |sid: &str| self.t3.as_ref().is_some_and(|m| m.owner(sid).is_some());
         let mut revoke = Vec::new();
         let mut recheck = Vec::new();
+        let mut unresolved = Vec::new();
         for (rid, t) in self
             .tracks
             .iter()
             .filter(|(_, t)| t.kind == TrackKind::Codex)
         {
             let Some(pane) = &t.pane else { continue };
+            let bind = self.codex_bind(&t.session_id, t.payload.cwd.as_deref(), &panes);
             let bound = matches!(
-                codex_bind(&t.session_id, t.payload.cwd.as_deref(), &panes),
+                &bind,
                 CodexBind::Session(p) | CodexBind::OnlyInCwd(p)
                     if p.agent_id == pane.agent_id && p.incarnation == pane.incarnation
             );
-            if t3_owns(&t.session_id) || !bound {
+            if t3_owns(&t.session_id) {
+                revoke.push(t.session_id.clone());
+            } else if bind == CodexBind::Unresolved {
+                // Unknown is neither bound nor unbound: withdraw readiness,
+                // never revoke, and recheck only once it is known.
+                if t.phase == Phase::Keys && !t.suspended && self.open_on_keys(rid) {
+                    unresolved.push(rid.clone());
+                }
+            } else if !bound {
                 revoke.push(t.session_id.clone());
             } else if t.phase == Phase::Keys
                 && self.open_on_keys(rid)
@@ -1511,6 +1532,26 @@ impl Reconciler {
         revoke.dedup();
         for sid in revoke {
             self.revoke_session(&sid).await;
+        }
+        for rid in unresolved {
+            let Some(agent) = self.tracks.get(&rid).map(|t| t.agent_id.clone()) else {
+                continue;
+            };
+            let _agent_guard = self.agent_guard(&agent).await;
+            let _guard = self.shared.occurrence_lock(&agent).await;
+            if !self.open_on_keys(&rid) {
+                continue;
+            }
+            if let Some(t) = self.tracks.get_mut(&rid)
+                && t.phase == Phase::Keys
+            {
+                t.suspended = true;
+                self.core.observe(Observation::RequestReady {
+                    agent_id: t.agent_id.clone(),
+                    key: t.key.clone(),
+                    ready: false,
+                });
+            }
         }
         for rid in recheck {
             let Some(agent) = self.tracks.get(&rid).map(|t| t.agent_id.clone()) else {
@@ -1700,9 +1741,10 @@ impl Reconciler {
         else {
             return false;
         };
-        let pane = match codex_bind(&sid, event.payload.cwd.as_deref(), &self.panes()) {
+        self.prefetch_dirs([event.payload.cwd.as_deref()]).await;
+        let pane = match self.codex_bind(&sid, event.payload.cwd.as_deref(), &self.panes()) {
             CodexBind::Session(p) | CodexBind::OnlyInCwd(p) => p,
-            CodexBind::Ambiguous | CodexBind::Unbound => return false,
+            CodexBind::Ambiguous | CodexBind::Unbound | CodexBind::Unresolved => return false,
         };
         if self.codex_watches() >= self.cfg.max_tracks {
             return false;
@@ -1877,7 +1919,8 @@ impl Reconciler {
         ctx: &CodexCtx,
         read: &CodexBindRead,
     ) -> CodexDecision {
-        let bound = matches!(codex_bind(&ticket.session_id, ctx.event.payload.cwd.as_deref(), &self.panes()), CodexBind::Session(p) | CodexBind::OnlyInCwd(p) if p.agent_id == ctx.pane.agent_id && p.incarnation == ctx.pane.incarnation);
+        // Cache only (locks are held): an unresolved directory is not bound.
+        let bound = matches!(self.codex_bind(&ticket.session_id, ctx.event.payload.cwd.as_deref(), &self.panes()), CodexBind::Session(p) | CodexBind::OnlyInCwd(p) if p.agent_id == ctx.pane.agent_id && p.incarnation == ctx.pane.incarnation);
         let paths = [AnswerPath::Keys];
         let valid = if ticket.request_id.is_some() {
             still_valid(ticket, &self.now_for(ticket), &paths)
@@ -1930,6 +1973,8 @@ impl Reconciler {
         let Some(herdr) = self.herdr.clone() else {
             return;
         };
+        // The binding check below runs under locks from the cache alone.
+        self.prefetch_dirs([ctx.event.payload.cwd.as_deref()]).await;
         let locks = herdr.agent_locks();
         let Ok(_agent) =
             tokio::time::timeout(self.cfg.lock_wait, locks.lock(&ticket.agent_id)).await

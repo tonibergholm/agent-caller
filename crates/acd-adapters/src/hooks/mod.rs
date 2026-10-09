@@ -5,6 +5,7 @@ pub mod endpoint;
 pub mod evidence;
 pub mod mapping;
 pub mod owner;
+pub mod paths;
 mod state;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -67,6 +68,12 @@ pub struct HooksConfig {
     pub max_sessions: usize,
     /// A8: session ids per credential generation.
     pub max_generation_ids: usize,
+    /// Resolves header socket and cwd paths, in blocking workers only.
+    pub path_resolver: paths::PathResolver,
+    /// Blocking path workers outstanding at once (a stuck one keeps its slot).
+    pub max_resolvers: usize,
+    /// The longest the reconciler waits for a path worker it just started.
+    pub resolve_wait: Duration,
 }
 
 /// Retained work, for tests and diagnostics (A1 to A8).
@@ -145,6 +152,9 @@ impl HooksConfig {
             unconsumed_ttl: Duration::from_secs(600),
             max_sessions: 4096,
             max_generation_ids: 4096,
+            path_resolver: paths::PathResolver::fs(),
+            max_resolvers: 4,
+            resolve_wait: Duration::from_millis(250),
         }
     }
 }
@@ -249,11 +259,11 @@ impl HooksAdapter {
         s
     }
 
-    /// Header and pane socket paths resolved on the filesystem so far.
+    /// Paths (header sockets, cwds) given to the resolver so far.
     #[cfg(any(test, feature = "testing"))]
-    pub fn socket_resolutions(&self) -> u64 {
+    pub fn path_resolutions(&self) -> u64 {
         self.shared
-            .socket_resolutions
+            .path_resolutions
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 

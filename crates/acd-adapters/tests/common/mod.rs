@@ -190,3 +190,71 @@ impl Rig {
     }
 }
 pub const CLI: [(&str, &str); 1] = [("X-Claude-Entrypoint", "cli")];
+
+/// A path resolver that blocks like a dead network mount on every path
+/// containing `marker` (all paths when empty) until released; others
+/// resolve on the real filesystem. Releases on drop, so the runtime, which
+/// waits for blocking tasks, can always shut down.
+pub struct Stall {
+    release: Arc<std::sync::atomic::AtomicBool>,
+    entered: Arc<std::sync::atomic::AtomicUsize>,
+    inside: Arc<std::sync::atomic::AtomicUsize>,
+    max_inside: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl Stall {
+    pub fn new() -> Self {
+        Self {
+            release: Arc::default(),
+            entered: Arc::default(),
+            inside: Arc::default(),
+            max_inside: Arc::default(),
+        }
+    }
+    pub fn resolver(&self, marker: &'static str) -> acd_adapters::hooks::paths::PathResolver {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (release, entered, inside, max_inside) = (
+            self.release.clone(),
+            self.entered.clone(),
+            self.inside.clone(),
+            self.max_inside.clone(),
+        );
+        acd_adapters::hooks::paths::PathResolver::new(move |p| {
+            if p.to_string_lossy().contains(marker) {
+                entered.fetch_add(1, SeqCst);
+                let now = inside.fetch_add(1, SeqCst) + 1;
+                max_inside.fetch_max(now, SeqCst);
+                while !release.load(SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                inside.fetch_sub(1, SeqCst);
+            }
+            std::fs::canonicalize(p).ok()
+        })
+    }
+    /// Resolutions that reached the stall so far.
+    pub fn entered(&self) -> usize {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn max_inside(&self) -> usize {
+        self.max_inside.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn release(&self) {
+        self.release
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// Releases after `after` from a plain thread. A test whose code wrongly
+    /// blocks a runtime worker on the stall (possibly the one driving
+    /// tokio's timers) then fails on its assertions instead of hanging.
+    pub fn watchdog(&self, after: Duration) {
+        let release = self.release.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            release.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+}
+impl Drop for Stall {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
