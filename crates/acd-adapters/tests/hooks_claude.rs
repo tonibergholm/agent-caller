@@ -1485,16 +1485,19 @@ async fn a_claim_during_the_hold_end_read_is_not_misreported_as_gone() {
     })
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let gate = r.fake.as_ref().unwrap().block_next("agent.read");
+    // Gate the hold-end read itself: a pane gate on `agent.read` can be
+    // taken by herdr's own poll or a presence read instead.
+    let (reached, release) = r.hooks.gates().hold_end_read.arm();
     drop(held);
-    tokio::time::timeout(Duration::from_secs(3), gate.arrived())
+    tokio::time::timeout(Duration::from_secs(3), reached)
         .await
-        .expect("hold-end read reached fake gate");
+        .expect("the hold-end read reached its gate")
+        .unwrap();
     assert_eq!(
         answer(&r, "a1", &rid, "allow").await.error_code(),
         Some(ErrorCode::RequestNotReady)
     );
-    gate.release();
+    release.send(()).unwrap();
     until("keys path", || {
         r.core
             .request(&rid)

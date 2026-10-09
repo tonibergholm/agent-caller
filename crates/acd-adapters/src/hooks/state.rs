@@ -2,8 +2,8 @@
 //! It drains the endpoint mailbox and its internal channel; it never awaits a herdr call itself.
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use acd_core::{AgentObs, Core, CorrelationKey, Observation};
@@ -19,7 +19,10 @@ use super::dialogs::{self, DialogMatch};
 use super::endpoint::{HoldId, HoldPermit, Inbound, Mailbox};
 use super::evidence::{self, EvidenceHub, Expect, Verdict};
 use super::mapping;
-use super::owner::{CodexBind, Owner, PaneFact, claude_owner, codex_bind, header_pane, pane_facts};
+use super::owner::{
+    CodexBind, HeaderRef, Owner, PaneFact, claude_owner_resolved, codex_bind, header_pane_resolved,
+    header_socket_hash, pane_facts,
+};
 use super::tickets::{Now, ReadKind, ReadSlots, Ticket, still_valid};
 use super::wire::{
     AlwaysRule, Hints, HookAgent, HookEvent, HookName, Payload, always_rule, claude_key, codex_key,
@@ -28,6 +31,7 @@ use super::wire::{
 use crate::herdr::HerdrAdapter;
 use crate::herdr::client::CALL_TIMEOUT;
 use crate::herdr::keys::{KeysTarget, codex_inventory as herdr_codex_inventory};
+use crate::herdr::map::socket_hash;
 use crate::herdr::reconciler::PaneRef;
 use crate::t3::sessions::SessionMap;
 use crate::text::{LAST_MESSAGE_CHARS, TITLE_CHARS, cap_chars, clean_display};
@@ -41,6 +45,14 @@ pub(crate) struct Shared {
     /// Session ids not recorded under a generation because it was full.
     pub dropped_generation_ids: AtomicU64,
     occurrence_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Published by the reconciler at the end of every turn.
+    pub stats: Mutex<super::HookStats>,
+    /// Spawned read tasks still alive (`TaskCount`).
+    pub read_tasks: AtomicUsize,
+    /// A clone of the reconciler's internal sender, for live queue depth.
+    pub internal_tx: OnceLock<mpsc::Sender<Internal>>,
+    /// Socket paths resolved on the filesystem (headers and panes).
+    pub socket_resolutions: AtomicU64,
     #[cfg(any(test, feature = "testing"))]
     pub gates: Gates,
     /// While set, `on_tick` returns at once (tests only).
@@ -53,6 +65,8 @@ pub(crate) struct Shared {
 pub struct Gates {
     pub deliver: Gate,
     pub retire: Gate,
+    /// Passed by a hold-end read task before its read.
+    pub hold_end_read: Gate,
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -74,6 +88,23 @@ impl Gate {
             let _ = reached.send(());
             let _ = release.await;
         }
+    }
+}
+
+/// Counts a spawned read task while it lives; an aborted task is counted
+/// out when its future is dropped.
+struct TaskCount(Arc<Shared>);
+
+impl TaskCount {
+    fn new(shared: &Arc<Shared>) -> Self {
+        shared.read_tasks.fetch_add(1, Ordering::SeqCst);
+        Self(shared.clone())
+    }
+}
+
+impl Drop for TaskCount {
+    fn drop(&mut self) {
+        self.0.read_tasks.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -142,7 +173,10 @@ pub(crate) enum Internal {
 /// kept while that pane's incarnation lives. The headers only arrive with
 /// hooks, so scans and T3 changes re-evaluate with this.
 struct HeaderBind {
-    hints: Hints,
+    pane: Option<String>,
+    /// The resolved header socket (`header_socket_hash`), so re-evaluations
+    /// never touch the filesystem.
+    socket_hash: String,
     agent_id: String,
     incarnation: u64,
 }
@@ -262,15 +296,13 @@ struct Unconsumed {
 
 const MAX_UNCONSUMED: usize = 8;
 
-fn cap_bytes(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_owned();
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_owned()
+/// Cached pane socket resolutions; cleared beyond this (sockets are few).
+const MAX_PANE_SOCKETS: usize = 64;
+
+/// A8: a `cwd` longer than `CWD_MAX_BYTES` is not stored (a truncated
+/// path would name the wrong project).
+fn stored_cwd(cwd: &str) -> Option<String> {
+    (cwd.len() <= CWD_MAX_BYTES).then(|| cwd.to_owned())
 }
 
 struct Session {
@@ -288,6 +320,9 @@ struct Session {
     last_event: Instant,
     in_registry: bool,
     ended: Option<Instant>,
+    /// The last header socket path that resolved, and its hash: a later
+    /// hook with the same header is not resolved again.
+    header_socket: Option<(String, String)>,
 }
 
 pub(crate) struct Reconciler {
@@ -303,13 +338,20 @@ pub(crate) struct Reconciler {
     scanner: Option<Arc<Mutex<Scanner>>>,
     scan_in_flight: Arc<AtomicBool>,
     scanning: bool,
-    // TODO(A8, Task 19): bound this map to `max_sessions`.
+    /// A8: at most `max_sessions` (`admit_session`).
     sessions: HashMap<String, Session>,
     codex: HashMap<String, CodexSession>,
     tracks: HashMap<String, Track>,
     holds: HashMap<HoldId, String>,
     next_op: u64,
+    /// O7 identity history; A8: at most `max_sessions` sessions.
     unconsumed: HashMap<String, Unconsumed>,
+    /// A8: set when evicting a session's identities would forget an
+    /// ambiguity; every new occurrence is shadowed until `unconsumed_ttl`.
+    shadow_all: Option<Instant>,
+    sessions_refused: u64,
+    /// Discovered pane socket paths and their resolved `socket_hash`.
+    pane_sockets: HashMap<std::path::PathBuf, String>,
     evidence: Arc<EvidenceHub>,
 }
 
@@ -326,6 +368,7 @@ impl Reconciler {
         mailbox: Mailbox,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(cfg.max_reads + 2);
+        let _ = shared.internal_tx.set(internal_tx.clone());
         let reads = Arc::new(Semaphore::new(cfg.max_reads));
         let scanner = Some(Arc::new(Mutex::new(Scanner::new(
             cfg.sessions_dirs.get(),
@@ -350,35 +393,114 @@ impl Reconciler {
             holds: HashMap::new(),
             next_op: 0,
             unconsumed: HashMap::new(),
+            shadow_all: None,
+            sessions_refused: 0,
+            pane_sockets: HashMap::new(),
             evidence,
         }
     }
 
+    /// A6: every turn serves the due tick and any T3 change first, then at
+    /// most `batch` control messages, internal results and lifecycle
+    /// events each; it blocks only when everything is empty. No queue can
+    /// starve the tick or an ownership change.
     pub(crate) async fn run(mut self) {
-        let mut tick = tokio::time::interval(self.cfg.tick);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut t3_changes = self.t3.as_ref().map(|m| m.changes());
+        let mut next_tick = Instant::now();
         let mut next_scan = Instant::now();
         loop {
+            let now = Instant::now();
+            if now >= next_tick {
+                next_tick = now + self.cfg.tick;
+                if now >= next_scan {
+                    next_scan = now + self.cfg.scan_interval;
+                    self.spawn_scan();
+                }
+                self.on_tick().await;
+            }
+            if let Some(rx) = t3_changes.as_mut()
+                && rx.has_changed().unwrap_or(false)
+            {
+                rx.borrow_and_update();
+                self.reevaluate_all().await;
+            }
+            let mut busy = false;
+            for _ in 0..self.cfg.batch {
+                let Ok(m) = self.mailbox.control.try_recv() else {
+                    break;
+                };
+                busy = true;
+                self.on_inbound(m).await;
+            }
+            for _ in 0..self.cfg.batch {
+                let Ok(m) = self.internal_rx.try_recv() else {
+                    break;
+                };
+                busy = true;
+                self.on_internal(m).await;
+            }
+            for _ in 0..self.cfg.batch {
+                match self.mailbox.events.try_recv() {
+                    Ok(m) => {
+                        busy = true;
+                        self.take_event(m).await;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => return,
+                }
+            }
+            self.publish_stats();
+            if busy {
+                continue;
+            }
+            // Idle: wait for any source or the next tick. A message taken
+            // here is handled now; the next turn serves the tick first.
             tokio::select! {
-                biased;
+                _ = tokio::time::sleep_until(next_tick) => {}
+                _ = changed(&mut t3_changes) => self.reevaluate_all().await,
                 Some(m) = self.mailbox.control.recv() => self.on_inbound(m).await,
                 Some(m) = self.internal_rx.recv() => self.on_internal(m).await,
-                _ = tick.tick() => {
-                    let now = Instant::now();
-                    if now >= next_scan { next_scan = now + self.cfg.scan_interval; self.spawn_scan(); }
-                    self.on_tick().await;
-                }
-                _ = changed(&mut t3_changes) => self.reevaluate_all().await,
                 m = self.mailbox.events.recv() => match m {
-                    Some(m) => {
-                        if let Inbound::Event { bytes, .. } = &m { self.mailbox.release(*bytes); }
-                        self.on_inbound(m).await
-                    }
+                    Some(m) => self.take_event(m).await,
                     None => return,
                 },
             }
+            self.publish_stats();
         }
+    }
+
+    async fn take_event(&mut self, m: Inbound) {
+        if let Inbound::Event { bytes, .. } = &m {
+            self.mailbox.release(*bytes);
+        }
+        self.on_inbound(m).await;
+    }
+
+    fn publish_stats(&self) {
+        let generation_ids = self
+            .shared
+            .by_generation
+            .lock()
+            .expect("shared")
+            .values()
+            .map(HashSet::len)
+            .sum();
+        *self.shared.stats.lock().expect("stats") = super::HookStats {
+            // Live in `HooksAdapter::stats`.
+            control_queued: 0,
+            events_queued: 0,
+            internal_queued: 0,
+            read_tasks: 0,
+            generation_ids_dropped: 0,
+            tracks: self.tracks.len(),
+            holds: self.holds.len(),
+            codex_watches: self.codex_watches(),
+            sessions: self.sessions.len(),
+            codex_sessions: self.codex.len(),
+            unconsumed_sessions: self.unconsumed.len(),
+            generation_ids,
+            sessions_refused: self.sessions_refused,
+        };
     }
 
     fn spawn_scan(&mut self) {
@@ -417,6 +539,48 @@ impl Reconciler {
             .unwrap_or_default()
     }
 
+    /// `socket_hash` of every pane socket that resolves, resolved once per
+    /// path and then cached (Task 11 follow-up), so re-evaluations stay off
+    /// the filesystem. Discovery already canonicalizes these paths.
+    fn pane_socket_hashes(&mut self, panes: &[PaneFact]) -> HashMap<std::path::PathBuf, String> {
+        if self.pane_sockets.len() > MAX_PANE_SOCKETS {
+            self.pane_sockets.clear();
+        }
+        for p in panes {
+            if !self.pane_sockets.contains_key(&p.socket) {
+                self.shared
+                    .socket_resolutions
+                    .fetch_add(1, Ordering::SeqCst);
+                // Only a path that resolves is cached; one that does not
+                // keeps its raw form and is tried again next time.
+                if let Ok(c) = std::fs::canonicalize(&p.socket) {
+                    self.pane_sockets.insert(p.socket.clone(), socket_hash(&c));
+                }
+            }
+        }
+        self.pane_sockets.clone()
+    }
+
+    /// The resolved header socket of `hints`: the session's cached
+    /// resolution when the raw header is unchanged, else resolved now.
+    fn header_hash(&mut self, session_id: &str, hints: &Hints) -> Option<String> {
+        let raw = hints.herdr_socket.as_ref()?;
+        let session = self.sessions.get_mut(session_id);
+        if let Some((cached, hash)) = session.as_ref().and_then(|s| s.header_socket.as_ref())
+            && cached == raw
+        {
+            return Some(hash.clone());
+        }
+        self.shared
+            .socket_resolutions
+            .fetch_add(1, Ordering::SeqCst);
+        let hash = header_socket_hash(hints)?;
+        if let Some(session) = session {
+            session.header_socket = Some((raw.clone(), hash.clone()));
+        }
+        Some(hash)
+    }
+
     /// The session's owner. `event` is the header hints of the hook being
     /// handled; a valid header binding is remembered on the session and
     /// reused by every later re-evaluation until its pane's incarnation
@@ -428,14 +592,22 @@ impl Reconciler {
         entrypoint: Option<&str>,
     ) -> Owner {
         let panes = self.panes();
+        let hashes = self.pane_socket_hashes(&panes);
+        let pane_hash = |p: &Path| hashes.get(p).cloned().unwrap_or_else(|| socket_hash(p));
+        let event_hash = event.and_then(|h| self.header_hash(session_id, h));
         let fresh = event.and_then(|h| {
-            header_pane(h, session_id, &panes).map(|p| HeaderBind {
-                hints: h.clone(),
+            let header = HeaderRef {
+                pane: h.herdr_pane.as_deref(),
+                socket_hash: event_hash.as_deref(),
+            };
+            header_pane_resolved(header, session_id, &panes, &pane_hash).map(|p| HeaderBind {
+                pane: h.herdr_pane.clone(),
+                socket_hash: event_hash.clone().unwrap_or_default(),
                 agent_id: p.agent_id.clone(),
                 incarnation: p.incarnation,
             })
         });
-        let mut hints = event.cloned().unwrap_or_default();
+        let mut header = (event.and_then(|h| h.herdr_pane.clone()), event_hash.clone());
         if let Some(session) = self.sessions.get_mut(session_id) {
             if fresh.is_some() {
                 session.binding = fresh;
@@ -447,25 +619,90 @@ impl Reconciler {
                 session.binding = None;
             }
             if let Some(b) = &session.binding {
-                hints = b.hints.clone();
+                header = (b.pane.clone(), Some(b.socket_hash.clone()));
             }
         }
         let t3 = self
             .t3
             .as_deref()
             .map(|m| m as &dyn super::owner::SessionOwners);
-        claude_owner(
+        claude_owner_resolved(
             session_id,
-            &hints,
+            HeaderRef {
+                pane: header.0.as_deref(),
+                socket_hash: header.1.as_deref(),
+            },
             entrypoint,
             t3,
             &panes,
             &self.cfg.ignored_entrypoints,
+            &pane_hash,
         )
     }
 
-    fn new_session(&mut self, sid: &str, state: AgentState, in_registry: bool, now: Instant) {
-        // TODO(A8, Task 19): refuse or evict at `max_sessions`.
+    /// A8: makes room for a new Claude (`codex == false`) or Codex session,
+    /// or refuses it. Evicts the least recently active session with no
+    /// open track and, for Codex, no running or wanted bind watch; a
+    /// hooks-only one also leaves core. Returns false when every session
+    /// is busy; the caller drops the event (a hold is released empty).
+    fn admit_session(&mut self, sid: &str, codex: bool) -> bool {
+        let (present, len) = if codex {
+            (self.codex.contains_key(sid), self.codex.len())
+        } else {
+            (self.sessions.contains_key(sid), self.sessions.len())
+        };
+        if present || len < self.cfg.max_sessions {
+            return true;
+        }
+        let busy: HashSet<&str> = self
+            .tracks
+            .values()
+            .map(|t| t.session_id.as_str())
+            .collect();
+        let victim = if codex {
+            self.codex
+                .iter()
+                .filter(|(id, c)| {
+                    !busy.contains(id.as_str())
+                        && c.wanted.is_none()
+                        && !c.watch.busy(ReadKind::CodexBind)
+                })
+                .min_by_key(|(_, c)| c.last_event)
+                .map(|(id, _)| id.clone())
+        } else {
+            self.sessions
+                .iter()
+                .filter(|(id, _)| !busy.contains(id.as_str()))
+                .min_by_key(|(_, s)| s.last_event)
+                .map(|(id, _)| id.clone())
+        };
+        let Some(victim) = victim else {
+            self.sessions_refused += 1;
+            return false;
+        };
+        if codex {
+            self.codex.remove(&victim);
+        } else if let Some(s) = self.sessions.remove(&victim)
+            && s.hooks_only
+        {
+            self.core.observe(Observation::AgentGone {
+                agent_id: format!("claude:{victim}"),
+            });
+        }
+        true
+    }
+
+    /// Adds `sid` unless A8 refuses it; false when refused.
+    fn new_session(
+        &mut self,
+        sid: &str,
+        state: AgentState,
+        in_registry: bool,
+        now: Instant,
+    ) -> bool {
+        if !self.admit_session(sid, false) {
+            return false;
+        }
         self.sessions
             .entry(sid.to_owned())
             .or_insert_with(|| Session {
@@ -483,7 +720,9 @@ impl Reconciler {
                 last_event: now,
                 in_registry,
                 ended: None,
+                header_socket: None,
             });
+        true
     }
 
     async fn on_inbound(&mut self, message: Inbound) {
@@ -549,19 +788,22 @@ impl Reconciler {
     }
 
     /// Applies a Claude event and returns whether the session was T3-owned
-    /// for this event.
+    /// for this event, or refused by A8 (no state, so no evidence either).
     async fn on_claude(&mut self, event: HookEvent, hold: Option<super::endpoint::HoldIn>) -> bool {
         let sid = event.payload.session_id.clone();
         let entrypoint = event.hints.entrypoint.clone();
         let now = Instant::now();
-        self.new_session(&sid, AgentState::Idle, false, now);
+        if !self.new_session(&sid, AgentState::Idle, false, now) {
+            // A8: dropping `hold` replies empty at once and frees its permit.
+            return true;
+        }
         let owner = self.owner_of(&sid, Some(&event.hints), entrypoint.as_deref());
         let t3_owned = matches!(owner, Owner::T3(_));
         let session = self.sessions.get_mut(&sid).expect("inserted above");
         session.last_event = now;
         session.last_hook = Some(now);
         if let Some(cwd) = &event.payload.cwd {
-            session.cwd = Some(cap_bytes(cwd, CWD_MAX_BYTES));
+            session.cwd = stored_cwd(cwd);
         }
         if entrypoint.is_some() {
             session.entrypoint = entrypoint;
@@ -648,6 +890,11 @@ impl Reconciler {
             return;
         };
         self.end_session_occurrences(&sid).await;
+        if self.tracks.len() >= self.cfg.max_tracks {
+            // A5: open nothing; dropping `hold` replies empty at once, so
+            // the terminal answers it.
+            return;
+        }
         let mut obs = mapping::claude_permission(
             &agent_id,
             key.clone(),
@@ -752,6 +999,9 @@ impl Reconciler {
             return;
         }
         self.end_session_occurrences(&sid).await;
+        if self.tracks.len() >= self.cfg.max_tracks {
+            return; // A5: herdr's fallback still shows the dialog
+        }
         let Some(obs) = mapping::claude_question(
             &agent_id,
             key.clone(),
@@ -941,7 +1191,15 @@ impl Reconciler {
         let tx = self.internal_tx.clone();
         let window = self.cfg.capture_window;
         let poll = self.cfg.capture_poll;
+        #[cfg(any(test, feature = "testing"))]
+        let shared = self.shared.clone();
+        let count = TaskCount::new(&self.shared);
         let task = tokio::spawn(async move {
+            let _count = count;
+            #[cfg(any(test, feature = "testing"))]
+            if matches!(purpose, Purpose::HoldEnded { .. }) {
+                shared.gates.hold_end_read.pass().await;
+            }
             let deadline = Instant::now() + window;
             loop {
                 let read = pref
@@ -1042,13 +1300,14 @@ impl Reconciler {
 
     fn mark_shadow(&mut self, rid: &str) {
         let shadowed = self.tracks.get(rid).is_some_and(|t| {
-            self.unconsumed.get(&t.session_id).is_some_and(|u| {
-                u.shadow_all.is_some()
-                    || u.entries
-                        .iter()
-                        .chain(u.consumed.iter())
-                        .any(|(e, _)| evidence::same_identity(e, &t.expect))
-            })
+            self.shadow_all.is_some()
+                || self.unconsumed.get(&t.session_id).is_some_and(|u| {
+                    u.shadow_all.is_some()
+                        || u.entries
+                            .iter()
+                            .chain(u.consumed.iter())
+                            .any(|(e, _)| evidence::same_identity(e, &t.expect))
+                })
         });
         if let Some(t) = self.tracks.get_mut(rid) {
             t.shadowed = shadowed;
@@ -1056,15 +1315,41 @@ impl Reconciler {
     }
 
     fn note_unconsumed(&mut self, t: &Track) {
-        let u = self.unconsumed.entry(t.session_id.clone()).or_default();
+        let u = self.history(&t.session_id);
         u.entries.push_back((t.expect.clone(), Instant::now()));
         Self::cap_identities(u);
     }
 
     fn note_consumed(&mut self, t: &Track) {
-        let u = self.unconsumed.entry(t.session_id.clone()).or_default();
+        let u = self.history(&t.session_id);
         u.consumed.push_back((t.expect.clone(), Instant::now()));
         Self::cap_identities(u);
+    }
+
+    /// The session's O7 history. A8: a full map first evicts the session
+    /// whose newest identity is oldest; forgetting identities sets the
+    /// global shadow, so an ambiguity is summarized, never forgotten.
+    fn history(&mut self, sid: &str) -> &mut Unconsumed {
+        if !self.unconsumed.contains_key(sid) && self.unconsumed.len() >= self.cfg.max_sessions {
+            let newest = |u: &Unconsumed| {
+                u.entries
+                    .iter()
+                    .chain(u.consumed.iter())
+                    .map(|(_, at)| *at)
+                    .chain(u.shadow_all)
+                    .max()
+            };
+            let victim = self
+                .unconsumed
+                .iter()
+                .min_by_key(|(_, u)| newest(u))
+                .map(|(id, _)| id.clone());
+            if let Some(victim) = victim {
+                self.unconsumed.remove(&victim);
+                self.shadow_all = Some(Instant::now());
+            }
+        }
+        self.unconsumed.entry(sid.to_owned()).or_default()
     }
 
     fn cap_identities(u: &mut Unconsumed) {
@@ -1379,6 +1664,9 @@ impl Reconciler {
     async fn on_codex(&mut self, event: HookEvent) -> bool {
         let sid = event.payload.session_id.clone();
         let now = Instant::now();
+        if !self.admit_session(&sid, true) {
+            return true; // A8: refused, like an unbound request
+        }
         let c = self
             .codex
             .entry(sid.clone())
@@ -1516,7 +1804,9 @@ impl Reconciler {
         let task_ctx = ctx.clone();
         let ctx_for_result = ctx.clone();
         let request_for_slot = ctx.rid.clone();
+        let count = TaskCount::new(&self.shared);
         let task = tokio::spawn(async move {
+            let _count = count;
             let matcher = DialogMatch::CodexCommand {
                 command: task_ctx.command.clone(),
             };
@@ -2216,8 +2506,12 @@ impl Reconciler {
             .iter()
             .map(|entry| entry.session_id.clone())
             .collect();
+        let mut refused = HashSet::new();
         for entry in &scan.live {
-            self.new_session(&entry.session_id, AgentState::Unknown, true, now);
+            if !self.new_session(&entry.session_id, AgentState::Unknown, true, now) {
+                refused.insert(entry.session_id.clone());
+                continue;
+            }
             let session = self
                 .sessions
                 .get_mut(&entry.session_id)
@@ -2225,7 +2519,7 @@ impl Reconciler {
             session.in_registry = true;
             session.last_event = now;
             if session.cwd.is_none() {
-                session.cwd = entry.cwd.as_deref().map(|c| cap_bytes(c, CWD_MAX_BYTES));
+                session.cwd = entry.cwd.as_deref().and_then(stored_cwd);
             }
             if scan.complete {
                 session.ended = None;
@@ -2254,7 +2548,11 @@ impl Reconciler {
                 live: scan.live.clone(),
             });
         }
-        for entry in &scan.live {
+        for entry in scan
+            .live
+            .iter()
+            .filter(|e| !refused.contains(&e.session_id))
+        {
             let owner = self.owner_of(&entry.session_id, None, entry.entrypoint.as_deref());
             self.apply_owner(&entry.session_id, owner).await;
         }
@@ -2356,6 +2654,12 @@ impl Reconciler {
             }
         }
         let ttl = self.cfg.unconsumed_ttl;
+        if self
+            .shadow_all
+            .is_some_and(|at| now.duration_since(at) >= ttl)
+        {
+            self.shadow_all = None;
+        }
         self.unconsumed.retain(|_, u| {
             u.entries.retain(|(_, at)| now.duration_since(*at) < ttl);
             u.consumed.retain(|(_, at)| now.duration_since(*at) < ttl);
@@ -2863,10 +3167,10 @@ mod tests {
     }
 
     #[test]
-    fn cwd_is_capped_on_a_char_boundary() {
-        let s = "é".repeat(3000);
-        let c = cap_bytes(&s, CWD_MAX_BYTES);
-        assert!(c.len() <= CWD_MAX_BYTES && c.len() >= CWD_MAX_BYTES - 1);
-        assert_eq!(cap_bytes("abc", 10), "abc");
+    fn a_cwd_over_the_limit_is_not_stored() {
+        assert_eq!(stored_cwd(&"é".repeat(3000)), None);
+        let max = "a".repeat(CWD_MAX_BYTES);
+        assert_eq!(stored_cwd(&max), Some(max.clone()));
+        assert_eq!(stored_cwd("/tmp/p"), Some("/tmp/p".into()));
     }
 }

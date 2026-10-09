@@ -239,6 +239,16 @@ pub fn mailbox(opts: &EndpointOptions) -> (MailboxTx, Mailbox) {
 }
 
 impl MailboxTx {
+    /// Queued (and, for control, reserved) messages: `(control, events)`.
+    /// Read from the senders, so it is current while the reconciler is
+    /// blocked. An open hold keeps one control slot reserved.
+    pub fn queued(&self) -> (usize, usize) {
+        (
+            self.control.max_capacity() - self.control.capacity(),
+            self.events.max_capacity() - self.events.capacity(),
+        )
+    }
+
     fn event(&self, event: HookEvent, generation: u64, bytes: usize) {
         let budget = &self.budget;
         let previous = budget.bytes.fetch_add(bytes, Ordering::SeqCst);

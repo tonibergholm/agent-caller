@@ -70,22 +70,45 @@ fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// The `socket_hash` of the header socket path after resolving symlinks.
+/// Fail closed: a header path that does not resolve is no header.
+pub fn header_socket_hash(hints: &Hints) -> Option<String> {
+    Some(socket_hash(
+        &std::fs::canonicalize(hints.herdr_socket.as_deref()?).ok()?,
+    ))
+}
+
+/// Claude headers whose socket path was already resolved
+/// (`header_socket_hash`), so the binding rules touch no filesystem.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeaderRef<'a> {
+    pub pane: Option<&'a str>,
+    pub socket_hash: Option<&'a str>,
+}
+
+/// The `socket_hash` of a discovered pane's socket after resolving symlinks.
+pub type PaneSocketHash<'a> = &'a dyn Fn(&Path) -> String;
+
+fn direct_pane_hash(p: &Path) -> String {
+    socket_hash(&canonical(p))
+}
+
 /// The Claude pane the headers name, before any conflict check. The socket
 /// header is only compared through `socket_hash` with sockets herdr
 /// discovery already knows; acd never opens a path taken from a header. A
 /// pane that reports a different session is not this session's pane.
 fn header_candidate<'a>(
-    hints: &Hints,
+    header: HeaderRef<'_>,
     session_id: &str,
     panes: &'a [PaneFact],
+    pane_hash: PaneSocketHash<'_>,
 ) -> Option<&'a PaneFact> {
-    let pane = hints.herdr_pane.as_deref().filter(|p| valid_id(p))?;
-    // Fail closed: a header path that does not resolve binds nothing.
-    let hash = socket_hash(&std::fs::canonicalize(hints.herdr_socket.as_deref()?).ok()?);
+    let pane = header.pane.filter(|p| valid_id(p))?;
+    let hash = header.socket_hash?;
     panes.iter().find(|f| {
         f.pane_id == pane
             && f.kind == AgentKind::Claude
-            && socket_hash(&canonical(&f.socket)) == hash
+            && pane_hash(&f.socket) == hash
             && f.session.as_deref().is_none_or(|s| s == session_id)
     })
 }
@@ -97,7 +120,22 @@ pub fn header_pane<'a>(
     session_id: &str,
     panes: &'a [PaneFact],
 ) -> Option<&'a PaneFact> {
-    let c = header_candidate(hints, session_id, panes)?;
+    let hash = header_socket_hash(hints);
+    let header = HeaderRef {
+        pane: hints.herdr_pane.as_deref(),
+        socket_hash: hash.as_deref(),
+    };
+    header_pane_resolved(header, session_id, panes, &direct_pane_hash)
+}
+
+/// `header_pane` with the header socket already resolved.
+pub fn header_pane_resolved<'a>(
+    header: HeaderRef<'_>,
+    session_id: &str,
+    panes: &'a [PaneFact],
+    pane_hash: PaneSocketHash<'_>,
+) -> Option<&'a PaneFact> {
+    let c = header_candidate(header, session_id, panes, pane_hash)?;
     let conflict = claude_reporters(session_id, panes)
         .iter()
         .any(|r| r.agent_id != c.agent_id);
@@ -115,11 +153,38 @@ pub fn claude_owner(
     panes: &[PaneFact],
     ignored: &[String],
 ) -> Owner {
+    let hash = header_socket_hash(hints);
+    let header = HeaderRef {
+        pane: hints.herdr_pane.as_deref(),
+        socket_hash: hash.as_deref(),
+    };
+    claude_owner_resolved(
+        session_id,
+        header,
+        entrypoint,
+        t3,
+        panes,
+        ignored,
+        &direct_pane_hash,
+    )
+}
+
+/// `claude_owner` with the header socket already resolved and the pane
+/// sockets resolved by `pane_hash`.
+pub fn claude_owner_resolved(
+    session_id: &str,
+    header: HeaderRef<'_>,
+    entrypoint: Option<&str>,
+    t3: Option<&dyn SessionOwners>,
+    panes: &[PaneFact],
+    ignored: &[String],
+    pane_hash: PaneSocketHash<'_>,
+) -> Owner {
     if let Some(agent) = t3.and_then(|m| m.owner(session_id)) {
         return Owner::T3(agent);
     }
     let reporters = claude_reporters(session_id, panes);
-    let bound = match header_candidate(hints, session_id, panes) {
+    let bound = match header_candidate(header, session_id, panes, pane_hash) {
         Some(c) => reporters
             .iter()
             .all(|r| r.agent_id == c.agent_id)

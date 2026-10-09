@@ -69,6 +69,31 @@ pub struct HooksConfig {
     pub max_generation_ids: usize,
 }
 
+/// Retained work, for tests and diagnostics (A1 to A8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HookStats {
+    /// Control messages queued, plus the slot each open hold reserves.
+    pub control_queued: usize,
+    pub events_queued: usize,
+    /// Read results queued or being sent to the reconciler.
+    pub internal_queued: usize,
+    /// Spawned read tasks still alive (running or about to send).
+    pub read_tasks: usize,
+    pub tracks: usize,
+    pub holds: usize,
+    pub codex_watches: usize,
+    pub sessions: usize,
+    pub codex_sessions: usize,
+    /// Sessions in the O7 identity history (unconsumed and consumed).
+    pub unconsumed_sessions: usize,
+    /// Session ids over every kept credential generation.
+    pub generation_ids: usize,
+    /// New sessions refused because their map was full of busy sessions.
+    pub sessions_refused: u64,
+    /// Session ids not recorded because their generation was full.
+    pub generation_ids_dropped: u64,
+}
+
 #[derive(Clone)]
 pub struct SessionRoots(Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync>);
 
@@ -205,6 +230,31 @@ impl HooksAdapter {
             .get(&generation)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Retained work (A1 to A8). The queue depths and `read_tasks` are read
+    /// live, so they are current while the reconciler is blocked; the rest
+    /// is published at the end of every reconciler turn.
+    pub fn stats(&self) -> HookStats {
+        use std::sync::atomic::Ordering;
+        let mut s = *self.shared.stats.lock().expect("stats");
+        (s.control_queued, s.events_queued) = self.tx.queued();
+        s.internal_queued = self
+            .shared
+            .internal_tx
+            .get()
+            .map_or(0, |tx| tx.max_capacity() - tx.capacity());
+        s.read_tasks = self.shared.read_tasks.load(Ordering::SeqCst);
+        s.generation_ids_dropped = self.shared.dropped_generation_ids.load(Ordering::Relaxed);
+        s
+    }
+
+    /// Header and pane socket paths resolved on the filesystem so far.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn socket_resolutions(&self) -> u64 {
+        self.shared
+            .socket_resolutions
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[cfg(any(test, feature = "testing"))]

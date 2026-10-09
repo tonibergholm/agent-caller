@@ -41,6 +41,14 @@ pub fn fast(cfg: &mut HooksConfig) {
     cfg.end_grace = Duration::from_millis(200);
 }
 pub async fn rig(panes: &[Value], tweak: impl FnOnce(&mut HooksConfig)) -> Rig {
+    rig_with(panes, tweak, |_| {}).await
+}
+/// `rig` with a tweak of the herdr adapter's config too.
+pub async fn rig_with(
+    panes: &[Value],
+    tweak: impl FnOnce(&mut HooksConfig),
+    herdr_tweak: impl FnOnce(&mut HerdrConfig),
+) -> Rig {
     let home = tempfile::Builder::new()
         .prefix("acd")
         .tempdir_in("/tmp")
@@ -54,7 +62,7 @@ pub async fn rig(panes: &[Value], tweak: impl FnOnce(&mut HooksConfig)) -> Rig {
         for p in panes {
             fake.set_agent(p.clone());
         }
-        let cfg = HerdrConfig {
+        let mut cfg = HerdrConfig {
             enabled: true,
             home: home.path().into(),
             env_socket: None,
@@ -72,6 +80,7 @@ pub async fn rig(panes: &[Value], tweak: impl FnOnce(&mut HooksConfig)) -> Rig {
                 ..KeysTiming::default()
             },
         };
+        herdr_tweak(&mut cfg);
         (Some(HerdrAdapter::new(cfg)), Some(fake))
     };
     let sessions = home.path().join(".claude/sessions");

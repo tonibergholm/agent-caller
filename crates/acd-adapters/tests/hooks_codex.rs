@@ -960,3 +960,70 @@ async fn a_rival_recheck_that_finds_the_dialog_collapsed_revokes_the_live_target
     r.hooks.pause_ticks_for_tests(false);
     revoked(&r, &mut rx, &rid).await;
 }
+
+#[tokio::test]
+async fn a_generation_stale_recheck_result_keeps_the_target_not_ready_until_a_fresh_pass() {
+    // C5: a newer Codex event makes the running recheck stale. Its result is
+    // discarded, the request stays refused, and only a fresh passing recheck
+    // restores readiness.
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_owned();
+    let r = rig(&[pane("w1:p1", &cwd, Some(CODEX_SID))], |_| {}).await;
+    let rid = live_codex_target(&r, &cwd, "w1:p1").await;
+    let f = r.fake.as_ref().unwrap();
+    let gate = f.block_next("agent.read@w1:p2"); // the recheck's rival read
+    let other = tempfile::tempdir().unwrap();
+    f.set_screen("w1:p2", "detection", &screen("codex-idle-detection.txt"));
+    f.set_agent(pane("w1:p2", other.path().to_str().unwrap(), None));
+    tokio::time::timeout(Duration::from_secs(5), gate.arrived())
+        .await
+        .expect("the recheck read reached the gate");
+    let p2 = until("rival listed", || {
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .panes()
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, p)| p.pane_id == "w1:p2")
+            .map(|(id, p)| (id.clone(), p.incarnation))
+    })
+    .await;
+    // No tick may start a fresh recheck while the stale one is judged.
+    r.hooks.pause_ticks_for_tests(true);
+    // A newer event of the session (not evidence for this request) bumps
+    // its bind generation.
+    let mut post = fx("codex/payload-PostToolUse-Bash.json");
+    post["session_id"] = CODEX_SID.into();
+    post["cwd"] = cwd.clone().into();
+    post["tool_input"]["command"] = "echo unrelated".into();
+    r.hook("codex", "PostToolUse", &post, &[]).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    gate.release();
+    until("the stale result was taken", || {
+        let st = r.hooks.stats();
+        (st.read_tasks == 0 && st.internal_queued == 0).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        answer_refused_by_readiness(&r, &rid).await,
+        Some(ErrorCode::RequestNotReady),
+        "the stale pass restored nothing"
+    );
+    assert_eq!(
+        r.herdr.as_ref().unwrap().keys_targets().rivals(&rid),
+        Some(vec![]),
+        "the stale result stored no inventory"
+    );
+    assert!(f.keys_sent().is_empty());
+    r.hooks.pause_ticks_for_tests(false);
+    until("a fresh recheck stored the new inventory", || {
+        (r.herdr.as_ref().unwrap().keys_targets().rivals(&rid) == Some(vec![p2.clone()]))
+            .then_some(())
+    })
+    .await;
+    assert!(answer(&r, &rid, "allow").await.ok);
+    assert_eq!(f.keys_sent().len(), 1);
+}
