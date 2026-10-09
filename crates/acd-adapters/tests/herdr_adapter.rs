@@ -282,6 +282,32 @@ async fn keys_rig_with(
     (r, rid)
 }
 
+/// Like `keys_rig`, but the target is bound to the pane's incarnation plus
+/// `incarnation_offset`.
+async fn bound_keys_rig(incarnation_offset: u64) -> (Rig, String) {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.adapter.keys_targets().remove(&rid);
+    // A fresh request (it supersedes the first): set-once forbids
+    // re-registering the old request id.
+    let id = agent(&r).id;
+    let mut obs = permission_obs(&id, "k2");
+    obs.answer_path = AnswerPath::Keys;
+    r.core.observe(Observation::RequestSeen(obs));
+    let key = CorrelationKey("k2".into());
+    let rid = r.core.request_id_for(&id, &key).unwrap();
+    let incarnation = r.adapter.panes().read().unwrap()[&id].incarnation + incarnation_offset;
+    let dialog = screen("claude-permission-bash.txt");
+    r.adapter
+        .keys_targets()
+        .set(
+            KeysTarget::from_screen(rid.clone(), id, key, &dialog, allow_deny())
+                .unwrap()
+                .for_incarnation(incarnation),
+        )
+        .unwrap();
+    (r, rid)
+}
+
 fn allow_deny() -> std::collections::HashMap<String, String> {
     [
         ("allow".to_string(), "1".to_string()),
@@ -1153,5 +1179,23 @@ async fn unknown_send_keys_error_is_uncertain() {
     assert!(
         r.adapter.keys_targets().get(&rid).is_some(),
         "the occurrence stays monitored"
+    );
+}
+
+#[tokio::test]
+async fn a_target_for_the_current_incarnation_works() {
+    let (r, rid) = bound_keys_rig(0).await;
+    assert!(delivered(&answer(&r, "a1", &rid, "allow").await));
+    assert_eq!(r.fake.keys_sent().len(), 1);
+}
+
+#[tokio::test]
+async fn a_target_for_an_old_incarnation_is_refused() {
+    let (r, rid) = bound_keys_rig(1_000).await;
+    let res = answer(&r, "a1", &rid, "allow").await;
+    assert_eq!(res.error_code(), Some(ErrorCode::RequestGone), "{res:?}");
+    assert!(
+        r.fake.keys_sent().is_empty(),
+        "zero keys to a replaced pane"
     );
 }

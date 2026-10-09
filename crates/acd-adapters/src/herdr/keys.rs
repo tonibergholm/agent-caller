@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
 use super::client::{CALL_TIMEOUT, CallError, Herdr, KNOWN_REFUSALS, ScreenRead};
-use super::reconciler::{Hint, PaneMap};
+use super::reconciler::{Hint, PaneMap, PaneRef};
 pub use super::screen::DialogIdentity;
 use super::screen::{Fingerprint, GuardDigest, find_dialog, guard_digest, prompt_line};
 
@@ -54,6 +54,8 @@ pub struct KeysTarget {
     pub(crate) identity: DialogIdentity,
     /// Option id -> herdr key name: `"1"`..`"9"` or `"esc"` only.
     pub(crate) option_keys: HashMap<String, String>,
+    /// The pane incarnation this target is bound to (G1); `None` is unbound.
+    pub(crate) incarnation: Option<u64>,
 }
 
 impl KeysTarget {
@@ -117,7 +119,23 @@ impl KeysTarget {
             digest,
             identity: dialog.identity,
             option_keys,
+            incarnation: None,
         })
+    }
+
+    /// Binds the target to one pane incarnation (G1). A key is only ever
+    /// sent while the pane map shows this incarnation for the agent.
+    pub fn for_incarnation(mut self, incarnation: u64) -> KeysTarget {
+        self.incarnation = Some(incarnation);
+        self
+    }
+
+    pub fn incarnation(&self) -> Option<u64> {
+        self.incarnation
+    }
+
+    fn incarnation_ok(&self, pane: &PaneRef) -> bool {
+        self.incarnation.is_none_or(|n| n == pane.incarnation)
     }
 
     /// The guard: a whole read whose dialog has exactly this target's digest,
@@ -184,6 +202,7 @@ impl KeysTarget {
             && self.digest == other.digest
             && self.identity == other.identity
             && self.option_keys == other.option_keys
+            && self.incarnation == other.incarnation
     }
 }
 
@@ -390,15 +409,28 @@ impl Engine {
 
     /// Whether `request_id` is still ours to answer with `key`: claimed for
     /// keys in the core, and its target unchanged since the guard (same
-    /// digest, identity and key for the option).
-    fn lease_held(&self, core: &Weak<Core>, target: &KeysTarget, option_id: &str) -> bool {
+    /// digest, identity and key for the option), and its pane still the
+    /// incarnation the target is bound to.
+    fn lease_held(
+        &self,
+        core: &Weak<Core>,
+        panes: &PaneMap,
+        target: &KeysTarget,
+        option_id: &str,
+    ) -> bool {
         let Some(core) = core.upgrade() else {
             return false;
         };
         let claimed = core.request(&target.request_id).is_some_and(|r| {
             r.status == RequestStatus::Answering && r.answer_path == AnswerPath::Keys
         });
+        let same_pane = panes
+            .read()
+            .expect("pane map")
+            .get(&target.agent_id)
+            .is_some_and(|p| target.incarnation_ok(p));
         claimed
+            && same_pane
             && self
                 .targets
                 .get(&target.request_id)
@@ -436,6 +468,9 @@ impl Engine {
         let Some(pane) = pane else {
             return Err(not_delivered(ErrorCode::AgentGone));
         };
+        if !target.incarnation_ok(&pane) {
+            return Err(not_delivered(ErrorCode::RequestGone));
+        }
 
         // A lock wait must never sit between the screen check and the key.
         let lock = match timeout_at(deadline, self.locks.lock(&request.agent_id)).await {
@@ -468,7 +503,7 @@ impl Engine {
             .connect_until(deadline)
             .await
             .map_err(|_| not_delivered(ErrorCode::SourceUnavailable))?;
-        if !self.lease_held(&core, &target, option_id) {
+        if !self.lease_held(&core, panes, &target, option_id) {
             drop(lock);
             drop(connected); // unused: nothing was sent
             return Err(not_delivered(ErrorCode::RequestGone));
