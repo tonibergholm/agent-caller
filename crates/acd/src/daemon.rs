@@ -119,11 +119,17 @@ pub struct HookCredentials {
     dir: PathBuf,
     auth: Arc<HookAuth>,
     applied: std::sync::Mutex<Applied>,
+    /// Debug builds only: every reload fails once a retirement committed
+    /// (`ACD_TEST_FAIL_AT=reload-after-retire`).
+    #[cfg(debug_assertions)]
+    fail_reloads: std::sync::atomic::AtomicBool,
 }
 
 struct Applied {
     tags: CredentialTags,
-    /// The tags of the accepted credentials and when they last changed.
+    /// The accepted current credential, the tags of the accepted
+    /// credentials, and when those tags last changed.
+    current: Credential,
     accepted: (u64, Option<u64>),
     changed_at: tokio::time::Instant,
 }
@@ -134,15 +140,18 @@ impl HookCredentials {
         let (cur, prev) = tags.credentials(store);
         let accepted = (cur.generation, prev.as_ref().map(|p| p.generation));
         let auth = Arc::new(HookAuth::new(cur.clone()));
-        auth.set(cur, prev);
+        auth.set(cur.clone(), prev);
         Self {
             dir: dir.to_path_buf(),
             auth,
             applied: std::sync::Mutex::new(Applied {
                 tags,
+                current: cur,
                 accepted,
                 changed_at: tokio::time::Instant::now(),
             }),
+            #[cfg(debug_assertions)]
+            fail_reloads: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -158,10 +167,15 @@ impl HookCredentials {
         self.auth.clone()
     }
 
-    /// Loads the store and applies it. Returns the store and the tag of its
-    /// current token. On an error the credentials stay as they were.
-    pub fn reload(&self) -> Result<(crate::hook_token::Store, u64)> {
+    /// Loads the store and applies it. Returns the store and the tags of
+    /// its current and previous tokens. On an error the credentials stay as
+    /// they were.
+    pub fn reload(&self) -> Result<(crate::hook_token::Store, (u64, Option<u64>))> {
         let mut applied = self.applied.lock().expect("hook credentials");
+        #[cfg(debug_assertions)]
+        if self.fail_reloads.load(std::sync::atomic::Ordering::SeqCst) {
+            bail!("injected failure at reload-after-retire");
+        }
         let store = crate::hook_token::load(&self.dir)?;
         let (cur, prev) = applied.tags.credentials(&store);
         let accepted = (cur.generation, prev.as_ref().map(|p| p.generation));
@@ -169,8 +183,46 @@ impl HookCredentials {
             applied.accepted = accepted;
             applied.changed_at = tokio::time::Instant::now();
         }
+        applied.current = cur.clone();
         self.auth.set(cur, prev);
-        Ok((store, accepted.0))
+        Ok((store, accepted))
+    }
+
+    /// T5: a committed retirement of the previous token tagged `previous`
+    /// takes effect at once, with no further store read. It applies only
+    /// while that token is still the accepted previous one, so a newer
+    /// credential set (a refresh that already saw a later store) is never
+    /// replaced.
+    pub fn retired(&self, previous: u64) {
+        let mut applied = self.applied.lock().expect("hook credentials");
+        if applied.accepted.1 == Some(previous) {
+            applied.accepted.1 = None;
+            applied.changed_at = tokio::time::Instant::now();
+            applied.tags.tags.retain(|(_, tag)| *tag != previous);
+            self.auth.set(applied.current.clone(), None);
+        }
+        #[cfg(debug_assertions)]
+        if std::env::var("ACD_TEST_FAIL_AT").is_ok_and(|s| s == "reload-after-retire") {
+            self.fail_reloads
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Rejected hook requests for the status: those since `window_start`
+    /// and since the accepted credentials last changed. A request rejected
+    /// before the change may only have come before the reload (a session
+    /// that read new headers first); a session that really holds a retired
+    /// token is rejected again and counted.
+    pub fn rejected_for_status(&self, window_start: tokio::time::Instant) -> usize {
+        self.auth
+            .rejected_since(window_start.max(self.changed_at()))
+    }
+}
+
+fn degraded(message: String) -> SourceStatus {
+    SourceStatus {
+        state: SourceState::Degraded,
+        message: Some(message),
     }
 }
 
@@ -201,14 +253,11 @@ async fn retire_once(
     rejected_since: tokio::time::Instant,
 ) -> SourceStatus {
     use crate::hook_token::{Retire, retire_if_done, status_message};
-    let (store, tag) = match creds.reload() {
+    let (store, (tag, previous_tag)) = match creds.reload() {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "hook token store unreadable; keeping the current credentials");
-            return SourceStatus {
-                state: SourceState::Degraded,
-                message: Some(format!("hook token store unreadable: {e}")),
-            };
+            return degraded(format!("hook token store unreadable: {e}"));
         }
     };
     let scan = hooks.last_complete_scan().map(scan_view);
@@ -233,6 +282,10 @@ async fn retire_once(
         Ok(Retire::Kept(k)) => (Some(k), None),
         Ok(Retire::Retired) => {
             tracing::info!("previous hook token retired");
+            // T5: revoke it in memory now; the reload below may fail.
+            if let Some(previous) = previous_tag {
+                creds.retired(previous);
+            }
             (None, None)
         }
         Ok(Retire::Nothing | Retire::Moved) => (None, None),
@@ -241,17 +294,15 @@ async fn retire_once(
             (None, Some(e.to_string()))
         }
     };
-    // T5: after a retirement the auth follows at once.
+    // The store as it is now, for the status.
     let store = match creds.reload() {
         Ok((s, _)) => s,
         Err(e) => {
             tracing::error!(error = %e, "hook token store unreadable; keeping the current credentials");
-            store
+            return degraded(format!("hook token store unreadable: {e}"));
         }
     };
-    let rejected = creds
-        .auth
-        .rejected_since(rejected_since.max(creds.changed_at()));
+    let rejected = creds.rejected_for_status(rejected_since);
     match status_message(&store, kept.as_ref(), rejected, retire_error.as_deref()) {
         Some((state, m)) => SourceStatus {
             state,
@@ -744,30 +795,77 @@ mod tests {
     }
 
     #[test]
-    fn rejections_before_a_credential_change_are_not_counted() {
+    fn the_status_counts_only_rejections_after_a_credential_change() {
         let d = tempfile::tempdir().unwrap();
         crate::hook_token::ensure(d.path(), false).unwrap();
         let store = crate::hook_token::load(d.path()).unwrap();
         let creds = HookCredentials::new(d.path(), &store);
-        let start = tokio::time::Instant::now();
+        let window = tokio::time::Instant::now();
         creds.auth().note_rejected(Some("pane"));
         creds.reload().unwrap();
-        let unchanged = creds.changed_at();
-        assert!(unchanged <= start, "an unchanged reload keeps the cutoff");
-        assert_eq!(creds.auth().rejected_since(unchanged), 1);
+        assert_eq!(
+            creds.rejected_for_status(window),
+            1,
+            "an unchanged reload keeps the count"
+        );
         rotated_store(d.path());
         creds.reload().unwrap();
-        let cutoff = creds.changed_at();
-        assert!(cutoff >= start);
         assert_eq!(
-            creds.auth().rejected_since(cutoff),
+            creds.rejected_for_status(window),
             0,
-            "before the rotation"
+            "a rejection from before the rotation is not counted"
         );
         creds.auth().note_rejected(Some("other pane"));
-        assert_eq!(creds.auth().rejected_since(cutoff), 1, "after it");
+        assert_eq!(creds.rejected_for_status(window), 1, "one after it is");
         creds.reload().unwrap();
-        assert_eq!(creds.changed_at(), cutoff);
+        assert_eq!(creds.rejected_for_status(window), 1, "and stays counted");
+    }
+
+    /// A rotation now, so the previous token has not expired.
+    fn rotated_now(d: &Path) -> crate::hook_token::Store {
+        let held = crate::writer_lock::acquire(d).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        crate::hook_token::rotate_store_locked(d, &held, now).unwrap()
+    }
+
+    fn rotated_creds(d: &Path) -> (HookCredentials, String, String, Option<u64>) {
+        crate::hook_token::ensure(d, false).unwrap();
+        let s = rotated_now(d);
+        let creds = HookCredentials::new(d, &s);
+        let (_, (_, previous)) = creds.reload().unwrap();
+        let old = s.previous.unwrap().token;
+        (creds, old, s.current, previous)
+    }
+
+    #[test]
+    fn a_retirement_revokes_the_previous_token_without_a_store_read() {
+        let d = tempfile::tempdir().unwrap();
+        let (creds, old, new, previous) = rotated_creds(d.path());
+        assert!(creds.auth().check(&old).is_some());
+        // The store becomes unreadable: only the in-memory revocation acts.
+        std::fs::remove_file(d.path().join(crate::hook_token::STORE_FILE)).unwrap();
+        creds.retired(previous.unwrap());
+        assert_eq!(creds.auth().check(&old), None, "revoked at once");
+        assert!(creds.auth().check(&new).is_some());
+        assert!(creds.reload().is_err());
+        assert_eq!(
+            creds.auth().check(&old),
+            None,
+            "a failed reload keeps it revoked"
+        );
+    }
+
+    #[test]
+    fn a_retirement_never_replaces_newer_credentials() {
+        let d = tempfile::tempdir().unwrap();
+        let (creds, _, middle, previous) = rotated_creds(d.path());
+        // A refresh already applied a later rotation: `middle` is now the
+        // previous token and must stay accepted.
+        let later = rotated_now(d.path());
+        creds.reload().unwrap();
+        creds.retired(previous.unwrap());
+        assert!(creds.auth().check(&middle).is_some());
+        assert!(creds.auth().check(&later.current).is_some());
     }
 
     #[test]

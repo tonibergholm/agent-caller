@@ -2687,3 +2687,78 @@ fn sessions_seen_before_a_reset_do_not_count_for_the_new_store() {
         store_of(&dir)["previous"].is_null()
     });
 }
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_retirement_revokes_the_token_even_when_the_store_cannot_be_read_again() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    // An empty registry: complete scans with no live session.
+    std::fs::create_dir_all(home.path().join(".claude/sessions")).unwrap();
+    // After the retirement commits, every reload of the store fails (the
+    // periodic refresh included): only the in-memory revocation can act.
+    let started = start_daemon(
+        &dir,
+        None,
+        "",
+        &[
+            ("ACD_TEST_HOOKS_FAST", "1"),
+            ("ACD_TEST_FAIL_AT", "reload-after-retire"),
+            home_env(home.path())[0],
+        ],
+    );
+    let old = store_token(&dir);
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    let new = store_token(&dir);
+    let body = claude_fixture("payload-Stop.json");
+    until_true("the new token", 5, || {
+        post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0 == 200
+    });
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0,
+        200
+    );
+    until_true("retirement", 15, || store_of(&dir)["previous"].is_null());
+    until_true("the retired token rejected", 2, || {
+        post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0 == 401
+    });
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0,
+        200
+    );
+    until_true("a degraded status", 5, || {
+        status_text(&dir).contains("hook token store unreadable")
+    });
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_held_writer_lock_does_not_delay_a_credential_refresh() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    // Normal periods: the first retirement attempt runs only after 30 s, so
+    // only the periodic refresh can apply the new token.
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let gate = home.path().join("gate");
+    // The rotation commits the store, then waits holding hooks.lock.
+    let mut child = acd_home(&dir, home.path())
+        .env(
+            "ACD_TEST_PAUSE_AT",
+            format!("before-headers-state={}", gate.display()),
+        )
+        .args(["token", "rotate", "hook"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let reached = home.path().join("gate.reached");
+    until_true("the rotation holding the lock", 10, || reached.exists());
+    let new = store_token(&dir);
+    let body = claude_fixture("payload-Stop.json");
+    until_true("the new token while the lock is held", 6, || {
+        post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0 == 200
+    });
+    assert!(!gate.exists(), "the rotation still held the lock");
+    std::fs::write(&gate, b"").unwrap();
+    assert!(child.wait().unwrap().success());
+}
