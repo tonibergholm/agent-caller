@@ -244,33 +244,13 @@ impl Registry {
                 vec![]
             }
             Observation::RequestEndedById { request_id, by } => {
-                if !self.requests.contains_key(&request_id) {
-                    return vec![];
-                }
-                if matches!(
-                    by,
-                    ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent
-                ) {
-                    self.mark_gone_by_id(&request_id);
-                }
-                self.resolve_request(&request_id, by)
+                self.end_by_id(&request_id, by, None)
             }
             Observation::RequestEndedWithReason {
                 request_id,
                 by,
                 reason,
-            } => {
-                if !self.requests.contains_key(&request_id) {
-                    return vec![];
-                }
-                if matches!(
-                    by,
-                    ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent
-                ) {
-                    self.mark_gone_by_id(&request_id);
-                }
-                self.resolve_request_with(&request_id, by, Some(reason))
-            }
+            } => self.end_by_id(&request_id, by, Some(reason)),
             Observation::RequestEndedIfOpen { request_id, by } => {
                 let open = self
                     .requests
@@ -321,13 +301,35 @@ impl Registry {
         }
     }
 
-    /// Resolves an unresolved request. `by` is taken as reported: the adapter
-    /// decides between `Inbox` and `Terminal`. An `Inbox` resolution of a
-    /// claimed request carries the claimed option.
+    /// Ends a request by id. A resolution that confirms the dialog is gone
+    /// (`Inbox`, `Terminal`, `Agent`) marks its key gone first.
+    fn end_by_id(
+        &mut self,
+        request_id: &str,
+        by: ResolvedBy,
+        reason: Option<ResolveReason>,
+    ) -> Vec<Change> {
+        if !self.requests.contains_key(request_id) {
+            return vec![];
+        }
+        if matches!(
+            by,
+            ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent
+        ) {
+            self.mark_gone_by_id(request_id);
+        }
+        self.resolve_request_with(request_id, by, reason)
+    }
+
+    /// Resolves an unresolved request without a reason. See
+    /// `resolve_request_with`.
     pub fn resolve_request(&mut self, request_id: &str, by: ResolvedBy) -> Vec<Change> {
         self.resolve_request_with(request_id, by, None)
     }
 
+    /// Resolves an unresolved request. `by` is taken as reported: the adapter
+    /// decides between `Inbox` and `Terminal`. An `Inbox` resolution of a
+    /// claimed request carries the claimed option. `reason` refines `by`.
     pub fn resolve_request_with(
         &mut self,
         request_id: &str,
