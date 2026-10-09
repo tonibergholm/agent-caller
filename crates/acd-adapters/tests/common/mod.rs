@@ -196,6 +196,8 @@ pub const CLI: [(&str, &str); 1] = [("X-Claude-Entrypoint", "cli")];
 /// resolve on the real filesystem. Releases on drop, so the runtime, which
 /// waits for blocking tasks, can always shut down.
 pub struct Stall {
+    /// Off: the marker does not stall (for a test that stalls later).
+    active: Arc<std::sync::atomic::AtomicBool>,
     release: Arc<std::sync::atomic::AtomicBool>,
     entered: Arc<std::sync::atomic::AtomicUsize>,
     inside: Arc<std::sync::atomic::AtomicUsize>,
@@ -204,6 +206,7 @@ pub struct Stall {
 impl Stall {
     pub fn new() -> Self {
         Self {
+            active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             release: Arc::default(),
             entered: Arc::default(),
             inside: Arc::default(),
@@ -212,14 +215,15 @@ impl Stall {
     }
     pub fn resolver(&self, marker: &'static str) -> acd_adapters::hooks::paths::PathResolver {
         use std::sync::atomic::Ordering::SeqCst;
-        let (release, entered, inside, max_inside) = (
+        let (active, release, entered, inside, max_inside) = (
+            self.active.clone(),
             self.release.clone(),
             self.entered.clone(),
             self.inside.clone(),
             self.max_inside.clone(),
         );
         acd_adapters::hooks::paths::PathResolver::new(move |p| {
-            if p.to_string_lossy().contains(marker) {
+            if active.load(SeqCst) && p.to_string_lossy().contains(marker) {
                 entered.fetch_add(1, SeqCst);
                 let now = inside.fetch_add(1, SeqCst) + 1;
                 max_inside.fetch_max(now, SeqCst);
@@ -230,6 +234,9 @@ impl Stall {
             }
             std::fs::canonicalize(p).ok()
         })
+    }
+    pub fn set_active(&self, on: bool) {
+        self.active.store(on, std::sync::atomic::Ordering::SeqCst);
     }
     /// Resolutions that reached the stall so far.
     pub fn entered(&self) -> usize {

@@ -37,7 +37,8 @@ impl std::fmt::Debug for PathResolver {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Resolved {
-    /// Never resolved yet (a worker may be running or none was free).
+    /// Not known now: never resolved, or the last answer is older than
+    /// the freshness window (a refresh may be running or none was free).
     Unknown,
     /// Resolution finished: the path does not resolve.
     Missing,
@@ -46,9 +47,6 @@ pub(crate) enum Resolved {
 
 /// Cached paths; payload cwds are attacker-chosen, so the map is bounded.
 const MAX_KNOWN: usize = 4096;
-/// A path that did not resolve is tried again after this; meanwhile, and
-/// while the retry runs, `Missing` stays the answer.
-const MISSING_TTL: Duration = Duration::from_secs(5);
 
 struct Entry {
     canonical: Option<PathBuf>,
@@ -69,6 +67,10 @@ pub(crate) struct Paths {
     /// can ever be stuck.
     workers: Arc<Semaphore>,
     wait: Duration,
+    /// How long an answer stays usable. A symlink can be retargeted at any
+    /// time, so an older answer is `Unknown` (fail closed) until a worker
+    /// refreshes it.
+    freshness: Duration,
     resolutions: Arc<AtomicU64>,
 }
 
@@ -77,6 +79,7 @@ impl Paths {
         resolver: PathResolver,
         max_workers: usize,
         wait: Duration,
+        freshness: Duration,
         resolutions: Arc<AtomicU64>,
     ) -> Self {
         Self {
@@ -84,12 +87,13 @@ impl Paths {
             inner: Arc::default(),
             workers: Arc::new(Semaphore::new(max_workers)),
             wait,
+            freshness,
             resolutions,
         }
     }
 
-    /// The cached answer; never blocks. An unknown path, or a `Missing`
-    /// one past its TTL, gets a worker if one is free.
+    /// The cached answer if it is fresh; never blocks. An unknown or
+    /// expired path gets a worker if one is free.
     pub fn get(&self, p: &Path) -> Resolved {
         self.lookup(p).0
     }
@@ -110,17 +114,14 @@ impl Paths {
 
     fn lookup(&self, p: &Path) -> (Resolved, Option<oneshot::Receiver<()>>) {
         let mut inner = self.inner.lock().expect("paths");
-        let (value, fresh) = match inner.known.get(p) {
-            Some(Entry {
-                canonical: Some(c), ..
-            }) => (Resolved::Canonical(c.clone()), true),
-            Some(Entry {
-                canonical: None,
-                at,
-            }) => (Resolved::Missing, at.elapsed() < MISSING_TTL),
-            None => (Resolved::Unknown, false),
+        let value = match inner.known.get(p) {
+            Some(e) if e.at.elapsed() < self.freshness => match &e.canonical {
+                Some(c) => Resolved::Canonical(c.clone()),
+                None => Resolved::Missing,
+            },
+            _ => Resolved::Unknown,
         };
-        if fresh || inner.pending.contains(p) {
+        if value != Resolved::Unknown || inner.pending.contains(p) {
             return (value, None);
         }
         let Ok(permit) = self.workers.clone().try_acquire_owned() else {
@@ -173,8 +174,52 @@ mod tests {
             resolver,
             workers,
             Duration::from_millis(200),
+            Duration::from_millis(300),
             Arc::default(),
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_expired_answer_is_unknown_until_a_refresh_replaces_it() {
+        // A retargeted symlink: the second answer differs from the first.
+        let target = Arc::new(Mutex::new(PathBuf::from("/A")));
+        let gate = Arc::new(AtomicBool::new(true));
+        let _release = Release(gate.clone());
+        let (t, g) = (target.clone(), gate.clone());
+        let p = paths(
+            PathResolver::new(move |_| {
+                while !g.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Some(t.lock().unwrap().clone())
+            }),
+            2,
+        );
+        p.prefetch([PathBuf::from("/project")]).await;
+        assert_eq!(
+            p.get(Path::new("/project")),
+            Resolved::Canonical("/A".into())
+        );
+        *target.lock().unwrap() = "/B".into();
+        gate.store(false, Ordering::SeqCst); // the refresh will hang
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert_eq!(
+            p.get(Path::new("/project")),
+            Resolved::Unknown,
+            "expired: not the old answer, even while the refresh runs"
+        );
+        assert_eq!(p.get(Path::new("/project")), Resolved::Unknown);
+        gate.store(true, Ordering::SeqCst);
+        for _ in 0..100 {
+            if p.get(Path::new("/project")) != Resolved::Unknown {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            p.get(Path::new("/project")),
+            Resolved::Canonical("/B".into())
+        );
     }
 
     #[tokio::test]

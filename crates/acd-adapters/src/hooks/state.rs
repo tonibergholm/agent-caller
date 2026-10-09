@@ -369,6 +369,7 @@ impl Reconciler {
             cfg.path_resolver.clone(),
             cfg.max_resolvers,
             cfg.resolve_wait,
+            cfg.path_freshness,
             shared.path_resolutions.clone(),
         );
         let scanner = Some(Arc::new(Mutex::new(Scanner::new(

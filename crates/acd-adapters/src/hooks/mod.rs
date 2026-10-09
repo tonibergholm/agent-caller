@@ -74,6 +74,9 @@ pub struct HooksConfig {
     pub max_resolvers: usize,
     /// The longest the reconciler waits for a path worker it just started.
     pub resolve_wait: Duration,
+    /// How long a resolved path stays usable; older is unknown until a
+    /// worker refreshes it (a symlink may have been retargeted).
+    pub path_freshness: Duration,
 }
 
 /// Retained work, for tests and diagnostics (A1 to A8).
@@ -155,6 +158,7 @@ impl HooksConfig {
             path_resolver: paths::PathResolver::fs(),
             max_resolvers: 4,
             resolve_wait: Duration::from_millis(250),
+            path_freshness: Duration::from_secs(3),
         }
     }
 }

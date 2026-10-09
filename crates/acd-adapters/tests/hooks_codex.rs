@@ -1081,3 +1081,79 @@ async fn an_unresolved_cwd_withdraws_readiness_without_revoking_until_known() {
     assert!(answer(&r, &rid, "allow").await.ok);
     assert_eq!(f.keys_sent().len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retargeted_cwd_symlink_binds_by_its_new_target_after_the_freshness_window() {
+    // Sol (Task 19 review): a cached cwd resolution must not outlive a
+    // retargeted symlink. After `path_freshness` the old answer is unknown
+    // (nothing binds, the live target is not ready) until a refresh
+    // replaces it; then a new hook binds by the new target.
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, b) = (tmp.path().join("A"), tmp.path().join("B"));
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    let link = tmp.path().join("project");
+    std::os::unix::fs::symlink(&a, &link).unwrap();
+    let link_s = link.to_str().unwrap().to_owned();
+    let stall = Stall::new();
+    stall.set_active(false);
+    let resolver = stall.resolver("project");
+    stall.watchdog(Duration::from_secs(8));
+    let r = rig(
+        &[
+            pane("w1:p1", a.to_str().unwrap(), None),
+            pane("w1:p2", b.to_str().unwrap(), None),
+        ],
+        |c| {
+            c.path_resolver = resolver;
+            c.resolve_wait = Duration::from_millis(100);
+            c.path_freshness = Duration::from_millis(300);
+        },
+    )
+    .await;
+    let f = r.fake.as_ref().unwrap();
+    f.set_screen("w1:p2", "detection", &screen("codex-idle-detection.txt"));
+    // project -> A: the session binds to the only Codex pane in A.
+    let rid = live_codex_target(&r, &link_s, "w1:p1").await;
+    let (_, mut rx) = r.core.attach(None);
+    // Retarget project -> B; its refresh hangs.
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&b, &link).unwrap();
+    stall.set_active(true);
+    until("the refresh of the expired answer is stuck", || {
+        (stall.entered() >= 1).then_some(())
+    })
+    .await;
+    // During the refresh nothing binds: not to A's pane by the old answer.
+    let mut second = permission(&link_s);
+    second["session_id"] = "01a116d3-0000-7000-8000-0000000000e2".into();
+    r.hook("codex", "PermissionRequest", &second, &[]).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while let Ok(m) = rx.try_recv() {
+        assert!(
+            !matches!(m, ServerMessage::RequestOpened { .. }),
+            "nothing binds while the cwd is being refreshed: {m:?}"
+        );
+    }
+    assert_eq!(
+        answer_refused_by_readiness(&r, &rid).await,
+        Some(ErrorCode::RequestNotReady),
+        "the live target is not ready meanwhile"
+    );
+    // The refresh replaces the answer; a new hook binds to B's pane.
+    f.set_screen("w1:p1", "detection", &screen("codex-idle-detection.txt"));
+    f.set_screen(
+        "w1:p2",
+        "detection",
+        &screen("codex-permission-bash-detection.txt"),
+    );
+    stall.release();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    r.hook("codex", "PermissionRequest", &second, &[]).await;
+    let p2 = agent(&r, "w1:p2");
+    until("bound to the new target's pane", || {
+        r.agent(&p2).and_then(|q| q.pending)
+    })
+    .await;
+    assert!(f.keys_sent().is_empty());
+}
