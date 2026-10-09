@@ -2,7 +2,7 @@
 //! Both restart acd after any non-zero exit and leave clean stops alone.
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 pub const LABEL: &str = "dev.agent-caller.acd";
 pub const MARKER: &str = "acd-managed:v1";
@@ -80,6 +80,48 @@ fn contains_marker(bytes: &[u8]) -> bool {
     bytes.windows(marker.len()).any(|window| window == marker)
 }
 
+const MAX_SERVICE_BACKUPS: usize = 5;
+
+fn service_backup_timestamp(name: &str, service_name: &str) -> Option<(i64, u32)> {
+    let suffix = name.strip_prefix(&format!("{service_name}.bak-"))?;
+    let mut parts = suffix.split('-');
+    let stamp = parts.next()?.parse().ok()?;
+    let attempt = match parts.next() {
+        Some(attempt) => attempt.parse().ok()?,
+        None => 0,
+    };
+    (parts.next().is_none()).then_some((stamp, attempt))
+}
+
+fn prune_service_backups(backup_dir: &Path, service_name: &str) -> Result<()> {
+    let mut backups = Vec::new();
+    for entry in std::fs::read_dir(backup_dir)
+        .with_context(|| format!("reading {}", backup_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("reading {}", backup_dir.display()))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("reading {}", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(timestamp) = service_backup_timestamp(name, service_name) else {
+            continue;
+        };
+        backups.push((timestamp, entry.path()));
+    }
+    backups.sort_by_key(|(timestamp, _)| *timestamp);
+    for (_, backup) in backups.into_iter().rev().skip(MAX_SERVICE_BACKUPS) {
+        std::fs::remove_file(&backup).with_context(|| format!("removing {}", backup.display()))?;
+    }
+    Ok(())
+}
+
 fn backup_definition(path: &Path, old: &[u8], backup_dir: &Path) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -107,6 +149,7 @@ fn backup_definition(path: &Path, old: &[u8], backup_dir: &Path) -> Result<()> {
             Ok(mut out) => {
                 out.write_all(old)
                     .with_context(|| format!("writing backup {}", backup.display()))?;
+                prune_service_backups(backup_dir, &name)?;
                 return Ok(());
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -407,18 +450,14 @@ mod tests {
         run_install(home.path(), cfg.path(), "/old/acd", false, &fake).unwrap();
         fake.calls.borrow_mut().clear();
         run_install(home.path(), cfg.path(), "/new/acd", false, &fake).unwrap();
-        assert!(
-            std::fs::read_to_string(definition_path(home.path()))
-                .unwrap()
-                .contains("/new/acd")
-        );
+        assert!(std::fs::read_to_string(definition_path(home.path()))
+            .unwrap()
+            .contains("/new/acd"));
         let found = backups(cfg.path());
         assert_eq!(found.len(), 1);
-        assert!(
-            std::fs::read_to_string(&found[0])
-                .unwrap()
-                .contains("/old/acd")
-        );
+        assert!(std::fs::read_to_string(&found[0])
+            .unwrap()
+            .contains("/old/acd"));
         let calls = fake.calls.borrow().join("\n");
         if cfg!(target_os = "macos") {
             assert!(
@@ -431,6 +470,46 @@ mod tests {
             }
             assert!(calls.find("daemon-reload").unwrap() < calls.find("restart").unwrap());
         }
+    }
+
+    #[test]
+    fn reinstall_keeps_only_five_service_backups() {
+        let home = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let backup_dir = cfg.path().join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let unrelated = backup_dir.join("keep-me.txt");
+        std::fs::write(&unrelated, "unrelated backup").unwrap();
+        let fake = Fake::default();
+
+        run_install(home.path(), cfg.path(), "/acd/0", false, &fake).unwrap();
+        for version in 1..=7 {
+            run_install(
+                home.path(),
+                cfg.path(),
+                &format!("/acd/{version}"),
+                false,
+                &fake,
+            )
+            .unwrap();
+        }
+
+        let service_path = definition_path(home.path());
+        let service_name = service_path.file_name().unwrap().to_str().unwrap();
+        let service_backups = backups(cfg.path())
+            .into_iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| service_backup_timestamp(name, service_name))
+                    .is_some()
+            })
+            .count();
+        assert_eq!(service_backups, 5);
+        assert_eq!(
+            std::fs::read_to_string(unrelated).unwrap(),
+            "unrelated backup"
+        );
     }
 
     #[test]
