@@ -438,15 +438,16 @@ impl Registry {
                 let mut st = self.keys.remove(&(a, k.clone())).expect("listed above");
                 st.agent_id = to.to_string();
                 // A leftover state on the target (an earlier, resolved
-                // occurrence) must not hide the live request: the source's
-                // state wins when it holds one.
+                // occurrence) must not hide the live request or a newer
+                // tombstone: the source's whole state wins when it holds an
+                // open request or has a higher generation.
                 match self.keys.entry((to.to_string(), k)) {
                     Entry::Vacant(v) => {
                         v.insert(st);
                     }
                     Entry::Occupied(mut o) => {
                         let generation = o.get().generation.max(st.generation);
-                        if st.open_request.is_some() {
+                        if st.open_request.is_some() || st.generation > o.get().generation {
                             o.insert(st);
                         }
                         o.get_mut().generation = generation;

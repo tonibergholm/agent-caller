@@ -304,3 +304,96 @@ fn an_answering_request_loses_to_a_structured_one_as_uncertain() {
     );
     assert!(r.agent("claude:s1").is_none());
 }
+
+/// Drives `agent` through key `k`: seen, ended, dialog gone. With `reusable`
+/// false the final occurrence leaves a tombstone.
+fn end_key(r: &mut Registry, agent: &str, k: &str, reusable: bool) {
+    let mut o = permission_obs(agent, k);
+    o.reusable_key = reusable;
+    r.apply(Observation::RequestSeen(o));
+    r.apply(Observation::RequestEnded {
+        agent_id: agent.into(),
+        key: CorrelationKey(k.into()),
+        by: ResolvedBy::Terminal,
+    });
+    if reusable {
+        r.apply(Observation::DialogGone {
+            agent_id: agent.into(),
+            key: CorrelationKey(k.into()),
+        });
+    }
+}
+
+#[test]
+fn a_newer_source_tombstone_still_guards_replays_after_migration() {
+    let mut r = reg();
+    // Target: a reusable, confirmed-gone leftover (generation 1).
+    end_key(&mut r, "herdr:h:w1:p1", "k", true);
+    // Source: the same key reused once (generation 2), then left as a tombstone.
+    end_key(&mut r, "claude:s1", "k", true);
+    end_key(&mut r, "claude:s1", "k", false);
+    r.apply(Observation::RequestSeen(permission_obs("claude:s1", "k2")));
+    let rid = r
+        .agent("claude:s1")
+        .unwrap()
+        .pending
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    r.apply(Observation::AgentMigrated {
+        from: "claude:s1".into(),
+        to: "herdr:h:w1:p1".into(),
+    });
+    // A replay of the tombstoned key must not supersede the moved request.
+    r.apply(Observation::RequestSeen(permission_obs(
+        "herdr:h:w1:p1",
+        "k",
+    )));
+    assert_eq!(
+        r.agent("herdr:h:w1:p1")
+            .unwrap()
+            .pending
+            .as_ref()
+            .unwrap()
+            .id,
+        rid
+    );
+}
+
+#[test]
+fn an_older_source_state_leaves_the_target_leftover_alone() {
+    let mut r = reg();
+    // Target: generation 2, a non-reusable tombstone.
+    end_key(&mut r, "herdr:h:w1:p1", "k", true);
+    end_key(&mut r, "herdr:h:w1:p1", "k", false);
+    // Source: generation 1, reusable and confirmed gone.
+    end_key(&mut r, "claude:s1", "k", true);
+    r.apply(Observation::RequestSeen(permission_obs("claude:s1", "k2")));
+    let rid = r
+        .agent("claude:s1")
+        .unwrap()
+        .pending
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    r.apply(Observation::AgentMigrated {
+        from: "claude:s1".into(),
+        to: "herdr:h:w1:p1".into(),
+    });
+    // The target's tombstone survives, so the replay is still ignored.
+    r.apply(Observation::RequestSeen(permission_obs(
+        "herdr:h:w1:p1",
+        "k",
+    )));
+    assert_eq!(
+        r.agent("herdr:h:w1:p1")
+            .unwrap()
+            .pending
+            .as_ref()
+            .unwrap()
+            .id,
+        rid
+    );
+}
