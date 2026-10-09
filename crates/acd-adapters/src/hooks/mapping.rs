@@ -34,59 +34,77 @@ fn is_invisible(c: char) -> bool {
     c.is_control() || is_format_character(c) || matches!(c, '\u{2028}' | '\u{2029}')
 }
 
-/// Command text for display. Newlines stay real line breaks (the display
-/// contract keeps them); every other control, format or invisible
-/// character is shown as an escape (`\t`, `\u{7}`, `\u{200b}`) so the
-/// text shown matches what runs. Returns the text and whether it was cut
-/// at `DETAIL_CHARS`.
-fn escaped_detail(raw: &str) -> (String, bool) {
+/// Text for display, so that what is shown matches what runs. Control,
+/// format and invisible characters are shown as escapes (`\t`, `\r`,
+/// `\u{7}`, `\u{200b}`); leading and trailing whitespace is escaped too
+/// instead of trimmed. With `raw_text` a real backslash shows as `\\`
+/// (so the text `\u{7}` differs from a real BEL) and inner newlines stay
+/// real line breaks (the display contract keeps them); without it the
+/// text is already JSON-escaped and every newline is escaped.
+fn escape_text(raw: &str, raw_text: bool) -> String {
+    let cs: Vec<char> = raw.chars().collect();
+    let first = cs.iter().position(|c| !c.is_whitespace());
+    let last = cs.iter().rposition(|c| !c.is_whitespace());
     let mut out = String::new();
-    let mut n = 0usize;
-    let mut cut = false;
-    for c in raw.trim().chars() {
-        let piece = match c {
-            '\n' => "\n".to_string(),
-            '\t' => "\\t".to_string(),
-            '\r' => "\\r".to_string(),
-            c if is_invisible(c) => format!("\\u{{{:x}}}", c as u32),
-            c => c.to_string(),
-        };
-        let len = piece.chars().count();
-        if n + len > DETAIL_CHARS {
-            cut = true;
-            break;
+    for (i, &c) in cs.iter().enumerate() {
+        let edge = first.is_none_or(|f| i < f) || last.is_none_or(|l| i > l);
+        match c {
+            '\\' if raw_text => out.push_str("\\\\"),
+            '\n' if raw_text && !edge => out.push('\n'),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if is_invisible(c) || (edge && c.is_whitespace()) => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32))
+            }
+            c => out.push(c),
         }
-        out.push_str(&piece);
-        n += len;
     }
-    (out, cut)
+    out
 }
 
 const TOO_LONG: &str =
     "This is too long to show in full, so it cannot be answered here. Answer it in the terminal.";
 
-/// The detail text and whether it was cut. A cut detail hides part of what
-/// would run, so callers must offer no answer for it.
-fn detail_checked(input: &Value) -> (String, bool) {
-    let raw = match command_of(input) {
-        Some(c) => c.to_owned(),
-        None => match input.get("file_path").and_then(Value::as_str) {
-            Some(f) => f.to_owned(),
-            None => canonical_json(input),
-        },
-    };
-    let (text, cut) = escaped_detail(&raw);
-    if cut {
-        let head = cap_chars(&text, DETAIL_CHARS - 200);
+/// Everything the user needs to judge the request, per tool. Bash shows
+/// the `command` first (real lines), then every other input key except
+/// `description` as a labelled compact JSON line. Every other tool shows
+/// all of its keys that way (`file_path` first), so no argument is hidden.
+/// Returns the text and whether it exceeds `limit` chars; a cut detail
+/// hides part of what would run, so callers must offer no answer for it.
+fn detail_checked(tool: Option<&str>, input: &Value, limit: usize) -> (String, bool) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut skip: Vec<&str> = vec![];
+    if tool == Some("Bash")
+        && let Some(c) = command_of(input)
+    {
+        lines.push(escape_text(c, true));
+        skip.extend(["command", "description"]);
+    }
+    match input.as_object() {
+        Some(o) => {
+            let mut keys: Vec<&String> = o.keys().filter(|k| !skip.contains(&k.as_str())).collect();
+            keys.sort_by_key(|k| (k.as_str() != "file_path", k.as_str()));
+            for k in keys {
+                let line = format!("{}: {}", Value::String(k.clone()), canonical_json(&o[k]));
+                lines.push(escape_text(&line, false));
+            }
+        }
+        None if !input.is_null() => lines.push(escape_text(&canonical_json(input), false)),
+        None => {}
+    }
+    let text = lines.join("\n");
+    if text.chars().count() > limit {
+        let head = cap_chars(&text, limit.saturating_sub(200));
         (format!("{head}\n\n{TOO_LONG}"), true)
     } else {
         (text, false)
     }
 }
 
-/// The command, the file path, or compact JSON (spec §6.2 step 1).
-pub fn detail_of(input: &Value) -> String {
-    detail_checked(input).0
+/// The request's arguments as shown to the user (spec §6.2 step 1).
+pub fn detail_of(tool: Option<&str>, input: &Value) -> String {
+    detail_checked(tool, input, DETAIL_CHARS).0
 }
 
 pub fn rule_text(r: &AlwaysRule) -> String {
@@ -107,7 +125,7 @@ pub fn claude_permission(
     upgrade_from: Option<CorrelationKey>,
     p: &Payload,
 ) -> RequestObs {
-    let (detail, cut) = detail_checked(&p.tool_input);
+    let (detail, cut) = detail_checked(p.tool_name.as_deref(), &p.tool_input, DETAIL_CHARS);
     let mut options = vec![];
     if !cut {
         options = vec![
@@ -245,7 +263,10 @@ pub fn question_specs(input: &Value) -> Result<Vec<QuestionSpec>, &'static str> 
                 .collect::<Result<Vec<_>, &'static str>>()?;
             let mut shown = std::collections::HashSet::new();
             for (label, _) in &options {
-                let l = clean_display(label, TITLE_CHARS);
+                let l: String = clean_display(label, TITLE_CHARS)
+                    .chars()
+                    .filter(|&c| !is_format_character(c))
+                    .collect();
                 if l.is_empty() || !shown.insert(l) {
                     return Err("option labels are empty or not distinct");
                 }
@@ -354,16 +375,24 @@ pub fn codex_permission(
     p: &Payload,
     collapsed: bool,
 ) -> RequestObs {
-    let (mut detail, cut) = detail_checked(&p.tool_input);
-    if !cut && let Some(d) = p.tool_input.get("description").and_then(Value::as_str) {
-        // The agent's own description of the command, labelled as such.
-        let room = DETAIL_CHARS.saturating_sub(detail.chars().count() + 12);
-        let (reason, _) = escaped_detail(d);
-        if room >= 20 && !reason.is_empty() {
-            detail.push_str("\n\nReason: ");
-            detail.push_str(&cap_chars(&reason, room.min(DESCRIPTION_CHARS)));
-        }
-    }
+    // The agent's own description goes first, as one escaped line, so its
+    // prose can never pose as part of the command that follows.
+    let is_bash = p.tool_name.as_deref() == Some("Bash") && command_of(&p.tool_input).is_some();
+    let reason = p
+        .tool_input
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|_| is_bash)
+        .map(|d| escape_text(d, true).replace('\n', "\\n"))
+        .filter(|d| !d.is_empty())
+        .map(|d| format!("Reason: {}\n\n", cap_chars(&d, DESCRIPTION_CHARS)))
+        .unwrap_or_default();
+    let (body, cut) = detail_checked(
+        p.tool_name.as_deref(),
+        &p.tool_input,
+        DETAIL_CHARS - reason.chars().count(),
+    );
+    let mut detail = format!("{reason}{body}");
     if collapsed && !cut {
         detail.push_str("\n\nEnlarge the pane to answer here.");
     }
@@ -383,14 +412,10 @@ pub fn codex_permission(
         options: if cut {
             vec![]
         } else {
+            // No allow_always: Codex's "don't ask again" grants a prefix the
+            // agent chose and we cannot show.
             vec![
                 opt("allow", "Yes", Effect::Allow, None),
-                opt(
-                    "allow_always",
-                    "Yes, don't ask again",
-                    Effect::AllowAlways,
-                    None,
-                ),
                 opt(
                     "deny",
                     "No, and tell Codex what to do differently",
@@ -584,11 +609,15 @@ mod tests {
             (o.answer_path, o.ready, o.reusable_key),
             (AnswerPath::Keys, false, true)
         );
-        assert!(o.detail.starts_with("touch ~/acp0_test_1.txt\n"));
-        assert!(o.detail.contains("outside the writable workspace"));
+        assert!(
+            o.detail
+                .starts_with("Reason: Allow the exact requested command")
+        );
+        assert!(o.detail.ends_with("\n\ntouch ~/acp0_test_1.txt"));
+        // N2: no allow_always on Codex.
         assert_eq!(
             o.options.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
-            vec!["allow", "allow_always", "deny"]
+            vec!["allow", "deny"]
         );
         let c = codex_permission(
             "a",
@@ -635,15 +664,61 @@ mod tests {
         assert_eq!(o.detail.chars().count(), DETAIL_CHARS);
     }
     #[test]
-    fn codex_without_a_command_shows_the_detail_then_the_labelled_reason() {
+    fn codex_reason_is_one_escaped_line_before_the_command() {
         let mut p = payload("codex/payload-PermissionRequest-Bash.json");
-        p.tool_input = serde_json::json!({"file_path":"/etc/hosts","description":"edit it"});
+        p.tool_input = serde_json::json!({"command":"ls","description":"ok\n\nls\nrm -rf ~\u{7}"});
         let o = codex_permission("a", k(), None, &p, false);
-        assert_eq!(o.detail, "/etc/hosts\n\nReason: edit it");
-        p.tool_input = serde_json::json!({"description":"only a description"});
-        let o = codex_permission("a", k(), None, &p, false);
-        assert!(o.detail.contains("Reason: only a description"));
-        assert!(o.detail.starts_with('{'), "{}", o.detail);
+        assert_eq!(o.detail, "Reason: ok\\n\\nls\\nrm -rf ~\\u{7}\n\nls");
+        assert!(o.options.iter().all(|x| x.effect != Effect::AllowAlways));
+    }
+    #[test]
+    fn detail_is_built_per_tool_and_hides_no_argument() {
+        let d = |tool: &str, input: Value| detail_of(Some(tool), &input);
+        assert_eq!(
+            d(
+                "Bash",
+                serde_json::json!({"command":"ls","description":"x","dangerouslyDisableSandbox":true,"run_in_background":true,"timeout":5})
+            ),
+            "ls\n\"dangerouslyDisableSandbox\": true\n\"run_in_background\": true\n\"timeout\": 5"
+        );
+        assert_eq!(
+            d(
+                "Write",
+                serde_json::json!({"content":"a\nb","file_path":"/x"})
+            ),
+            "\"file_path\": \"/x\"\n\"content\": \"a\\nb\""
+        );
+        let e = d(
+            "Edit",
+            serde_json::json!({"file_path":"/x","old_string":"o","new_string":"n","replace_all":true}),
+        );
+        for part in [
+            "\"/x\"",
+            "\"old_string\": \"o\"",
+            "\"new_string\": \"n\"",
+            "\"replace_all\": true",
+        ] {
+            assert!(e.contains(part), "{e}");
+        }
+        assert!(e.starts_with("\"file_path\""));
+        let m = d(
+            "MultiEdit",
+            serde_json::json!({"file_path":"/x","edits":[{"old_string":"a","new_string":"b"},{"old_string":"c","new_string":"d"}]}),
+        );
+        assert!(m.contains("\"a\"") && m.contains("\"d\""), "{m}");
+        let mcp = d(
+            "mcp__x__run",
+            serde_json::json!({"command":"safe","target":"prod"}),
+        );
+        assert!(mcp.contains("\"command\": \"safe\"") && mcp.contains("\"target\": \"prod\""));
+        assert!(d("Other", serde_json::json!({"url":"http://x"})).contains("\"url\""));
+    }
+    #[test]
+    fn backslashes_and_edge_whitespace_are_shown() {
+        let d = |c: &str| detail_of(Some("Bash"), &serde_json::json!({"command": c}));
+        assert_eq!(d("echo \\u{7}"), "echo \\\\u{7}");
+        assert_ne!(d("echo \\u{7}"), d("echo \u{7}"));
+        assert_eq!(d(" ls \u{3000}\n"), "\\u{20}ls\\u{20}\\u{3000}\\n");
     }
     #[test]
     fn too_many_questions_or_options_or_clashing_labels_are_invalid() {

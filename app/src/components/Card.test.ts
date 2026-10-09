@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import Card from "./Card.svelte";
 import { card } from "../lib/fixtures";
+import cardSource from "./Card.svelte?raw";
 
 afterEach(cleanup);
 
@@ -142,4 +143,16 @@ test("the selected card hints only at the keys it accepts", () => {
   none.unmount();
   const unselected = render(Card, props(both));
   expect(unselected.container.querySelector(".keys")).toBeNull();
+});
+
+test("a multi-line detail keeps its line break and renders monospace pre-wrap", () => {
+  const c = card({ key: "m/x" });
+  c.agent.pending = { ...c.agent.pending!, detail: "echo hello\nrm -rf ~" };
+  const { container } = render(Card, props(c));
+  const d = container.querySelector(".detail") as HTMLElement;
+  expect(d.textContent).toBe("echo hello\nrm -rf ~");
+  // jsdom applies no component styles, so check the stylesheet source.
+  const css = cardSource;
+  expect(css).toMatch(/\.detail[^{]*\{[^}]*white-space:\s*pre-wrap/);
+  expect(css).toMatch(/\.detail[^{]*\{[^}]*monospace/);
 });

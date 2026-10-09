@@ -142,6 +142,12 @@
     width: 100%;
     text-align: left;
   }
+  .detail {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+  }
   .rule {
     display: block;
     font-family: ui-monospace, monospace;
