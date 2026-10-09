@@ -15,7 +15,7 @@ use crate::text::{
 
 pub const DETAIL_CHARS: usize = 4000;
 const DESCRIPTION_CHARS: usize = 400;
-pub const CODEX_KEYS: [(&str, &str); 3] = [("allow", "1"), ("allow_always", "2"), ("deny", "esc")];
+pub const CODEX_KEYS: [(&str, &str); 2] = [("allow", "1"), ("deny", "esc")];
 
 fn opt(id: &str, label: &str, effect: Effect, description: Option<String>) -> RequestOption {
     RequestOption {

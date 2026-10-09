@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use acd_core::{AgentObs, Core, CorrelationKey, Observation};
 use acd_protocol::{
@@ -18,15 +19,15 @@ use super::dialogs::{self, DialogMatch};
 use super::endpoint::{HoldId, HoldPermit, Inbound, Mailbox};
 use super::evidence::{self, EvidenceHub, Expect, Verdict};
 use super::mapping;
-use super::owner::{Owner, PaneFact, claude_owner, header_pane, pane_facts};
+use super::owner::{CodexBind, Owner, PaneFact, claude_owner, codex_bind, header_pane, pane_facts};
 use super::tickets::{Now, ReadKind, ReadSlots, Ticket, still_valid};
 use super::wire::{
-    AlwaysRule, Hints, HookAgent, HookEvent, HookName, Payload, always_rule, claude_key,
+    AlwaysRule, Hints, HookAgent, HookEvent, HookName, Payload, always_rule, claude_key, codex_key,
     command_of, tool_digest,
 };
 use crate::herdr::HerdrAdapter;
 use crate::herdr::client::CALL_TIMEOUT;
-use crate::herdr::keys::KeysTarget;
+use crate::herdr::keys::{KeysTarget, codex_inventory as herdr_codex_inventory};
 use crate::herdr::reconciler::PaneRef;
 use crate::t3::sessions::SessionMap;
 use crate::text::{LAST_MESSAGE_CHARS, TITLE_CHARS, cap_chars, clean_display};
@@ -126,6 +127,12 @@ pub(crate) enum Internal {
         result: ReadResult,
         permit: OwnedSemaphorePermit,
     },
+    CodexBound {
+        ticket: Ticket,
+        ctx: Box<CodexCtx>,
+        read: CodexBindRead,
+        permit: OwnedSemaphorePermit,
+    },
 }
 
 /// The last valid header binding (G1): the pane the hook headers named,
@@ -169,6 +176,59 @@ struct Track {
     next_check: Instant,
     shadowed: bool,
     identity_seen: bool,
+    codex_ctx: Option<CodexCtx>,
+    codex_inventory: Vec<(String, u64)>,
+}
+
+struct CodexSession {
+    bind_gen: u64,
+    last_event: Instant,
+    watch: ReadSlots,
+    wanted: Option<CodexCtx>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PaneSeen {
+    Shows(String),
+    NotShown { collapsed: bool },
+    Unknown,
+}
+
+pub(crate) fn pane_seen(
+    read: Option<&crate::herdr::client::ScreenRead>,
+    matcher: &DialogMatch,
+) -> PaneSeen {
+    match read {
+        None => PaneSeen::Unknown,
+        Some(r) if r.truncated => PaneSeen::Unknown,
+        Some(r) if matcher.find(&r.text).is_some() => PaneSeen::Shows(r.text.clone()),
+        Some(r) => PaneSeen::NotShown {
+            collapsed: DialogMatch::collapsed_codex(&r.text),
+        },
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CodexCtx {
+    event: HookEvent,
+    pane: PaneFact,
+    key: CorrelationKey,
+    command: String,
+    rid: Option<String>,
+    tries: u8,
+}
+pub(crate) struct CodexBindRead {
+    bound: PaneSeen,
+    inventory: Vec<(String, u64)>,
+    rivals: Vec<PaneSeen>,
+}
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CodexDecision {
+    Enable(String),
+    Collapsed,
+    Nothing,
+    Retry,
+    Stale,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,6 +291,7 @@ pub(crate) struct Reconciler {
     scanning: bool,
     // TODO(A8, Task 19): bound this map to `max_sessions`.
     sessions: HashMap<String, Session>,
+    codex: HashMap<String, CodexSession>,
     tracks: HashMap<String, Track>,
     holds: HashMap<HoldId, String>,
     next_op: u64,
@@ -270,6 +331,7 @@ impl Reconciler {
             scan_in_flight: Arc::new(AtomicBool::new(false)),
             scanning: false,
             sessions: HashMap::new(),
+            codex: HashMap::new(),
             tracks: HashMap::new(),
             holds: HashMap::new(),
             next_op: 0,
@@ -465,8 +527,9 @@ impl Reconciler {
                 }
             }
             HookAgent::Codex => {
-                self.on_codex(event.clone()).await;
-                self.evidence.publish(&event);
+                if !self.on_codex(event.clone()).await {
+                    self.evidence.publish(&event);
+                }
             }
         }
     }
@@ -645,6 +708,8 @@ impl Reconciler {
                 next_check: now + self.cfg.held_dialog_poll,
                 shadowed: false,
                 identity_seen: false,
+                codex_ctx: None,
+                codex_inventory: Vec::new(),
             },
         );
         self.mark_shadow(&rid);
@@ -733,6 +798,8 @@ impl Reconciler {
                 next_check: now + self.cfg.held_dialog_poll,
                 shadowed: false,
                 identity_seen: false,
+                codex_ctx: None,
+                codex_inventory: Vec::new(),
             },
         );
         self.mark_shadow(&rid);
@@ -814,7 +881,10 @@ impl Reconciler {
     }
 
     fn bind_gen_of(&self, sid: &str) -> Option<u64> {
-        self.sessions.get(sid).map(|session| session.bind_gen)
+        self.sessions
+            .get(sid)
+            .map(|session| session.bind_gen)
+            .or_else(|| self.codex.get(sid).map(|c| c.bind_gen))
     }
 
     fn ticket_for(&mut self, rid: &str, kind: ReadKind) -> Option<Ticket> {
@@ -927,11 +997,16 @@ impl Reconciler {
                 .get(&ticket.agent_id)
                 .map(|pane| pane.incarnation)
         });
-        let track = ticket
-            .request_id
-            .as_ref()
-            .and_then(|rid| self.tracks.get(rid))
-            .map(|track| (track.op, track.reads.latest(ticket.kind)));
+        let track = match &ticket.request_id {
+            Some(rid) => self
+                .tracks
+                .get(rid)
+                .map(|track| (track.op, track.reads.latest(ticket.kind))),
+            None => self
+                .codex
+                .get(&ticket.session_id)
+                .map(|c| (0, c.watch.latest(ReadKind::CodexBind))),
+        };
         let request = ticket
             .request_id
             .as_ref()
@@ -1157,7 +1232,456 @@ impl Reconciler {
         }
     }
 
-    async fn on_codex(&mut self, _event: HookEvent) {}
+    async fn on_codex(&mut self, event: HookEvent) -> bool {
+        let sid = event.payload.session_id.clone();
+        let now = Instant::now();
+        let c = self
+            .codex
+            .entry(sid.clone())
+            .or_insert_with(|| CodexSession {
+                bind_gen: 0,
+                last_event: now,
+                watch: ReadSlots::default(),
+                wanted: None,
+            });
+        c.bind_gen += 1;
+        c.last_event = now;
+        c.watch.abort_all();
+        c.wanted = None;
+        if self.t3.as_ref().is_some_and(|m| m.owner(&sid).is_some()) {
+            return true;
+        }
+        self.apply_evidence(&event).await;
+        if event.name != HookName::PermissionRequest {
+            return false;
+        }
+        let Some(key) = codex_key(&event.payload) else {
+            return false;
+        };
+        self.end_session_occurrences(&sid).await;
+        let Some(command) = command_of(&event.payload.tool_input)
+            .filter(|c| dialogs::single_row(c))
+            .map(str::to_owned)
+        else {
+            return false;
+        };
+        let pane = match codex_bind(&sid, event.payload.cwd.as_deref(), &self.panes()) {
+            CodexBind::Session(p) | CodexBind::OnlyInCwd(p) => p,
+            CodexBind::Ambiguous | CodexBind::Unbound => return false,
+        };
+        if self.codex_watches() >= self.cfg.max_tracks {
+            return false;
+        }
+        self.spawn_codex_bind(CodexCtx {
+            event,
+            pane,
+            key,
+            command,
+            rid: None,
+            tries: 0,
+        });
+        false
+    }
+
+    fn codex_watches(&self) -> usize {
+        self.codex
+            .values()
+            .filter(|c| c.wanted.is_some() || c.watch.busy(ReadKind::CodexBind))
+            .count()
+    }
+
+    fn codex_inventory(&self, bound: &str) -> Vec<(String, u64)> {
+        self.herdr
+            .as_ref()
+            .map(|h| herdr_codex_inventory(&h.panes(), bound))
+            .unwrap_or_default()
+    }
+
+    fn spawn_codex_bind(&mut self, ctx: CodexCtx) {
+        let Some(herdr) = self.herdr.clone() else {
+            return;
+        };
+        let sid = ctx.event.payload.session_id.clone();
+        let Ok(permit) = self.reads.clone().try_acquire_owned() else {
+            self.want_codex(ctx);
+            return;
+        };
+        let (op, read_seq) = if let Some(rid) = &ctx.rid {
+            let Some(t) = self.tracks.get_mut(rid) else {
+                return;
+            };
+            let Some(seq) = t.reads.admit(ReadKind::CodexBind, true) else {
+                return;
+            };
+            (t.op, seq)
+        } else {
+            let Some(c) = self.codex.get_mut(&sid) else {
+                return;
+            };
+            let Some(seq) = c.watch.admit(ReadKind::CodexBind, true) else {
+                return;
+            };
+            (0, seq)
+        };
+        let Some(bind_gen) = self.bind_gen_of(&sid) else {
+            return;
+        };
+        let inventory = self.codex_inventory(&ctx.pane.agent_id);
+        let map = herdr.panes();
+        let (pref, rivals) = {
+            let map = map.read().expect("pane map");
+            let Some(pref) = map
+                .get(&ctx.pane.agent_id)
+                .cloned()
+                .filter(|p| p.incarnation == ctx.pane.incarnation)
+            else {
+                return;
+            };
+            let rivals = inventory
+                .iter()
+                .map(|(id, inc)| {
+                    (
+                        (id.clone(), *inc),
+                        map.get(id).filter(|p| p.incarnation == *inc).cloned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (pref, rivals)
+        };
+        let ticket = Ticket {
+            agent_id: ctx.pane.agent_id.clone(),
+            incarnation: ctx.pane.incarnation,
+            session_id: sid.clone(),
+            bind_gen,
+            request_id: ctx.rid.clone(),
+            op,
+            kind: ReadKind::CodexBind,
+            read_seq,
+        };
+        let until = Instant::now()
+            + if ctx.rid.is_none() {
+                self.cfg.codex_window
+            } else {
+                Duration::ZERO
+            };
+        let poll = self.cfg.capture_poll;
+        let tx = self.internal_tx.clone();
+        let task_ctx = ctx.clone();
+        let ctx_for_result = ctx.clone();
+        let request_for_slot = ctx.rid.clone();
+        let task = tokio::spawn(async move {
+            let matcher = DialogMatch::CodexCommand {
+                command: task_ctx.command.clone(),
+            };
+            let read_one = |pane: PaneRef| async move {
+                pane.herdr
+                    .read_screen(
+                        &pane.pane_id,
+                        "detection",
+                        None,
+                        Instant::now() + CALL_TIMEOUT,
+                    )
+                    .await
+                    .ok()
+            };
+            let bound = loop {
+                let got = read_one(pref.clone()).await;
+                let seen = pane_seen(got.as_ref(), &matcher);
+                if matches!(seen, PaneSeen::Shows(_)) || Instant::now() >= until {
+                    break seen;
+                }
+                tokio::time::sleep(poll).await;
+            };
+            let mut rival_seen = Vec::new();
+            for (_, p) in &rivals {
+                rival_seen.push(match p {
+                    Some(p) => pane_seen(read_one(p.clone()).await.as_ref(), &matcher),
+                    None => PaneSeen::Unknown,
+                });
+            }
+            let inventory = rivals.into_iter().map(|(id, _)| id).collect();
+            let read = CodexBindRead {
+                bound,
+                inventory,
+                rivals: rival_seen,
+            };
+            let _ = tx
+                .send(Internal::CodexBound {
+                    ticket,
+                    ctx: Box::new(ctx_for_result),
+                    read,
+                    permit,
+                })
+                .await;
+        });
+        if let Some(rid) = &request_for_slot {
+            if let Some(t) = self.tracks.get_mut(rid) {
+                t.reads.started(ReadKind::CodexBind, task.abort_handle());
+            }
+        } else if let Some(c) = self.codex.get_mut(&sid) {
+            c.watch.started(ReadKind::CodexBind, task.abort_handle());
+        }
+    }
+
+    fn want_codex(&mut self, ctx: CodexCtx) {
+        let sid = ctx.event.payload.session_id.clone();
+        if let Some(rid) = &ctx.rid {
+            if let Some(t) = self.tracks.get_mut(rid) {
+                t.reads.admit(ReadKind::CodexBind, false);
+            }
+        } else if let Some(c) = self.codex.get_mut(&sid) {
+            c.wanted = Some(ctx);
+        }
+    }
+
+    fn codex_decision(
+        &self,
+        ticket: &Ticket,
+        ctx: &CodexCtx,
+        read: &CodexBindRead,
+    ) -> CodexDecision {
+        let bound = matches!(codex_bind(&ticket.session_id, ctx.event.payload.cwd.as_deref(), &self.panes()), CodexBind::Session(p) | CodexBind::OnlyInCwd(p) if p.agent_id == ctx.pane.agent_id && p.incarnation == ctx.pane.incarnation);
+        let paths = [AnswerPath::Keys];
+        let valid = if ticket.request_id.is_some() {
+            still_valid(ticket, &self.now_for(ticket), &paths)
+        } else {
+            still_valid(ticket, &self.now_for(ticket), &[])
+        };
+        if !bound || !valid {
+            return CodexDecision::Stale;
+        }
+        match &read.bound {
+            PaneSeen::Shows(screen)
+                if read.inventory != self.codex_inventory(&ctx.pane.agent_id) =>
+            {
+                CodexDecision::Retry
+            }
+            PaneSeen::Shows(screen)
+                if read
+                    .rivals
+                    .iter()
+                    .all(|r| matches!(r, PaneSeen::NotShown { .. })) =>
+            {
+                CodexDecision::Enable(screen.clone())
+            }
+            PaneSeen::Shows(_) => CodexDecision::Nothing,
+            PaneSeen::NotShown { collapsed: true }
+                if read.inventory != self.codex_inventory(&ctx.pane.agent_id) =>
+            {
+                CodexDecision::Retry
+            }
+            PaneSeen::NotShown { collapsed: true }
+                if read
+                    .rivals
+                    .iter()
+                    .all(|r| matches!(r, PaneSeen::NotShown { .. })) =>
+            {
+                CodexDecision::Collapsed
+            }
+            _ => CodexDecision::Nothing,
+        }
+    }
+
+    async fn on_codex_bound(&mut self, ticket: Ticket, ctx: CodexCtx, read: CodexBindRead) {
+        if let Some(rid) = &ticket.request_id {
+            if let Some(t) = self.tracks.get_mut(rid) {
+                t.reads.finished(ReadKind::CodexBind, ticket.read_seq);
+            }
+        } else if let Some(c) = self.codex.get_mut(&ticket.session_id) {
+            c.watch.finished(ReadKind::CodexBind, ticket.read_seq);
+        }
+        let Some(herdr) = self.herdr.clone() else {
+            return;
+        };
+        let locks = herdr.agent_locks();
+        let Ok(_agent) =
+            tokio::time::timeout(self.cfg.lock_wait, locks.lock(&ticket.agent_id)).await
+        else {
+            self.want_codex(ctx);
+            return;
+        };
+        let Ok(_occurrence) = tokio::time::timeout(
+            self.cfg.lock_wait,
+            self.shared.occurrence_lock(&ticket.agent_id),
+        )
+        .await
+        else {
+            self.want_codex(ctx);
+            return;
+        };
+        match self.codex_decision(&ticket, &ctx, &read) {
+            CodexDecision::Stale => {}
+            CodexDecision::Retry if ctx.tries < 3 => {
+                drop(_occurrence);
+                drop(_agent);
+                self.spawn_codex_bind(CodexCtx {
+                    tries: ctx.tries + 1,
+                    ..ctx
+                });
+            }
+            CodexDecision::Retry | CodexDecision::Nothing => {
+                if let Some(rid) = &ctx.rid
+                    && self.tracks.get(rid).is_some_and(|t| t.phase == Phase::Keys)
+                {
+                    if let Some(t) = self.tracks.get_mut(rid) {
+                        self.core.observe(Observation::RequestReady {
+                            agent_id: t.agent_id.clone(),
+                            key: t.key.clone(),
+                            ready: false,
+                        });
+                    }
+                    herdr.keys_targets().remove(rid);
+                    self.end(rid, ResolvedBy::Uncertain);
+                }
+            }
+            decision @ (CodexDecision::Collapsed | CodexDecision::Enable(_)) => {
+                let rid = match &ctx.rid {
+                    Some(rid) => rid.clone(),
+                    None => {
+                        match self.open_codex_locked(&ctx, decision == CodexDecision::Collapsed) {
+                            Some(rid) => rid,
+                            None => return,
+                        }
+                    }
+                };
+                if let CodexDecision::Enable(screen) = decision {
+                    if self
+                        .tracks
+                        .get(&rid)
+                        .is_some_and(|t| t.phase == Phase::Keys)
+                    {
+                        herdr
+                            .keys_targets()
+                            .set_rivals(&rid, read.inventory.clone());
+                        if let Some(t) = self.tracks.get_mut(&rid) {
+                            t.codex_inventory = read.inventory;
+                            self.core.observe(Observation::RequestReady {
+                                agent_id: t.agent_id.clone(),
+                                key: t.key.clone(),
+                                ready: true,
+                            });
+                        }
+                    } else {
+                        self.register_codex_locked(
+                            &rid,
+                            screen,
+                            ticket.incarnation,
+                            read.inventory,
+                        );
+                    }
+                }
+            }
+        }
+        self.sweep();
+    }
+
+    fn open_codex_locked(&mut self, ctx: &CodexCtx, collapsed: bool) -> Option<String> {
+        if self.tracks.len() >= self.cfg.max_tracks {
+            return None;
+        }
+        let agent = ctx.pane.agent_id.clone();
+        let obs = mapping::codex_permission(
+            &agent,
+            ctx.key.clone(),
+            self.fallback_key(&agent),
+            &ctx.event.payload,
+            collapsed,
+        );
+        self.core.observe(Observation::RequestSeen(obs));
+        let rid = self.core.request_id_for(&agent, &ctx.key)?;
+        let now = Instant::now();
+        self.next_op += 1;
+        let sid = ctx.event.payload.session_id.clone();
+        self.tracks.insert(
+            rid.clone(),
+            Track {
+                kind: TrackKind::Codex,
+                agent_id: agent,
+                session_id: sid.clone(),
+                key: ctx.key.clone(),
+                op: self.next_op,
+                reads: ReadSlots::default(),
+                wanted_purpose: HashMap::new(),
+                hold_end_tries: 0,
+                expect: Expect::CodexTool {
+                    session_id: sid,
+                    tool_name: ctx.event.payload.tool_name.clone().unwrap_or_default(),
+                    command: ctx.command.clone(),
+                },
+                matcher: Some(DialogMatch::CodexCommand {
+                    command: ctx.command.clone(),
+                }),
+                pane: Some(ctx.pane.clone()),
+                phase: Phase::ReadOnly,
+                opened_at: now,
+                payload: ctx.event.payload.clone(),
+                capture: None,
+                absent: 0,
+                next_check: now + self.cfg.held_dialog_poll,
+                shadowed: false,
+                identity_seen: false,
+                codex_ctx: Some(CodexCtx {
+                    rid: Some(rid.clone()),
+                    ..ctx.clone()
+                }),
+                codex_inventory: Vec::new(),
+            },
+        );
+        self.mark_shadow(&rid);
+        Some(rid)
+    }
+
+    fn register_codex_locked(
+        &mut self,
+        rid: &str,
+        screen: String,
+        incarnation: u64,
+        inventory: Vec<(String, u64)>,
+    ) {
+        let Some(herdr) = self.herdr.clone() else {
+            return;
+        };
+        let Some(t) = self.tracks.get_mut(rid) else {
+            return;
+        };
+        let obs = mapping::codex_permission(&t.agent_id, t.key.clone(), None, &t.payload, false);
+        self.core.observe(Observation::RequestSeen(obs));
+        let keys = mapping::CODEX_KEYS
+            .iter()
+            .map(|(o, k)| (o.to_string(), k.to_string()))
+            .collect();
+        let target = KeysTarget::from_screen(
+            rid.to_owned(),
+            t.agent_id.clone(),
+            t.key.clone(),
+            &screen,
+            keys,
+        )
+        .map(|k| k.for_incarnation(incarnation));
+        let open = self
+            .core
+            .request(rid)
+            .is_some_and(|r| r.status == RequestStatus::Open && r.answer_path == AnswerPath::Keys);
+        let Some(target) = target
+            .ok()
+            .filter(|_| open && self.core.agent(&t.agent_id).is_some())
+        else {
+            return;
+        };
+        if herdr.keys_targets().set(target).is_ok() {
+            herdr.keys_targets().set_rivals(rid, inventory.clone());
+            self.core.observe(Observation::RequestReady {
+                agent_id: t.agent_id.clone(),
+                key: t.key.clone(),
+                ready: true,
+            });
+            t.phase = Phase::Keys;
+            t.capture = Some(screen);
+            t.codex_inventory = inventory;
+            self.evidence
+                .expect(rid, t.expect.clone(), t.shadowed, t.opened_at);
+        }
+    }
 
     async fn on_internal(&mut self, message: Internal) {
         match message {
@@ -1172,6 +1696,15 @@ impl Reconciler {
                 permit,
             } => {
                 self.on_screen(ticket, purpose, result).await;
+                drop(permit);
+            }
+            Internal::CodexBound {
+                ticket,
+                ctx,
+                read,
+                permit,
+            } => {
+                self.on_codex_bound(ticket, *ctx, read).await;
                 drop(permit);
             }
         }
@@ -1613,6 +2146,43 @@ impl Reconciler {
                 self.spawn_read(&rid, Purpose::Presence);
             }
         }
+        let mut codex_todo = Vec::new();
+        for (sid, c) in &mut self.codex {
+            if let Some(ctx) = c.wanted.take() {
+                codex_todo.push(ctx);
+            }
+            for (_, t) in self.tracks.iter().filter(|(_, t)| {
+                t.session_id == *sid
+                    && t.kind == TrackKind::Codex
+                    && t.reads.wanted().contains(&ReadKind::CodexBind)
+            }) {
+                if let Some(ctx) = t.codex_ctx.clone() {
+                    codex_todo.push(ctx);
+                }
+            }
+        }
+        for ctx in codex_todo.into_iter().take(self.cfg.batch) {
+            self.spawn_codex_bind(ctx);
+        }
+        let codex_ids: Vec<String> = self
+            .tracks
+            .iter()
+            .filter(|(_, t)| {
+                t.kind == TrackKind::Codex
+                    && t.phase == Phase::ReadOnly
+                    && t.capture.is_none()
+                    && now >= t.next_check
+            })
+            .map(|(rid, _)| rid.clone())
+            .collect();
+        for rid in codex_ids.into_iter().take(self.cfg.batch) {
+            if let Some(t) = self.tracks.get_mut(&rid) {
+                t.next_check = now + self.cfg.capture_window + self.cfg.held_dialog_poll;
+            }
+            if let Some(ctx) = self.tracks.get(&rid).and_then(|t| t.codex_ctx.clone()) {
+                self.spawn_codex_bind(ctx);
+            }
+        }
         let ttl = self.cfg.unconsumed_ttl;
         self.unconsumed.retain(|_, u| {
             u.entries.retain(|(_, at)| now.duration_since(*at) < ttl);
@@ -1641,6 +2211,10 @@ impl Reconciler {
                 });
             }
         }
+        self.codex.retain(|sid, c| {
+            now.duration_since(c.last_event) < self.cfg.idle_expiry
+                || self.tracks.values().any(|t| t.session_id == *sid)
+        });
         self.retry_wanted();
     }
 }
@@ -1766,6 +2340,8 @@ mod tests {
             next_check: opened_at,
             shadowed: false,
             identity_seen: false,
+            codex_ctx: None,
+            codex_inventory: Vec::new(),
         }
     }
 

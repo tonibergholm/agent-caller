@@ -177,10 +177,12 @@ struct TargetsInner {
     live: HashMap<String, KeysTarget>,
     retired: VecDeque<String>,
     retired_set: HashSet<String>,
+    rivals: HashMap<String, Vec<(String, u64)>>,
 }
 
 impl TargetsInner {
     fn retire(&mut self, request_id: &str) {
+        self.rivals.remove(request_id);
         if self.retired_set.insert(request_id.to_owned()) {
             self.retired.push_back(request_id.to_owned());
             if self.retired.len() > RETIRED_CAP
@@ -244,6 +246,15 @@ impl KeysTargets {
 
     pub fn get(&self, request_id: &str) -> Option<KeysTarget> {
         self.lock().live.get(request_id).cloned()
+    }
+
+    /// Stores the validated Codex rival inventory beside the immutable lease.
+    pub fn set_rivals(&self, request_id: &str, inventory: Vec<(String, u64)>) {
+        self.lock().rivals.insert(request_id.to_owned(), inventory);
+    }
+
+    pub fn rivals(&self, request_id: &str) -> Option<Vec<(String, u64)>> {
+        self.lock().rivals.get(request_id).cloned()
     }
 
     pub fn remove(&self, request_id: &str) -> Option<KeysTarget> {
@@ -431,8 +442,13 @@ impl Engine {
             .expect("pane map")
             .get(&target.agent_id)
             .is_some_and(|p| target.incarnation_ok(p));
+        let rivals_ok = self
+            .targets
+            .rivals(&target.request_id)
+            .is_none_or(|v| v == codex_inventory(panes, &target.agent_id));
         claimed
             && same_pane
+            && rivals_ok
             && self
                 .targets
                 .get(&target.request_id)
@@ -578,6 +594,19 @@ impl Engine {
         let _ = verdict_tx.send(delivery);
         result
     }
+}
+
+/// Every Codex pane except `except`, sorted by id and incarnation.
+pub fn codex_inventory(panes: &PaneMap, except: &str) -> Vec<(String, u64)> {
+    let mut inventory: Vec<_> = panes
+        .read()
+        .expect("pane map")
+        .iter()
+        .filter(|(id, pane)| pane.kind == AgentKind::Codex && id.as_str() != except)
+        .map(|(id, pane)| (id.clone(), pane.incarnation))
+        .collect();
+    inventory.sort();
+    inventory
 }
 
 /// One step of the confirmation timeline.
