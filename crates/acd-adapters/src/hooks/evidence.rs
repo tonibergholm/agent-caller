@@ -1,0 +1,318 @@
+//! Correlated outcome evidence (spec §5.1 Attribution, §6.2 step 3, §6.3
+//! Completion). Pure rules here; `EvidenceHub` (Task 16) feeds the keys
+//! engine with them.
+use std::collections::HashMap;
+
+use acd_protocol::Effect;
+
+use super::wire::{HookEvent, HookName, command_of, tool_digest};
+pub use crate::herdr::keys::Verdict;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Expect {
+    ClaudeTool {
+        session_id: String,
+        tool_name: String,
+        digest: String,
+    },
+    ClaudeQuestion {
+        session_id: String,
+        question: String,
+        labels: HashMap<String, String>,
+    },
+    CodexTool {
+        session_id: String,
+        tool_name: String,
+        command: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Seen {
+    ToolRan,
+    TurnEnded,
+    Answered(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sent {
+    Allow,
+    Deny,
+    Choose(String),
+}
+
+pub fn sent_for_effect(e: Effect) -> Option<Sent> {
+    match e {
+        Effect::Allow | Effect::AllowAlways => Some(Sent::Allow),
+        Effect::Deny => Some(Sent::Deny),
+        Effect::Choose | Effect::Unknown => None,
+    }
+}
+
+fn session_of(e: &Expect) -> &str {
+    match e {
+        Expect::ClaudeTool { session_id, .. }
+        | Expect::ClaudeQuestion { session_id, .. }
+        | Expect::CodexTool { session_id, .. } => session_id,
+    }
+}
+
+/// What `ev` says about the expected request, if anything.
+pub fn observe(expect: &Expect, ev: &HookEvent) -> Option<Seen> {
+    if ev.payload.session_id != session_of(expect) {
+        return None;
+    }
+    let turn_end = matches!(ev.name, HookName::Stop | HookName::UserPromptSubmit);
+    let post = ev.name == HookName::PostToolUse;
+    let tool = ev.payload.tool_name.as_deref();
+    match expect {
+        Expect::ClaudeTool {
+            tool_name, digest, ..
+        } => {
+            if post
+                && tool == Some(tool_name.as_str())
+                && tool_digest(tool_name, &ev.payload.tool_input) == *digest
+            {
+                Some(Seen::ToolRan)
+            } else {
+                turn_end.then_some(Seen::TurnEnded)
+            }
+        }
+        Expect::ClaudeQuestion { question, .. } => {
+            if post && tool == Some("AskUserQuestion") {
+                // Sol R3-2: identity evidence only when the answers map has
+                // this question with a string answer; another question's
+                // outcome is no evidence at all.
+                [&ev.payload.tool_response, &ev.payload.tool_input]
+                    .into_iter()
+                    .find_map(|v| {
+                        v.get("answers")?
+                            .get(question.as_str())?
+                            .as_str()
+                            .map(str::to_owned)
+                    })
+                    .map(Seen::Answered)
+            } else {
+                turn_end.then_some(Seen::TurnEnded)
+            }
+        }
+        Expect::CodexTool {
+            tool_name, command, ..
+        } => {
+            if post
+                && tool == Some(tool_name.as_str())
+                && command_of(&ev.payload.tool_input) == Some(command.as_str())
+            {
+                Some(Seen::ToolRan)
+            } else {
+                turn_end.then_some(Seen::TurnEnded)
+            }
+        }
+    }
+}
+
+/// O7: the evidence identity of an expectation (Sol R3-2). Question
+/// identity is the question text; option labels are not part of it,
+/// because answer evidence names only the question and the chosen label.
+pub fn same_identity(a: &Expect, b: &Expect) -> bool {
+    match (a, b) {
+        (
+            Expect::ClaudeTool {
+                session_id: s1,
+                tool_name: t1,
+                digest: d1,
+            },
+            Expect::ClaudeTool {
+                session_id: s2,
+                tool_name: t2,
+                digest: d2,
+            },
+        ) => s1 == s2 && t1 == t2 && d1 == d2,
+        (
+            Expect::ClaudeQuestion {
+                session_id: s1,
+                question: q1,
+                ..
+            },
+            Expect::ClaudeQuestion {
+                session_id: s2,
+                question: q2,
+                ..
+            },
+        ) => s1 == s2 && q1 == q2,
+        (
+            Expect::CodexTool {
+                session_id: s1,
+                tool_name: t1,
+                command: c1,
+            },
+            Expect::CodexTool {
+                session_id: s2,
+                tool_name: t2,
+                command: c2,
+            },
+        ) => s1 == s2 && t1 == t2 && c1 == c2,
+        _ => false,
+    }
+}
+
+/// O7: evidence that names an occurrence's identity, as opposed to a
+/// turn end.
+pub fn is_identity(seen: &Seen) -> bool {
+    matches!(seen, Seen::ToolRan | Seen::Answered(_))
+}
+
+/// O7: a shadowed occurrence ignores identity evidence; turn ends apply.
+pub fn observe_shadowed(expect: &Expect, ev: &HookEvent, shadowed: bool) -> Option<Seen> {
+    observe(expect, ev).filter(|seen| !(shadowed && is_identity(seen)))
+}
+
+pub fn verdict(sent: &Sent, seen: &Seen) -> Verdict {
+    match (sent, seen) {
+        (Sent::Allow, Seen::ToolRan) | (Sent::Deny, Seen::TurnEnded) => Verdict::Consistent,
+        (Sent::Choose(want), Seen::Answered(got)) if want == got => Verdict::Consistent,
+        _ => Verdict::Contradicts,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hooks::wire::{Hints, HookAgent, Payload};
+
+    fn ev(rel: &str, name: HookName) -> HookEvent {
+        let p = format!(
+            "{}/../../tests/fixtures/hooks/{rel}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+        HookEvent {
+            agent: HookAgent::Claude,
+            name,
+            payload: Payload::from_value(&v).unwrap(),
+            hints: Hints::default(),
+            at: tokio::time::Instant::now(),
+        }
+    }
+    fn bash(command: &str) -> Expect {
+        let input = serde_json::json!({"command": command, "description": "Create empty file"});
+        Expect::ClaudeTool {
+            session_id: "4e3885ee-7454-410d-a2e2-86f4dc2533c0".into(),
+            tool_name: "Bash".into(),
+            digest: crate::hooks::wire::tool_digest("Bash", &input),
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_allow_and_deny_follow_section_6_2() {
+        let post = ev(
+            "claude/payload-PostToolUse-Bash.json",
+            HookName::PostToolUse,
+        );
+        let stop = ev("claude/payload-Stop.json", HookName::Stop);
+        let e = bash("touch /tmp/acp0/t2.txt");
+        assert_eq!(observe(&e, &post), Some(Seen::ToolRan));
+        assert_eq!(
+            observe(&bash("touch /tmp/acp0/other"), &post),
+            None,
+            "another tool call is no evidence"
+        );
+        assert_eq!(observe(&e, &stop), Some(Seen::TurnEnded));
+        assert_eq!(verdict(&Sent::Allow, &Seen::ToolRan), Verdict::Consistent);
+        assert_eq!(
+            verdict(&Sent::Allow, &Seen::TurnEnded),
+            Verdict::Contradicts
+        );
+        assert_eq!(verdict(&Sent::Deny, &Seen::TurnEnded), Verdict::Consistent);
+        assert_eq!(verdict(&Sent::Deny, &Seen::ToolRan), Verdict::Contradicts);
+    }
+
+    #[tokio::test]
+    async fn other_sessions_are_never_evidence() {
+        let mut stop = ev("claude/payload-Stop.json", HookName::Stop);
+        stop.payload.session_id = "someone-else".into();
+        assert_eq!(observe(&bash("x"), &stop), None);
+    }
+
+    #[tokio::test]
+    async fn questions_compare_the_answer_label() {
+        let post = ev(
+            "claude/payload-PostToolUse-AskUserQuestion.json",
+            HookName::PostToolUse,
+        );
+        let e = question("Pick a color", &[("o1", "Red"), ("o2", "Blue")]);
+        assert_eq!(observe(&e, &post), Some(Seen::Answered("Red".into())));
+        assert_eq!(
+            verdict(&Sent::Choose("Red".into()), &Seen::Answered("Red".into())),
+            Verdict::Consistent
+        );
+        assert_eq!(
+            verdict(&Sent::Choose("Blue".into()), &Seen::Answered("Red".into())),
+            Verdict::Contradicts
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shadowed_occurrence_sees_only_turn_ends() {
+        // O7: identity evidence may belong to an older identical occurrence.
+        let post = ev(
+            "claude/payload-PostToolUse-Bash.json",
+            HookName::PostToolUse,
+        );
+        let e = bash(post.payload.tool_input["command"].as_str().unwrap());
+        assert_eq!(observe_shadowed(&e, &post, false), Some(Seen::ToolRan));
+        assert_eq!(observe_shadowed(&e, &post, true), None);
+        let stop = ev("claude/payload-Stop.json", HookName::Stop);
+        assert_eq!(observe_shadowed(&e, &stop, true), Some(Seen::TurnEnded));
+        assert!(
+            is_identity(&Seen::ToolRan)
+                && is_identity(&Seen::Answered("x".into()))
+                && !is_identity(&Seen::TurnEnded)
+        );
+    }
+
+    fn question(q: &str, labels: &[(&str, &str)]) -> Expect {
+        Expect::ClaudeQuestion {
+            session_id: "4e3885ee-7454-410d-a2e2-86f4dc2533c0".into(),
+            question: q.into(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn question_identity_ignores_option_labels() {
+        // Sol R3-2.
+        let a = question("Pick a color", &[("o1", "Red"), ("o2", "Blue")]);
+        let b = question("Pick a color", &[("o1", "Blue"), ("o2", "Green")]);
+        assert!(same_identity(&a, &b));
+        assert!(!same_identity(
+            &a,
+            &question("Pick a size", &[("o1", "Red")])
+        ));
+        assert!(!same_identity(&a, &bash("x")));
+    }
+
+    #[tokio::test]
+    async fn another_questions_outcome_is_no_evidence() {
+        let post = ev(
+            "claude/payload-PostToolUse-AskUserQuestion.json",
+            HookName::PostToolUse,
+        );
+        assert_eq!(
+            observe(&question("A different question?", &[("o1", "Red")]), &post),
+            None
+        );
+        let mut bad = post.clone();
+        bad.payload.tool_response = serde_json::json!({"answers": {"Pick a color": 3}});
+        bad.payload.tool_input = serde_json::json!({});
+        assert_eq!(
+            observe(&question("Pick a color", &[("o1", "Red")]), &bad),
+            None,
+            "not a string answer"
+        );
+    }
+}
