@@ -42,6 +42,11 @@ pub struct AgentInfo {
     pub state_change_seq: u64,
     #[serde(default)]
     pub agent_session: Option<AgentSession>,
+    /// The foreground process's cwd; herdr's `cwd` can be the shell's (D5).
+    #[serde(default)]
+    pub foreground_cwd: Option<String>,
+    #[serde(default)]
+    pub terminal_id: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]

@@ -191,7 +191,10 @@ impl Herdr {
                 expect_type(&v, "agent_info")?;
                 serde_json::from_value(v["agent"].clone())
                     .map(Some)
-                    .map_err(|e| CallError::NoReply(format!("bad agent: {e}")))
+                    .map_err(|e| CallError::Server {
+                        code: "undecodable_agent".into(),
+                        message: format!("bad agent: {e}"),
+                    })
             }
             Err(CallError::Server { code, .. }) if code == "agent_not_found" => Ok(None),
             Err(e) => Err(e),

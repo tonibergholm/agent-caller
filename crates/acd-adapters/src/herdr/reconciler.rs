@@ -57,6 +57,37 @@ pub struct PaneRef {
     pub pane_id: String,
     pub kind: AgentKind,
     pub hints: mpsc::Sender<Hint>,
+    /// The herdr socket this pane lives on.
+    pub socket: std::path::PathBuf,
+    /// `agent_session.value`: the agent's own session id, when reported.
+    pub session: Option<String>,
+    /// Raw `foreground_cwd`, else `cwd` (not display-cleaned).
+    pub cwd: Option<String>,
+    pub terminal_id: Option<String>,
+    /// Which agent incarnation this is (G1). A replacement under the same
+    /// agent id gets a new value; targets and read tickets compare it.
+    pub incarnation: u64,
+}
+
+/// Process-wide, so incarnations never repeat across sockets.
+static NEXT_INCARNATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PaneIdentity {
+    terminal_id: Option<String>,
+    session: Option<String>,
+    kind: AgentKind,
+}
+
+impl PaneIdentity {
+    /// A different terminal, a different reported session, or a different
+    /// agent kind means a new agent under the same pane id. A session that
+    /// appears for the first time does not.
+    fn replaced_by(&self, next: &PaneIdentity) -> bool {
+        self.kind != next.kind
+            || matches!((&self.terminal_id, &next.terminal_id), (Some(a), Some(b)) if a != b)
+            || matches!((&self.session, &next.session), (Some(a), Some(b)) if a != b)
+    }
 }
 
 /// `agent_id -> PaneRef`. The reconciler inserts and removes; adapters read.
@@ -187,6 +218,9 @@ pub fn spawn(
         fb_open: HashMap::new(),
         keys: keys.clone(),
         watch_absent: HashMap::new(),
+        closed: HashSet::new(),
+        identity: HashMap::new(),
+        incarnations: HashMap::new(),
         next_class: Class::Hint,
         last_list: Instant::now(),
     };
@@ -271,6 +305,12 @@ struct Reconciler {
     keys: Arc<KeysTargets>,
     /// Request id -> consecutive detection reads without its dialog.
     watch_absent: HashMap<String, u8>,
+    /// Panes with a `Hint::Closed` not yet applied.
+    closed: HashSet<String>,
+    /// What made each known pane's agent this agent.
+    identity: HashMap<String, PaneIdentity>,
+    /// Current incarnation per known pane.
+    incarnations: HashMap<String, u64>,
     next_class: Class,
     last_list: Instant,
 }
@@ -364,6 +404,8 @@ impl Reconciler {
         self.dirty.clear();
         self.dirty_set.clear();
         self.resync.store(false, Ordering::Relaxed);
+        // Panes survive a reconnect, so `identity` stays.
+        self.closed.clear();
         self.set_health(Health::Down(reason));
         for pane_id in self.known.keys() {
             let Some(a) = self.core.agent(&map::agent_id(&self.hash, pane_id)) else {
@@ -435,7 +477,11 @@ impl Reconciler {
 
     fn ingest(&mut self, hint: Hint) {
         match hint {
-            Hint::Pane(p) | Hint::Closed(p) => self.mark_dirty(p),
+            Hint::Closed(p) => {
+                self.closed.insert(p.clone());
+                self.mark_dirty(p)
+            }
+            Hint::Pane(p) => self.mark_dirty(p),
             Hint::Resync => self.resync.store(true, Ordering::Relaxed),
         }
     }
@@ -692,21 +738,16 @@ impl Reconciler {
             if *absent < ABSENT_READS {
                 continue;
             }
-            self.watch_absent.remove(&t.request_id);
-            // Removed before the resolution is published.
-            self.keys.remove(&t.request_id);
-            self.core.observe(Observation::DialogGoneById {
-                request_id: t.request_id.clone(),
-            });
-            if status == Some(RequestStatus::Open) {
-                // Ended without any acd delivery. A claim may land after the
-                // status read above, so end it only while still open.
-                self.core.observe(Observation::RequestEndedIfOpen {
-                    request_id: t.request_id,
-                    by: ResolvedBy::Terminal,
-                });
+            if retire_target(&self.core, &self.keys, &t.request_id, status) {
+                self.watch_absent.remove(&t.request_id);
+                self.mark_dirty(pane_id.to_owned());
+            } else {
+                // A claim landed after the status read. Its guard will see
+                // the dialog gone and release the request; the next absent
+                // read ends it.
+                self.watch_absent
+                    .insert(t.request_id.clone(), ABSENT_READS - 1);
             }
-            self.mark_dirty(pane_id.to_owned());
         }
     }
 
@@ -763,43 +804,77 @@ impl Reconciler {
 
     fn apply(&mut self, pane_id: &str, info: Option<AgentInfo>) {
         let agent_id = map::agent_id(&self.hash, pane_id);
-        match info.and_then(|i| map::agent_obs(&self.hash, &i)) {
-            Some(obs) => {
-                if self.known.insert(pane_id.to_owned(), obs.kind) != Some(obs.kind) {
-                    self.subs_changed = true;
-                }
-                if obs.state == AgentState::NeedsYou {
-                    self.blocked.insert(pane_id.to_owned());
-                } else {
-                    self.blocked.remove(pane_id);
-                }
-                self.panes.write().expect("pane map").insert(
-                    agent_id,
-                    PaneRef {
-                        herdr: self.herdr.clone(),
-                        pane_id: pane_id.to_owned(),
-                        kind: obs.kind,
-                        hints: self.hints_tx.clone(),
-                    },
-                );
-                self.fallback.on_state(
-                    pane_id,
-                    obs.state == AgentState::NeedsYou,
-                    Instant::now().into_std(),
-                );
-                self.core.observe(Observation::AgentUpsert(obs));
+        let Some((info, obs)) = info.and_then(|i| map::agent_obs(&self.hash, &i).map(|o| (i, o)))
+        else {
+            self.closed.remove(pane_id);
+            self.identity.remove(pane_id);
+            self.forget_pane(pane_id);
+            return;
+        };
+        let next = PaneIdentity {
+            terminal_id: info.terminal_id.clone(),
+            session: info.agent_session.as_ref().and_then(|s| s.value.clone()),
+            kind: obs.kind,
+        };
+        let closed = self.closed.remove(pane_id);
+        let replaced = self
+            .identity
+            .get(pane_id)
+            .is_some_and(|old| old.replaced_by(&next));
+        if self.known.contains_key(pane_id) && (closed || replaced) {
+            self.forget_pane(pane_id);
+        }
+        self.identity.insert(pane_id.to_owned(), next.clone());
+        let incarnation = match self.incarnations.get(pane_id) {
+            Some(n) if self.known.contains_key(pane_id) => *n,
+            _ => {
+                let n = NEXT_INCARNATION.fetch_add(1, Ordering::Relaxed);
+                self.incarnations.insert(pane_id.to_owned(), n);
+                n
             }
-            None => {
-                self.fallback.forget(pane_id);
-                self.fb_open.remove(pane_id);
-                self.keys.remove_agent(&agent_id);
-                if self.known.remove(pane_id).is_some() {
-                    self.subs_changed = true;
-                    self.blocked.remove(pane_id);
-                    self.panes.write().expect("pane map").remove(&agent_id);
-                    self.core.observe(Observation::AgentGone { agent_id });
-                }
-            }
+        };
+        if self.known.insert(pane_id.to_owned(), obs.kind) != Some(obs.kind) {
+            self.subs_changed = true;
+        }
+        if obs.state == AgentState::NeedsYou {
+            self.blocked.insert(pane_id.to_owned());
+        } else {
+            self.blocked.remove(pane_id);
+        }
+        self.panes.write().expect("pane map").insert(
+            agent_id,
+            PaneRef {
+                herdr: self.herdr.clone(),
+                pane_id: pane_id.to_owned(),
+                kind: obs.kind,
+                hints: self.hints_tx.clone(),
+                socket: self.herdr.path().to_path_buf(),
+                session: next.session,
+                cwd: info.foreground_cwd.clone().or_else(|| info.cwd.clone()),
+                terminal_id: next.terminal_id,
+                incarnation,
+            },
+        );
+        self.fallback.on_state(
+            pane_id,
+            obs.state == AgentState::NeedsYou,
+            Instant::now().into_std(),
+        );
+        self.core.observe(Observation::AgentUpsert(obs));
+    }
+
+    /// The pane's agent is gone: drop everything known about it.
+    fn forget_pane(&mut self, pane_id: &str) {
+        let agent_id = map::agent_id(&self.hash, pane_id);
+        self.incarnations.remove(pane_id);
+        self.fallback.forget(pane_id);
+        self.fb_open.remove(pane_id);
+        self.keys.remove_agent(&agent_id);
+        if self.known.remove(pane_id).is_some() {
+            self.subs_changed = true;
+            self.blocked.remove(pane_id);
+            self.panes.write().expect("pane map").remove(&agent_id);
+            self.core.observe(Observation::AgentGone { agent_id });
         }
     }
 
@@ -843,6 +918,32 @@ impl Reconciler {
     }
 }
 
+/// The dialog of `request_id`'s target is confirmed gone. Ends an open
+/// request `terminal` first, then removes the target, unless a claim got
+/// in between (P1 follow-up: removing first left a claimed request with
+/// no target and no watcher). Returns whether the target was removed.
+pub fn retire_target(
+    core: &Core,
+    keys: &KeysTargets,
+    request_id: &str,
+    status_at_read: Option<RequestStatus>,
+) -> bool {
+    if status_at_read == Some(RequestStatus::Open) {
+        core.observe(Observation::RequestEndedIfOpen {
+            request_id: request_id.to_owned(),
+            by: ResolvedBy::Terminal,
+        });
+    }
+    if core.request(request_id).map(|r| r.status) == Some(RequestStatus::Answering) {
+        return false;
+    }
+    keys.remove(request_id);
+    core.observe(Observation::DialogGoneById {
+        request_id: request_id.to_owned(),
+    });
+    true
+}
+
 /// Turns events into hints. A full channel drops the event and sets the
 /// sticky resync flag. EOF reports `generation` as lost.
 async fn read_events(
@@ -866,4 +967,86 @@ async fn read_events(
         }
     }
     let _ = down.send(generation);
+}
+
+#[cfg(test)]
+mod retire_tests {
+    use super::*;
+    use acd_core::testing::{FakeAdapter, agent_obs, permission_obs, test_machine};
+
+    fn target(core: &Core, agent: &str) -> (KeysTargets, String) {
+        let mut obs = permission_obs(agent, "k");
+        obs.answer_path = AnswerPath::Keys;
+        core.observe(Observation::RequestSeen(obs));
+        let rid = core
+            .request_id_for(agent, &CorrelationKey("k".into()))
+            .unwrap();
+        let dialog = std::fs::read_to_string(format!(
+            "{}/../../tests/fixtures/herdr/claude-permission-bash.txt",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let keys = KeysTargets::default();
+        keys.set(
+            super::super::keys::KeysTarget::from_screen(
+                rid.clone(),
+                agent.into(),
+                CorrelationKey("k".into()),
+                &dialog,
+                [("allow".to_string(), "1".to_string())].into(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        (keys, rid)
+    }
+
+    #[tokio::test]
+    async fn a_claim_after_the_status_read_keeps_the_target() {
+        let fake = FakeAdapter::gated();
+        let core = Core::new(test_machine(), vec![fake.clone()]);
+        core.observe(Observation::AgentUpsert(agent_obs("a")));
+        let (keys, rid) = target(&core, "a");
+        let c2 = core.clone();
+        let r2 = rid.clone();
+        let pending = tokio::spawn(async move {
+            c2.handle(
+                "c",
+                acd_protocol::ClientMessage::RequestAnswer {
+                    id: "x".into(),
+                    request_id: r2,
+                    revision: None,
+                    option_id: Some("allow".into()),
+                    text: None,
+                },
+            )
+            .await
+        });
+        while core.request(&rid).map(|r| r.status) != Some(RequestStatus::Answering) {
+            tokio::task::yield_now().await;
+        }
+        // The watch read `Open` before the claim landed.
+        assert!(!retire_target(
+            &core,
+            &keys,
+            &rid,
+            Some(RequestStatus::Open)
+        ));
+        assert!(
+            keys.get(&rid).is_some(),
+            "the claimed request keeps its target"
+        );
+        fake.open_gate();
+        pending.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_open_request_ends_terminal_and_loses_its_target() {
+        let core = Core::new(test_machine(), vec![FakeAdapter::new()]);
+        core.observe(Observation::AgentUpsert(agent_obs("a")));
+        let (keys, rid) = target(&core, "a");
+        assert!(retire_target(&core, &keys, &rid, Some(RequestStatus::Open)));
+        assert!(core.request(&rid).is_none());
+        assert!(keys.get(&rid).is_none());
+    }
 }
