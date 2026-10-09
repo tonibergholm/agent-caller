@@ -69,6 +69,10 @@ impl Core {
             .request_id_for(agent_id, key)
     }
 
+    pub fn pending_key(&self, agent_id: &str) -> Option<(String, CorrelationKey, RequestKind)> {
+        self.inner.lock().unwrap().registry.pending_key(agent_id)
+    }
+
     pub fn observe(&self, obs: Observation) {
         let mut st = self.inner.lock().unwrap();
         let changes = st.registry.apply(obs);

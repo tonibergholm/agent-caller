@@ -89,6 +89,12 @@ pub enum Observation {
         key: CorrelationKey,
         request_id: String,
     },
+    /// Moves `from`'s pending request (same id, status and revision) and
+    /// its keys to `to`, then removes `from` (spec §6.2 Binding, D6).
+    AgentMigrated {
+        from: String,
+        to: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -170,6 +176,7 @@ impl Registry {
         match obs {
             Observation::AgentUpsert(o) => self.upsert_agent(o),
             Observation::AgentGone { agent_id } => self.agent_gone(&agent_id),
+            Observation::AgentMigrated { from, to } => self.migrate(&from, &to),
             Observation::RequestSeen(o) => self.request_seen(o),
             Observation::RequestReady {
                 agent_id,
@@ -340,6 +347,82 @@ impl Registry {
     pub fn request_id_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String> {
         self.open_request_for(agent_id, key)
             .filter(|rid| self.requests.get(rid).is_some_and(|e| e.key == *key))
+    }
+
+    pub fn pending_key(&self, agent_id: &str) -> Option<(String, CorrelationKey, RequestKind)> {
+        let p = self.agents.get(agent_id)?.pending.as_ref()?;
+        let e = self.requests.get(&p.id)?;
+        Some((p.id.clone(), e.key.clone(), e.req.kind))
+    }
+
+    fn migrate(&mut self, from: &str, to: &str) -> Vec<Change> {
+        if from == to || !self.agents.contains_key(from) || !self.agents.contains_key(to) {
+            return vec![];
+        }
+        let mut out = Vec::new();
+        let moving = self.agents.get(from).and_then(|a| a.pending.clone());
+        if let Some(p) = moving {
+            match self.agents.get(to).and_then(|a| a.pending.clone()) {
+                Some(q)
+                    if q.kind == RequestKind::BlockedUnparsed
+                        && q.status == RequestStatus::Open =>
+                {
+                    out.extend(
+                        self.resolve_request(&q.id, ResolvedBy::Superseded)
+                            .into_iter()
+                            .filter(|c| !matches!(c, Change::AgentUpdated(_))),
+                    );
+                }
+                Some(_) => {
+                    let by = if p.status == RequestStatus::Answering {
+                        ResolvedBy::Uncertain
+                    } else {
+                        ResolvedBy::Lost
+                    };
+                    out.extend(
+                        self.resolve_request(&p.id, by)
+                            .into_iter()
+                            .filter(|c| !matches!(c, Change::AgentUpdated(_))),
+                    );
+                    out.extend(self.agent_gone(from));
+                    return out;
+                }
+                None => {}
+            }
+            if let Some(e) = self.requests.get_mut(&p.id) {
+                e.req.agent_id = to.to_string();
+            }
+            let moved: Vec<(String, CorrelationKey)> = self
+                .keys
+                .keys()
+                .filter(|(a, _)| a == from)
+                .cloned()
+                .collect();
+            for (a, k) in moved {
+                let mut st = self.keys.remove(&(a, k.clone())).expect("listed above");
+                st.agent_id = to.to_string();
+                self.keys.entry((to.to_string(), k)).or_insert(st);
+            }
+            let req = self
+                .requests
+                .get(&p.id)
+                .map(|e| e.req.clone())
+                .expect("moved request");
+            self.seen.remove(to);
+            let a = self.agents.get_mut(to).expect("checked above");
+            a.pending = Some(req);
+            if a.state != AgentState::NeedsYou {
+                a.state = AgentState::NeedsYou;
+                a.state_since = Utc::now();
+            }
+            out.push(Change::AgentUpdated(a.clone()));
+        }
+        // The request moved: nothing is resolved here.
+        self.agents.remove(from);
+        self.keys.retain(|_, k| k.agent_id != from);
+        self.seen.remove(from);
+        out.push(Change::AgentRemoved(from.to_string()));
+        out
     }
 
     fn upsert_agent(&mut self, mut o: AgentObs) -> Vec<Change> {
