@@ -125,6 +125,8 @@ fn claude_question(d: &Dialog, spec: &QuestionSpec) -> bool {
     }
     let n = spec.options.len();
     d.options.len() == n + 2
+        && d.option_rows.len() == n + 2
+        && question_option_rows(d, spec)
         && d.options
             .iter()
             .enumerate()
@@ -136,6 +138,36 @@ fn claude_question(d: &Dialog, spec: &QuestionSpec) -> bool {
             .all(|((label, _), o)| o.label == *label)
         && d.options[n].label == "Type something."
         && d.options[n + 1].label == "Chat about this"
+}
+
+/// M3: the rows from the first option to the footer are exactly the label
+/// rows, each followed by the hook option's single description row (indented
+/// to the label text) or nothing, then the fixture's rule before the
+/// built-in options and blank rows before the footer. Any other row, such as
+/// a wrapped label or a deeper-indented numbered row, means no match.
+fn question_option_rows(d: &Dialog, spec: &QuestionSpec) -> bool {
+    let n = spec.options.len();
+    let rows = &d.region;
+    let at = &d.option_rows;
+    for (k, (_, desc)) in spec.options.iter().enumerate() {
+        let between = &rows[at[k] + 1..at[k + 1]];
+        let ok = match desc {
+            None => between.is_empty(),
+            Some(t) => {
+                single_row(t) && between.len() == 1 && between[0].trim_end() == format!("     {t}")
+            }
+        };
+        if !ok {
+            return false;
+        }
+    }
+    let gap = &rows[at[n] + 1..at[n + 1]];
+    if !matches!(gap, [r] if rule(r)) {
+        return false;
+    }
+    let tail = &rows[at[n + 1] + 1..];
+    tail.split_last()
+        .is_some_and(|(_, rest)| rest.iter().all(|r| blank(r)))
 }
 
 impl DialogMatch {
@@ -180,7 +212,23 @@ mod tests {
                 header: header.into(),
                 question: q.into(),
                 multi_select: false,
-                options: labels.iter().map(|l| (l.to_string(), None)).collect(),
+                options: labels
+                    .iter()
+                    .map(|l| (l.to_string(), Some(format!("Choose {}", l.to_lowercase()))))
+                    .collect(),
+            },
+        }
+    }
+    fn question_desc(header: &str, q: &str, opts: &[(&str, &str)]) -> DialogMatch {
+        DialogMatch::ClaudeQuestion {
+            spec: QuestionSpec {
+                header: header.into(),
+                question: q.into(),
+                multi_select: false,
+                options: opts
+                    .iter()
+                    .map(|(l, d)| (l.to_string(), Some(d.to_string())))
+                    .collect(),
             },
         }
     }
@@ -380,6 +428,54 @@ mod tests {
                 .is_none(),
             "text above the header"
         );
+    }
+
+    #[test]
+    fn option_rows_must_be_exactly_label_and_description() {
+        let q = screen("claude-askuserquestion-single.txt");
+        let hook = || {
+            question_desc(
+                "Color",
+                "Pick a color",
+                &[("Red", "Choose red"), ("Blue", "Choose blue")],
+            )
+        };
+        assert!(
+            hook().find(&q).is_some(),
+            "the recorded dialog with descriptions"
+        );
+        assert!(
+            DialogMatch::ClaudeQuestion {
+                spec: QuestionSpec {
+                    header: "Color".into(),
+                    question: "Pick a color".into(),
+                    multi_select: false,
+                    options: vec![("Red".into(), None), ("Blue".into(), None)],
+                }
+            }
+            .find(&q)
+            .is_none(),
+            "an unexpected description row"
+        );
+        let wrapped = q.replace("     Choose red", "     and delete saved preferences");
+        assert!(wrapped.contains("and delete saved"));
+        assert!(
+            question("Color", "Pick a color", &["Red", "Blue"])
+                .find(&wrapped)
+                .is_none(),
+            "wrapped label looks like a description"
+        );
+        assert!(hook().find(&wrapped).is_none(), "description differs");
+        let deeper = q.replace(
+            "     Choose red",
+            "     Choose red\n      3. Delete everything",
+        );
+        assert!(
+            hook().find(&deeper).is_none(),
+            "extra indented numbered row"
+        );
+        let two = q.replace("  2. Blue\n     Choose blue", "  2. Blue");
+        assert!(hook().find(&two).is_none(), "missing description");
     }
 
     #[test]
