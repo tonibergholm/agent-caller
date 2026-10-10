@@ -1780,8 +1780,10 @@ async fn a_stale_capture_for_an_unheld_request_cannot_register_a_target() {
 async fn a_hold_end_read_waiting_for_a_slot_still_switches_to_keys() {
     let r = rig(
         &[
-            fake_agent("w1:p1", "claude", "blocked"),
-            fake_agent("w1:p2", "claude", "blocked"),
+            // Not "blocked": herdr's fallback would poll both panes with
+            // `agent.read`, and such a poll could take the gate below.
+            fake_agent("w1:p1", "claude", "working"),
+            fake_agent("w1:p2", "claude", "working"),
         ],
         |cfg| {
             cfg.max_reads = 1;
@@ -1829,7 +1831,8 @@ async fn a_hold_end_read_waiting_for_a_slot_still_switches_to_keys() {
         .await;
     let rid_a = until("A", || r.agent(&a1).and_then(|a| a.pending).map(|p| p.id)).await;
     tokio::time::sleep(Duration::from_millis(700)).await;
-    let gate = fake.block_next("agent.read");
+    // Gate B's capture read only: it holds the single read slot.
+    let gate = fake.block_next("agent.read@w1:p2");
     let mut second = fx("claude/payload-PermissionRequest-Bash.json");
     second["session_id"] = "5f4996ff-0000-4000-8000-000000000002".into();
     let _held_b = r.hold(&second, &on("w1:p2")).await;
@@ -2108,4 +2111,104 @@ async fn a_fresh_header_conflict_unbinds_and_drops_the_cached_binding() {
         r.agent(&hooks_only_id()).is_some(),
         "no cached p1 binding brought the session back"
     );
+}
+
+/// p1 reports the session and p2 does not; the session is header-bound to
+/// p1, then a hook names p2: a conflict. Returns the rig and p1's agent id.
+async fn header_conflict_rig() -> (Rig, String) {
+    let mut p1 = fake_agent("w1:p1", "claude", "idle");
+    p1["agent_session"] = json!({"value": SID});
+    let r = rig(&[p1, fake_agent("w1:p2", "claude", "idle")], |_| {}).await;
+    let p1_id = until("p1 reports the session", || {
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .panes()
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, p)| p.pane_id == "w1:p1" && p.session.as_deref() == Some(SID))
+            .map(|(id, _)| id.clone())
+    })
+    .await;
+    until("p1 agent", || r.agent(&p1_id)).await;
+    let prompt = fx("claude/payload-UserPromptSubmit.json");
+    let h1 = header_on(&r, "w1:p1");
+    let h1: Vec<(&str, &str)> = h1.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    r.hook("claude", "UserPromptSubmit", &prompt, &h1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(r.agent(&hooks_only_id()).is_none(), "bound to p1");
+    let h2 = header_on(&r, "w1:p2");
+    let h2: Vec<(&str, &str)> = h2.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    r.hook("claude", "UserPromptSubmit", &prompt, &h2).await;
+    until("the conflict leaves the session unbound", || {
+        r.agent(&hooks_only_id())
+    })
+    .await;
+    (r, p1_id)
+}
+
+fn header_on(r: &Rig, pane: &'static str) -> Vec<(&'static str, String)> {
+    vec![
+        ("X-Herdr-Pane", pane.into()),
+        ("X-Herdr-Socket", r.sock()),
+        ("X-Claude-Entrypoint", "cli".into()),
+    ]
+}
+
+/// Re-evaluations without a header: a herdr pane update and registry scans.
+async fn reevaluate_without_header(r: &Rig) {
+    let mut p2 = fake_agent("w1:p2", "claude", "working");
+    p2["cwd"] = json!("/tmp");
+    r.fake.as_ref().unwrap().set_agent(p2);
+    r.fake
+        .as_ref()
+        .unwrap()
+        .push_event(json!({"event": "pane_updated", "data": {"pane_id": "w1:p2"}}));
+    registry_entry(r, "busy");
+    // Several scan intervals (100 ms) and tick cycles.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+}
+
+#[tokio::test]
+async fn a_header_conflict_stays_unbound_across_reevaluations_until_a_consistent_header() {
+    let (r, _p1) = header_conflict_rig().await;
+    reevaluate_without_header(&r).await;
+    assert!(
+        r.agent(&hooks_only_id()).is_some(),
+        "scans and pane updates must not rebind the reporting pane"
+    );
+    let prompt = fx("claude/payload-UserPromptSubmit.json");
+    let h = header_on(&r, "w1:p1");
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    r.hook("claude", "UserPromptSubmit", &prompt, &h).await;
+    until("a consistent header rebinds p1", || {
+        r.agent(&hooks_only_id()).is_none().then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_header_conflict_clears_when_its_pane_disappears() {
+    let (r, _p1) = header_conflict_rig().await;
+    let f = r.fake.as_ref().unwrap();
+    f.remove_agent("w1:p2");
+    f.push_event(json!({"event": "pane_closed", "data": {"pane_id": "w1:p2"}}));
+    until("p2 gone", || {
+        (!r.herdr
+            .as_ref()
+            .unwrap()
+            .panes()
+            .read()
+            .unwrap()
+            .values()
+            .any(|p| p.pane_id == "w1:p2"))
+        .then_some(())
+    })
+    .await;
+    registry_entry(&r, "busy");
+    until("the reporting pane binds again", || {
+        r.agent(&hooks_only_id()).is_none().then_some(())
+    })
+    .await;
 }

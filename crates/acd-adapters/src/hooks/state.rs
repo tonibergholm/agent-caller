@@ -182,6 +182,16 @@ struct HeaderBind {
     incarnation: u64,
 }
 
+/// R9: a hook's resolved header named a pane that could not bind (another
+/// pane reports the session, or no Claude pane matches). Until cleared,
+/// re-evaluations without a header keep the session unbound.
+#[derive(Clone, Debug)]
+struct HeaderConflict {
+    /// The named pane's agent id and incarnation when discovery knows it;
+    /// the mark clears when that pane changes incarnation or disappears.
+    pane: Option<(String, u64)>,
+}
+
 /// Largest `cwd` kept per session.
 const CWD_MAX_BYTES: usize = 4096;
 
@@ -306,6 +316,7 @@ fn stored_cwd(cwd: &str) -> Option<String> {
 struct Session {
     owner: Owner,
     binding: Option<HeaderBind>,
+    conflict: Option<HeaderConflict>,
     bind_gen: u64,
     agent_id: Option<String>,
     hooks_only: bool,
@@ -609,14 +620,29 @@ impl Reconciler {
             })
         });
         // A present, resolved header is current evidence: it replaces the
-        // cached binding even when it does not bind (R9: a conflict leaves
-        // the session unbound). Only a hook without a resolved header keeps
-        // the cache.
-        let resolved_header = event.is_some_and(|h| h.herdr_pane.is_some()) && event_hash.is_some();
+        // cached binding even when it does not bind. R9: such a conflict is
+        // remembered, so no later re-evaluation without a header binds the
+        // session until a hook's header binds consistently or the named
+        // pane changes. Only a hook without a resolved header keeps both.
+        let resolved_header = event.and_then(|h| {
+            let pane = h.herdr_pane.as_deref()?;
+            let hash = event_hash.as_deref()?;
+            Some((pane, hash))
+        });
         let mut header = (event.and_then(|h| h.herdr_pane.clone()), event_hash.clone());
+        let mut unbound = false;
         if let Some(session) = self.sessions.get_mut(session_id) {
-            if fresh.is_some() || resolved_header {
+            if fresh.is_some() {
                 session.binding = fresh;
+                session.conflict = None;
+            } else if let Some((pane, hash)) = resolved_header {
+                session.binding = None;
+                session.conflict = Some(HeaderConflict {
+                    pane: panes
+                        .iter()
+                        .find(|p| p.pane_id == pane && pane_hash(&p.socket) == hash)
+                        .map(|p| (p.agent_id.clone(), p.incarnation)),
+                });
             } else if session.binding.as_ref().is_some_and(|b| {
                 !panes
                     .iter()
@@ -624,6 +650,19 @@ impl Reconciler {
             }) {
                 session.binding = None;
             }
+            if session
+                .conflict
+                .as_ref()
+                .and_then(|c| c.pane.as_ref())
+                .is_some_and(|(id, inc)| {
+                    !panes
+                        .iter()
+                        .any(|p| p.agent_id == *id && p.incarnation == *inc)
+                })
+            {
+                session.conflict = None;
+            }
+            unbound = session.conflict.is_some();
             if let Some(b) = &session.binding {
                 header = (b.pane.clone(), Some(b.socket_hash.clone()));
             }
@@ -632,6 +671,9 @@ impl Reconciler {
             .t3
             .as_deref()
             .map(|m| m as &dyn super::owner::SessionOwners);
+        // A marked conflict sees no panes: T3 ownership and the entrypoint
+        // rules still apply, but no pane can bind.
+        let panes: &[PaneFact] = if unbound { &[] } else { &panes };
         claude_owner_resolved(
             session_id,
             HeaderRef {
@@ -640,7 +682,7 @@ impl Reconciler {
             },
             entrypoint,
             t3,
-            &panes,
+            panes,
             &self.cfg.ignored_entrypoints,
             &pane_hash,
         )
@@ -714,6 +756,7 @@ impl Reconciler {
             .or_insert_with(|| Session {
                 owner: Owner::Unknown,
                 binding: None,
+                conflict: None,
                 bind_gen: 0,
                 agent_id: None,
                 hooks_only: false,
