@@ -170,9 +170,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("s.sock");
         drop(UnixListener::bind(&p).unwrap());
-        let before = ino(&p);
+        // The old socket refuses connections; the inode number may be
+        // reused (it is on Linux), so prove the replacement by serving.
+        assert!(UnixStream::connect(&p).is_err());
         let (l, _owned) = bind_as(&p, euid()).unwrap();
-        assert_ne!(ino(&p), before);
         drop(UnixStream::connect(&p).unwrap());
         assert!(l.accept().is_ok());
     }
