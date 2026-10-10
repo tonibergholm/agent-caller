@@ -193,6 +193,15 @@ pub fn ensure_locked(dir: &Path, held: &WriterLock, force: bool) -> Result<bool>
     if legacy {
         std::fs::remove_file(dir.join(LEGACY_FILE))?;
     }
+    // No earlier token is accepted now, so no uninstalled Claude root needs
+    // scanning (F4). Best effort: a reset of an unreadable store restarts at
+    // generation 1, and entries left behind only widen later scans.
+    if let Ok(mut record) = hooks_install::Record::load(dir)
+        && !record.uninstalled_claude.is_empty()
+    {
+        record.uninstalled_claude.clear();
+        let _ = record.save(dir);
+    }
     Ok(true)
 }
 
@@ -508,6 +517,20 @@ mod tests {
         crate::secrets::parse_token(&s.current).unwrap();
         assert!(!ensure(d.path(), false).unwrap());
         assert_eq!(load(d.path()).unwrap(), s);
+    }
+    #[test]
+    fn a_forced_reset_forgets_uninstalled_claude_roots() {
+        let d = dir();
+        ensure(d.path(), false).unwrap();
+        let mut r = hooks_install::Record::load(d.path()).unwrap();
+        r.uninstalled_claude.insert("/c/settings.json".into(), 1);
+        r.save(d.path()).unwrap();
+        assert!(ensure(d.path(), true).unwrap());
+        let r = hooks_install::Record::load(d.path()).unwrap();
+        assert!(
+            r.uninstalled_claude.is_empty(),
+            "no earlier token is accepted"
+        );
     }
     #[test]
     fn load_never_migrates() {

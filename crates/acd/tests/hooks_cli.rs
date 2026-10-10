@@ -2351,6 +2351,11 @@ impl Drop for Sleeper {
 /// A registry entry for a real child process, so `SystemProc` sees a live
 /// session that started before the rotation.
 fn live_registry_session(home: &std::path::Path) -> Sleeper {
+    live_registry_session_in(&home.join(".claude/sessions"))
+}
+
+/// A live registry session in the `sessions` directory of any Claude root.
+fn live_registry_session_in(sessions: &std::path::Path) -> Sleeper {
     let child = std::process::Command::new("sleep")
         .arg("120")
         .spawn()
@@ -2363,8 +2368,7 @@ fn live_registry_session(home: &std::path::Path) -> Sleeper {
         .output()
         .unwrap();
     let lstart = String::from_utf8(out.stdout).unwrap().trim().to_owned();
-    let sessions = home.join(".claude/sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::create_dir_all(sessions).unwrap();
     let entry = serde_json::json!({
         "pid": pid, "sessionId": LIVE_SID, "cwd": "/tmp", "procStart": lstart,
         "startedAt": chrono::Utc::now().timestamp_millis() - 60_000,
@@ -2762,4 +2766,109 @@ fn a_held_writer_lock_does_not_delay_a_credential_refresh() {
     assert!(!gate.exists(), "the rotation still held the lock");
     std::fs::write(&gate, b"").unwrap();
     assert!(child.wait().unwrap().success());
+}
+
+/// `acd hooks install|uninstall claude` and `acd token rotate hook` for the
+/// Claude root `root`.
+fn in_claude_root(
+    dir: &std::path::Path,
+    home: &std::path::Path,
+    root: &std::path::Path,
+    args: &[&str],
+) -> std::process::Output {
+    acd_home(dir, home)
+        .env("CLAUDE_CONFIG_DIR", root)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// Sol final F4: an uninstalled Claude root stays in the registry scan while
+/// its sessions may hold the previous token. Before the fix only the
+/// default root was scanned, the scan was complete and empty, and the
+/// previous token was retired under the live session.
+#[cfg(debug_assertions)]
+#[test]
+fn an_uninstalled_root_keeps_the_previous_token_for_its_live_sessions() {
+    let (home, dir) = home_with_acd();
+    let custom = home.path().join("custom-claude");
+    let ok = |o: std::process::Output| assert!(o.status.success(), "{o:?}");
+    ok(in_claude_root(
+        &dir,
+        home.path(),
+        &custom,
+        &["hooks", "install", "claude"],
+    ));
+    // The session started before the rotation: it holds the old token.
+    let _sleeper = live_registry_session_in(&custom.join("sessions"));
+    let old = store_token(&dir);
+    ok(in_claude_root(
+        &dir,
+        home.path(),
+        &custom,
+        &["token", "rotate", "hook"],
+    ));
+    ok(in_claude_root(
+        &dir,
+        home.path(),
+        &custom,
+        &["hooks", "uninstall", "claude"],
+    ));
+    // The default root exists and is empty, so its scans complete.
+    std::fs::create_dir_all(home.path().join(".claude/sessions")).unwrap();
+    let started = start_daemon(
+        &dir,
+        None,
+        "",
+        &[("ACD_TEST_HOOKS_FAST", "1"), home_env(home.path())[0]],
+    );
+    let updated = store_of(&dir)["headers"]["updated_at_ms"].as_i64().unwrap();
+    wait_until_ms(updated + 5_000 + 2_000);
+    // A complete scan found the session in the uninstalled root.
+    let pending = "rotation pending: 1 Claude sessions";
+    until_true("a retirement decision", 5, || {
+        status_text(&dir).contains(pending) || store_of(&dir)["previous"].is_null()
+    });
+    assert!(store_of(&dir)["previous"].is_object(), "retired early");
+    assert!(status_text(&dir).contains(pending));
+    assert_eq!(
+        post_hook(
+            started.hook_port,
+            "/hook/claude/Stop",
+            &old,
+            &[],
+            &stop_body(LIVE_SID)
+        )
+        .0,
+        200
+    );
+}
+
+/// Sol final F4: install records that cannot be read make every registry
+/// scan incomplete, so the previous token stays. Before the fix the error
+/// became an empty root list and a default-root-only scan retired it.
+#[cfg(debug_assertions)]
+#[test]
+fn unreadable_install_records_keep_the_previous_token() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    std::fs::create_dir_all(home.path().join(".claude/sessions")).unwrap();
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    let records = dir.join("hooks-installed.json");
+    std::fs::write(&records, b"not json").unwrap();
+    std::fs::set_permissions(&records, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let _started = start_daemon(
+        &dir,
+        None,
+        "",
+        &[("ACD_TEST_HOOKS_FAST", "1"), home_env(home.path())[0]],
+    );
+    let updated = store_of(&dir)["headers"]["updated_at_ms"].as_i64().unwrap();
+    wait_until_ms(updated + 5_000 + 2_000);
+    let waiting = "waiting for a complete registry scan";
+    until_true("a retirement decision", 5, || {
+        status_text(&dir).contains(waiting) || store_of(&dir)["previous"].is_null()
+    });
+    assert!(store_of(&dir)["previous"].is_object(), "retired");
+    assert!(status_text(&dir).contains(waiting));
 }

@@ -654,9 +654,19 @@ stays usable while it waits (§4, invariant 1).
 
 **Session discovery** (P0 item 9, gate 5). Every 30 s and at startup, acd
 scans `<claude config dir>/sessions/*.json` for every root it knows: the
-install records' roots plus the default root, read again before each scan
-(D24). It never opens the `.key` files there.
+install records' roots, the roots of uninstalled Claude installs whose
+sessions may still hold the previous hook token, and the default root, read
+again before each scan (D24). It never opens the `.key` files there.
 
+- An uninstalled root stays known because sessions started before
+  `acd hooks uninstall claude` keep the headers they read. When its record
+  is removed, the install records keep the root with the token store's
+  current generation (unknown if the store cannot be read: kept). The root
+  is scanned only while the previous token is that generation or older.
+  The entry leaves the records at the next record change after no accepted
+  token is that old, or when a forced `acd init` resets the store.
+- If the install records cannot be read, the root list is unknown and every
+  scan is incomplete until they can.
 - The registry fields used are `pid`, `sessionId`, `cwd`, `name`, `status`
   and `procStart`. `status` is `idle`, `busy` or `waiting` (a `waiting`
   entry also has `waitingFor`, for example `permission prompt`). An unknown
@@ -675,10 +685,11 @@ install records' roots plus the default root, read again before each scan
   cannot be verified follows the **dead-pid rule**: if the process named by
   the file name is dead, the entry is skipped; if it is alive or cannot be
   checked, the scan is marked incomplete. A listing error, an unsafe
-  directory or hitting the entry cap also marks it incomplete. Each reason is
-  logged once, without file contents, and none creates an agent. A missing
-  or incomplete scan never removes an agent that hooks keep alive, and an
-  incomplete scan is never used to retire the previous hook token (§6.1).
+  directory, a missing root (an uninstalled root's deleted directory
+  included: it cannot be shown to be empty) or hitting the entry cap also
+  marks it incomplete. Each reason is logged once, without file contents,
+  and none creates an agent. A missing or incomplete scan never removes an
+  agent that hooks keep alive, and an incomplete scan is never used to retire the previous hook token (§6.1).
   Each scan carries its wall-clock start and end times for that purpose.
 - Discovery applies the same ownership filter as hooks (below), so the
   scan never creates a T3-owned session.
@@ -775,8 +786,10 @@ never waits on herdr itself:
   next tick retries. The cache holds at most 4096 paths.
 - **Lock order** (R11). The herdr per-agent delivery lock is taken before
   the hooks occurrence lock whenever both are held, and an occurrence lock
-  is never held while taking a delivery lock. Every holder releases a
-  delivery lock within two herdr call deadlines (6 s).
+  is never held while taking a delivery lock. A key delivery holds it for at
+  most the keys deliver budget (`deliver_budget`, 8 s) plus the local write
+  of the key: the lock wait, the guard read, the C7 rival reads (R12), any
+  further read of the target and the connect all share that one deadline.
 
 **Registry status and hook state.** Hook-set state wins for 30 s, and a
 registry `status` never turns a hook-set `done` into `idle`.

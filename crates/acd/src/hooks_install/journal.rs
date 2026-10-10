@@ -57,10 +57,7 @@ pub fn finish(config_dir: &Path) -> Result<()> {
 }
 fn apply(config_dir: &Path, dest: &Path, rec: Option<FileRecord>) -> Result<()> {
     let mut record = Record::load(config_dir)?;
-    match rec {
-        Some(r) => record.files.insert(dest.to_path_buf(), r),
-        None => record.files.remove(dest),
-    };
+    record.set(config_dir, dest, rec);
     record.save(config_dir)
 }
 

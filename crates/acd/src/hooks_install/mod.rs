@@ -42,6 +42,14 @@ pub struct FileRecord {
 pub struct Record {
     pub version: u32,
     pub files: BTreeMap<PathBuf, FileRecord>,
+    /// Claude settings files whose install record was removed, with the
+    /// token store's generation at that moment (`u64::MAX` when the store
+    /// could not be read). Sessions started before the removal keep the
+    /// headers they read, so their registry root is scanned while the
+    /// previous token is that generation or older (Sol final F4). Pruned
+    /// once no accepted token is that old.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub uninstalled_claude: BTreeMap<PathBuf, u64>,
 }
 
 impl Record {
@@ -69,17 +77,67 @@ impl Record {
             .map(|(p, _)| p.clone())
             .collect()
     }
+    /// Sets (`Some`) or removes (`None`) the install record of `dest`. The
+    /// caller holds the writer lock. A removed Claude record moves to
+    /// `uninstalled_claude` (F4).
+    pub fn set(&mut self, config_dir: &Path, dest: &Path, rec: Option<FileRecord>) {
+        let store = crate::hook_token::load(config_dir).ok();
+        match rec {
+            Some(r) => {
+                self.uninstalled_claude.remove(dest);
+                self.files.insert(dest.to_path_buf(), r);
+            }
+            None => {
+                if self
+                    .files
+                    .remove(dest)
+                    .is_some_and(|r| r.target == Target::Claude)
+                {
+                    let generation = store.as_ref().map_or(u64::MAX, |s| s.generation);
+                    self.uninstalled_claude
+                        .insert(dest.to_path_buf(), generation);
+                }
+            }
+        }
+        if let Some(s) = &store {
+            let oldest = s.previous.as_ref().map_or(s.generation, |p| p.generation);
+            self.uninstalled_claude.retain(|_, g| *g >= oldest);
+        }
+    }
 }
 
-pub fn recorded_claude_roots(config_dir: &Path) -> Vec<PathBuf> {
-    Record::load(config_dir)
-        .map(|r| {
-            r.claude_destinations()
-                .iter()
-                .filter_map(|p| p.parent().map(|d| d.join("sessions")))
-                .collect()
-        })
-        .unwrap_or_default()
+/// The registry roots (`<root>/sessions`) of recorded Claude installs and
+/// of uninstalled ones whose sessions may still hold the previous token
+/// (F4). An error when the install records cannot be read: the caller must
+/// then treat any scan as incomplete. An unreadable token store keeps every
+/// uninstalled root.
+pub fn recorded_claude_roots(config_dir: &Path) -> Result<Vec<PathBuf>> {
+    let record = Record::load(config_dir)?;
+    let previous = crate::hook_token::load(config_dir)
+        .ok()
+        .map(|s| s.previous.map(|p| p.generation));
+    let mut destinations = record.claude_destinations();
+    destinations.extend(
+        record
+            .uninstalled_claude
+            .iter()
+            .filter(|(_, g)| match previous {
+                None => true,
+                Some(None) => false,
+                Some(Some(p)) => **g >= p,
+            })
+            .map(|(p, _)| p.clone()),
+    );
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for root in destinations
+        .iter()
+        .filter_map(|p| p.parent().map(|d| d.join("sessions")))
+    {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    Ok(roots)
 }
 
 /// Resolves the parent directory once. Every later step (Git check, backup,
@@ -474,14 +532,7 @@ fn edit_settings(
             return Err(e.error);
         }
         let mut record = Record::load(&ctx.config_dir)?;
-        match rec {
-            Some(r) => {
-                record.files.insert(dest.to_path_buf(), r);
-            }
-            None => {
-                record.files.remove(dest);
-            }
-        }
+        record.set(&ctx.config_dir, dest, rec);
         record.save(&ctx.config_dir)?;
         journal::finish(&ctx.config_dir)?;
         return Ok(Report {

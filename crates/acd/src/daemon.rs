@@ -45,14 +45,34 @@ pub fn hook_socket_path(dir: &Path) -> PathBuf {
     dir.join("hook.sock")
 }
 
-/// Claude registry roots: the roots of recorded Claude installs, then the
-/// default root, deduplicated (D24). Read again before every scan.
+/// Stands in for the roots that could not be discovered. It can never be
+/// opened (the NUL byte), so the scan that lists it is incomplete (F4).
+pub const UNDISCOVERED_ROOT: &str = "<Claude registry roots unavailable>\0";
+
+/// Claude registry roots: the roots of recorded Claude installs and of
+/// uninstalled ones the previous token may still be in use under, then the
+/// default root, deduplicated (D24). Read again before every scan. When the
+/// install records cannot be read, `UNDISCOVERED_ROOT` makes the scan
+/// incomplete, so it retires no token.
 pub fn claude_roots(
     config_dir: &Path,
     home: &Path,
     claude_config_dir: Option<&Path>,
 ) -> Vec<PathBuf> {
-    let mut roots = crate::hooks_install::recorded_claude_roots(config_dir);
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static FAILING: AtomicBool = AtomicBool::new(false);
+    let mut roots = match crate::hooks_install::recorded_claude_roots(config_dir) {
+        Ok(roots) => {
+            FAILING.store(false, Ordering::Relaxed);
+            roots
+        }
+        Err(e) => {
+            if !FAILING.swap(true, Ordering::Relaxed) {
+                tracing::error!(error = %format!("{e:#}"), "cannot read the hook install records; Claude registry scans stay incomplete");
+            }
+            vec![PathBuf::from(UNDISCOVERED_ROOT)]
+        }
+    };
     let default = acd_adapters::hooks::claude_sessions::sessions_dir(home, claude_config_dir);
     let default = std::fs::canonicalize(default.parent().unwrap_or(&default))
         .map(|p| p.join("sessions"))
@@ -762,6 +782,95 @@ mod tests {
         );
         let roots = claude_roots(d.path(), &home, Some(&custom));
         assert_eq!(roots, vec![custom.join("sessions")], "deduplicated");
+    }
+
+    fn claude_record(rec: &mut crate::hooks_install::Record, dir: &Path, dest: &Path) {
+        rec.set(
+            dir,
+            dest,
+            Some(crate::hooks_install::FileRecord {
+                target: crate::hooks_install::Target::Claude,
+                created_file: true,
+                created_hooks_key: true,
+                created_events: vec![],
+            }),
+        );
+    }
+
+    #[test]
+    fn an_uninstalled_root_is_scanned_while_the_previous_token_may_be_in_use_there() {
+        let d = tempfile::tempdir().unwrap();
+        crate::secrets::ensure_private_dir(d.path()).unwrap();
+        crate::hook_token::ensure(d.path(), false).unwrap();
+        let home = d.path().join("home");
+        let default = home.join(".claude/sessions");
+        let custom = d.path().join("custom/settings.json");
+        let mut rec = crate::hooks_install::Record::load(d.path()).unwrap();
+        claude_record(&mut rec, d.path(), &custom);
+        rec.set(d.path(), &custom, None);
+        rec.save(d.path()).unwrap();
+        assert_eq!(rec.uninstalled_claude.get(&custom), Some(&1));
+        // No previous token: nothing is pending anywhere.
+        assert_eq!(claude_roots(d.path(), &home, None), vec![default.clone()]);
+        // Generation 1, which the uninstalled root's sessions hold, became previous.
+        rotated_store(d.path());
+        let with_custom = vec![d.path().join("custom/sessions"), default.clone()];
+        assert_eq!(claude_roots(d.path(), &home, None), with_custom);
+        // Retiring it is not enough while generation 1 is the oldest accepted;
+        // a second rotation makes generation 2 previous and generation 1 gone.
+        let held = crate::writer_lock::acquire(d.path()).unwrap();
+        let mut s = crate::hook_token::load(d.path()).unwrap();
+        s.previous = None;
+        s.headers.state = crate::hook_token::HeaderState::Done;
+        crate::hook_token::save_locked(d.path(), &held, &s).unwrap();
+        crate::hook_token::rotate_store_locked(d.path(), &held, 2_000).unwrap();
+        drop(held);
+        assert_eq!(claude_roots(d.path(), &home, None), vec![default.clone()]);
+        // A later record change prunes it.
+        let mut rec = crate::hooks_install::Record::load(d.path()).unwrap();
+        claude_record(&mut rec, d.path(), &d.path().join("other/settings.json"));
+        assert!(rec.uninstalled_claude.is_empty(), "{rec:?}");
+    }
+
+    #[test]
+    fn a_reinstalled_root_is_no_longer_uninstalled() {
+        let d = tempfile::tempdir().unwrap();
+        crate::secrets::ensure_private_dir(d.path()).unwrap();
+        crate::hook_token::ensure(d.path(), false).unwrap();
+        let custom = d.path().join("custom/settings.json");
+        let mut rec = crate::hooks_install::Record::load(d.path()).unwrap();
+        claude_record(&mut rec, d.path(), &custom);
+        rec.set(d.path(), &custom, None);
+        claude_record(&mut rec, d.path(), &custom);
+        assert!(rec.uninstalled_claude.is_empty());
+        assert_eq!(rec.claude_destinations(), vec![custom]);
+    }
+
+    #[test]
+    fn unreadable_install_records_make_every_scan_incomplete() {
+        let d = tempfile::tempdir().unwrap();
+        crate::secrets::ensure_private_dir(d.path()).unwrap();
+        let home = d.path().join("home");
+        let default = home.join(".claude/sessions");
+        std::fs::create_dir_all(&default).unwrap();
+        let scan = |roots: Vec<PathBuf>| {
+            acd_adapters::hooks::claude_sessions::Scanner::new(
+                roots,
+                Arc::new(acd_adapters::hooks::claude_sessions::SystemProc),
+            )
+            .scan()
+            .complete
+        };
+        assert!(
+            scan(claude_roots(d.path(), &home, None)),
+            "a readable empty root"
+        );
+        let records = d.path().join(crate::hooks_install::RECORD_FILE);
+        crate::secrets::write_structured(&records, "not json").unwrap();
+        let roots = claude_roots(d.path(), &home, None);
+        let default = std::fs::canonicalize(default).unwrap();
+        assert_eq!(roots, vec![PathBuf::from(UNDISCOVERED_ROOT), default]);
+        assert!(!scan(roots), "the undiscovered root counts as unreadable");
     }
 
     fn rotated_store(d: &Path) -> crate::hook_token::Store {
