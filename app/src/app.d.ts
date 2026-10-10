@@ -4,3 +4,8 @@ declare module "*.svelte" {
   const component: Component;
   export default component;
 }
+
+declare module "*.svelte?raw" {
+  const source: string;
+  export default source;
+}

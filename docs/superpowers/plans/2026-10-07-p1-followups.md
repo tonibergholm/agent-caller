@@ -39,12 +39,10 @@ its name.
 
 ## P3: hooks and service
 
-Status, 2026-10-09: each bullet is tagged with the task of
+Status, 2026-10-10: each bullet is tagged with the task of
 `docs/superpowers/plans/2026-10-09-p3-hooks.md` that resolved it. Tasks 1
-to 16 and 20 to 29 are approved in the SDD ledger. A tag of the form
-`[pending: Task N]` names a task that is not approved yet (Tasks 17 to 19
-and 30 to 32); flip those tags when the ledger marks the task approved.
-The leftovers are under "P3 deferred" below.
+to 31 are approved in the SDD ledger; Task 32 (this file, the spec and the
+live checks) is in progress. The leftovers are under "P3 deferred" below.
 
 - [done: Task 4 (set-once targets) and Task 6 (targets bound to a pane
   incarnation); D8] Answer revisions (docs/superpowers/plans/2026-10-08-p5-answer-revision.md):
@@ -55,8 +53,7 @@ The leftovers are under "P3 deferred" below.
   does not cover it.
 
 - [done: Tasks 10, 11 and 16 (map, re-evaluation, T3 takeover forgets hub
-  expectations); [pending: Task 18] revoking live requests on every owner
-  transition] P3 ownership rule 1: read `T3Adapter::sessions()` (`SessionMap`). For each
+  expectations), 18 (revoking live requests on every owner transition)] P3 ownership rule 1: read `T3Adapter::sessions()` (`SessionMap`). For each
   Claude session, if `SessionMap::owner(session_id)` is `Some`, drop the
   hook-side and discovery state for that session. Re-evaluate sessions whose
   ownership is unknown (spec §6.2 rule 4) on every `SessionMap::changes()`
@@ -75,9 +72,9 @@ The leftovers are under "P3 deferred" below.
   - restart on exit code 75 [done: Tasks 28, 29; launchd
     `SuccessfulExit = false`, systemd `Restart=on-failure`];
   - handle SIGTERM gracefully [done: Task 29; held hook requests get an
-    empty reply before `run` returns: pending, Task 30];
+    empty reply before `run` returns: Task 30];
   - make a dead serve task fatal [done: Task 29 (exit 1); the hook
-    listeners joining the supervised set: pending, Task 30];
+    listeners joining the supervised set: Task 30];
   - exit the process when a mutex is poisoned [done: Task 29 (panic exits
     70)];
   - resolve `tailscale` by absolute path, because launchd's PATH is minimal
@@ -97,14 +94,14 @@ The leftovers are under "P3 deferred" below.
     `sent_at`.
   - Never reuse a verdict across request ids.
   - Answer within `evidence_timeout`.
-- [done for Claude: Tasks 15 and 16; [pending: Task 17] Codex] After
+- [done: Tasks 15 and 16 (Claude), Task 17 (Codex)] After
   opening each keys-answerable request, register a `KeysTarget` with
   `request_id = core.request_id_for(agent_id, &key)`. Targets of resolved
   requests are dropped by the P2 target watch.
-- [done for Claude: Tasks 15 and 16; [pending: Task 17] Codex] Build keys
+- [done: Tasks 15 and 16 (Claude), Task 17 (Codex)] Build keys
   targets only with `KeysTarget::from_screen` (its fields are
   sealed). Register only after `core.agent(agent_id)` is Some.
-- [done: Tasks 4, 15, 16; [pending: Task 17] Codex] Option keys may only be
+- [done: Tasks 4, 15, 16 (Claude), Task 17 (Codex)] Option keys may only be
   "1".."9" or "esc", never Enter. The guard
   digest blanks the cursor, so it cannot tell which option Enter picks.
 - [done: Task 13 (dialog match contract M1 to M5, raw rows only)] Never
@@ -113,7 +110,7 @@ The leftovers are under "P3 deferred" below.
   whitespace. The guard digest (full sha256 of the whole screen through the
   footer) is the only security-relevant value.
 - [done: Task 15] Never switch a held hook's request to `keys` while the hook is still held.
-- [done for Claude: Tasks 2, 14, 16; [pending: Task 17] Codex] When a hook
+- [done: Tasks 2, 14, 16 (Claude), Task 17 (Codex)] When a hook
   request belongs to the dialog already shown as a
   `blocked_unparsed` fallback, upgrade it in place (`upgrade_from` =
   `herdr::fallback::key(..)`), never supersede it; otherwise the pane can
@@ -132,8 +129,8 @@ The leftovers are under "P3 deferred" below.
   `RequestEndedIfOpen`. A claim landing in that window leaves the request
   with no target: the delivery fails its lease and the request reopens with
   no watcher. Reorder (end first, then remove) or re-check under one step.
-- [done for Claude: Tasks 14 to 16 (O1 to O3, a new request id and a fresh
-  target); [pending: Task 17] Codex] If a dialog with the same identity
+- [done: Tasks 14 to 16 (Claude: O1 to O3, a new request id and a fresh
+  target), Task 17 (Codex)] If a dialog with the same identity
   reappears within about 2 polls after a
   terminal answer, the old occurrence stays open (answers get
   `screen_mismatch`). Re-register with `from_screen` when the hook reports a
@@ -169,8 +166,8 @@ The leftovers are under "P3 deferred" below.
   add an optional `reason` to `request.resolved` (for example
   `"stray_keystroke"`). Today it reports only `by: uncertain`. This touches
   `acd-protocol` and its schema, so coordinate it with P5.
-- [done: Tasks 5 and 10 (`codex_bind`); [pending: Task 17] the caller with
-  mandatory screen checks] Bind Codex sessions with `agent_session.value`, which `AgentInfo` now
+- [done: Tasks 5 and 10 (`codex_bind`), Task 17 (the caller with mandatory
+  screen checks and the T3 ownership check, C7/R12 at delivery)] Bind Codex sessions with `agent_session.value`, which `AgentInfo` now
   carries.
 - [done: Task 3] When adding `reason` to `request.resolved`, map it in
   `acd_client::view::resolution_notice`. `stray_keystroke` maps to "A stray
@@ -200,32 +197,37 @@ Open live checks (Task 32 Step 6): 10 (`Tip:` lines), 11 (Codex hook review),
 12 (wrapped commands), 13 (parallel `PermissionRequest`), 14 (registry entry
 delay, **release gate**; `REGISTRY_GRACE_MS` is an assumption until then).
 
-Not owned by any task in the plan (amendment A1 mitigations for the Claude
-`http` hooks): `acd init` choosing a random free `hook_port`, the best-effort
-"hook port is held by another process" warning in `acd status` and
-`acd hooks status`, and a trust-model line in the install output (the Codex
-install note exists; the Claude one does not mention port squatting). The
-spec (§9) describes them as required.
+Amendment A1 mitigations for the Claude `http` hooks, which no plan task
+owned, are done in Task 30: `acd init` picks a random free `hook_port` for a
+new config (existing configs keep theirs), `acd status` and
+`acd hooks status` warn, best effort, when another process holds the hook port
+while acd is not running, and the Claude install prints the trust note. The
+spec (§9) describes them.
 
-Pending P3 work recorded in the ledger as carries:
+Carries closed:
 
-- Task 30: hook listeners go into the daemon's `servers` JoinSet (loss is
-  fatal); held hook requests get an empty reply or a clean close before `run`
-  returns on SIGTERM; `rt.shutdown_timeout` so blocking scanner tasks cannot
-  delay exit.
-- Task 31: the daemon clears its `on_current` set (sessions seen on the
-  current credential generation) when the store is reset or regenerated, for
-  example by `ensure --force`; the retirement caller passes complete scans
-  and the sessions seen on the current generation (Task 26 contract).
-- Task 17: callers run the T3 ownership check before `codex_bind` and apply
-  the screen checks for `Session` and `OnlyInCwd` bindings. In the recorded
-  misbound fixture all panes share one cwd, so the cwd check cannot reject
-  the app-server pane; the screen checks are the only guard.
-- Task 19 (A8): the history map's global cap; cache the canonical header
-  socket path per binding (or record the discovery aliases), because it is
-  canonicalized synchronously on the reconciler for each event and scan, and
-  a stalled mount could block it. Minor: a hooks-only agent's state stays
-  frozen while a migration waits for the target agent.
+- Task 30: hook listeners are in the daemon's `servers` JoinSet (loss is
+  fatal); held hook requests get an empty reply before `run` returns on
+  SIGTERM; `rt.shutdown_timeout` bounds the exit; the endpoint `Credential`
+  has a redacting `Debug`.
+- Task 31 (R13): the in-memory hook credentials reload from the store within
+  2 s, retirement revokes in memory at once, an expired previous token is
+  rejected per request, the daemon clears its `on_current` set when the store
+  is reset or regenerated, and the retirement caller passes complete scans.
+- Task 17 (C7, R12): Codex callers run the T3 ownership check before
+  `codex_bind` and apply the screen checks for `Session` and `OnlyInCwd`
+  bindings; delivery re-reads every rival under the delivery lock. In the
+  recorded misbound fixture all panes share one cwd, so the cwd check cannot
+  reject the app-server pane; the screen checks are the only guard.
+- Task 19 (A8): global caps on the history and session maps, and path
+  resolution in at most 4 bounded workers with a 3 s freshness window
+  (unknown fails closed), so a stalled mount cannot block the reconciler.
+  Residual: a Claude header binding refreshes only on the next valid hook.
+  Minor: a hooks-only agent's state stays frozen while a migration waits for
+  the target agent.
+
+Still open:
+
 - Task 4: `KeysTargets::remove` retires ids even when no live target exists,
   so callers must not remove before setting; watch for a self-deadlock if a
   P3 holder re-enters `deliver` for the same agent.

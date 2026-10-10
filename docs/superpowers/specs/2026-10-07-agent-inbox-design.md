@@ -404,7 +404,8 @@ generation that matched.
 
 The listeners are served by the daemon. `hook.sock` is created with its
 permissions set before it serves, and startup is serialized by an exclusive
-daemon lock. A pre-existing path is replaced only on a definite stale
+daemon lock, `<config_dir>/acd.lock`, which the daemon holds for its whole
+life; a second daemon that finds it held refuses to start. A pre-existing path is replaced only on a definite stale
 condition: a socket owned by the effective uid whose connect fails with
 `ECONNREFUSED`. A live socket, another file type or owner, or any other
 error refuses to start. Shutdown removes the socket only if it is still the
@@ -477,6 +478,9 @@ findings and gate 2):
   that mentions the marker but does not parse is *suspicious*: install and
   uninstall leave it alone and warn, and `acd token rotate hook` refuses
   while one exists. Every other entry is foreign;
+- when it installs the Claude entries, prints the trust note of §9: the
+  hook token and payloads go to a loopback port that another local process
+  can take while acd is not running;
 - installs these Claude events: `UserPromptSubmit`, `PermissionRequest`,
   `PreToolUse` (matcher `AskUserQuestion`), `PostToolUse`,
   `PostToolUseFailure`, `Stop`, `SessionEnd`; and these Codex events:
@@ -547,6 +551,16 @@ header, so these rules apply:
   migrate the old file into the store and remove it. The store holds the
   current credential, an optional previous credential, a credential
   generation, and the state of the last header update.
+- **Credential freshness (R13).** The daemon checks tokens against an
+  in-memory copy of the store. It reloads the store every 2 s, without
+  taking `hooks.lock`, so a change made by the CLI (`acd token rotate hook`,
+  a forced `acd init`) reaches the check within 2 s. A forced reset therefore
+  leaves the token it dropped valid for up to 2 s; v1 accepts that. When the
+  daemon retires the previous token itself, the commit also revokes it in
+  memory at once. A previous token whose expiry has passed is rejected on
+  each request, whether or not the store has been reloaded since. A reload
+  that fails leaves the last good copy in use and shows the hooks source as
+  degraded in `acd status`.
 - `acd token rotate hook`:
   1. **Refuses, writing nothing**, when the current generation's headers are
      not `done` (repair with `acd hooks install claude`), when a previous
@@ -750,6 +764,15 @@ never waits on herdr itself:
   unconsumed identities are stored. A full map evicts the least recently
   active session without an open request, or refuses a new one. Evicting an
   unconsumed identity makes every new occurrence shadowed (O7) for 10 minutes.
+- Path resolution never runs on the reconciler. Canonicalizing a hook's
+  `cwd` or a header socket path can block on an unavailable mount, so it
+  runs in at most 4 blocking workers. The reconciler reads a cache of
+  answers, each fresh for 3 s, and waits only for workers it has just
+  started, up to a deadline and never while holding a lock. A path whose
+  answer is missing, stale or still being resolved is *unknown*, and unknown
+  fails closed: a header socket path that is unknown gives no header
+  binding, and a directory that is unknown gives no Codex cwd match. The
+  next tick retries. The cache holds at most 4096 paths.
 - **Lock order** (R11). The herdr per-agent delivery lock is taken before
   the hooks occurrence lock whenever both are held, and an occurrence lock
   is never held while taking a delivery lock. Every holder releases a
@@ -988,7 +1011,7 @@ hooks-only Codex agents (D4): an unbound request opens nothing, and herdr's
   command and other input keys, per the display rules of §6.2.
 
 **Answering.** A request is answerable only after the dialog on screen is
-validated, through one path (C1 to C6):
+validated, through one path (C1 to C7):
 
 - The bound pane is read, then every other Codex pane that exists at read
   time (its *rivals*). Each read returns *shows* (the complete command
@@ -1008,6 +1031,13 @@ validated, through one path (C1 to C6):
   engine refuses, sending nothing, when the current set differs, even before
   the reconciler has noticed. When it notices, it marks the request not ready,
   re-reads, and either re-enables it or revokes it.
+- **C7, at delivery.** Under the herdr delivery lock, right before the key
+  is written and after the guard read of the bound pane, the keys engine
+  reads every rival of the validated inventory again (R12). Each read must
+  be whole and must not show the command, and each rival must still be the
+  same pane incarnation. A rival that shows the command, cannot be read
+  before the call deadline, was truncated or is gone refuses the answer with
+  `request_not_ready` and sends no key. The reconciler then revalidates.
 - A Codex session that moves to another pane, becomes unbound, is taken by
   T3, or gets a rival showing the command has its request revoked.
 - acd waits up to 1 s for the dialog. The measured delay is 35–118 ms
@@ -1579,7 +1609,9 @@ while the panel is closed.
 The config directory also contains `tls.pem` (the private key and matching
 certificate, mode 0600) and `tls.lock` (the cross-process publication lock).
 For hooks it holds `hook-tokens.json`, `hook.sock`, `hooks-installed.json`,
-`hooks-journal.json` and the writer lock `hooks.lock` (§6.1).
+`hooks-journal.json` and the writer lock `hooks.lock` (§6.1). The daemon's
+own files are `acd.sock` and `hook.sock`, and its single-instance lock
+`acd.lock` (§6.1).
 
 **Supervision.** The daemon exits with a code the supervisor can act on:
 
@@ -1967,7 +1999,7 @@ conservative handling of multi-cause T3 failures.
 `docs/research/2026-10-09-p3-gate4-codex.md`), and the P3 plan
 (`docs/superpowers/plans/2026-10-09-p3-hooks.md`) went through Sol rounds 1
 to 3 and a transport amendment (A1). The orchestrator's task reviews added
-rulings R1 to R11. This revision folds the results in:
+rulings R1 to R13. This revision folds the results in:
 
 - §5.1: the Claude key now includes the tool digest and is reusable; Codex
   evidence matches the command; hook occurrences O1 to O7 define a new
@@ -1985,10 +2017,22 @@ rulings R1 to R11. This revision folds the results in:
   `allow_always` rule (Q2); display rules (R8); the dialog match contract
   (M1 to M5) with no screen binding for multi-row commands (D26).
 - §6.3: the Codex binding rule as implemented (gate 4, round-2 ruling B4),
-  its validation (C1 to C6), no `allow_always`, and the shared-daemon
+  its validation (C1 to C7), no `allow_always`, and the shared-daemon
   limitation.
-- §9 and §11: the config keys, commands, supervision exit codes and trust
-  model; gates 2, 4, 5 and 7 resolved, live checks 10 to 14 open (14 is a
+- §6.1 (daemon and credentials): the `acd.lock` single-instance lock and
+  the socket replacement rules; credentials reload from the store within
+  2 s, retirement revokes in memory at once, and an expired previous token
+  is rejected on each request (R13).
+- §6.2 (concurrency): path resolution in at most 4 bounded workers with a
+  3 s freshness window, unknown failing closed, and session and occurrence
+  caps (A8); Claude Bash details omit the agent's description and Codex
+  shows it as one escaped `Reason:` line (R8).
+- §6.3: delivery-time rival re-reads under the delivery lock, refusing with
+  `request_not_ready` (C7, R12).
+- §9 and §11: the config keys (a random `hook_port` per new config), the
+  commands, the config-directory inventory with `acd.lock`, supervision exit
+  codes, the squat warning in `acd status` and `acd hooks status`, the trust
+  note printed by the Claude install, and the trust model; gates 2, 4, 5 and 7 resolved, live checks 10 to 14 open (14 is a
   release gate).
 
 Decisions that differ from the gate documents' proposals: acd never binds
@@ -1997,3 +2041,5 @@ app-server's); and the previous hook token is retired by a scan that started
 after the header update, not "when every older session has exited"
 (§6.1, T4). Claude's `http` hooks keep the residual risk of §9, accepted for
 personal use (R7).
+
+**P3 final, 2026-10-10 (revision 5.0).** The draft's pending points are closed against the approved tasks 17 to 19, 30 and 31: C7 and R12 (§6.3), R13 and A8 (§6.1, §6.2), the daemon socket rules and `acd.lock` (§6.1, §9), the random `hook_port`, the squat warning and the install trust note (§9), and the R8 clarification (§6.2). The unverified points stay in §11 and live checks 10 to 14 remain open.
