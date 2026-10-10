@@ -1,0 +1,22 @@
+{
+ "id": "c1",
+ "result": {
+  "type": "agent_info",
+  "agent": {
+   "terminal_id": "term_65d6327009d571",
+   "agent": "codex",
+   "terminal_title": "Reply with ok | d1",
+   "terminal_title_stripped": "Reply with ok | d1",
+   "agent_status": "idle",
+   "workspace_id": "w1",
+   "tab_id": "w1:t1",
+   "pane_id": "w1:p1",
+   "focused": true,
+   "state_change_seq": 15,
+   "completion_seq": 15,
+   "cwd": "/tmp/acp3/codex/d1",
+   "foreground_cwd": "/private/tmp/acp3/codex/d1",
+   "revision": 22
+  }
+ }
+}

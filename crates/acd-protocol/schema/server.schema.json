@@ -365,6 +365,22 @@
       ],
       "type": "string"
     },
+    "ResolveReason": {
+      "description": "Why a request resolved the way it did, when that matters to the user.",
+      "oneOf": [
+        {
+          "enum": [
+            "unknown"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "stray_keystroke",
+          "description": "A key may have landed in the agent's input box (spec §6.2).",
+          "type": "string"
+        }
+      ]
+    },
     "ResolvedBy": {
       "enum": [
         "inbox",
@@ -590,6 +606,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolveReason"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "request_id": {

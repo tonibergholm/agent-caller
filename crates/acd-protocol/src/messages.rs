@@ -1,4 +1,4 @@
-use crate::model::{Agent, Machine, Request, ResolvedBy};
+use crate::model::{Agent, Machine, Request, ResolveReason, ResolvedBy};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -203,6 +203,8 @@ pub enum ServerMessage {
         by: ResolvedBy,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         option_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<ResolveReason>,
     },
     #[serde(rename = "machine.updated")]
     MachineUpdated {

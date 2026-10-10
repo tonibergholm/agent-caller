@@ -1,0 +1,77 @@
+{
+ "id": "c1",
+ "result": {
+  "type": "agent_list",
+  "agents": [
+   {
+    "terminal_id": "term_65d6327009d571",
+    "agent": "codex",
+    "terminal_title": "Reply with ok | d1",
+    "terminal_title_stripped": "Reply with ok | d1",
+    "agent_status": "idle",
+    "workspace_id": "w1",
+    "tab_id": "w1:t1",
+    "pane_id": "w1:p1",
+    "focused": true,
+    "state_change_seq": 20,
+    "completion_seq": 20,
+    "cwd": "/tmp/acp3/codex/d1",
+    "foreground_cwd": "/private/tmp/acp3/codex/d1",
+    "revision": 22
+   },
+   {
+    "terminal_id": "term_65d6337924d324",
+    "agent": "codex",
+    "terminal_title": "Reply with just four | d1",
+    "terminal_title_stripped": "Reply with just four | d1",
+    "agent_status": "idle",
+    "workspace_id": "w1",
+    "tab_id": "w1:t1",
+    "pane_id": "w1:p4",
+    "focused": false,
+    "state_change_seq": 24,
+    "completion_seq": 24,
+    "cwd": "/private/tmp/acp3/codex/d1",
+    "foreground_cwd": "/private/tmp/acp3/codex/d1",
+    "revision": 6
+   },
+   {
+    "terminal_id": "term_65d6333fb12862",
+    "agent": "codex",
+    "terminal_title": "Reply with just two | d1",
+    "terminal_title_stripped": "Reply with just two | d1",
+    "agent_status": "idle",
+    "workspace_id": "w1",
+    "tab_id": "w1:t1",
+    "pane_id": "w1:p2",
+    "focused": false,
+    "state_change_seq": 18,
+    "completion_seq": 18,
+    "cwd": "/private/tmp/acp3/codex/d1",
+    "foreground_cwd": "/private/tmp/acp3/codex/d1",
+    "revision": 6
+   },
+   {
+    "terminal_id": "term_65d63379225e33",
+    "agent": "codex",
+    "terminal_title": "cd /tmp/acp3/codex/d1 && codex app-server --listen ",
+    "terminal_title_stripped": "cd /tmp/acp3/codex/d1 && codex app-server --listen",
+    "agent_status": "idle",
+    "agent_session": {
+     "source": "herdr:codex",
+     "agent": "codex",
+     "kind": "id",
+     "value": "01a11f8b-4cd7-7ad0-8b21-cfd40e5ccbde"
+    },
+    "workspace_id": "w1",
+    "tab_id": "w1:t1",
+    "pane_id": "w1:p3",
+    "focused": false,
+    "state_change_seq": 21,
+    "cwd": "/private/tmp/acp3/codex/d1",
+    "foreground_cwd": "/private/tmp/acp3/codex/d1",
+    "revision": 2
+   }
+  ]
+ }
+}

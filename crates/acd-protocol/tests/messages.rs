@@ -198,8 +198,49 @@ fn unknown_values_decode_on_every_enum() {
             ..
         }
     ));
+    let m = decode_server(r#"{"type":"request.resolved","epoch":"e","seq":4,"request_id":"r","agent_id":"a","by":"uncertain","reason":"cosmic_ray"}"#)
+        .unwrap().unwrap();
+    assert!(matches!(
+        m,
+        ServerMessage::RequestResolved {
+            reason: Some(ResolveReason::Unknown),
+            ..
+        }
+    ));
     let r: RequestStatus = serde_json::from_str(r#""paused""#).unwrap();
     assert_eq!(r, RequestStatus::Unknown);
+}
+
+#[test]
+fn request_resolved_reason_round_trips_and_is_optional() {
+    let with = r#"{"type":"request.resolved","epoch":"e1","seq":45,"request_id":"r8","agent_id":"a","by":"uncertain","reason":"stray_keystroke"}"#;
+    let m: ServerMessage = serde_json::from_str(with).unwrap();
+    assert!(matches!(
+        &m,
+        ServerMessage::RequestResolved {
+            reason: Some(ResolveReason::StrayKeystroke),
+            ..
+        }
+    ));
+    assert_eq!(
+        serde_json::to_value(&m).unwrap(),
+        serde_json::from_str::<serde_json::Value>(with).unwrap()
+    );
+    let without = r#"{"type":"request.resolved","epoch":"e1","seq":44,"request_id":"r7","agent_id":"a","by":"inbox"}"#;
+    let m: ServerMessage = serde_json::from_str(without).unwrap();
+    assert!(matches!(
+        &m,
+        ServerMessage::RequestResolved { reason: None, .. }
+    ));
+    assert!(!serde_json::to_string(&m).unwrap().contains("reason"));
+    let future = r#"{"type":"request.resolved","epoch":"e1","seq":46,"request_id":"r9","agent_id":"a","by":"uncertain","reason":"cosmic_ray"}"#;
+    assert!(matches!(
+        serde_json::from_str::<ServerMessage>(future).unwrap(),
+        ServerMessage::RequestResolved {
+            reason: Some(ResolveReason::Unknown),
+            ..
+        }
+    ));
 }
 
 fn validator(schema: serde_json::Value) -> jsonschema::Validator {

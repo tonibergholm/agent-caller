@@ -1,16 +1,6 @@
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
-
-fn acd(dir: &std::path::Path) -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_acd"));
-    // HOME points into the test dir so the daemon never finds the real
-    // herdr socket under ~/.config/herdr.
-    c.env("ACD_CONFIG_DIR", dir)
-        .env("HOME", dir)
-        .env_remove("HERDR_SOCKET_PATH")
-        .env_remove("RUST_LOG");
-    c
-}
+mod common;
+use common::{acd, free_port};
 
 fn initialized() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -27,7 +17,9 @@ fn pin_of(dir: &std::path::Path) -> String {
     let bundle = std::fs::read_to_string(dir.join("tls.pem")).unwrap();
     acd_core::tls::check_pair(&acd_core::tls::KeyFiles::from_bundle(&bundle).unwrap()).unwrap()
 }
-fn mode(p: std::path::PathBuf) -> u32 { std::fs::metadata(p).unwrap().permissions().mode() & 0o777 }
+fn mode(p: std::path::PathBuf) -> u32 {
+    std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+}
 
 #[test]
 fn init_creates_one_private_bundle_and_repairs_it() {
@@ -82,7 +74,11 @@ fn tls_rotate_replaces_a_corrupt_existing_bundle() {
     let dir = initialized();
     std::fs::write(dir.path().join("tls.pem"), b"corrupt").unwrap();
     let out = acd(dir.path()).args(["tls", "rotate"]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(out.stdout.starts_with(b"TLS key replaced."));
     pin_of(dir.path());
 }
@@ -220,9 +216,13 @@ fn init_creates_private_files_and_is_repeatable() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("acd");
     let out = acd(&dir).arg("init").output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(mode(dir.clone()), 0o700);
-    for f in ["client.token", "hook.token", "config.toml", "machine-id"] {
+    for f in ["client.token", "hook-tokens.json", "config.toml", "machine-id"] {
         assert_eq!(mode(dir.join(f)), 0o600, "{f}");
     }
     let token = std::fs::read_to_string(dir.join("client.token")).unwrap();
@@ -230,7 +230,11 @@ fn init_creates_private_files_and_is_repeatable() {
     assert!(String::from_utf8_lossy(&out.stdout).contains(token.trim()));
 
     let again = acd(&dir).arg("init").output().unwrap();
-    assert!(again.status.success(), "{}", String::from_utf8_lossy(&again.stderr));
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
 }
 
 #[test]
@@ -239,7 +243,13 @@ fn token_rotate_replaces_client_token() {
     let dir = tmp.path().join("acd");
     assert!(acd(&dir).arg("init").status().unwrap().success());
     let before = std::fs::read_to_string(dir.join("client.token")).unwrap();
-    assert!(acd(&dir).args(["token", "rotate", "client"]).status().unwrap().success());
+    assert!(
+        acd(&dir)
+            .args(["token", "rotate", "client"])
+            .status()
+            .unwrap()
+            .success()
+    );
     let after = std::fs::read_to_string(dir.join("client.token")).unwrap();
     assert_ne!(before, after);
     assert_eq!(mode(dir.join("client.token")), 0o600);
@@ -250,18 +260,28 @@ fn loose_token_mode_is_refused_with_fix() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("acd");
     assert!(acd(&dir).arg("init").status().unwrap().success());
-    std::fs::set_permissions(dir.join("client.token"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(
+        dir.join("client.token"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
     let out = acd(&dir).arg("run").output().unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("client.token") && err.contains("chmod 600"), "{err}");
+    assert!(
+        err.contains("client.token") && err.contains("chmod 600"),
+        "{err}"
+    );
 }
 
 #[test]
 fn rotate_on_missing_dir_says_run_init() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("acd");
-    let out = acd(&dir).args(["token", "rotate", "client"]).output().unwrap();
+    let out = acd(&dir)
+        .args(["token", "rotate", "client"])
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("acd init"));
     assert!(!dir.exists());
@@ -274,10 +294,16 @@ fn rotate_refuses_loose_dir() {
     assert!(acd(&dir).arg("init").status().unwrap().success());
     let before = std::fs::read_to_string(dir.join("client.token")).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
-    let out = acd(&dir).args(["token", "rotate", "client"]).output().unwrap();
+    let out = acd(&dir)
+        .args(["token", "rotate", "client"])
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("chmod 700"));
-    assert_eq!(before, std::fs::read_to_string(dir.join("client.token")).unwrap());
+    assert_eq!(
+        before,
+        std::fs::read_to_string(dir.join("client.token")).unwrap()
+    );
 }
 
 #[test]
@@ -287,15 +313,31 @@ fn init_repairs_partial_dir_and_force_keeps_machine_id() {
     assert!(acd(&dir).arg("init").status().unwrap().success());
     let client = std::fs::read_to_string(dir.join("client.token")).unwrap();
     let id = std::fs::read_to_string(dir.join("machine-id")).unwrap();
-    std::fs::remove_file(dir.join("hook.token")).unwrap();
+    std::fs::remove_file(dir.join("hook-tokens.json")).unwrap();
     let out = acd(&dir).arg("init").output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("hook.token"));
-    assert_eq!(mode(dir.join("hook.token")), 0o600);
-    assert_eq!(client, std::fs::read_to_string(dir.join("client.token")).unwrap());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("hook-tokens.json"));
+    assert_eq!(mode(dir.join("hook-tokens.json")), 0o600);
+    assert_eq!(
+        client,
+        std::fs::read_to_string(dir.join("client.token")).unwrap()
+    );
 
-    assert!(acd(&dir).args(["init", "--force"]).status().unwrap().success());
-    assert_ne!(client, std::fs::read_to_string(dir.join("client.token")).unwrap());
+    assert!(
+        acd(&dir)
+            .args(["init", "--force"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_ne!(
+        client,
+        std::fs::read_to_string(dir.join("client.token")).unwrap()
+    );
     assert_eq!(id, std::fs::read_to_string(dir.join("machine-id")).unwrap());
 }
 
@@ -303,10 +345,16 @@ fn init_repairs_partial_dir_and_force_keeps_machine_id() {
 /// kills it and fails, so a regression cannot hang the suite.
 fn run_expecting_exit(dir: &std::path::Path) -> (std::process::ExitStatus, String) {
     use std::io::Read;
-    let mut child = acd(dir).arg("run").stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let mut child = acd(dir)
+        .arg("run")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let status = loop {
-        if let Some(st) = child.try_wait().unwrap() { break st; }
+        if let Some(st) = child.try_wait().unwrap() {
+            break st;
+        }
         if std::time::Instant::now() > deadline {
             child.kill().ok();
             child.wait().ok();
@@ -315,34 +363,24 @@ fn run_expecting_exit(dir: &std::path::Path) -> (std::process::ExitStatus, Strin
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     let mut err = String::new();
-    child.stderr.take().unwrap().read_to_string(&mut err).unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
     (status, err)
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
-
-/// A running `acd run`, killed when dropped so a failed assert cannot leave
-/// it behind.
-struct Daemon(std::process::Child);
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        self.0.kill().ok();
-        self.0.wait().ok();
-    }
-}
-
-/// An initialized config dir listening on a free loopback port.
-fn init_loopback(name: &str) -> (tempfile::TempDir, std::path::PathBuf, u16) {
+/// An initialized config dir; `start` writes ports and starts the daemon.
+fn init_named() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("acd");
-    assert!(acd(&dir).arg("init").status().unwrap().success());
-    let port = free_port();
-    let cfg = format!("machine_name = \"{name}\"\nport = {port}\nlisten = [\"loopback\"]\n");
-    std::fs::write(dir.join("config.toml"), cfg).unwrap();
-    (tmp, dir, port)
+    let dir = common::init_dir(tmp.path());
+    (tmp, dir)
+}
+
+fn start(dir: &std::path::Path, name: &str, env: &[(&str, &str)]) -> common::Started {
+    common::start_daemon(dir, None, &format!("machine_name = \"{name}\"\n"), env)
 }
 
 /// Runs `acd status` until it succeeds, for at most 10 s.
@@ -350,10 +388,18 @@ fn status_when_ready(dir: &std::path::Path, rust_log: Option<&str>) -> std::proc
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let mut cmd = acd(dir);
-        if let Some(l) = rust_log { cmd.env("RUST_LOG", l); }
+        if let Some(l) = rust_log {
+            cmd.env("RUST_LOG", l);
+        }
         let out = cmd.arg("status").output().unwrap();
-        if out.status.success() { return out; }
-        assert!(std::time::Instant::now() < deadline, "status never succeeded: {}", String::from_utf8_lossy(&out.stderr));
+        if out.status.success() {
+            return out;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "status never succeeded: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
@@ -361,11 +407,11 @@ fn status_when_ready(dir: &std::path::Path, rust_log: Option<&str>) -> std::proc
 #[test]
 fn run_serves_loopback_and_status_reports_machine() {
     use std::os::unix::fs::FileTypeExt;
-    let (_tmp, dir, _) = init_loopback("e2e-box");
+    let (_tmp, dir) = init_named();
     // A socket left by a crashed daemon is replaced.
     drop(std::os::unix::net::UnixListener::bind(dir.join("acd.sock")).unwrap());
 
-    let _daemon = Daemon(acd(&dir).arg("run").spawn().unwrap());
+    let _daemon = start(&dir, "e2e-box", &[]);
     let out = String::from_utf8_lossy(&status_when_ready(&dir, None).stdout).into_owned();
     assert!(out.contains("machine: e2e-box"), "{out}");
     assert!(out.contains("agents: 0"), "{out}");
@@ -379,28 +425,89 @@ fn run_serves_loopback_and_status_reports_machine() {
 fn token_forms(token: &str) -> Vec<String> {
     use base64::Engine;
     let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token).unwrap();
-    let decimal = token.as_bytes()[..12].iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", ");
-    vec![token.to_string(), hex(token.as_bytes()), hex(token.as_bytes()).to_uppercase(), decimal, hex(&decoded)]
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token)
+        .unwrap();
+    let decimal = token.as_bytes()[..12]
+        .iter()
+        .map(|b| b.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![
+        token.to_string(),
+        hex(token.as_bytes()),
+        hex(token.as_bytes()).to_uppercase(),
+        decimal,
+        hex(&decoded),
+    ]
 }
 
 #[test]
-fn trace_logs_never_contain_the_token() {
-    for rust_log in ["trace", "trace,tungstenite::protocol::frame=trace,tokio_tungstenite=trace,axum::extract::ws=trace"] {
-        let (tmp, dir, _) = init_loopback("log-box");
-        let token = std::fs::read_to_string(dir.join("client.token")).unwrap().trim().to_string();
-        let log_path = tmp.path().join("daemon.log");
-        let log = std::fs::File::create(&log_path).unwrap();
-        let daemon = Daemon(acd(&dir).env("RUST_LOG", rust_log).arg("run").stderr(log).spawn().unwrap());
+fn trace_logs_never_contain_either_token() {
+    for rust_log in [
+        "trace",
+        "trace,tungstenite::protocol::frame=trace,tokio_tungstenite=trace,axum::extract::ws=trace",
+    ] {
+        let (_tmp, dir) = init_named();
+        let token = std::fs::read_to_string(dir.join("client.token"))
+            .unwrap()
+            .trim()
+            .to_string();
+        let started = start(&dir, "log-box", &[("RUST_LOG", rust_log)]);
+        let log_path = started.log.clone();
         let status = status_when_ready(&dir, Some(rust_log));
-        drop(daemon);
+        let hook = common::store_token(&dir);
+        let body = std::fs::read_to_string(format!(
+            "{}/../../tests/fixtures/hooks/claude/payload-UserPromptSubmit.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let path = "/hook/claude/UserPromptSubmit";
+        let cli = [("X-Claude-Entrypoint", "cli")];
+        assert_eq!(
+            common::post_hook(started.hook_port, path, &hook, &cli, &body).0,
+            200
+        );
+        assert_eq!(
+            common::post_hook(started.hook_port, path, "wrong-token-value", &[], &body).0,
+            401
+        );
+        // The same over hook.sock (Codex's path).
+        let sock = dir.join("hook.sock");
+        assert_eq!(
+            common::post_hook_unix(&sock, path, &hook, &cli, &body).0,
+            200
+        );
+        assert_eq!(
+            common::post_hook_unix(&sock, path, "wrong-token-value", &[], &body).0,
+            401
+        );
+        drop(started);
         let daemon_log = std::fs::read_to_string(&log_path).unwrap();
         let status_log = String::from_utf8_lossy(&status.stderr).into_owned();
-        assert!(daemon_log.contains("TRACE"), "{rust_log}: expected trace output from the daemon");
-        for form in token_forms(&token) {
-            assert!(!daemon_log.contains(&form), "{rust_log}: daemon log contains the token as {form}");
-            assert!(!status_log.contains(&form), "{rust_log}: status log contains the token as {form}");
+        assert!(
+            daemon_log.contains("TRACE"),
+            "{rust_log}: expected trace output from the daemon"
+        );
+        for form in token_forms(&token).into_iter().chain(token_forms(&hook)) {
+            assert!(
+                !daemon_log.contains(&form),
+                "{rust_log}: daemon log contains a token as {form}"
+            );
+            assert!(
+                !status_log.contains(&form),
+                "{rust_log}: status log contains a token as {form}"
+            );
         }
+        // Sol I8: the rejection log carries only the opaque remote id.
+        assert!(
+            daemon_log.contains("missing or retired token"),
+            "{rust_log}"
+        );
+        assert!(
+            !daemon_log.contains("wrong-token-value"),
+            "{rust_log}: daemon log contains a rejected token"
+        );
     }
 }
 
@@ -422,11 +529,15 @@ fn status_never_sends_the_token_over_tcp() {
                 continue;
             };
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
             let mut raw = stream.try_clone().unwrap();
             match tokio_tungstenite::tungstenite::accept(stream) {
                 Ok(mut ws) => {
-                    while let Ok(m) = ws.read() { seen.lock().unwrap().extend_from_slice(&m.into_data()); }
+                    while let Ok(m) = ws.read() {
+                        seen.lock().unwrap().extend_from_slice(&m.into_data());
+                    }
                 }
                 Err(_) => {
                     let mut rest = Vec::new();
@@ -440,8 +551,18 @@ fn status_never_sends_the_token_over_tcp() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("acd");
     assert!(acd(&dir).arg("init").status().unwrap().success());
-    std::fs::write(dir.join("config.toml"), format!("port = {port}\nlisten = [\"loopback\"]\n")).unwrap();
-    let token = std::fs::read_to_string(dir.join("client.token")).unwrap().trim().to_string();
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "port = {port}\nhook_port = {}\nlisten = [\"loopback\"]\n",
+            free_port()
+        ),
+    )
+    .unwrap();
+    let token = std::fs::read_to_string(dir.join("client.token"))
+        .unwrap()
+        .trim()
+        .to_string();
     let out = acd(&dir).arg("status").output().unwrap();
     thread.join().unwrap();
     assert!(!out.status.success(), "status succeeded against a squatter");
@@ -456,7 +577,14 @@ fn run_refuses_empty_or_short_client_token() {
         let dir = tmp.path().join("acd");
         assert!(acd(&dir).arg("init").status().unwrap().success());
         let port = free_port();
-        std::fs::write(dir.join("config.toml"), format!("port = {port}\nlisten = [\"loopback\"]\n")).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            format!(
+                "port = {port}\nhook_port = {}\nlisten = [\"loopback\"]\n",
+                free_port()
+            ),
+        )
+        .unwrap();
         std::fs::write(dir.join("client.token"), bad).unwrap();
         let (status, err) = run_expecting_exit(&dir);
         assert!(!status.success(), "run accepted token {bad:?}");
@@ -472,7 +600,14 @@ fn run_fails_when_a_listen_address_cannot_be_bound() {
     assert!(acd(&dir).arg("init").status().unwrap().success());
     let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = blocker.local_addr().unwrap().port();
-    std::fs::write(dir.join("config.toml"), format!("port = {port}\nlisten = [\"loopback\"]\n")).unwrap();
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "port = {port}\nhook_port = {}\nlisten = [\"loopback\"]\n",
+            free_port()
+        ),
+    )
+    .unwrap();
     let (status, err) = run_expecting_exit(&dir);
     assert!(!status.success());
     assert!(err.contains("cannot bind"), "{err}");
@@ -480,13 +615,132 @@ fn run_fails_when_a_listen_address_cannot_be_bound() {
 
 #[test]
 fn second_daemon_on_another_port_leaves_the_live_socket_alone() {
-    let (_tmp, dir, _) = init_loopback("first");
-    let _daemon = Daemon(acd(&dir).arg("run").spawn().unwrap());
-    status_when_ready(&dir, None);
-    std::fs::write(dir.join("config.toml"), format!("machine_name = \"second\"\nport = {}\nlisten = [\"loopback\"]\n", free_port())).unwrap();
-    let (status, err) = run_expecting_exit(&dir);
-    assert!(!status.success());
+    let (_tmp, dir) = init_named();
+    let _daemon = start(&dir, "first", &[]);
+    let mut err = String::new();
+    for _ in 0..5 {
+        // Fresh ports each time, so a retry never reuses ports that just failed.
+        std::fs::write(
+            dir.join("config.toml"),
+            format!(
+                "machine_name = \"second\"\nport = {}\nhook_port = {}\nlisten = [\"loopback\"]\n",
+                free_port(),
+                free_port()
+            ),
+        )
+        .unwrap();
+        let (status, e) = run_expecting_exit(&dir);
+        assert!(!status.success());
+        err = e;
+        if !(err.contains("cannot bind 127.") || err.contains("cannot bind [")) {
+            break;
+        }
+    }
     assert!(err.contains("another acd is running"), "{err}");
-    let out = String::from_utf8_lossy(&acd(&dir).arg("status").output().unwrap().stdout).into_owned();
+    let out =
+        String::from_utf8_lossy(&acd(&dir).arg("status").output().unwrap().stdout).into_owned();
     assert!(out.contains("machine: first"), "{out}");
+}
+
+#[test]
+fn init_repairs_loose_modes_of_files_it_keeps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init_dir(tmp.path());
+    let before = std::fs::read_to_string(dir.join("client.token")).unwrap();
+    for f in [
+        "client.token",
+        "hook-tokens.json",
+        "machine-id",
+        "config.toml",
+    ] {
+        std::fs::set_permissions(dir.join(f), std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let out = acd(&dir).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for f in [
+        "client.token",
+        "hook-tokens.json",
+        "machine-id",
+        "config.toml",
+    ] {
+        assert_eq!(mode(dir.join(f)), 0o600, "{f}");
+    }
+    assert_eq!(
+        before,
+        std::fs::read_to_string(dir.join("client.token")).unwrap(),
+        "kept, not replaced"
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("repaired"));
+}
+
+#[test]
+fn init_and_run_refuse_a_symlinked_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init_dir(tmp.path());
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::rename(dir.join("hook-tokens.json"), &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.join("hook-tokens.json")).unwrap();
+    let out = acd(&dir).arg("init").output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("symlink"));
+    let (status, err) = run_expecting_exit(&dir);
+    assert!(!status.success() && err.contains("symlink"), "{err}");
+}
+
+#[test]
+fn an_empty_machine_id_is_refused_by_run_and_regenerated_by_init() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = common::init_dir(tmp.path());
+    std::fs::write(dir.join("machine-id"), "\n").unwrap();
+    let (status, err) = run_expecting_exit(&dir);
+    assert!(
+        !status.success() && err.contains("machine-id is empty"),
+        "{err}"
+    );
+    assert!(acd(&dir).arg("init").status().unwrap().success());
+    assert!(
+        !std::fs::read_to_string(dir.join("machine-id"))
+            .unwrap()
+            .trim()
+            .is_empty()
+    );
+}
+
+#[test]
+fn init_repairs_a_setuid_secret_and_a_loose_t3_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("acd");
+    assert!(acd(&dir).arg("init").status().unwrap().success());
+    std::fs::set_permissions(
+        dir.join("client.token"),
+        std::fs::Permissions::from_mode(0o4600),
+    )
+    .unwrap();
+    std::fs::write(dir.join("t3.token"), "t\n").unwrap();
+    std::fs::set_permissions(dir.join("t3.token"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(acd(&dir).arg("run").output().unwrap().status.code() != Some(0));
+    let out = acd(&dir).arg("init").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("client.token") && text.contains("t3.token"),
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::metadata(dir.join("client.token"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o600
+    );
+    assert_eq!(mode(dir.join("t3.token")), 0o600);
 }

@@ -229,6 +229,7 @@ fn inbox_end_after_claim_carries_the_claimed_option() {
         agent_id: "a1".into(),
         by: ResolvedBy::Inbox,
         option_id: Some("allow".into()),
+        reason: None,
     }));
 }
 
@@ -246,6 +247,7 @@ fn terminal_end_after_claim_stays_terminal() {
         agent_id: "a1".into(),
         by: ResolvedBy::Terminal,
         option_id: None,
+        reason: None,
     }));
 }
 
@@ -384,5 +386,6 @@ fn release_clears_the_claim() {
         agent_id: "a1".into(),
         by: ResolvedBy::Terminal,
         option_id: None,
+        reason: None,
     }));
 }

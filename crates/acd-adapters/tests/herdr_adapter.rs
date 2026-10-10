@@ -282,6 +282,32 @@ async fn keys_rig_with(
     (r, rid)
 }
 
+/// Like `keys_rig`, but the target is bound to the pane's incarnation plus
+/// `incarnation_offset`.
+async fn bound_keys_rig(incarnation_offset: u64) -> (Rig, String) {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.adapter.keys_targets().remove(&rid);
+    // A fresh request (it supersedes the first): set-once forbids
+    // re-registering the old request id.
+    let id = agent(&r).id;
+    let mut obs = permission_obs(&id, "k2");
+    obs.answer_path = AnswerPath::Keys;
+    r.core.observe(Observation::RequestSeen(obs));
+    let key = CorrelationKey("k2".into());
+    let rid = r.core.request_id_for(&id, &key).unwrap();
+    let incarnation = r.adapter.panes().read().unwrap()[&id].incarnation + incarnation_offset;
+    let dialog = screen("claude-permission-bash.txt");
+    r.adapter
+        .keys_targets()
+        .set(
+            KeysTarget::from_screen(rid.clone(), id, key, &dialog, allow_deny())
+                .unwrap()
+                .for_incarnation(incarnation),
+        )
+        .unwrap();
+    (r, rid)
+}
+
 fn allow_deny() -> std::collections::HashMap<String, String> {
     [
         ("allow".to_string(), "1".to_string()),
@@ -975,7 +1001,7 @@ async fn truncated_reads_are_neutral_in_the_watch() {
 }
 
 #[tokio::test]
-async fn lease_rejects_a_replaced_target() {
+async fn a_target_cannot_be_replaced_mid_delivery() {
     let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
     let gate = r.fake.block_next("agent.read");
     let pending = tokio::spawn({
@@ -1005,13 +1031,112 @@ async fn lease_rejects_a_replaced_target() {
         allow_deny(),
     )
     .unwrap();
-    assert_ne!(replaced.fingerprint(), old.fingerprint());
-    assert_eq!(replaced.identity(), old.identity());
-    r.adapter.keys_targets().set(replaced).unwrap();
+    assert!(r.adapter.keys_targets().set(replaced).is_err());
     gate.release();
+    let res = pending.await.unwrap();
+    assert!(delivered(&res), "{res:?}");
+    assert_eq!(r.fake.keys_sent().len(), 1, "the original target was used");
+}
+
+#[tokio::test]
+async fn a_held_agent_lock_delays_the_key() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    let agent_id = r.core.request(&rid).unwrap().agent_id;
+    let guard = r.adapter.agent_locks().lock(&agent_id).await;
+    let pending = tokio::spawn({
+        let core = r.core.clone();
+        let rid = rid.clone();
+        async move {
+            core.handle(
+                "c",
+                ClientMessage::RequestAnswer {
+                    id: "a1".into(),
+                    request_id: rid,
+                    revision: None,
+                    option_id: Some("allow".into()),
+                    text: None,
+                },
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        r.fake.keys_sent().is_empty(),
+        "no key while another path holds the agent"
+    );
+    let mut other = permission_obs(&agent_id, "k2");
+    other.answer_path = AnswerPath::Keys;
+    r.core.observe(Observation::RequestSeen(other));
+    drop(guard);
     let res = pending.await.unwrap();
     assert_eq!(res.error_code(), Some(ErrorCode::RequestGone), "{res:?}");
     assert!(r.fake.keys_sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_dialog_change_while_waiting_for_the_lock_sends_nothing() {
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    let agent_id = r.core.request(&rid).unwrap().agent_id;
+    let guard = r.adapter.agent_locks().lock(&agent_id).await;
+    let pending = tokio::spawn({
+        let core = r.core.clone();
+        let rid = rid.clone();
+        async move {
+            core.handle(
+                "c",
+                ClientMessage::RequestAnswer {
+                    id: "a1".into(),
+                    request_id: rid,
+                    revision: None,
+                    option_id: Some("allow".into()),
+                    text: None,
+                },
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    r.fake.set_screen("w1:p1", "detection", &redrawn_dialog());
+    drop(guard);
+    let res = pending.await.unwrap();
+    assert_eq!(res.error_code(), Some(ErrorCode::ScreenMismatch), "{res:?}");
+    assert!(r.fake.keys_sent().is_empty(), "zero keys");
+}
+
+#[tokio::test]
+async fn stray_keystroke_carries_its_reason() {
+    let (r, rid) = keys_rig(
+        "claude-idle-detection.txt",
+        "claude-idle-prompt-stray-1.txt",
+    )
+    .await;
+    r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
+    let (_, mut rx) = r.core.attach(None);
+    answer(&r, "a1", &rid, "allow").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let msg = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("no resolution within 5 s");
+        if let Err(tokio::sync::broadcast::error::RecvError::Closed) = msg {
+            panic!("event channel closed before the resolution");
+        }
+        if let Ok(ServerMessage::RequestResolved {
+            request_id,
+            by,
+            reason,
+            ..
+        }) = msg
+            && request_id == rid
+        {
+            assert_eq!(
+                (by, reason),
+                (ResolvedBy::Uncertain, Some(ResolveReason::StrayKeystroke))
+            );
+            break;
+        }
+    }
 }
 
 #[tokio::test]
@@ -1054,5 +1179,73 @@ async fn unknown_send_keys_error_is_uncertain() {
     assert!(
         r.adapter.keys_targets().get(&rid).is_some(),
         "the occurrence stays monitored"
+    );
+}
+
+#[tokio::test]
+async fn a_target_for_the_current_incarnation_works() {
+    let (r, rid) = bound_keys_rig(0).await;
+    assert!(delivered(&answer(&r, "a1", &rid, "allow").await));
+    assert_eq!(r.fake.keys_sent().len(), 1);
+}
+
+#[tokio::test]
+async fn a_target_for_an_old_incarnation_is_refused() {
+    let (r, rid) = bound_keys_rig(1_000).await;
+    let res = answer(&r, "a1", &rid, "allow").await;
+    assert_eq!(res.error_code(), Some(ErrorCode::RequestGone), "{res:?}");
+    assert!(
+        r.fake.keys_sent().is_empty(),
+        "zero keys to a replaced pane"
+    );
+    assert_eq!(reads(&r, "detection"), 0, "refused before any screen read");
+}
+
+#[tokio::test]
+async fn a_pane_replaced_during_the_guard_read_gets_no_key() {
+    let (r, rid) = bound_keys_rig(0).await;
+    let agent_id = agent(&r).id;
+    let gate = r.fake.block_next("agent.read");
+    let pending = tokio::spawn({
+        let core = r.core.clone();
+        let rid = rid.clone();
+        async move {
+            core.handle(
+                "c",
+                ClientMessage::RequestAnswer {
+                    id: "a1".into(),
+                    request_id: rid,
+                    revision: None,
+                    option_id: Some("allow".into()),
+                    text: None,
+                },
+            )
+            .await
+        }
+    });
+    gate.arrived().await; // the guard read is held
+    // Rewrite the map directly (forget_pane would drop the target too), and
+    // keep rewriting: the reconciler republishes the pane's real incarnation
+    // on its next refresh.
+    let writer = tokio::spawn({
+        let panes = r.adapter.panes();
+        let agent_id = agent_id.clone();
+        async move {
+            loop {
+                if let Some(p) = panes.write().unwrap().get_mut(&agent_id) {
+                    p.incarnation = u64::MAX;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    gate.release();
+    let res = pending.await.unwrap();
+    writer.abort();
+    assert_eq!(res.error_code(), Some(ErrorCode::RequestGone), "{res:?}");
+    assert!(
+        r.fake.keys_sent().is_empty(),
+        "the lease must catch a replaced pane before the write"
     );
 }

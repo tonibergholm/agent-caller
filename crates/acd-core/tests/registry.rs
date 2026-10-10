@@ -72,6 +72,32 @@ fn resolved(changes: &[Change]) -> Vec<(String, ResolvedBy, Option<String>)> {
         .collect()
 }
 
+#[test]
+fn a_reason_reaches_the_resolution() {
+    let mut r = Registry::new("m".into());
+    r.apply(Observation::AgentUpsert(acd_core::testing::agent_obs("a")));
+    r.apply(Observation::RequestSeen(acd_core::testing::permission_obs(
+        "a", "k",
+    )));
+    let rid = r.agent("a").unwrap().pending.as_ref().unwrap().id.clone();
+    let ch = r.apply(Observation::RequestEndedWithReason {
+        request_id: rid.clone(),
+        by: ResolvedBy::Uncertain,
+        reason: ResolveReason::StrayKeystroke,
+    });
+    assert!(ch.iter().any(|c| matches!(c, Change::RequestResolved {
+        request_id, by: ResolvedBy::Uncertain, reason: Some(ResolveReason::StrayKeystroke), .. } if *request_id == rid)));
+    assert!(
+        r.apply(Observation::RequestEndedWithReason {
+            request_id: rid,
+            by: ResolvedBy::Uncertain,
+            reason: ResolveReason::StrayKeystroke,
+        })
+        .is_empty(),
+        "a second end is a no-op"
+    );
+}
+
 fn reg_with_agent() -> Registry {
     let mut r = Registry::new("m1".into());
     r.apply(Observation::AgentUpsert(agent("a1")));

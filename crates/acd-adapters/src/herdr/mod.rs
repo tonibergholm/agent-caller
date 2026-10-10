@@ -20,7 +20,7 @@ use async_trait::async_trait;
 
 use self::client::CallError;
 use self::discovery::Discovery;
-use self::keys::{Engine, Evidence, KeysTargets, KeysTiming};
+use self::keys::{AgentLocks, Engine, Evidence, KeysTargets, KeysTiming};
 use self::reconciler::{Hint, PaneMap, Timing};
 
 const SEND_DEADLINE: Duration = Duration::from_secs(10);
@@ -115,6 +115,11 @@ impl HerdrAdapter {
     /// Where P3 registers keys-answerable occurrences.
     pub fn keys_targets(&self) -> Arc<KeysTargets> {
         self.keys.targets()
+    }
+
+    /// Shared with P3 (D7).
+    pub fn agent_locks(&self) -> Arc<AgentLocks> {
+        self.keys.locks()
     }
 
     /// Replaces the default `NoEvidence`.

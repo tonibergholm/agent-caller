@@ -107,7 +107,8 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
     - unknown `source`, `kind`, `status`, `by` or source `state`: decoded as
       `unknown`;
     - an unknown request status is read-only;
-    - an unknown resolution is shown as "check the terminal".
+    - an unknown resolution is shown as "check the terminal";
+    - unknown `reason`: decoded as `unknown` and ignored.
 - **Version mismatch.** If `hello.protocol` is not supported, the daemon
   sends `error {code: "unsupported_protocol", supported: ["acd/1"]}` and
   closes with code 4400.
@@ -134,7 +135,7 @@ agent.updated    {epoch, seq, agent}
 agent.removed    {epoch, seq, agent_id}
 request.opened   {epoch, seq, request}
 request.resolved {epoch, seq, request_id, agent_id,
-                  by: "inbox"|"terminal"|"agent"|"superseded"|"uncertain"|"lost", option_id?}
+                  by: "inbox"|"terminal"|"agent"|"superseded"|"uncertain"|"lost", option_id?, reason?}
 machine.updated  {epoch, seq, machine}
 result           {id, ok: true, outcome?} | {id, ok: false, error: {code, message}}
 pong             {id}
@@ -145,6 +146,11 @@ pong             {id}
 - `"delivered"`: acd wrote the answer to the hook reply, the keys, or T3.
 - Confirmation arrives later as `request.resolved {by: "inbox"}`, or as
   `by: "uncertain"`.
+
+`reason` is optional. `"stray_keystroke"` means acd sent a key, and the
+key may have landed in the agent's input box instead of the dialog
+(`by` is then `"uncertain"`). Clients show "A stray keystroke may be in
+the input box". Unknown reasons are ignored.
 
 **Error codes:**
 

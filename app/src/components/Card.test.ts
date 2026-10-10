@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import Card from "./Card.svelte";
 import { card } from "../lib/fixtures";
+import cardSource from "./Card.svelte?raw";
 
 afterEach(cleanup);
 
@@ -142,4 +143,20 @@ test("the selected card hints only at the keys it accepts", () => {
   none.unmount();
   const unselected = render(Card, props(both));
   expect(unselected.container.querySelector(".keys")).toBeNull();
+});
+
+test("a multi-line detail renders one hanging-indent block per logical line", () => {
+  const c = card({ key: "m/x" });
+  const long = `echo a${" ".repeat(300)}b`;
+  c.agent.pending = { ...c.agent.pending!, detail: `$ echo hello\n> ${long}\n"run_in_background": true` };
+  const { container } = render(Card, props(c));
+  const lines = Array.from(container.querySelectorAll(".detail > .line")).map((e) => e.textContent);
+  expect(lines).toEqual(["$ echo hello", `> ${long}`, '"run_in_background": true']);
+  // jsdom applies no component styles, so check the stylesheet source.
+  const css = cardSource;
+  const rule = css.match(/\.detail \.line\s*\{([^}]*)\}/)?.[1] ?? "";
+  expect(rule).toMatch(/white-space:\s*pre-wrap/);
+  expect(rule).toMatch(/padding-left:\s*2ch/);
+  expect(rule).toMatch(/text-indent:\s*-2ch/);
+  expect(css).toMatch(/\.detail\s*\{[^}]*monospace/);
 });

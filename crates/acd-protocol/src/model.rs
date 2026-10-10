@@ -115,6 +115,17 @@ pub enum ResolvedBy {
     Unknown,
 }
 
+/// Why a request resolved the way it did, when that matters to the user.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolveReason {
+    /// A key may have landed in the agent's input box (spec §6.2).
+    StrayKeystroke,
+    #[serde(other)]
+    Unknown,
+}
+
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]

@@ -863,3 +863,170 @@ async fn socket_missing_twice_removes_its_agents() {
     until("removed", || core.agent(&id).is_none().then_some(())).await;
     until("unconfigured", || matches!(core.welcome(), ServerMessage::Welcome { ref machine, .. } if machine.sources.herdr.state == SourceState::Unconfigured).then_some(())).await;
 }
+
+#[tokio::test]
+async fn pane_facts_carry_session_cwd_and_socket() {
+    let fake = FakeHerdr::start().await;
+    let mut info = fake_agent("w1:p1", "codex", "idle");
+    info["cwd"] = "/tmp".into();
+    info["foreground_cwd"] = "/private/tmp/proj".into();
+    info["agent_session"] = serde_json::json!({"source": "herdr:codex", "agent": "codex", "kind": "id", "value": "s-1"});
+    fake.set_agent(info);
+    let r = rig(fake).await;
+    let pane = until("pane", || r.panes.read().unwrap().values().next().cloned()).await;
+    assert_eq!(pane.session.as_deref(), Some("s-1"));
+    assert_eq!(
+        pane.cwd.as_deref(),
+        Some("/private/tmp/proj"),
+        "foreground_cwd wins (D5)"
+    );
+    assert_eq!(pane.socket, r.fake.path());
+}
+
+fn incarnation(r: &Rig, pane: &str) -> Option<u64> {
+    r.panes
+        .read()
+        .unwrap()
+        .get(&r.id(pane))
+        .map(|p| p.incarnation)
+}
+
+#[tokio::test]
+async fn incarnation_is_stable_across_updates_and_new_after_replacement() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
+    let r = rig(fake).await;
+    let first = until("pane", || incarnation(&r, "w1:p1")).await;
+    r.fake.set_status("w1:p1", "working");
+    until("working", || {
+        (r.state("w1:p1") == Some(AgentState::Working)).then_some(())
+    })
+    .await;
+    assert_eq!(incarnation(&r, "w1:p1"), Some(first), "an update keeps it");
+    let mut info = fake_agent("w1:p1", "claude", "idle");
+    info["terminal_id"] = "term_new".into();
+    r.fake.set_agent(info);
+    r.fake.push_event(
+        serde_json::json!({"event": "pane_updated", "data": {"pane": {"pane_id": "w1:p1"}}}),
+    );
+    until("new incarnation", || {
+        incarnation(&r, "w1:p1").filter(|n| *n != first).map(|_| ())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_pane_closed_and_redetected_is_a_new_agent() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "blocked"));
+    let r = rig(fake).await;
+    let id = r.id("w1:p1");
+    let first = until("pane", || incarnation(&r, "w1:p1")).await;
+    r.core.observe(acd_core::Observation::RequestSeen(
+        acd_core::testing::permission_obs(&id, "k1"),
+    ));
+    let rid = r
+        .core
+        .request_id_for(&id, &acd_core::CorrelationKey("k1".into()))
+        .unwrap();
+    let (_, mut rx) = r.core.attach(None);
+    // The close and the re-detection land before the next fetch, so the
+    // pane id is never seen absent.
+    // Same terminal id, no session: only the close makes it a new agent.
+    r.fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
+    r.fake
+        .push_event(serde_json::json!({"event": "pane_closed", "data": {"pane_id": "w1:p1"}}));
+    r.fake.push_event(
+        serde_json::json!({"event": "pane_agent_detected", "data": {"pane_id": "w1:p1"}}),
+    );
+    let mut removed = false;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out")
+            .unwrap()
+        {
+            ServerMessage::RequestResolved { request_id, by, .. } if request_id == rid => {
+                assert_eq!(by, ResolvedBy::Lost)
+            }
+            ServerMessage::AgentRemoved { agent_id, .. } if agent_id == id => removed = true,
+            ServerMessage::AgentUpdated { agent, .. } if agent.id == id && removed => {
+                assert!(agent.pending.is_none());
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_ne!(incarnation(&r, "w1:p1"), Some(first));
+}
+
+#[tokio::test]
+async fn a_changed_session_is_a_new_agent_but_a_first_session_is_not() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
+    let r = rig(fake).await;
+    let id = r.id("w1:p1");
+    until("pane", || r.state("w1:p1")).await;
+    let (_, mut rx) = r.core.attach(None);
+    let session = |r: &Rig| {
+        r.panes
+            .read()
+            .unwrap()
+            .get(&r.id("w1:p1"))
+            .and_then(|p| p.session.clone())
+    };
+    let mut info = fake_agent("w1:p1", "claude", "idle");
+    info["agent_session"] = serde_json::json!({"value": "s-1"});
+    r.fake.set_agent(info.clone());
+    r.fake.push_event(
+        serde_json::json!({"event": "pane_updated", "data": {"pane": {"pane_id": "w1:p1"}}}),
+    );
+    until("session known", || session(&r)).await;
+    info["agent_session"] = serde_json::json!({"value": "s-2"});
+    r.fake.set_agent(info);
+    r.fake.push_event(
+        serde_json::json!({"event": "pane_updated", "data": {"pane": {"pane_id": "w1:p1"}}}),
+    );
+    let mut removals = 0;
+    while let Ok(Ok(m)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        if matches!(m, ServerMessage::AgentRemoved { ref agent_id, .. } if *agent_id == id) {
+            removals += 1;
+        }
+        if session(&r).as_deref() == Some("s-2") {
+            break;
+        }
+    }
+    assert_eq!(removals, 1, "null -> s-1 is not a new agent; s-1 -> s-2 is");
+}
+
+#[tokio::test]
+async fn a_malformed_agent_get_keeps_the_connection() {
+    let fake = FakeHerdr::start().await;
+    fake.set_agent(fake_agent("w1:p1", "claude", "idle"));
+    let r = rig(fake).await;
+    until("pane", || r.state("w1:p1")).await;
+    // A dropped connection shows as `Down` for at least the backoff.
+    let mut health = r.handle.health();
+    let watcher = tokio::spawn(async move {
+        let mut left = false;
+        while health.changed().await.is_ok() {
+            left |= *health.borrow() != Health::Connected;
+        }
+        left
+    });
+    let mut bad = fake_agent("w1:p1", "claude", "working");
+    bad["revision"] = "not a number".into();
+    r.fake.set_agent(bad);
+    r.fake.push_event(
+        serde_json::json!({"event": "pane_updated", "data": {"pane": {"pane_id": "w1:p1"}}}),
+    );
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_ne!(
+        r.state("w1:p1"),
+        Some(AgentState::Unknown),
+        "the connection was not dropped"
+    );
+    assert_eq!(*r.handle.health().borrow(), Health::Connected);
+    r.handle.shutdown(false).await;
+    assert!(!watcher.await.unwrap(), "health never left Connected");
+}

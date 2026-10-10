@@ -63,6 +63,8 @@ struct State {
     gates: HashMap<String, VecDeque<Held>>,
     delays: HashMap<String, VecDeque<Duration>>,
     truncated: HashSet<(String, String)>,
+    /// `(pane, source)` whose every `agent.read` fails.
+    failing: HashSet<(String, String)>,
     /// `agent.read` source -> queued error codes.
     read_fails: HashMap<String, VecDeque<String>>,
     on_keys: Option<KeysHook>,
@@ -237,6 +239,18 @@ impl FakeHerdr {
         }
     }
 
+    /// Every `agent.read` of this pane and source fails with
+    /// `platform_error` while `value` is true.
+    pub fn set_read_failing(&self, pane_id: &str, source: &str, value: bool) {
+        let key = (pane_id.to_owned(), source.to_owned());
+        let mut st = self.st();
+        if value {
+            st.failing.insert(key);
+        } else {
+            st.failing.remove(&key);
+        }
+    }
+
     /// The next `agent.read` of `source` (any pane) gets an error with
     /// `code`; reads of other sources are unaffected.
     pub fn fail_next_read(&self, source: &str, code: &str) {
@@ -251,6 +265,7 @@ impl FakeHerdr {
     /// side effect and before the reply, until the gate is released. A
     /// `fail_next` for the same method still applies on release. If the
     /// client drops the connection while the call is held, it is discarded.
+    /// `"<method>@<pane id>"` holds only a request whose `target` is that pane.
     pub fn block_next(&self, method: &str) -> Gate {
         let (arrived_tx, arrived_rx) = watch::channel(false);
         let (release_tx, release_rx) = oneshot::channel();
@@ -430,7 +445,11 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
             st.in_flight += 1;
             st.max_in_flight = st.max_in_flight.max(st.in_flight);
         }
-        st.gates.get_mut(&method).and_then(VecDeque::pop_front)
+        let pane_gate = params["target"]
+            .as_str()
+            .and_then(|t| st.gates.get_mut(&format!("{method}@{t}")))
+            .and_then(VecDeque::pop_front);
+        pane_gate.or_else(|| st.gates.get_mut(&method).and_then(VecDeque::pop_front))
     };
     if let Some(held) = gate {
         let _ = held.arrived.send(true);
@@ -548,6 +567,9 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
                             return err(&code, "injected read failure");
                         }
                         let key = (t.to_owned(), source.to_owned());
+                        if st.failing.contains(&key) {
+                            return err("platform_error", "injected read failure");
+                        }
                         let text = st.screens.get(&key).cloned().unwrap_or_default();
                         let truncated = st.truncated.contains(&key);
                         Outcome::Reply(json!({"type": "pane_read", "read": {

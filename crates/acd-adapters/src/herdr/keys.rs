@@ -7,19 +7,21 @@
 //! provide `Evidence`. A key never reaches a screen whose dialog digest
 //! differs from the target's, and nothing is labelled `inbox` without
 //! evidence that matches this occurrence.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use acd_core::{Answer, Core, CorrelationKey, DeliverError, Observation};
-use acd_protocol::{AgentKind, AnswerPath, ErrorCode, Request, RequestStatus, ResolvedBy};
+use acd_protocol::{
+    AgentKind, AnswerPath, ErrorCode, Request, RequestStatus, ResolveReason, ResolvedBy,
+};
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
 use super::client::{CALL_TIMEOUT, CallError, Herdr, KNOWN_REFUSALS, ScreenRead};
-use super::reconciler::{Hint, PaneMap};
+use super::reconciler::{Hint, PaneMap, PaneRef};
 pub use super::screen::DialogIdentity;
 use super::screen::{Fingerprint, GuardDigest, find_dialog, guard_digest, prompt_line};
 
@@ -52,6 +54,8 @@ pub struct KeysTarget {
     pub(crate) identity: DialogIdentity,
     /// Option id -> herdr key name: `"1"`..`"9"` or `"esc"` only.
     pub(crate) option_keys: HashMap<String, String>,
+    /// The pane incarnation this target is bound to (G1); `None` is unbound.
+    pub(crate) incarnation: Option<u64>,
 }
 
 impl KeysTarget {
@@ -115,7 +119,25 @@ impl KeysTarget {
             digest,
             identity: dialog.identity,
             option_keys,
+            incarnation: None,
         })
+    }
+
+    /// Binds the target to one pane incarnation (G1). A key is only ever
+    /// sent while the pane map shows this incarnation for the agent.
+    pub fn for_incarnation(mut self, incarnation: u64) -> KeysTarget {
+        self.incarnation = Some(incarnation);
+        self
+    }
+
+    /// The bound pane incarnation. `None` means unbound; P3 never leaves a
+    /// target unbound.
+    pub fn incarnation(&self) -> Option<u64> {
+        self.incarnation
+    }
+
+    fn incarnation_ok(&self, pane: &PaneRef) -> bool {
+        self.incarnation.is_none_or(|n| n == pane.incarnation)
     }
 
     /// The guard: a whole read whose dialog has exactly this target's digest,
@@ -147,9 +169,58 @@ fn check_keys(option_keys: &HashMap<String, String>) -> Result<(), &'static str>
     }
 }
 
-/// Registered targets, by request id.
+/// Retired request ids remembered so a removed target is never re-set.
+const RETIRED_CAP: usize = 4096;
+
 #[derive(Default)]
-pub struct KeysTargets(Mutex<HashMap<String, KeysTarget>>);
+struct TargetsInner {
+    live: HashMap<String, KeysTarget>,
+    retired: VecDeque<String>,
+    retired_set: HashSet<String>,
+    rivals: HashMap<String, Rivals>,
+}
+
+/// Whether a screen shows the command a Codex target answers. P3 builds it
+/// from its dialog matcher; herdr only calls it on whole (untruncated) reads.
+pub type ShowsCommand = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// A Codex target's validated rival inventory (C6) and the matcher the
+/// delivery re-reads every rival with (C7).
+#[derive(Clone)]
+struct Rivals {
+    inventory: Vec<(String, u64)>,
+    shows: ShowsCommand,
+}
+
+impl TargetsInner {
+    fn retire(&mut self, request_id: &str) {
+        self.rivals.remove(request_id);
+        if self.retired_set.insert(request_id.to_owned()) {
+            self.retired.push_back(request_id.to_owned());
+            if self.retired.len() > RETIRED_CAP
+                && let Some(old) = self.retired.pop_front()
+            {
+                self.retired_set.remove(&old);
+            }
+        }
+    }
+}
+
+/// Registered targets, by request id. A target is immutable for its
+/// request id (D8): the content the user reviewed is the content the guard checks.
+#[derive(Default)]
+pub struct KeysTargets(Mutex<TargetsInner>);
+
+impl KeysTarget {
+    fn same_as(&self, other: &KeysTarget) -> bool {
+        self.agent_id == other.agent_id
+            && self.key == other.key
+            && self.digest == other.digest
+            && self.identity == other.identity
+            && self.option_keys == other.option_keys
+            && self.incarnation == other.incarnation
+    }
+}
 
 /// Keys the guard can vouch for. The fingerprint blanks the cursor marker,
 /// so it cannot tell which option Enter would pick: Enter is never allowed.
@@ -158,11 +229,12 @@ fn is_guardable_key(k: &str) -> bool {
 }
 
 impl KeysTargets {
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, KeysTarget>> {
+    fn lock(&self) -> MutexGuard<'_, TargetsInner> {
         self.0.lock().expect("keys targets")
     }
 
-    /// Registers or replaces the target for `t.request_id`. Rejects any
+    /// Registers a target once for `t.request_id`. Identical registration is
+    /// idempotent; a different or retired target is rejected. Rejects any
     /// option key other than `"1"`..`"9"` or `"esc"`.
     ///
     /// Register only once the herdr agent exists (`core.agent(agent_id)` is
@@ -170,20 +242,53 @@ impl KeysTargets {
     /// at its next poll.
     pub fn set(&self, t: KeysTarget) -> Result<(), &'static str> {
         check_keys(&t.option_keys)?;
-        self.lock().insert(t.request_id.clone(), t);
-        Ok(())
+        let mut inner = self.lock();
+        if inner.retired_set.contains(&t.request_id) {
+            return Err("this request's target was already retired");
+        }
+        match inner.live.get(&t.request_id) {
+            Some(old) if old.same_as(&t) => Ok(()),
+            Some(_) => Err("a different target is already registered for this request"),
+            None => {
+                inner.live.insert(t.request_id.clone(), t);
+                Ok(())
+            }
+        }
     }
 
     pub fn get(&self, request_id: &str) -> Option<KeysTarget> {
-        self.lock().get(request_id).cloned()
+        self.lock().live.get(request_id).cloned()
+    }
+
+    /// Stores the validated Codex rival inventory beside the immutable lease,
+    /// with the matcher for the command: before the key, every rival in the
+    /// inventory is read again and must not show it (C7).
+    pub fn set_rivals(&self, request_id: &str, inventory: Vec<(String, u64)>, shows: ShowsCommand) {
+        self.lock()
+            .rivals
+            .insert(request_id.to_owned(), Rivals { inventory, shows });
+    }
+
+    pub fn rivals(&self, request_id: &str) -> Option<Vec<(String, u64)>> {
+        self.lock()
+            .rivals
+            .get(request_id)
+            .map(|r| r.inventory.clone())
+    }
+
+    fn rivals_of(&self, request_id: &str) -> Option<Rivals> {
+        self.lock().rivals.get(request_id).cloned()
     }
 
     pub fn remove(&self, request_id: &str) -> Option<KeysTarget> {
-        self.lock().remove(request_id)
+        let mut inner = self.lock();
+        inner.retire(request_id);
+        inner.live.remove(request_id)
     }
 
     pub fn for_agent(&self, agent_id: &str) -> Vec<KeysTarget> {
         self.lock()
+            .live
             .values()
             .filter(|t| t.agent_id == agent_id)
             .cloned()
@@ -191,12 +296,49 @@ impl KeysTargets {
     }
 
     pub(crate) fn all(&self) -> Vec<KeysTarget> {
-        self.lock().values().cloned().collect()
+        self.lock().live.values().cloned().collect()
     }
 
     /// Drops every target of an agent whose pane is gone.
     pub(crate) fn remove_agent(&self, agent_id: &str) {
-        self.lock().retain(|_, t| t.agent_id != agent_id);
+        let mut inner = self.lock();
+        let ids: Vec<String> = inner
+            .live
+            .values()
+            .filter(|t| t.agent_id == agent_id)
+            .map(|t| t.request_id.clone())
+            .collect();
+        for id in ids {
+            inner.retire(&id);
+            inner.live.remove(&id);
+        }
+    }
+}
+
+/// One async lock per agent (D7). The engine holds it from before its
+/// final guard read until the key write completes, so waiting for the
+/// lock never ages a screen check (Sol B5). P3 holds it around every
+/// revalidation, observation and target registration on a herdr agent,
+/// so a lease check can never pass on a state P3 is about to change.
+#[derive(Default)]
+pub struct AgentLocks(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+impl AgentLocks {
+    pub async fn lock(&self, agent_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let mutex = {
+            let mut map = self.0.lock().expect("agent locks");
+            map.retain(|_, mutex| Arc::strong_count(mutex) > 1);
+            map.entry(agent_id.to_owned()).or_default().clone()
+        };
+        mutex.lock_owned().await
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.lock().expect("agent locks").len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -274,6 +416,7 @@ fn not_delivered(code: ErrorCode) -> DeliverError {
 /// The adapter's keys state: targets, the evidence source and timing.
 pub(crate) struct Engine {
     targets: Arc<KeysTargets>,
+    locks: Arc<AgentLocks>,
     evidence: Mutex<Arc<dyn Evidence>>,
     timing: KeysTiming,
 }
@@ -282,6 +425,7 @@ impl Engine {
     pub(crate) fn new(timing: KeysTiming) -> Engine {
         Engine {
             targets: Arc::default(),
+            locks: Arc::default(),
             evidence: Mutex::new(Arc::new(NoEvidence)),
             timing,
         }
@@ -291,25 +435,88 @@ impl Engine {
         self.targets.clone()
     }
 
+    pub(crate) fn locks(&self) -> Arc<AgentLocks> {
+        self.locks.clone()
+    }
+
     pub(crate) fn set_evidence(&self, e: Arc<dyn Evidence>) {
         *self.evidence.lock().expect("evidence") = e;
     }
 
     /// Whether `request_id` is still ours to answer with `key`: claimed for
     /// keys in the core, and its target unchanged since the guard (same
-    /// digest, identity and key for the option).
-    fn lease_held(&self, core: &Weak<Core>, target: &KeysTarget, option_id: &str) -> bool {
+    /// digest, identity and key for the option), and its pane still the
+    /// incarnation the target is bound to (else `RequestGone`). A Codex
+    /// target's rival inventory must also equal the validated one (C6, else
+    /// `RequestNotReady`: the reconciler revalidates it).
+    fn lease(
+        &self,
+        core: &Weak<Core>,
+        panes: &PaneMap,
+        target: &KeysTarget,
+        option_id: &str,
+    ) -> Result<(), ErrorCode> {
         let Some(core) = core.upgrade() else {
-            return false;
+            return Err(ErrorCode::RequestGone);
         };
         let claimed = core.request(&target.request_id).is_some_and(|r| {
             r.status == RequestStatus::Answering && r.answer_path == AnswerPath::Keys
         });
-        claimed
-            && self
-                .targets
-                .get(&target.request_id)
-                .is_some_and(|t| t.unchanged_since(target, option_id))
+        let same_pane = panes
+            .read()
+            .expect("pane map")
+            .get(&target.agent_id)
+            .is_some_and(|p| target.incarnation_ok(p));
+        let unchanged = self
+            .targets
+            .get(&target.request_id)
+            .is_some_and(|t| t.unchanged_since(target, option_id));
+        if !(claimed && same_pane && unchanged) {
+            return Err(ErrorCode::RequestGone);
+        }
+        let rivals_ok = self
+            .targets
+            .rivals(&target.request_id)
+            .is_none_or(|v| v == codex_inventory(panes, &target.agent_id));
+        if !rivals_ok {
+            return Err(ErrorCode::RequestNotReady);
+        }
+        Ok(())
+    }
+
+    /// C7: reads every rival in the validated inventory again; each must be
+    /// a whole read that does not show the command. A rival missing from the
+    /// pane map, unreadable before `deadline`, truncated or showing the
+    /// command refuses the key.
+    async fn rivals_clear(
+        &self,
+        panes: &PaneMap,
+        rivals: &Rivals,
+        deadline: Instant,
+    ) -> Result<(), ErrorCode> {
+        for (id, incarnation) in &rivals.inventory {
+            let pane = panes
+                .read()
+                .expect("pane map")
+                .get(id)
+                .filter(|p| p.incarnation == *incarnation)
+                .cloned();
+            let Some(pane) = pane else {
+                return Err(ErrorCode::RequestNotReady);
+            };
+            let read = pane
+                .herdr
+                .read_screen(&pane.pane_id, "detection", None, deadline)
+                .await;
+            match read {
+                Ok(r) if !r.truncated && !(rivals.shows)(&r.text) => {}
+                _ => {
+                    tracing::debug!(rival = %id, "a Codex rival may show the command; key refused");
+                    return Err(ErrorCode::RequestNotReady);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Runs inline: nothing is sent from a spawned task, so no send can start
@@ -343,6 +550,15 @@ impl Engine {
         let Some(pane) = pane else {
             return Err(not_delivered(ErrorCode::AgentGone));
         };
+        if !target.incarnation_ok(&pane) {
+            return Err(not_delivered(ErrorCode::RequestGone));
+        }
+
+        // A lock wait must never sit between the screen check and the key.
+        let lock = match timeout_at(deadline, self.locks.lock(&request.agent_id)).await {
+            Ok(guard) => guard,
+            Err(_) => return Err(not_delivered(ErrorCode::SourceUnavailable)),
+        };
 
         // Guard: the screen must show exactly the dialog the user saw.
         let read = pane
@@ -358,7 +574,26 @@ impl Engine {
         // spec's "read the prompt line before the key" cannot see a draft,
         // and a draft that already ends in the sent digit is reported as a
         // stray (`uncertain`, the safe side).
-        let baseline = prompt_line(pane.kind, &read.text);
+        let mut baseline = prompt_line(pane.kind, &read.text);
+        // C7: no rival may show the command now. Read under the lock, after
+        // the guard; the target is then guarded again, so only the connect
+        // and the lease lie between the last target read and the key.
+        if let Some(rivals) = self.targets.rivals_of(&target.request_id) {
+            self.rivals_clear(panes, &rivals, deadline)
+                .await
+                .map_err(not_delivered)?;
+            // The rival reads can take seconds: the target dialog may have
+            // been replaced meanwhile, so guard it again right before the key.
+            let read = pane
+                .herdr
+                .read_screen(&pane.pane_id, "detection", None, deadline)
+                .await
+                .map_err(|_| not_delivered(ErrorCode::SourceUnavailable))?;
+            if !target.guard_passes(&read) {
+                return Err(not_delivered(ErrorCode::ScreenMismatch));
+            }
+            baseline = prompt_line(pane.kind, &read.text);
+        }
 
         // Connect first, then check the lease, so only the local write lies
         // between the check and the key reaching herdr. The screen can still
@@ -369,9 +604,10 @@ impl Engine {
             .connect_until(deadline)
             .await
             .map_err(|_| not_delivered(ErrorCode::SourceUnavailable))?;
-        if !self.lease_held(&core, &target, option_id) {
+        if let Err(code) = self.lease(&core, panes, &target, option_id) {
+            drop(lock);
             drop(connected); // unused: nothing was sent
-            return Err(not_delivered(ErrorCode::RequestGone));
+            return Err(not_delivered(code));
         }
 
         tracing::debug!(pane_id = %pane.pane_id, request_id = %target.request_id, "herdr agent.send_keys");
@@ -383,6 +619,7 @@ impl Engine {
             .await
             // herdr frames by newline: a partial line is never dispatched.
             .map_err(|_| not_delivered(ErrorCode::SourceUnavailable))?;
+        drop(lock);
         let t_send = written.at();
 
         // Start confirming now, before the reply, so the first prompt check
@@ -440,6 +677,19 @@ impl Engine {
         let _ = verdict_tx.send(delivery);
         result
     }
+}
+
+/// Every Codex pane except `except`, sorted by id and incarnation.
+pub fn codex_inventory(panes: &PaneMap, except: &str) -> Vec<(String, u64)> {
+    let mut inventory: Vec<_> = panes
+        .read()
+        .expect("pane map")
+        .iter()
+        .filter(|(id, pane)| pane.kind == AgentKind::Codex && id.as_str() != except)
+        .map(|(id, pane)| (id.clone(), pane.incarnation))
+        .collect();
+    inventory.sort();
+    inventory
 }
 
 /// One step of the confirmation timeline.
@@ -588,17 +838,20 @@ impl Confirm {
 
     /// herdr accepted the key: attribute the outcome and publish it.
     async fn report(self, seen: Observed) {
-        let by = if seen.stray || !seen.closed {
-            ResolvedBy::Uncertain
+        let (by, reason) = if seen.stray {
+            (ResolvedBy::Uncertain, Some(ResolveReason::StrayKeystroke))
+        } else if !seen.closed {
+            (ResolvedBy::Uncertain, None)
         } else {
             let outcome = self
                 .evidence
                 .outcome(&self.target, &self.option_id, self.t_send);
-            match timeout(self.timing.evidence_timeout, outcome).await {
+            let by = match timeout(self.timing.evidence_timeout, outcome).await {
                 Ok(Verdict::Consistent) => ResolvedBy::Inbox,
                 Ok(Verdict::Contradicts) => ResolvedBy::Terminal,
                 Ok(Verdict::NoEvidence) | Err(_) => ResolvedBy::Uncertain,
-            }
+            };
+            (by, None)
         };
         let Some(core) = self.core.upgrade() else {
             return;
@@ -614,7 +867,15 @@ impl Confirm {
         }
         // Otherwise the target stays: the watch monitors the dialog until it
         // is really gone. Never another key.
-        core.observe(Observation::RequestEndedById { request_id, by });
+        if let Some(reason) = reason {
+            core.observe(Observation::RequestEndedWithReason {
+                request_id,
+                by,
+                reason,
+            });
+        } else {
+            core.observe(Observation::RequestEndedById { request_id, by });
+        }
         let _ = self.hints.try_send(Hint::Pane(self.pane_id.clone()));
     }
 }
@@ -659,6 +920,54 @@ mod tests {
         )
         .unwrap();
         (t, dialog)
+    }
+
+    #[test]
+    fn a_target_is_set_once_per_request_id() {
+        let (t, dialog) = claude_target();
+        let targets = KeysTargets::default();
+        targets.set(t.clone()).unwrap();
+        targets.set(t.clone()).unwrap();
+        let redrawn = dialog.replace("⏺ Creating empty file", "⏺ Creating an empty file");
+        let other = KeysTarget::from_screen(
+            "r1".into(),
+            "a".into(),
+            CorrelationKey("k".into()),
+            &redrawn,
+            [("allow".to_string(), "1".to_string())].into(),
+        )
+        .unwrap();
+        assert!(
+            targets.set(other.clone()).is_err(),
+            "a different target never replaces"
+        );
+        assert_eq!(targets.get("r1").unwrap().fingerprint(), t.fingerprint());
+        targets.remove("r1");
+        assert!(
+            targets.set(other).is_err(),
+            "a retired request id never gets a target again"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_locks_serialize_per_agent_and_forget_idle_entries() {
+        let locks = Arc::new(AgentLocks::default());
+        let g = locks.lock("a").await;
+        let l2 = locks.clone();
+        let waiter = tokio::spawn(async move {
+            l2.lock("a").await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !waiter.is_finished(),
+            "a second lock on the same agent waits"
+        );
+        let _other = locks.lock("b").await;
+        drop(g);
+        waiter.await.unwrap();
+        drop(_other);
+        let _ = locks.lock("c").await;
+        assert!(locks.len() <= 1, "idle entries are pruned");
     }
 
     /// The same target with one digest byte past the 16-hex prefix flipped:

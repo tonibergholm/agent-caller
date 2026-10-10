@@ -52,7 +52,11 @@
   {/if}
   {#if pending}
     <div class="request">{pending.title}</div>
-    {#if pending.detail}<div class="detail">{pending.detail}</div>{/if}
+    {#if pending.detail}
+      <div class="detail">
+        {#each pending.detail.split("\n") as line, i (i)}<div class="line">{line}</div>{/each}
+      </div>
+    {/if}
     {#if question}<div class="question">{question}</div>{/if}
     {#if pending.kind === "blocked_unparsed" && pending.raw_screen !== null}
       <pre>{pending.raw_screen}</pre>
@@ -141,6 +145,19 @@
     display: block;
     width: 100%;
     text-align: left;
+  }
+  .detail {
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+  }
+  /* One block per logical line with a hanging indent: a wrapped row is
+     indented, so only a real line starts at the left edge. */
+  .detail .line {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding-left: 2ch;
+    text-indent: -2ch;
+    min-height: 1.2em;
   }
   .rule {
     display: block;

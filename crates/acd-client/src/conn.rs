@@ -67,6 +67,7 @@ pub enum MachineEvent {
         agent_id: String,
         by: acd_protocol::ResolvedBy,
         option_id: Option<String>,
+        reason: Option<acd_protocol::ResolveReason>,
     },
     Welcomed {
         generation: u64,
@@ -395,7 +396,7 @@ async fn serve(
                             Applied::Resync(why) => return End::Resync(why),
                             Applied::Changed => { let status = if session.ready() { MachineStatus::Online } else { MachineStatus::Syncing }; state.send_replace(MachineState { instance, status, session: session.clone(), conn_gen: generation }); },
                             Applied::Opened(req) => { state.send_replace(MachineState { instance, status: if session.ready() { MachineStatus::Online } else { MachineStatus::Syncing }, session: session.clone(), conn_gen: generation }); let _ = events.send((instance, MachineEvent::Opened(req))); },
-                            Applied::Resolved { request_id, agent_id, by, option_id } => { let _ = events.send((instance, MachineEvent::Resolved { request_id, agent_id, by, option_id })); },
+                            Applied::Resolved { request_id, agent_id, by, option_id, reason } => { let _ = events.send((instance, MachineEvent::Resolved { request_id, agent_id, by, option_id, reason })); },
                             Applied::Ignored => {}
                         }
                         if session.ready() && !became_ready {

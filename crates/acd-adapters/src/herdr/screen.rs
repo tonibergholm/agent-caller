@@ -79,6 +79,12 @@ pub struct Dialog {
     pub fingerprint: Option<Fingerprint>,
     /// The full digest `fingerprint` is cut from; `None` with it.
     pub digest: Option<GuardDigest>,
+    /// The raw rows of the located region, first row through the footer,
+    /// exactly as read. For P3 hook matching (Dialog match contract) only;
+    /// the guard compares `digest`.
+    pub region: Vec<String>,
+    /// Indexes into `region` of the option rows, in screen order.
+    pub option_rows: Vec<usize>,
 }
 
 const CLAUDE_FOOTER: &str = "Esc to cancel";
@@ -417,6 +423,7 @@ fn make_dialog(
         screen_digest(&lines[..=end], &abs)
     });
     let options = block.into_iter().map(|(_, o)| o).collect();
+    let region = lines[start..=end].iter().map(|l| l.to_string()).collect();
     Dialog {
         kind,
         options,
@@ -424,6 +431,8 @@ fn make_dialog(
         text,
         fingerprint: digest.map(|d| d.fingerprint()),
         digest,
+        region,
+        option_rows: option_idx,
     }
 }
 
@@ -615,6 +624,20 @@ mod tests {
         assert!(d.text.contains("touch /tmp/acp0/t1.txt"));
         assert!(!d.text.contains("Tip:"));
         assert!(d.fingerprint.is_some());
+    }
+
+    #[test]
+    fn a_dialog_exposes_its_raw_region_and_option_rows() {
+        let d = find_dialog(&fx("claude-permission-bash.txt")).unwrap();
+        assert!(d.region.first().unwrap().trim().chars().all(|c| c == '─'));
+        assert!(d.region.last().unwrap().contains("Esc to cancel"));
+        let labels: Vec<_> = d
+            .option_rows
+            .iter()
+            .map(|&i| d.region[i].trim().to_string())
+            .collect();
+        assert!(labels[0].ends_with("1. Yes"), "{labels:?}");
+        assert_eq!(d.option_rows.len(), d.options.len());
     }
 
     #[test]

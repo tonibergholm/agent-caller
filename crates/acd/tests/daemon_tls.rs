@@ -8,65 +8,30 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use tokio_tungstenite::tungstenite::Message;
+mod common;
+use common::acd;
 
-fn acd(dir: &std::path::Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_acd"));
-    // HOME points into the test dir so the daemon never finds the real
-    // herdr socket under ~/.config/herdr.
-    cmd.env("ACD_CONFIG_DIR", dir)
-        .env("HOME", dir)
-        .env_remove("HERDR_SOCKET_PATH")
-        .env_remove("RUST_LOG");
-    cmd
-}
-
-fn init(listen: &str) -> (tempfile::TempDir, std::path::PathBuf, u16) {
+fn init() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("acd");
-    let out = acd(&dir).arg("init").output().unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    std::fs::write(
-        dir.join("config.toml"),
-        format!("port = {port}\nlisten = {listen}\n"),
-    )
-    .unwrap();
-    (tmp, dir, port)
+    let dir = common::init_dir(tmp.path());
+    (tmp, dir)
 }
 
-struct Daemon(std::process::Child);
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        self.0.kill().ok();
-        self.0.wait().ok();
+fn start(
+    dir: &std::path::Path,
+    listen: &str,
+    debug_log: bool,
+    admission: Option<usize>,
+) -> common::Started {
+    let admission = admission.map(|n| n.to_string());
+    let mut env: Vec<(&str, &str)> = Vec::new();
+    if debug_log {
+        env.push(("RUST_LOG", "debug"));
     }
-}
-
-fn start(dir: &std::path::Path, log: Option<&std::path::Path>, admission: Option<usize>) -> Daemon {
-    let mut cmd = acd(dir);
-    cmd.arg("run");
-    if let Some(path) = log {
-        cmd.env("RUST_LOG", "debug")
-            .stderr(std::fs::File::create(path).unwrap());
+    if let Some(n) = admission.as_deref() {
+        env.push(("ACD_TEST_MAX_UNAUTH", n));
     }
-    if let Some(n) = admission {
-        cmd.env("ACD_TEST_MAX_UNAUTH", n.to_string());
-    }
-    let child = cmd.spawn().unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !dir.join("acd.sock").exists() {
-        assert!(std::time::Instant::now() < deadline, "daemon did not start");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Daemon(child)
+    common::start_daemon(dir, Some(listen), "", &env)
 }
 
 #[derive(Debug)]
@@ -201,8 +166,9 @@ async fn hello(
 
 #[tokio::test]
 async fn tcp_requires_tls_and_a_valid_pin_authenticates_hello() {
-    let (_tmp, dir, port) = init("[\"127.0.0.1\"]");
-    let _daemon = start(&dir, None, None);
+    let (_tmp, dir) = init();
+    let started = start(&dir, "[\"127.0.0.1\"]", false, None);
+    let port = started.port;
     assert!(
         tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/"))
             .await
@@ -218,9 +184,10 @@ async fn tcp_requires_tls_and_a_valid_pin_authenticates_hello() {
 
 #[tokio::test]
 async fn wrong_pin_fails_before_hello_and_rotation_keeps_open_sessions() {
-    let (_tmp, dir, port) = init("[\"127.0.0.1\"]");
-    let log = dir.join("daemon.log");
-    let _daemon = start(&dir, Some(&log), None);
+    let (_tmp, dir) = init();
+    let started = start(&dir, "[\"127.0.0.1\"]", true, None);
+    let port = started.port;
+    let log = started.log.clone();
     let token = std::fs::read_to_string(dir.join("client.token")).unwrap();
     let old = pin_of(&dir);
     let wrong = acd_core::tls::check_pair(&acd_core::tls::generate("wrong")).unwrap();
@@ -284,8 +251,9 @@ async fn admission_budget_is_shared_by_ipv4_and_ipv6_listeners() {
     if std::net::TcpListener::bind("[::1]:0").is_err() {
         return;
     }
-    let (_tmp, dir, port) = init("[\"127.0.0.1\", \"::1\"]");
-    let _daemon = start(&dir, None, Some(2));
+    let (_tmp, dir) = init();
+    let started = start(&dir, "[\"127.0.0.1\", \"::1\"]", false, Some(2));
+    let port = started.port;
     let pin = pin_of(&dir);
     let cfg = client_config(&pin);
     let mut held = Vec::new();
