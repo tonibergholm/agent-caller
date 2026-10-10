@@ -1740,7 +1740,10 @@ async fn a_capture_result_after_t3_takeover_is_discarded() {
 #[tokio::test]
 async fn a_stale_capture_for_an_unheld_request_cannot_register_a_target() {
     let (r, agent, _filler) = unheld_bound_rig().await;
-    let gate = r.fake.as_ref().unwrap().block_next("agent.read");
+    // Gate p1's capture read only: the held filler on p2 polls its own
+    // screen, and a global gate could take that poll instead. Both panes
+    // are "working", so herdr's fallback reads neither.
+    let gate = r.fake.as_ref().unwrap().block_next("agent.read@w1:p1");
     let port = r.port;
     let body = fx("claude/payload-PermissionRequest-Bash.json").to_string();
     let headers = bound_headers(&r);
