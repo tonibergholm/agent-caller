@@ -608,9 +608,14 @@ impl Reconciler {
                 incarnation: p.incarnation,
             })
         });
+        // A present, resolved header is current evidence: it replaces the
+        // cached binding even when it does not bind (R9: a conflict leaves
+        // the session unbound). Only a hook without a resolved header keeps
+        // the cache.
+        let resolved_header = event.is_some_and(|h| h.herdr_pane.is_some()) && event_hash.is_some();
         let mut header = (event.and_then(|h| h.herdr_pane.clone()), event_hash.clone());
         if let Some(session) = self.sessions.get_mut(session_id) {
-            if fresh.is_some() {
+            if fresh.is_some() || resolved_header {
                 session.binding = fresh;
             } else if session.binding.as_ref().is_some_and(|b| {
                 !panes
@@ -908,8 +913,12 @@ impl Reconciler {
             if pane.is_none() {
                 return;
             }
-            obs.answer_path = AnswerPath::Keys;
-            obs.options = mapping::claude_keys_options();
+            // A request the mapper made read-only (a cut detail) never
+            // gains the keys path.
+            if obs.answer_path != AnswerPath::None {
+                obs.answer_path = AnswerPath::Keys;
+                obs.options = mapping::claude_keys_options();
+            }
             obs.ready = false;
         }
         self.observe_locked(&agent_id, pane.is_some(), Observation::RequestSeen(obs))
@@ -2366,6 +2375,13 @@ impl Reconciler {
         };
         let mut observation =
             mapping::claude_permission(&track.agent_id, track.key.clone(), None, &track.payload);
+        if observation.answer_path == AnswerPath::None {
+            // The mapper's read-only decision (a cut detail hides part of
+            // the request) holds on every path: no keys, options or
+            // readiness, whatever the screen shows.
+            track.phase = Phase::ReadOnly;
+            return;
+        }
         observation.answer_path = AnswerPath::Keys;
         observation.options = mapping::claude_keys_options();
         observation.ready = false;

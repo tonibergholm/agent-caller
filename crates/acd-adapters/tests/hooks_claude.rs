@@ -1,5 +1,6 @@
 mod common;
 use acd_adapters::herdr::fake::fake_agent;
+use acd_adapters::hooks::HooksConfig;
 use acd_adapters::hooks::testing::read_response;
 use acd_core::{CorrelationKey, Observation};
 use acd_protocol::*;
@@ -1195,7 +1196,11 @@ fn bound_headers(r: &Rig) -> Vec<(&'static str, String)> {
 }
 
 async fn bound_rig() -> (Rig, String) {
-    let r = rig(&[fake_agent("w1:p1", "claude", "blocked")], |_| {}).await;
+    bound_rig_with(|_| {}).await
+}
+
+async fn bound_rig_with(tweak: impl FnOnce(&mut HooksConfig)) -> (Rig, String) {
+    let r = rig(&[fake_agent("w1:p1", "claude", "blocked")], tweak).await;
     r.fake.as_ref().unwrap().on_keys(|f, pane, _| {
         let idle = herdr_screen("claude-idle-detection.txt");
         let prompt = herdr_screen("claude-idle-prompt.txt");
@@ -1386,6 +1391,74 @@ async fn a_bound_hold_close_with_the_matching_dialog_switches_to_incarnation_bou
     assert!(target.incarnation().is_some());
     assert!(answer(&r, "a1", &rid, "allow").await.ok);
     assert_eq!(r.fake.as_ref().unwrap().keys_sent().len(), 1);
+}
+
+/// A short Bash command whose extra input field overflows the detail cap:
+/// the terminal dialog still matches, but the mapper made it read-only.
+fn truncated_bash() -> Value {
+    let mut payload = fx("claude/payload-PermissionRequest-Bash.json");
+    payload["tool_input"]["note"] = "x".repeat(5000).into();
+    payload
+}
+
+/// F1: the truncated request never gained keys, options or readiness.
+async fn assert_still_read_only(r: &Rig, rid: &str) {
+    let request = r.core.request(rid).unwrap();
+    assert_eq!(request.answer_path, AnswerPath::None);
+    assert!(request.options.is_empty());
+    assert!(!request.is_answerable());
+    assert!(r.herdr.as_ref().unwrap().keys_targets().get(rid).is_none());
+    assert!(!answer(r, "a1", rid, "allow").await.ok);
+    assert!(r.fake.as_ref().unwrap().keys_sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_truncated_request_stays_read_only_after_a_hold_close_and_capture() {
+    let (r, agent) = bound_rig().await;
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let held = r.hold(&truncated_bash(), &h).await;
+    let rid = until("bound request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    assert_eq!(r.core.request(&rid).unwrap().answer_path, AnswerPath::None);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(held);
+    // Long enough for the hold-end read to match and apply.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_still_read_only(&r, &rid).await;
+}
+
+#[tokio::test]
+async fn a_truncated_request_stays_read_only_after_hold_expiry_and_capture() {
+    let (r, agent) = bound_rig_with(|cfg| cfg.permission_hold = Duration::from_millis(300)).await;
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let held = r.hold(&truncated_bash(), &h).await;
+    let rid = until("bound request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    assert_eq!(read_response(held).await, (200, String::new()));
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_still_read_only(&r, &rid).await;
+}
+
+#[tokio::test]
+async fn an_unheld_truncated_request_stays_read_only_after_capture() {
+    let (r, agent, _filler) = unheld_bound_rig().await;
+    let mut payload = truncated_bash();
+    payload["session_id"] = "target-session".into();
+    let h = bound_headers(&r);
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    r.hook("claude", "PermissionRequest", &payload, &h).await;
+    let rid = until("request", || {
+        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_still_read_only(&r, &rid).await;
 }
 
 #[tokio::test]
@@ -1967,4 +2040,72 @@ async fn a_hooks_only_session_taken_by_t3_releases_its_hold() {
     r.t3.set_for_tests("t3:thread-1", Some(SID));
     assert_eq!(released(held).await, (200, String::new()));
     until("gone", || r.agent(HOOKS_ONLY).is_none().then_some(())).await;
+}
+
+#[tokio::test]
+async fn a_fresh_header_conflict_unbinds_and_drops_the_cached_binding() {
+    // F2 (R9): the session is header-bound to p1, which reports it. A hook
+    // whose header names p2 while p1 still reports the session is a
+    // conflict: not bound, and the cached p1 binding is gone.
+    let mut p1 = fake_agent("w1:p1", "claude", "idle");
+    p1["agent_session"] = json!({"value": SID});
+    let r = rig(&[p1, fake_agent("w1:p2", "claude", "idle")], |_| {}).await;
+    let sock = r.sock();
+    let on = |pane: &'static str| {
+        vec![
+            ("X-Herdr-Pane", pane),
+            ("X-Herdr-Socket", sock.as_str()),
+            ("X-Claude-Entrypoint", "cli"),
+        ]
+    };
+    let p1_fact = || {
+        r.herdr
+            .as_ref()
+            .unwrap()
+            .panes()
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, p)| p.pane_id == "w1:p1")
+            .map(|(id, p)| (id.clone(), p.incarnation, p.session.clone()))
+    };
+    let (p1_id, incarnation, _) = until("p1 reports the session", || {
+        p1_fact().filter(|(_, _, s)| s.as_deref() == Some(SID))
+    })
+    .await;
+    until("p1 agent", || r.agent(&p1_id)).await;
+    let prompt = fx("claude/payload-UserPromptSubmit.json");
+    r.hook("claude", "UserPromptSubmit", &prompt, &on("w1:p1"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(r.agent(&hooks_only_id()).is_none(), "bound to p1");
+
+    r.hook("claude", "UserPromptSubmit", &prompt, &on("w1:p2"))
+        .await;
+    until("the conflict leaves the session unbound", || {
+        r.agent(&hooks_only_id())
+    })
+    .await;
+
+    // p1 stops reporting the session (same incarnation): only a cached
+    // binding could still tie a header-less hook to p1.
+    r.fake
+        .as_ref()
+        .unwrap()
+        .set_agent(fake_agent("w1:p1", "claude", "idle"));
+    r.fake
+        .as_ref()
+        .unwrap()
+        .push_event(json!({"event": "pane_updated", "data": {"pane_id": "w1:p1"}}));
+    let (_, now, _) = until("p1 stops reporting", || {
+        p1_fact().filter(|(_, _, s)| s.is_none())
+    })
+    .await;
+    assert_eq!(now, incarnation, "same pane incarnation");
+    r.hook("claude", "UserPromptSubmit", &prompt, &CLI).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        r.agent(&hooks_only_id()).is_some(),
+        "no cached p1 binding brought the session back"
+    );
 }

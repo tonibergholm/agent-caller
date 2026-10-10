@@ -423,6 +423,43 @@ async fn a_live_target_refuses_while_a_rival_now_shows_the_command() {
 }
 
 #[tokio::test]
+async fn a_target_dialog_replaced_during_the_rival_reads_gets_no_key() {
+    // F3: the target screen is checked again after the C7 rival reads,
+    // immediately before the write.
+    let (r, rid, _a, _b) = ready_with_rival("codex-idle-detection.txt").await;
+    // No C5 recheck may consume the rival gate.
+    r.hooks.pause_ticks_for_tests(true);
+    let f = r.fake.as_ref().unwrap();
+    let gate = f.block_next("agent.read@w1:p2");
+    let core = r.core.clone();
+    let id = rid.clone();
+    let answering = tokio::spawn(async move {
+        core.handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "a1".into(),
+                request_id: id,
+                revision: None,
+                option_id: Some("allow".into()),
+                text: None,
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), gate.arrived())
+        .await
+        .expect("the rival read reached the gate");
+    // A replacement dialog for another command, same pane and incarnation.
+    let replaced =
+        screen("codex-permission-bash-detection.txt").replace("acp0_test_t5_1", "acp0_test_t5_2");
+    f.set_screen("w1:p1", "detection", &replaced);
+    gate.release();
+    let result = answering.await.unwrap();
+    assert_eq!(result.error_code(), Some(ErrorCode::ScreenMismatch));
+    assert!(f.keys_sent().is_empty());
+}
+
+#[tokio::test]
 async fn an_unreadable_or_truncated_rival_refuses_the_key() {
     let (r, rid, _a, _b) = ready_with_rival("codex-idle-detection.txt").await;
     let f = r.fake.as_ref().unwrap();

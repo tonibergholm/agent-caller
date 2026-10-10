@@ -574,13 +574,25 @@ impl Engine {
         // spec's "read the prompt line before the key" cannot see a draft,
         // and a draft that already ends in the sent digit is reported as a
         // stray (`uncertain`, the safe side).
-        let baseline = prompt_line(pane.kind, &read.text);
+        let mut baseline = prompt_line(pane.kind, &read.text);
         // C7: no rival may show the command now. Read under the lock, after
-        // the guard, so only the connect lies between these reads and the key.
+        // the guard; the target is then guarded again, so only the connect
+        // and the lease lie between the last target read and the key.
         if let Some(rivals) = self.targets.rivals_of(&target.request_id) {
             self.rivals_clear(panes, &rivals, deadline)
                 .await
                 .map_err(not_delivered)?;
+            // The rival reads can take seconds: the target dialog may have
+            // been replaced meanwhile, so guard it again right before the key.
+            let read = pane
+                .herdr
+                .read_screen(&pane.pane_id, "detection", None, deadline)
+                .await
+                .map_err(|_| not_delivered(ErrorCode::SourceUnavailable))?;
+            if !target.guard_passes(&read) {
+                return Err(not_delivered(ErrorCode::ScreenMismatch));
+            }
+            baseline = prompt_line(pane.kind, &read.text);
         }
 
         // Connect first, then check the lease, so only the local write lies
