@@ -255,6 +255,25 @@ pub fn systemd_unit(exe: &Path, config_dir: &Path) -> String {
     )
 }
 
+/// How long `install` waits for launchd to finish a `bootout`, and how it
+/// retries a `bootstrap` that still loses the race.
+#[derive(Clone, Copy)]
+pub struct Timing {
+    pub unload_poll: std::time::Duration,
+    pub unload_polls: u32,
+    pub bootstrap_backoff: std::time::Duration,
+    pub bootstrap_retries: u32,
+}
+
+impl Timing {
+    pub const LIVE: Timing = Timing {
+        unload_poll: std::time::Duration::from_millis(100),
+        unload_polls: 50,
+        bootstrap_backoff: std::time::Duration::from_millis(250),
+        bootstrap_retries: 4,
+    };
+}
+
 pub fn install(
     home: &Path,
     exe: &Path,
@@ -262,6 +281,18 @@ pub fn install(
     print: bool,
     force: bool,
     runner: &dyn Runner,
+) -> Result<String> {
+    install_with(home, exe, config_dir, print, force, runner, Timing::LIVE)
+}
+
+pub fn install_with(
+    home: &Path,
+    exe: &Path,
+    config_dir: &Path,
+    print: bool,
+    force: bool,
+    runner: &dyn Runner,
+    timing: Timing,
 ) -> Result<String> {
     if cfg!(target_os = "macos") {
         let plist = home
@@ -274,26 +305,45 @@ pub fn install(
         std::fs::create_dir_all(home.join("Library/Logs"))?;
         let existed = write_definition(&plist, &text, force, &config_dir.join("backups"))?;
         let uid = acd_securefs::euid();
+        let job = format!("gui/{uid}/{LABEL}");
         if existed {
             // A service that is not loaded (stopped by hand, failed bootstrap,
             // foreign plist) makes bootout fail; bootstrap is the real check.
-            if let Err(error) = runner.run(
-                "launchctl",
-                &["bootout".into(), format!("gui/{uid}/{LABEL}")],
-            ) {
-                tracing::debug!("launchctl bootout ignored: {error:#}");
+            match runner.run("launchctl", &["bootout".into(), job.clone()]) {
+                Err(error) => tracing::debug!("launchctl bootout ignored: {error:#}"),
+                // bootout returns before launchd has finished unloading, and a
+                // bootstrap that races it fails with EIO. Wait until the job is gone.
+                Ok(()) => {
+                    for _ in 0..timing.unload_polls {
+                        if runner
+                            .run("launchctl", &["print".into(), job.clone()])
+                            .is_err()
+                        {
+                            break;
+                        }
+                        std::thread::sleep(timing.unload_poll);
+                    }
+                }
             }
         }
-        runner
-            .run(
-                "launchctl",
-                &[
-                    "bootstrap".into(),
-                    format!("gui/{uid}"),
-                    plist.display().to_string(),
-                ],
-            )
-            .context("launchctl bootstrap failed")?;
+        let bootstrap = [
+            "bootstrap".to_string(),
+            format!("gui/{uid}"),
+            plist.display().to_string(),
+        ];
+        let mut retries = timing.bootstrap_retries;
+        loop {
+            match runner.run("launchctl", &bootstrap) {
+                Ok(()) => break,
+                // Exit status 5 (EIO) is launchd still tearing the old job down.
+                Err(error) if retries > 0 && format!("{error:#}").contains("exit status: 5") => {
+                    retries -= 1;
+                    tracing::debug!("launchctl bootstrap retrying: {error:#}");
+                    std::thread::sleep(timing.bootstrap_backoff);
+                }
+                Err(error) => return Err(error.context("launchctl bootstrap failed")),
+            }
+        }
         Ok(format!(
             "Installed and started {}. Stop it with: launchctl bootout gui/{uid}/{LABEL}",
             plist.display()
@@ -364,12 +414,34 @@ mod tests {
     struct Fake {
         calls: RefCell<Vec<String>>,
         fail: Option<&'static str>,
+        /// `launchctl print` succeeds (job still loaded) this many more times.
+        print_present: std::cell::Cell<u32>,
+        /// `launchctl bootstrap` fails with exit status 5 this many more times.
+        bootstrap_eio: std::cell::Cell<u32>,
     }
+
+    const FAST: Timing = Timing {
+        unload_poll: std::time::Duration::from_millis(1),
+        unload_polls: 20,
+        bootstrap_backoff: std::time::Duration::from_millis(1),
+        bootstrap_retries: 3,
+    };
 
     impl Runner for Fake {
         fn run(&self, program: &str, args: &[String]) -> Result<()> {
             let line = format!("{program} {}", args.join(" "));
             self.calls.borrow_mut().push(line.clone());
+            if line.starts_with("launchctl print ") {
+                if self.print_present.get() > 0 {
+                    self.print_present.set(self.print_present.get() - 1);
+                    return Ok(());
+                }
+                bail!("{line} failed (exit status: 113)");
+            }
+            if line.starts_with("launchctl bootstrap ") && self.bootstrap_eio.get() > 0 {
+                self.bootstrap_eio.set(self.bootstrap_eio.get() - 1);
+                bail!("{line} failed (exit status: 5)");
+            }
             if self.fail.is_some_and(|word| line.contains(word)) {
                 bail!("{line} failed (exit status: 5)");
             }
@@ -387,7 +459,7 @@ mod tests {
     }
 
     fn run_install(home: &Path, cfg: &Path, exe: &str, force: bool, fake: &Fake) -> Result<String> {
-        install(home, Path::new(exe), cfg, false, force, fake)
+        install_with(home, Path::new(exe), cfg, false, force, fake, FAST)
     }
 
     fn backups(cfg: &Path) -> Vec<PathBuf> {
@@ -577,5 +649,103 @@ mod tests {
         let cfg = tempfile::tempdir().unwrap();
         let error = run_install(home.path(), cfg.path(), "/x/acd", false, &fake).unwrap_err();
         assert!(format!("{error:#}").contains(word), "{error:#}");
+    }
+
+    fn reinstall_over_loaded(fake: &Fake) -> Result<String> {
+        let home = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        run_install(home.path(), cfg.path(), "/old/acd", false, &Fake::default()).unwrap();
+        run_install(home.path(), cfg.path(), "/new/acd", false, fake)
+    }
+
+    #[test]
+    fn bootstrap_waits_until_the_booted_out_job_is_gone() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let fake = Fake::default();
+        fake.print_present.set(2);
+        reinstall_over_loaded(&fake).unwrap();
+        let calls = fake.calls.borrow();
+        let prints = calls.iter().filter(|c| c.contains(" print ")).count();
+        assert_eq!(prints, 3, "{calls:?}");
+        let last_print = calls.iter().rposition(|c| c.contains(" print ")).unwrap();
+        let boots: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.contains(" bootstrap "))
+            .collect();
+        assert_eq!(boots.len(), 1, "{calls:?}");
+        assert!(boots[0].0 > last_print, "{calls:?}");
+        assert!(calls[0].contains("bootout"), "{calls:?}");
+    }
+
+    #[test]
+    fn bootstrap_retries_an_eio_failure() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let fake = Fake::default();
+        fake.bootstrap_eio.set(1);
+        reinstall_over_loaded(&fake).unwrap();
+        let boots = fake
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| c.contains(" bootstrap "))
+            .count();
+        assert_eq!(boots, 2);
+    }
+
+    #[test]
+    fn bootstrap_gives_up_after_bounded_retries_and_names_the_call() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let fake = Fake::default();
+        fake.bootstrap_eio.set(u32::MAX);
+        let error = reinstall_over_loaded(&fake).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("launchctl bootstrap"),
+            "{error:#}"
+        );
+        let boots = fake
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| c.contains(" bootstrap "))
+            .count();
+        assert_eq!(boots, 1 + FAST.bootstrap_retries as usize);
+    }
+
+    #[test]
+    fn a_non_eio_bootstrap_failure_is_not_retried() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        struct Other(RefCell<u32>);
+        impl Runner for Other {
+            fn run(&self, _: &str, args: &[String]) -> Result<()> {
+                if args[0] == "bootstrap" {
+                    *self.0.borrow_mut() += 1;
+                    bail!("launchctl bootstrap failed (exit status: 37)");
+                }
+                Ok(())
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let other = Other(RefCell::new(0));
+        assert!(install_with(
+            home.path(),
+            Path::new("/x/acd"),
+            cfg.path(),
+            false,
+            false,
+            &other,
+            FAST
+        )
+        .is_err());
+        assert_eq!(*other.0.borrow(), 1);
     }
 }
