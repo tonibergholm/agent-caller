@@ -1990,9 +1990,10 @@ fn a_stale_hook_sock_is_replaced() {
     let (_home, dir) = home_with_acd();
     let sock = dir.join("hook.sock");
     drop(UnixListener::bind(&sock).unwrap()); // left by a crashed daemon
-    let stale = inode(&sock);
+    // Linux may reuse the inode number, so the request below, not the inode,
+    // proves the stale socket was replaced.
+    assert!(std::os::unix::net::UnixStream::connect(&sock).is_err());
     let _started = start_daemon(&dir, None, "", &[]);
-    assert_ne!(inode(&sock), stale);
     assert_eq!(mode(&sock), 0o600);
     let body = claude_fixture("payload-UserPromptSubmit.json");
     assert_eq!(

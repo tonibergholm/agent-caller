@@ -316,7 +316,8 @@ async fn retire_once(
 }
 
 /// Debug builds only: `ACD_TEST_STOP_SERVER=<name>` ends that server task
-/// shortly after it starts, to test supervision.
+/// about a second after it starts (after every listener is up, even on a
+/// slow machine), to test supervision.
 fn stop_server_for_tests(name: &str) -> bool {
     #[cfg(debug_assertions)]
     {
@@ -519,7 +520,7 @@ pub async fn run(dir: &Path) -> Result<()> {
     let stop_now = stop_server_for_tests("hook");
     servers.spawn(async move {
         if stop_now {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(1000)).await;
         } else {
             let listener = endpoint::capped(hook_listener, max_connections);
             if let Err(e) = axum::serve(listener, app_tcp)
@@ -535,7 +536,7 @@ pub async fn run(dir: &Path) -> Result<()> {
     let stop_now = stop_server_for_tests("hook-sock");
     servers.spawn(async move {
         if stop_now {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(1000)).await;
         } else {
             let listener = endpoint::capped_unix(hook_unix, max_connections);
             if let Err(e) = axum::serve(listener, hook_app)
@@ -627,7 +628,7 @@ pub async fn run(dir: &Path) -> Result<()> {
     let stop_local = stop_server_for_tests("local");
     servers.spawn(async move {
         if stop_local {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(1000)).await;
             return "local socket".to_string();
         }
         if let Err(e) = axum::serve(local, app).await {
