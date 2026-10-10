@@ -2,7 +2,7 @@
 //! Both restart acd after any non-zero exit and leave clean stops alone.
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 pub const LABEL: &str = "dev.agent-caller.acd";
 pub const MARKER: &str = "acd-managed:v1";
@@ -17,12 +17,24 @@ pub struct SystemRunner;
 
 impl Runner for SystemRunner {
     fn run(&self, program: &str, args: &[String]) -> Result<()> {
-        let status = std::process::Command::new(program)
+        // Capture the tool's output: probes like `launchctl print` are
+        // expected to fail and must not print to the user's terminal.
+        let out = std::process::Command::new(program)
             .args(args)
-            .status()
+            .stdin(std::process::Stdio::null())
+            .output()
             .with_context(|| format!("running {program} {}", args.join(" ")))?;
-        if !status.success() {
-            bail!("{program} {} failed ({status})", args.join(" "));
+        if !out.status.success() {
+            let detail = String::from_utf8_lossy(&out.stderr);
+            let detail = detail.trim();
+            if detail.is_empty() {
+                bail!("{program} {} failed ({})", args.join(" "), out.status);
+            }
+            bail!(
+                "{program} {} failed ({}): {detail}",
+                args.join(" "),
+                out.status
+            );
         }
         Ok(())
     }
@@ -522,14 +534,18 @@ mod tests {
         run_install(home.path(), cfg.path(), "/old/acd", false, &fake).unwrap();
         fake.calls.borrow_mut().clear();
         run_install(home.path(), cfg.path(), "/new/acd", false, &fake).unwrap();
-        assert!(std::fs::read_to_string(definition_path(home.path()))
-            .unwrap()
-            .contains("/new/acd"));
+        assert!(
+            std::fs::read_to_string(definition_path(home.path()))
+                .unwrap()
+                .contains("/new/acd")
+        );
         let found = backups(cfg.path());
         assert_eq!(found.len(), 1);
-        assert!(std::fs::read_to_string(&found[0])
-            .unwrap()
-            .contains("/old/acd"));
+        assert!(
+            std::fs::read_to_string(&found[0])
+                .unwrap()
+                .contains("/old/acd")
+        );
         let calls = fake.calls.borrow().join("\n");
         if cfg!(target_os = "macos") {
             assert!(
@@ -736,16 +752,18 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let cfg = tempfile::tempdir().unwrap();
         let other = Other(RefCell::new(0));
-        assert!(install_with(
-            home.path(),
-            Path::new("/x/acd"),
-            cfg.path(),
-            false,
-            false,
-            &other,
-            FAST
-        )
-        .is_err());
+        assert!(
+            install_with(
+                home.path(),
+                Path::new("/x/acd"),
+                cfg.path(),
+                false,
+                false,
+                &other,
+                FAST
+            )
+            .is_err()
+        );
         assert_eq!(*other.0.borrow(), 1);
     }
 }
