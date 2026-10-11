@@ -118,8 +118,8 @@ acd hooks status
 ```
 
 Start new agent sessions afterwards. Running Claude sessions keep the
-hook config they started with. `acd hooks uninstall claude|codex` removes
-the entries acd manages and leaves your other hooks alone. Codex may ask
+hook config they started with. `acd hooks uninstall claude` and
+`acd hooks uninstall codex` remove the entries acd manages and leaves your other hooks alone. Codex may ask
 you to review the hooks the first time it runs them.
 
 **herdr.** No setup. acd checks `$HERDR_SOCKET_PATH`, or
@@ -197,7 +197,7 @@ directory.
 | `machine_name` | Name shown in the app | host name |
 | `port` | `acd/1` WebSocket port | 47800 |
 | `listen` | Addresses to bind: loopback and the machine's own Tailscale addresses only | `["loopback", "tailscale"]` |
-| `hook_port` | Claude hook listener on `127.0.0.1`. Do not change it after installing hooks. | random, chosen by `acd init` |
+| `hook_port` | Claude hook listener on `127.0.0.1`. Do not change it after installing hooks. | random in a config created by `acd init`, 47801 when the key is absent |
 | `allowed_origins` | Browser origins allowed to connect | none |
 | `claude.permission_hold` | Seconds to hold a Claude permission hook | 3600 |
 | `ignored_entrypoints` | Claude entry points to ignore | `["sdk-ts"]` |
