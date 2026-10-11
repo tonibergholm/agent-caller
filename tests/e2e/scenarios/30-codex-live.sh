@@ -79,10 +79,11 @@ wait_idle
 
 log "4. Simultaneous answers (keys request)"
 ask_touch x-cx-race.txt
-req=$(inbox wait-open --agent "$AID" --timeout 90 --ready); RID=$(echo "$req" | jq -r .id)
-race=$(inbox race "$RID" allow deny); note "race: $(echo "$race" | jq -c '[.[]|{o:._option,ok,code:.error.code,outcome}]')"
+req=$(inbox wait-open --agent "$AID" --timeout 90 --ready); RID=$(echo "$req" | jq -r '.id // empty')
+[ -n "$RID" ] || fail "4 Codex asked for no approval within 90 s (model behaviour; the race was not run)"
+race=$( [ -n "$RID" ] && inbox race "$RID" allow deny || echo '[]'); note "race: $(echo "$race" | jq -c '[.[]|{o:._option,ok,code:.error.code,outcome}]')"
 ok=$(echo "$race" | jq '[.[]|select(.ok)]|length')
-[ "$ok" = 1 ] && pass "4a exactly one of two simultaneous answers delivered" || fail "4a $ok delivered"
+if [ -n "$RID" ]; then [ "$ok" = 1 ] && pass "4a exactly one of two simultaneous answers delivered" || fail "4a $ok delivered"; fi
 sleep 5; win=$(echo "$race" | jq -r '.[]|select(.ok)|._option')
 if [ "$win" = allow ]; then [ -e /tmp/ace2e/x-cx-race.txt ] && pass "4b winner allow: file exists" || fail "4b allow won but no file"
 else [ ! -e /tmp/ace2e/x-cx-race.txt ] && pass "4b winner deny: no file" || fail "4b deny won but file exists"; fi
