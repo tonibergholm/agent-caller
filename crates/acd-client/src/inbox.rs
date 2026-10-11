@@ -100,6 +100,9 @@ pub enum InboxEvent {
         request_id: String,
     },
 }
+
+/// How many action outcomes the broadcast holds before a slow receiver lags.
+pub const OUTCOME_CHANNEL_CAPACITY: usize = 256;
 pub struct Inbox {
     inner: Mutex<Inner>,
     secrets: Arc<dyn SecretStore>,
@@ -135,7 +138,7 @@ impl Inbox {
         }));
         let (tx, _) = watch::channel(initial);
         let (events_tx, _) = broadcast::channel(64);
-        let (outcomes_tx, _) = broadcast::channel(256);
+        let (outcomes_tx, _) = broadcast::channel(OUTCOME_CHANNEL_CAPACITY);
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 machines: settings

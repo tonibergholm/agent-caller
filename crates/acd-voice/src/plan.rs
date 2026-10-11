@@ -108,13 +108,14 @@ enum Prior {
 enum State {
     #[default]
     Idle,
-    Thinking,
+    /// `id` is what the HUD's Esc names (shares the proposal counter).
+    Thinking(u64),
     /// A countdown step on its way to the screen; nothing is enqueued until
     /// the HUD acknowledges proposal `id` (D22).
     Presenting { proposal: Proposal, id: u64 },
     Confirm { proposal: Proposal, id: u64, shown: bool },
-    WhichOne(Choice),
-    Counting { proposal: Proposal, action_id: String },
+    WhichOne(Choice, u64),
+    Counting { proposal: Proposal, action_id: String, id: u64 },
     Sending { proposal: Proposal, action_id: String },
     Shown,
 }
@@ -153,15 +154,16 @@ impl Executor {
             _ => Prior::Nothing,
         };
         self.utterance += 1;
-        self.state = State::Thinking;
+        let id = self.next_proposal();
+        self.state = State::Thinking(id);
         self.snapshot = Some(snapshot);
         self.transcript = Some(transcript.clone());
-        (self.utterance, show(Hud::Thinking { transcript }))
+        (self.utterance, show(Hud::Thinking { transcript, id }))
     }
 
     /// The router's result for utterance `n`; stale results are dropped.
     pub fn routed(&mut self, n: u64, routed: Routed) -> Option<Reaction> {
-        if n != self.utterance || !matches!(self.state, State::Thinking) {
+        if n != self.utterance || !matches!(self.state, State::Thinking(_)) {
             return None;
         }
         Some(self.take(routed))
@@ -174,13 +176,13 @@ impl Executor {
     pub fn reply(&mut self, port: &dyn InboxPort, transcript: &VoiceText, locale: Locale) -> Option<Reaction> {
         let which_one = match self.state {
             State::Confirm { .. } => false,
-            State::WhichOne(_) => true,
+            State::WhichOne(..) => true,
             _ => return None,
         };
         let reaction = match fast::parse_reply(transcript.expose(), locale) {
             Some(Reply::Confirm) if !which_one => self.confirm(port, None),
-            Some(Reply::Choose(i)) if which_one => self.choose(i),
-            Some(Reply::Cancel) => self.cancel(port),
+            Some(Reply::Choose(i)) if which_one => self.choose(None, i),
+            Some(Reply::Cancel) => self.cancel(port, None),
             _ => None,
         };
         Some(reaction.unwrap_or_else(|| self.waiting()))
@@ -231,29 +233,42 @@ impl Executor {
     /// bound against the snapshot frozen at `begin` for this utterance and
     /// never a newer one, so the bound step names the request the user
     /// heard; `enqueue` then checks it against the live inbox.
-    pub fn choose(&mut self, index: usize) -> Option<Reaction> {
+    ///
+    /// `id` is the list the HUD rendered (`choice_id`); a pick for a list
+    /// since replaced is ignored. `None` (a spoken pick) names the current one.
+    pub fn choose(&mut self, id: Option<u64>, index: usize) -> Option<Reaction> {
         let routed = match (&self.state, &self.snapshot) {
-            (State::WhichOne(choice), Some(snapshot)) if index < choice.candidates.len() => {
+            (State::WhichOne(choice, cid), Some(snapshot))
+                if index < choice.candidates.len() && id.is_none_or(|i| i == *cid) =>
+            {
                 router::bind(snapshot, choice, index)
             }
             _ => return None,
         };
-        self.state = State::Thinking;
+        let thinking = self.next_proposal();
+        self.state = State::Thinking(thinking);
         Some(self.take(routed))
     }
 
     /// Esc or a click on Cancel. A countdown is cancelled by its id (spec
     /// §5.6); a step already sent cannot be undone.
-    pub fn cancel(&mut self, port: &dyn InboxPort) -> Option<Reaction> {
+    ///
+    /// `id` is the state the HUD rendered (its `proposal_id`, `choice_id`
+    /// or thinking `id`); a cancel for a state since replaced is ignored.
+    /// `None` (spoken, or global) cancels whatever is current.
+    pub fn cancel(&mut self, port: &dyn InboxPort, id: Option<u64>) -> Option<Reaction> {
+        if id.is_some() && id != self.input_id() {
+            return None;
+        }
         let reaction = match std::mem::take(&mut self.state) {
             State::Presenting { proposal, .. } | State::Confirm { proposal, .. } => {
                 self.done(Some(&proposal), OutcomeView::Cancelled)
             }
-            State::WhichOne(_) | State::Thinking => self.done(None, OutcomeView::Cancelled),
-            State::Counting { proposal, action_id } if port.cancel(&action_id) => {
+            State::WhichOne(..) | State::Thinking(_) => self.done(None, OutcomeView::Cancelled),
+            State::Counting { proposal, action_id, .. } if port.cancel(&action_id) => {
                 self.done(Some(&proposal), OutcomeView::Cancelled)
             }
-            State::Counting { proposal, action_id } | State::Sending { proposal, action_id } => {
+            State::Counting { proposal, action_id, .. } | State::Sending { proposal, action_id } => {
                 let view = self.view(&proposal);
                 self.state = State::Sending { proposal, action_id };
                 show(Hud::Sending { proposal: view, too_late_to_cancel: true })
@@ -269,7 +284,7 @@ impl Executor {
             return None;
         }
         let (proposal, action_id) = match std::mem::take(&mut self.state) {
-            State::Counting { proposal, action_id } | State::Sending { proposal, action_id } => (proposal, action_id),
+            State::Counting { proposal, action_id, .. } | State::Sending { proposal, action_id } => (proposal, action_id),
             other => {
                 self.state = other;
                 return None;
@@ -319,8 +334,9 @@ impl Executor {
         match routed {
             Routed::Refused(refusal) => self.error(refusal),
             Routed::WhichOne(choice) => {
-                let hud = self.which_one_hud(&choice);
-                self.state = State::WhichOne(choice);
+                let id = self.next_proposal();
+                let hud = self.which_one_hud(&choice, id);
+                self.state = State::WhichOne(choice, id);
                 show(hud)
             }
             Routed::Proposal(p) => match p.level {
@@ -338,6 +354,15 @@ impl Executor {
                     show(Hud::Confirm { proposal, proposal_id: id })
                 }
             },
+        }
+    }
+
+    /// The id of the state the HUD is showing, which its inputs carry back.
+    fn input_id(&self) -> Option<u64> {
+        match &self.state {
+            State::Thinking(id) | State::WhichOne(_, id) => Some(*id),
+            State::Presenting { id, .. } | State::Confirm { id, .. } | State::Counting { id, .. } => Some(*id),
+            State::Idle | State::Sending { .. } | State::Shown => None,
         }
     }
 
@@ -383,7 +408,7 @@ impl Executor {
         match port.enqueue(op) {
             Ok(action_id) => {
                 let proposal = self.view(&p);
-                self.state = State::Counting { proposal: p, action_id: action_id.clone() };
+                self.state = State::Counting { proposal: p, action_id: action_id.clone(), id };
                 show(Hud::Countdown { proposal, proposal_id: id, action_id: Some(action_id) })
             }
             Err(e) => self.error(refusal_for(e)),
@@ -394,12 +419,12 @@ impl Executor {
     fn waiting(&self) -> Reaction {
         match &self.state {
             State::Confirm { proposal, id, .. } => show(Hud::Confirm { proposal: self.view(proposal), proposal_id: *id }),
-            State::WhichOne(choice) => show(self.which_one_hud(choice)),
+            State::WhichOne(choice, id) => show(self.which_one_hud(choice, *id)),
             _ => show(Hud::Hidden),
         }
     }
 
-    fn which_one_hud(&self, choice: &Choice) -> Hud {
+    fn which_one_hud(&self, choice: &Choice, choice_id: u64) -> Hud {
         let candidates = match &self.snapshot {
             Some(s) => choice
                 .candidates
@@ -409,7 +434,7 @@ impl Executor {
                 .collect(),
             None => Vec::new(),
         };
-        Hud::WhichOne { candidates, transcript: self.transcript.clone().unwrap_or_default() }
+        Hud::WhichOne { candidates, transcript: self.transcript.clone().unwrap_or_default(), choice_id }
     }
 
     fn done(&mut self, proposal: Option<&Proposal>, outcome: OutcomeView) -> Reaction {

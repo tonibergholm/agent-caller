@@ -103,17 +103,17 @@ impl Controller {
     }
 
     /// Voice on or off. Either way a new session starts, under the same
-    /// lock as admission (B4). Off also cancels unsent work, hides the HUD
-    /// and drops voice text from memory (spec §6.3).
+    /// lock as admission (B4), and the executor resets: in-flight routing
+    /// is dropped, unsent work cancelled, voice text forgotten (spec §6.3)
+    /// and the HUD hidden, so a bump never leaves the HUD on a state whose
+    /// work was dropped.
     pub fn set_enabled(&self, on: bool) {
         let mut core = self.core.lock().unwrap();
         core.enabled = on;
         core.session += 1;
         self.session_tx.send_replace(core.session);
-        if !on {
-            core.exec.reset(&self.port);
-            self.emit(&mut core.exec, Reaction { hud: Hud::Hidden, select: None });
-        }
+        core.exec.reset(&self.port);
+        self.emit(&mut core.exec, Reaction { hud: Hud::Hidden, select: None });
     }
 
     /// Test hook: `hook` runs just before admission, with no lock held, so
@@ -191,12 +191,17 @@ impl Controller {
         self.act(|exec, port| exec.confirm(port, Some(id)));
     }
 
-    pub fn choose(&self, index: usize) {
-        self.act(|exec, _| exec.choose(index));
+    /// A digit or click on candidate `index` of list `choice_id`, the one
+    /// the HUD rendered; a list since replaced is ignored.
+    pub fn choose(&self, choice_id: u64, index: usize) {
+        self.act(|exec, _| exec.choose(Some(choice_id), index));
     }
 
-    pub fn cancel(&self) {
-        self.act(|exec, port| exec.cancel(port));
+    /// Esc or Cancel. `Some(id)` is the `input_id` of the state the HUD
+    /// showed; a cancel for a state since replaced is ignored. `None`
+    /// cancels whatever is current.
+    pub fn cancel(&self, id: Option<u64>) {
+        self.act(|exec, port| exec.cancel(port, id));
     }
 
     /// Runs `f` on the executor and publishes its reaction while still

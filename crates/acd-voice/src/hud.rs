@@ -68,11 +68,11 @@ pub enum Hud {
     Hidden,
     /// Shown by the audio steps; step 1 has no microphone.
     Listening,
-    Thinking { transcript: VoiceText },
+    Thinking { transcript: VoiceText, id: u64 },
     /// Waits for Enter, a click or "confirm" on this `proposal_id`, which
     /// the HUD must first acknowledge as shown (D22).
     Confirm { proposal: ProposalView, proposal_id: u64 },
-    WhichOne { candidates: Vec<TargetView>, transcript: VoiceText },
+    WhichOne { candidates: Vec<TargetView>, transcript: VoiceText, choice_id: u64 },
     /// `action_id` is `None` until the HUD acknowledged `proposal_id` and
     /// the 2 s countdown started (D22).
     Countdown { proposal: ProposalView, proposal_id: u64, action_id: Option<String> },
@@ -96,6 +96,18 @@ impl Hud {
         matches!(self, Hud::Sending { .. } | Hud::Done { .. } | Hud::Error { .. } | Hud::Speaking { .. })
     }
 
+    /// The id the HUD sends back with Esc, a click or a digit, so an input
+    /// meant for a replaced state is ignored. `None` where nothing can be
+    /// cancelled or chosen.
+    pub fn input_id(&self) -> Option<u64> {
+        match self {
+            Hud::Thinking { id, .. } => Some(*id),
+            Hud::WhichOne { choice_id, .. } => Some(*choice_id),
+            Hud::Confirm { proposal_id, .. } | Hud::Countdown { proposal_id, .. } => Some(*proposal_id),
+            _ => None,
+        }
+    }
+
     /// The proposal the HUD must acknowledge as shown (D22).
     pub fn awaiting_display(&self) -> Option<u64> {
         match self {
@@ -110,5 +122,13 @@ impl Hud {
 #[derive(Debug, Serialize)]
 pub struct HudEvent<'a> {
     pub seq: u64,
+    /// `hud.input_id()`: send it back with the input.
+    pub id: Option<u64>,
     pub hud: &'a Hud,
+}
+
+impl<'a> HudEvent<'a> {
+    pub fn new(seq: u64, hud: &'a Hud) -> Self {
+        Self { seq, id: hud.input_id(), hud }
+    }
 }

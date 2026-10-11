@@ -241,10 +241,10 @@ async fn cancel_while_presenting_or_counting_sends_nothing() {
     let port = FakePort::with(&[&a]);
     let mut exec = Executor::new();
     let id = say(&mut exec, &port, &s, "approve").await.hud.awaiting_display().unwrap();
-    assert!(matches!(exec.cancel(&port).unwrap().hud, Hud::Done { outcome: OutcomeView::Cancelled, .. }));
+    assert!(matches!(exec.cancel(&port, None).unwrap().hud, Hud::Done { outcome: OutcomeView::Cancelled, .. }));
     assert_eq!(exec.shown(&port, id), None, "a late ack does not start it");
     say_shown(&mut exec, &port, &s, "approve").await;
-    let r = exec.cancel(&port).unwrap();
+    let r = exec.cancel(&port, None).unwrap();
     assert!(matches!(r.hud, Hud::Done { outcome: OutcomeView::Cancelled, .. }));
     assert_eq!(port.cancelled(), ["act-0"]);
     assert_eq!(exec.outcome("act-0", VoiceOutcome::Cancelled), None, "already reported");
@@ -258,7 +258,7 @@ async fn cancel_after_fire_reports_too_late_then_the_outcome() {
     let mut exec = Executor::new();
     say_shown(&mut exec, &port, &s, "approve").await;
     port.cancel_works.store(false, Ordering::SeqCst);
-    let r = exec.cancel(&port).unwrap();
+    let r = exec.cancel(&port, None).unwrap();
     assert!(matches!(r.hud, Hud::Sending { too_late_to_cancel: true, .. }));
     let done = exec.outcome("act-0", VoiceOutcome::Delivered).unwrap();
     assert!(matches!(done.hud, Hud::Done { outcome: OutcomeView::Delivered, .. }));
@@ -302,8 +302,8 @@ async fn which_one_then_a_digit_presents_the_choice() {
         panic!("expected which-one")
     };
     assert_eq!(candidates.iter().map(|c| c.card.as_str()).collect::<Vec<_>>(), ["m/a", "m/b"]);
-    assert_eq!(exec.choose(5), None);
-    let id = exec.choose(1).unwrap().hud.awaiting_display().unwrap();
+    assert_eq!(exec.choose(None, 5), None);
+    let id = exec.choose(None, 1).unwrap().hud.awaiting_display().unwrap();
     assert!(port.enqueued().is_empty());
     exec.shown(&port, id);
     assert_eq!(port.enqueued(), [pick("m/b", "r-b", "allow")]);
@@ -322,7 +322,7 @@ async fn a_pick_binds_against_the_frozen_snapshot_not_a_newer_one() {
     };
     // The executor only holds the snapshot frozen for this utterance, so
     // the pick binds revision 1.
-    let id = exec.choose(1).unwrap().hud.awaiting_display().unwrap();
+    let id = exec.choose(None, 1).unwrap().hud.awaiting_display().unwrap();
     assert_eq!(
         exec.shown(&port, id).unwrap().hud,
         error(Refusal::SnapshotChanged),
@@ -337,7 +337,7 @@ async fn a_pick_binds_against_the_frozen_snapshot_not_a_newer_one() {
     let mut exec = Executor::new();
     say(&mut exec, &port, &s, "approve").await;
     exec.begin(&port, newer, VoiceText::new("approve"));
-    assert_eq!(exec.choose(1), None, "the old choice is gone with its snapshot");
+    assert_eq!(exec.choose(None, 1), None, "the old choice is gone with its snapshot");
 }
 
 #[tokio::test]
@@ -501,9 +501,11 @@ fn the_hud_json_shape_is_the_frontend_contract() {
         request: Some("bash approval".into()),
         off_screen: false,
     };
-    let hud = Hud::WhichOne { candidates: vec![target], transcript: VoiceText::new("approve") };
-    let v = serde_json::to_value(HudEvent { seq: 7, hud: &hud }).unwrap();
+    let hud = Hud::WhichOne { candidates: vec![target], transcript: VoiceText::new("approve"), choice_id: 4 };
+    let v = serde_json::to_value(HudEvent::new(7, &hud)).unwrap();
     assert_eq!(v["seq"], 7);
+    assert_eq!(v["id"], 4, "the id the HUD sends back");
+    assert_eq!(v["hud"]["choice_id"], 4);
     assert_eq!(v["hud"]["state"], "which_one");
     assert_eq!(v["hud"]["candidates"][0]["request"], "bash approval");
     assert_eq!(v["hud"]["candidates"][0]["off_screen"], false);
@@ -513,4 +515,51 @@ fn the_hud_json_shape_is_the_frontend_contract() {
     assert_eq!(v, serde_json::json!({"state": "error", "refusal": "display_failed", "transcript": null}));
     assert!(!Hud::Hidden.fades() && !Hud::Hidden.wants_key());
     assert!(Hud::Speaking { text: VoiceText::new("x") }.fades());
+}
+
+#[tokio::test]
+async fn a_pick_for_a_replaced_list_is_ignored() {
+    let (a, b) = (pending("m", "a"), pending("m", "b"));
+    let s = snapshot(vec![a.clone(), b.clone()]);
+    let port = FakePort::with(&[&a, &b]);
+    let mut exec = Executor::new();
+    let Hud::WhichOne { choice_id: old, .. } = say(&mut exec, &port, &s, "approve").await.hud else {
+        panic!("expected which-one")
+    };
+    let Hud::WhichOne { choice_id: new, .. } = say(&mut exec, &port, &s, "approve").await.hud else {
+        panic!("expected which-one")
+    };
+    assert_ne!(old, new);
+    assert_eq!(exec.choose(Some(old), 1), None, "a click on the list that was replaced");
+    assert!(exec.choose(Some(new), 1).is_some(), "the list on screen works");
+}
+
+#[tokio::test]
+async fn a_cancel_for_an_older_step_does_not_cancel_a_newer_one() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    let old = say(&mut exec, &port, &s, "approve").await.hud.awaiting_display().unwrap();
+    exec.cancel(&port, None);
+    let new = say(&mut exec, &port, &s, "approve").await.hud.awaiting_display().unwrap();
+    assert_ne!(old, new);
+    assert_eq!(exec.cancel(&port, Some(old)), None, "Esc for the old HUD state");
+    exec.shown(&port, new);
+    assert_eq!(port.enqueued().len(), 1, "the newer step is still running");
+    assert_eq!(exec.cancel(&port, Some(old)), None, "also once it counts");
+    let r = exec.cancel(&port, Some(new)).unwrap();
+    assert!(matches!(r.hud, Hud::Done { outcome: OutcomeView::Cancelled, .. }));
+}
+
+#[tokio::test]
+async fn esc_on_the_thinking_hud_names_its_id() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    let (_, thinking) = exec.begin(&port, s, VoiceText::new("approve"));
+    let id = thinking.hud.input_id().unwrap();
+    assert_eq!(exec.cancel(&port, Some(id + 1)), None);
+    assert!(exec.cancel(&port, Some(id)).is_some());
 }

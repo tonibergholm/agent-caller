@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use acd_client::inbox::OUTCOME_CHANNEL_CAPACITY;
 use acd_protocol::ErrorCode;
 use acd_voice::hud::{Hud, OutcomeView};
 use acd_voice::refusal::Refusal;
@@ -99,7 +100,7 @@ async fn hud_cancel_during_the_countdown_sends_nothing() {
     r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
     r.voice.text_input("approve".into(), true).await.unwrap();
     hud_until(&r.sink, "countdown", countdown_started).await;
-    r.voice.cancel();
+    r.voice.cancel(None);
     hud_until(&r.sink, "cancelled", |h| matches!(h, Hud::Done { outcome: OutcomeView::Cancelled, .. })).await;
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(frames(&r.f, "request.answer").is_empty());
@@ -298,7 +299,7 @@ async fn a_lagged_outcome_stream_cancels_the_unfired_voice_action() {
     let flooded = AtomicBool::new(false);
     *r.sink.on_hud.lock().unwrap() = Some(Box::new(move |h| {
         if countdown_started(h) && !flooded.swap(true, Ordering::SeqCst) {
-            for _ in 0..300 {
+            for _ in 0..OUTCOME_CHANNEL_CAPACITY + 50 {
                 let id = inbox.pick("m1/a4", "r4", "deny", 1).unwrap();
                 assert!(inbox.cancel(&id));
             }
@@ -309,4 +310,47 @@ async fn a_lagged_outcome_stream_cancels_the_unfired_voice_action() {
     hud_until(&r.sink, "cancelled", |h| matches!(h, Hud::Done { outcome: OutcomeView::Cancelled, .. })).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(frames(&r.f, "request.answer").is_empty(), "the unfired action never sent");
+}
+
+/// Review I1: turning voice "on" while it is on still starts a new session,
+/// which drops the routing in flight; the HUD must not stay on Thinking.
+#[tokio::test]
+async fn enabling_an_enabled_voice_does_not_strand_the_hud_on_thinking() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let model: Arc<dyn IntentModel> = Arc::new(Gated { gate: gate.clone(), dropped });
+    let r = rig(vec![pending_agent()], Some(model), Display::Acks).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    let voice = r.voice.clone();
+    let old = tokio::spawn(async move { voice.text_input("tell the box claude something".into(), true).await });
+    hud_until(&r.sink, "thinking", |h| matches!(h, Hud::Thinking { .. })).await;
+    r.voice.set_enabled(true);
+    assert_eq!(old.await.unwrap(), Ok(()));
+    assert_eq!(r.sink.last(), Some(Hud::Hidden));
+    gate.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(r.sink.last(), Some(Hud::Hidden), "the dropped answer never lands");
+}
+
+/// Review I2: Esc and clicks carry the id of the state the HUD showed.
+#[tokio::test]
+async fn a_cancel_for_an_older_hud_state_does_not_cancel_the_newer_step() {
+    let r = rig(vec![pending_agent()], None, Display::Acks).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.text_input("yes always".into(), true).await.unwrap();
+    let Hud::Confirm { proposal_id: old, .. } = hud_until(&r.sink, "confirm", |h| matches!(h, Hud::Confirm { .. })).await else {
+        unreachable!()
+    };
+    r.voice.cancel(Some(old));
+    hud_until(&r.sink, "cancelled", |h| matches!(h, Hud::Done { outcome: OutcomeView::Cancelled, .. })).await;
+    r.voice.text_input("yes always".into(), true).await.unwrap();
+    let Hud::Confirm { proposal_id: new, .. } = hud_until(&r.sink, "confirm", |h| matches!(h, Hud::Confirm { .. })).await else {
+        unreachable!()
+    };
+    assert_ne!(old, new);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    r.voice.cancel(Some(old));
+    assert!(matches!(r.sink.last(), Some(Hud::Confirm { .. })), "the stale Esc was ignored");
+    r.voice.confirm(new);
+    frame(&r.f, "request.answer").await;
 }

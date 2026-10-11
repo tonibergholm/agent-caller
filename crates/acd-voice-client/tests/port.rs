@@ -81,8 +81,8 @@ async fn a_guard_from_another_connection_is_refused() {
     let port = AcdPort::new(r.inbox.clone());
     let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
     let conn = snap.card("m1/a1").unwrap().conn.unwrap();
-    let old = acd_voice::snapshot::ConnStamp { conn_gen: conn.conn_gen + 1, ..conn };
-    let guard = Guard { conn: old, agent_id: "a1".into(), request: Some(("r1".into(), 1)) };
+    let other_conn = acd_voice::snapshot::ConnStamp { conn_gen: conn.conn_gen + 1, ..conn };
+    let guard = Guard { conn: other_conn, agent_id: "a1".into(), request: Some(("r1".into(), 1)) };
     let card = || "m1/a1".to_owned();
     for op in [
         Enqueue::Pick { card: card(), option_id: "allow".into(), guard: guard.clone() },
