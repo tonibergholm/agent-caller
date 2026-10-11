@@ -51,3 +51,44 @@ fn outcomes_map_one_to_one() {
         assert_eq!(voice_outcome(client), voice);
     }
 }
+
+fn free_text_agent() -> serde_json::Value {
+    let mut a = pending_agent();
+    a["pending"]["free_text"] = true.into();
+    a
+}
+
+/// Task 10 review: the text answer is guarded like a pick.
+#[tokio::test]
+async fn answer_text_is_refused_on_a_stale_revision() {
+    let r = inbox_rig(vec![free_text_agent()]).await;
+    let port = AcdPort::new(r.inbox.clone());
+    let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
+    let conn = snap.card("m1/a1").unwrap().conn.unwrap();
+    let guard = Guard { conn, agent_id: "a1".into(), request: Some(("r1".into(), 1)) };
+    let answer = |guard| Enqueue::AnswerText { card: "m1/a1".into(), text: VoiceText::new("use main"), guard };
+    let stale = Guard { request: Some(("r1".into(), 9)), ..guard.clone() };
+    assert_eq!(port.enqueue(answer(stale)), Err(EnqueueError::Stale));
+    let id = port.enqueue(answer(guard)).unwrap();
+    assert!(port.cancel(&id));
+}
+
+/// Task 10 review: a guard stamped on another connection is refused, for
+/// every kind of step.
+#[tokio::test]
+async fn a_guard_from_another_connection_is_refused() {
+    let r = inbox_rig(vec![free_text_agent()]).await;
+    let port = AcdPort::new(r.inbox.clone());
+    let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
+    let conn = snap.card("m1/a1").unwrap().conn.unwrap();
+    let old = acd_voice::snapshot::ConnStamp { conn_gen: conn.conn_gen + 1, ..conn };
+    let guard = Guard { conn: old, agent_id: "a1".into(), request: Some(("r1".into(), 1)) };
+    let card = || "m1/a1".to_owned();
+    for op in [
+        Enqueue::Pick { card: card(), option_id: "allow".into(), guard: guard.clone() },
+        Enqueue::AnswerText { card: card(), text: VoiceText::new("x"), guard: guard.clone() },
+        Enqueue::Reply { card: card(), text: VoiceText::new("x"), guard: guard.clone() },
+    ] {
+        assert_eq!(port.enqueue(op), Err(EnqueueError::ConnectionChanged));
+    }
+}

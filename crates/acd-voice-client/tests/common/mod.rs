@@ -139,3 +139,99 @@ pub async fn frame(f: &FakeServer, kind: &str) -> Value {
     .await
     .unwrap_or_else(|_| panic!("no {kind} frame"))
 }
+
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use acd_voice::hud::Hud;
+use acd_voice::router::model::IntentModel;
+use acd_voice_client::{Controller, HudSink};
+use tokio::sync::mpsc;
+
+pub type HudHook = Box<dyn Fn(&Hud) + Send + Sync>;
+
+/// Records what the controller publishes. With `acks`, it plays the HUD
+/// webview: every state awaiting display is acknowledged, after the
+/// publish returns (never from inside it).
+#[derive(Default)]
+pub struct Sink {
+    pub huds: Mutex<Vec<(u64, Hud)>>,
+    pub selects: Mutex<Vec<String>>,
+    acks: Mutex<Option<mpsc::UnboundedSender<u64>>>,
+    /// Refuse every state that awaits display, as a failed emit would.
+    pub refuse_display: AtomicBool,
+    /// Runs for every state published, before it is acknowledged.
+    pub on_hud: Mutex<Option<HudHook>>,
+}
+
+impl HudSink for Sink {
+    fn hud(&self, seq: u64, hud: &Hud) -> bool {
+        if hud.awaiting_display().is_some() && self.refuse_display.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.huds.lock().unwrap().push((seq, hud.clone()));
+        if let Some(f) = self.on_hud.lock().unwrap().as_ref() {
+            f(hud);
+        }
+        if let (Some(id), Some(tx)) = (hud.awaiting_display(), self.acks.lock().unwrap().as_ref()) {
+            let _ = tx.send(id);
+        }
+        true
+    }
+    fn select(&self, card_key: &str) {
+        self.selects.lock().unwrap().push(card_key.to_owned());
+    }
+}
+
+impl Sink {
+    pub fn last(&self) -> Option<Hud> {
+        self.huds.lock().unwrap().last().map(|(_, h)| h.clone())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Display {
+    /// The HUD acknowledges everything it is shown.
+    Acks,
+    /// The HUD never answers.
+    Silent,
+}
+
+pub struct Rig {
+    pub f: acd_client::fake::FakeServer,
+    pub c: acd_client::fake::FakeConn,
+    pub inbox: Arc<acd_client::inbox::Inbox>,
+    pub voice: Arc<Controller>,
+    pub sink: Arc<Sink>,
+}
+
+pub async fn rig(agents: Vec<Value>, model: Option<Arc<dyn IntentModel>>, display: Display) -> Rig {
+    let InboxRig { f, c, inbox } = inbox_rig(agents).await;
+    let sink = Arc::new(Sink::default());
+    let voice = Controller::start(inbox.clone(), model, sink.clone(), true);
+    if display == Display::Acks {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        *sink.acks.lock().unwrap() = Some(tx);
+        let weak = Arc::downgrade(&voice);
+        tokio::spawn(async move {
+            while let Some(id) = rx.recv().await {
+                let Some(voice) = weak.upgrade() else { return };
+                voice.shown(id);
+            }
+        });
+    }
+    Rig { f, c, inbox, voice, sink }
+}
+
+pub async fn hud_until(sink: &Sink, what: &str, pred: impl Fn(&Hud) -> bool) -> Hud {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(h) = sink.last().filter(|h| pred(h)) {
+                return h;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+}

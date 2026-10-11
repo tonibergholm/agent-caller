@@ -6,3 +6,6 @@ mod port;
 
 pub use freeze::freeze;
 pub use port::{AcdPort, voice_outcome};
+mod controller;
+
+pub use controller::{Controller, DISPLAY_TIMEOUT, HudSink, InputError};
