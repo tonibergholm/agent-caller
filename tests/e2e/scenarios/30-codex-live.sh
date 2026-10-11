@@ -17,8 +17,8 @@ for l in sys.stdin:
 codex_up() {
   pgrep -f 'codex.*--no-daemon' >/dev/null && hd agent list | jq -e '.result.agents[]|select(.agent=="codex")' >/dev/null && return 0
   hd pane run $P "clear; cd /private/tmp/ace2e/proj && HOME=$REAL_HOME codex --no-daemon -m gpt-5.6-terra -c model_reasoning_effort=low -a on-request -s read-only" >/dev/null
-  wait_pane_text $P 'Hooks need review|Ask Codex' 30 || return 1
-  if pane_text $P | grep -q 'Hooks need review'; then hd pane send-keys $P Down Down Enter; wait_pane_text $P 'Ask Codex' 20 || return 1; fi
+  wait_pane_text $P 'Hooks need review|Ask Codex' 30 || return 1; sleep 3
+  if pane_text $P | grep -q 'Hooks need review'; then hd pane send-keys $P esc; wait_pane_text $P 'Ask Codex' 20 || return 1; fi
   sleep 2
 }
 agent_id() { inbox agents | jq -r '[.[]|select(.kind=="codex")][0].id'; }
