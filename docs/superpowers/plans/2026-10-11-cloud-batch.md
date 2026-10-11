@@ -2,7 +2,8 @@
 
 Prompts for Claude Code cloud sessions, which run on Linux. Each prompt
 is one session, one branch and one PR. Paste the common preamble first,
-then the task.
+then the task. Merge PR #11 (this doc and CLAUDE.md) before launching:
+sessions branch from main and need CLAUDE.md there.
 
 Launch 3 or 4 sessions at a time. Calibrate the cost on the first ones.
 Review each PR locally (Opus; Sol for risky ones) before merge. Cloud
@@ -11,7 +12,9 @@ sessions cannot call Codex.
 ## Conflicts with work in progress
 
 P6 is not merged. `p6-e2e` and `p6-t3` touch these files, so wave 1
-keeps out of them:
+keeps out of them. P6 also changes `tests/e2e/**`, the herdr fixtures
+and its research record; the preamble limits each session to its owned
+files, which covers those:
 
 - `crates/acd-adapters/src/herdr/keys.rs`, `herdr/screen.rs`
 - `crates/acd-adapters/src/hooks/mapping.rs`, `hooks/state.rs`
@@ -28,6 +31,8 @@ Wave 2 starts after P6 merges.
 
 ```text
 Read CLAUDE.md first. Work on a new branch from main and open one PR.
+Edit only the files your task owns. If you need another file, stop and
+say so in the PR description instead.
 
 Do not edit these files; another branch changes them: herdr/keys.rs,
 herdr/screen.rs, hooks/mapping.rs, hooks/state.rs and t3/* in
@@ -79,12 +84,14 @@ Follow-ups, P3 deferred, Task 5: no test pins that `lost()` in
 crates/acd-adapters/src/herdr/reconciler.rs clears `closed`. Add one
 that fails if the `self.closed.clear()` line is removed.
 
+The test above is required whatever the flake hunt finds.
+
 Then look at the herdr_e2e flake (crates/acd-adapters/tests/herdr_e2e.rs
 failed once in a workspace run and passed on rerun). Run it in a loop
 under load, for example 200 runs while the rest of the workspace tests
 run in parallel. If it fails, find the cause from the evidence and fix
-it. If it never fails, report the run count and conditions and change
-nothing.
+it. If it never fails, report the run count and conditions and make no
+flake-related changes.
 
 Owned files: crates/acd-adapters/src/herdr/reconciler.rs (tests only,
 unless the flake fix needs more), crates/acd-adapters/tests/herdr_e2e.rs,
@@ -104,9 +111,13 @@ say so in the test.
 
 Task 21: the writer stage of the hook token store
 (crates/acd/src/hook_token.rs) has no failure injection. Add a test seam
-that makes the atomic write fail at each stage (temp write, fsync,
-rename) and check that the store on disk stays at the previous valid
-state and that no old token becomes valid again. Read the Task 21 and
+that makes the atomic write fail at each stage. Before the rename (temp
+write, file fsync, rename itself), the store on disk must stay at the
+previous valid state. The directory fsync runs after the rename: there
+the new state is installed and only its durability is unconfirmed (see
+the write path in crates/acd/src/secrets.rs). Test that the error says
+so, and do not add a rollback; restoring the old state could make an
+old token valid again. Read the Task 21 and
 Task 26 sections of docs/superpowers/plans/2026-10-09-p3-hooks.md first.
 Check the `--force` generation-1 fallback against the retention history:
 report whether it can reuse a generation that is still retained. Do not
@@ -126,8 +137,11 @@ warnings are keyed on `listen_includes_tailscale` (the literal
 "tailscale" entry), while the probe runs on
 `bind::needs_tailscale_probe(&cfg.listen)`. Key the warnings on
 needs_probe, and word them so they are correct for both the keyword and
-an explicit address. If the address is then refused, the error should
-say why.
+an explicit address. Note the ordering: `bind::resolve_listen(...)?`
+returns before the warnings, and it refuses an explicit IP that
+Tailscale did not report (bind.rs). So moving the warnings is not
+enough; the refusal error itself must say why (CLI missing, probe
+failed, or address not reported).
 
 Factor the warning choice into a pure function and unit-test every case:
 CLI missing, probe failed, no addresses in range, keyword only, explicit
@@ -205,6 +219,9 @@ environment (nproc, kernel, rustc, uid), the method, a table of flaky
 tests with failure rates, and for each one the suspected cause with file
 and line references. Mark causes you have not confirmed as unconfirmed.
 Sandbox-only failures listed in CLAUDE.md go in their own section.
+
+Record `id -u`. If you run as root, classify permission-test failures
+separately from flakes and sandbox-only failures.
 
 Owned files: that one research doc.
 ```

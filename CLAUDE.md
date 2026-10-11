@@ -47,7 +47,9 @@ npm ci && npm run verify
 ```
 
 CI runs the workspace tests and clippy on Ubuntu and macOS, and the app
-on macOS. A change is ready when both workspace commands pass.
+on macOS. A workspace change is ready when both workspace commands pass.
+A change under `app/` also needs `npm run verify`. On Linux, report that
+check as pending for CI.
 
 ## Rules
 
@@ -67,8 +69,8 @@ on macOS. A change is ready when both workspace commands pass.
 
 ## Platform limits
 
-`launchctl` service install, the Keychain, notifications and the Tauri
-bundle work only on macOS. Live checks need herdr, T3 Code, Tailscale
+`launchctl` service install and the Keychain work only on macOS, and the
+reference app (bundle, hotkey, notifications) is verified only on macOS. Live checks need herdr, T3 Code, Tailscale
 and the test machines. Linux sessions cannot verify any of these. Say
 so when your change touches them.
 
