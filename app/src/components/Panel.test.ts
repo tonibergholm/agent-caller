@@ -264,3 +264,25 @@ test("a question card shows its text once", () => {
   render(Panel, { view: view({ cards: [c] }), api: fakeApi() });
   expect(screen.getAllByText("Which branch?").length).toBe(1);
 });
+
+test("the panel has a drag region and J/K scroll the selection into view", async () => {
+  const calls: string[] = [];
+  const original = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = function (this: Element, arg?: boolean | ScrollIntoViewOptions) {
+    calls.push(`${(this as HTMLElement).dataset.key}:${JSON.stringify(arg)}`);
+  };
+  try {
+    const { container } = render(Panel, {
+      view: view({ cards: [card({ key: "m/a" }), card({ key: "m/b" })] }),
+      api: fakeApi(),
+    });
+    expect(container.querySelector("[data-tauri-drag-region]")).not.toBeNull();
+    await userEvent.keyboard("j");
+    expect(calls.at(-1)).toMatch(/^m\/[ab]:\{"block":"nearest"\}$/);
+    const before = calls.length;
+    await userEvent.keyboard("j");
+    expect(calls.length).toBeGreaterThan(before);
+  } finally {
+    Element.prototype.scrollIntoView = original;
+  }
+});

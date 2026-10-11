@@ -33,6 +33,14 @@
     if (st.replyFor === null) replyText = "";
   });
 
+  // Keep the J/K selection in view in the scrolling panel.
+  $effect(() => {
+    const key = st.selected;
+    if (key === null) return;
+    const el = [...document.querySelectorAll<HTMLElement>("[data-key]")].find((e) => e.dataset.key === key);
+    el?.scrollIntoView?.({ block: "nearest" });
+  });
+
   onMount(() => {
     const timer = setInterval(() => (now = Date.now()), 100);
     return () => clearInterval(timer);
@@ -95,7 +103,9 @@
 <svelte:window onkeydown={handle} />
 
 <main class="panel">
-  <header>
+  <!-- The panel is borderless: this strip (and the header's empty space) drags it. -->
+  <div class="grip" data-tauri-drag-region aria-hidden="true"></div>
+  <header data-tauri-drag-region>
     {#each view.machines as m (m.key)}
       {@const reason = quiet.has(m.status.kind) ? null : statusReason(m.status)}
       <span class="chip" data-status={m.status.kind} title="{m.name}: {statusText(m.status)}"
@@ -144,6 +154,17 @@
 </main>
 
 <style>
+  :global(html, body) {
+    margin: 0;
+    height: 100%;
+  }
+  .grip {
+    flex: none;
+    height: 12px;
+    margin: -8px -8px 0;
+    cursor: grab;
+    background: linear-gradient(transparent 4px, rgba(128, 128, 128, 0.35) 4px 6px, transparent 6px);
+  }
   .panel {
     display: flex;
     flex-direction: column;

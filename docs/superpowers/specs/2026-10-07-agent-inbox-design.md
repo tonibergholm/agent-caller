@@ -186,8 +186,8 @@ A request is **answerable** when all three conditions hold:
   single-select.
 
 Anything else is shown read-only. The label says where to answer: "answer in
-T3" for a T3 agent (`source` is `t3`), "answer in terminal" for herdr and hook
-agents.
+T3" for a T3 agent (`source` is `t3`), "answer in terminal" for herdr, hook and
+unknown-source agents.
 
 ### 5.1 Request lifecycle and identity
 
@@ -1597,16 +1597,21 @@ react to events, such as notifications.
   3. `working`;
   4. `idle`, hidden behind a toggle.
 - Read-only requests show their content and where to answer: "answer in T3"
-  for T3 agents, "answer in terminal" for herdr and hook agents.
+  for T3 agents, "answer in terminal" for herdr, hook and unknown-source
+  agents.
 - A question shows its text once. The text is the request's `detail` (monospace
   lines); the first question's text is shown separately only when it differs
   from the detail.
-- The panel is user-resizable, with a minimum size. Its position and size are
-  remembered across hide/show and relaunch in `panel-frame.json` in the app
-  config dir (saved shortly after a drag stops, and on hide). A saved frame
-  that is still on a display is restored there, clamped into the display's
-  usable area; one that is off every display is centered, at its saved size,
-  on the display under the cursor.
+- The panel is user-resizable (drag its edges), with a minimum size, and
+  movable by dragging its header strip. Its position and size are remembered
+  across hide/show and relaunch in `panel-frame.json` in the app config dir.
+  Only the user's own moves and resizes are saved (shortly after a drag stops,
+  on hide and on quit), so a frame the app refits after a display goes away
+  does not replace the remembered one, and the panel returns there when the
+  display does. A remembered frame that is still on a display is restored
+  there, clamped into the display's usable area. One that is off every display
+  is centered, at its saved size, on the display under the cursor when the
+  panel is placed (opened), else on the primary display.
 - `blocked_unparsed` shows the raw-screen preview.
 - A request's detail is shown as monospace lines. Each logical line is a
   block that wraps with a hanging indent, so a long or wrapped command still

@@ -1,8 +1,5 @@
 //! The non-activating floating panel (spec §8). It takes key focus, so J/K/Esc
 //! and the reply field work, without activating the app: the frontmost app stays frontmost.
-// tauri_panel! requires an explicit return type, so `-> ()` is unavoidable.
-#![allow(clippy::unused_unit)]
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -11,30 +8,45 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Size, WebviewUrl, WebviewWindow,
 };
 use tauri_nspanel::{
-    CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask, tauri_panel,
+    CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask,
 };
 
 use crate::frame::{self, DEFAULT_SIZE, Frame, MIN_SIZE};
 
 static VISIBLE: AtomicBool = AtomicBool::new(false);
+/// Set while we move or size the panel ourselves, so the delegate callbacks
+/// that causes are not mistaken for the user dragging.
+static PLACING: AtomicBool = AtomicBool::new(false);
+/// The user moved or resized the panel since the last save. Only then is the
+/// frame written, so a frame refitted after a display went away never
+/// replaces the remembered one.
+static USER_CHANGED: AtomicBool = AtomicBool::new(false);
 /// Bumped on every move or resize; a save runs only if no newer change arrived.
 static FRAME_GENERATION: AtomicU64 = AtomicU64::new(0);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 
-tauri_panel! {
-    panel!(InboxPanel {
-        config: {
-            can_become_key_window: true,
-            can_become_main_window: false,
-            is_floating_panel: true
-        }
-    })
-    panel_event!(InboxPanelEvents {
-        window_did_resign_key(notification: &NSNotification) -> bool,
-        window_did_resize(notification: &NSNotification) -> (),
-        window_did_move(notification: &NSNotification) -> ()
-    })
+// tauri_panel! requires an explicit return type, so `-> ()` is unavoidable;
+// the allow is scoped to the macro output.
+#[allow(clippy::unused_unit)]
+mod defs {
+    use tauri_nspanel::tauri_panel;
+
+    tauri_panel! {
+        panel!(InboxPanel {
+            config: {
+                can_become_key_window: true,
+                can_become_main_window: false,
+                is_floating_panel: true
+            }
+        })
+        panel_event!(InboxPanelEvents {
+            window_did_resign_key(notification: &NSNotification) -> bool,
+            window_did_resize(notification: &NSNotification) -> (),
+            window_did_move(notification: &NSNotification) -> ()
+        })
+    }
 }
+use defs::{InboxPanel, InboxPanelEvents};
 
 /// Creates the panel directly because Tauri `setup` runs on the main thread.
 /// This must only be called from `setup`.
@@ -163,8 +175,20 @@ fn live_frame(window: &WebviewWindow) -> Option<Frame> {
     })
 }
 
-/// Usable area (menu bar and Dock excluded) of every display, in logical points.
-fn screen_frames(window: &WebviewWindow) -> Vec<Frame> {
+fn logical_frame(pos: tauri::PhysicalPosition<i32>, size: tauri::PhysicalSize<u32>, scale: f64) -> Frame {
+    let pos = pos.to_logical::<f64>(scale);
+    let size = size.to_logical::<f64>(scale);
+    Frame {
+        x: pos.x,
+        y: pos.y,
+        w: size.width,
+        h: size.height,
+    }
+}
+
+/// Every display in logical points, as (full frame, usable area with menu
+/// bar and Dock excluded), in the same order.
+fn screen_frames(window: &WebviewWindow) -> (Vec<Frame>, Vec<Frame>) {
     window
         .available_monitors()
         .unwrap_or_default()
@@ -172,40 +196,39 @@ fn screen_frames(window: &WebviewWindow) -> Vec<Frame> {
         .map(|m| {
             let scale = m.scale_factor();
             let area = m.work_area();
-            let pos = area.position.to_logical::<f64>(scale);
-            let size = area.size.to_logical::<f64>(scale);
-            Frame {
-                x: pos.x,
-                y: pos.y,
-                w: size.width,
-                h: size.height,
-            }
+            (
+                logical_frame(*m.position(), *m.size(), scale),
+                logical_frame(area.position, area.size, scale),
+            )
         })
-        .collect()
+        .unzip()
 }
 
-/// Index of the screen under the cursor, else the primary, else the first.
-fn fallback_screen(window: &WebviewWindow, screens: &[Frame]) -> usize {
-    let frame_of = |m: &tauri::Monitor| {
-        let scale = m.scale_factor();
-        let pos = m.work_area().position.to_logical::<f64>(scale);
-        (pos.x, pos.y)
-    };
-    let under_cursor = window
-        .cursor_position()
-        .ok()
-        .and_then(|c| window.monitor_from_point(c.x, c.y).ok().flatten());
-    let monitor = under_cursor.or_else(|| window.primary_monitor().ok().flatten());
-    monitor
-        .map(|m| frame_of(&m))
-        .and_then(|origin| screens.iter().position(|s| (s.x, s.y) == origin))
-        .unwrap_or(0)
+/// Index (into `full`) of the screen under the cursor, else the primary, else 0.
+fn fallback_screen(window: &WebviewWindow, full: &[Frame]) -> usize {
+    let primary = window.primary_monitor().ok().flatten();
+    let primary_index = primary.as_ref().and_then(|p| {
+        let f = logical_frame(*p.position(), *p.size(), p.scale_factor());
+        full.iter().position(|s| *s == f)
+    });
+    // The cursor is physical, scaled by the primary display's factor.
+    let under_cursor = primary.as_ref().zip(window.cursor_position().ok()).and_then(|(p, c)| {
+        let point = frame::cursor_logical((c.x, c.y), p.scale_factor());
+        frame::screen_at(point, full)
+    });
+    under_cursor.or(primary_index).unwrap_or(0)
 }
 
 /// Applies the remembered (or current) frame, fitted to the displays that exist now.
 fn place(window: &WebviewWindow, wanted: Option<Frame>) {
-    let screens = screen_frames(window);
-    let fallback = fallback_screen(window, &screens);
+    PLACING.store(true, Ordering::SeqCst);
+    place_inner(window, wanted);
+    PLACING.store(false, Ordering::SeqCst);
+}
+
+fn place_inner(window: &WebviewWindow, wanted: Option<Frame>) {
+    let (full, screens) = screen_frames(window);
+    let fallback = fallback_screen(window, &full);
     let Some(target) = frame::resolve(wanted, &screens, fallback) else {
         return;
     };
@@ -222,6 +245,10 @@ fn place(window: &WebviewWindow, wanted: Option<Frame>) {
 
 /// Saves the frame shortly after the user stops dragging or resizing.
 fn schedule_save(app: &AppHandle) {
+    if PLACING.load(Ordering::SeqCst) {
+        return;
+    }
+    USER_CHANGED.store(true, Ordering::SeqCst);
     let generation = FRAME_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -236,10 +263,13 @@ fn schedule_save(app: &AppHandle) {
     });
 }
 
-/// Writes the current frame. Main thread only (it reads the window).
-fn save_now(app: &AppHandle) {
+/// Writes the current frame if the user changed it. Main thread only (it reads the window).
+pub fn save_now(app: &AppHandle) {
     // A pending debounced save is now redundant.
     FRAME_GENERATION.fetch_add(1, Ordering::SeqCst);
+    if !USER_CHANGED.swap(false, Ordering::SeqCst) {
+        return;
+    }
     let (Some(path), Some(window)) = (frame_path(app), app.get_webview_window("panel")) else {
         return;
     };

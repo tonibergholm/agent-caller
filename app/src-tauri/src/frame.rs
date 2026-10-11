@@ -87,6 +87,19 @@ pub fn resolve(saved: Option<Frame>, screens: &[Frame], fallback: usize) -> Opti
     })
 }
 
+/// The cursor position Tauri reports is physical, scaled by the primary
+/// display's factor; screens are in logical points.
+pub fn cursor_logical(physical: (f64, f64), primary_scale: f64) -> (f64, f64) {
+    (physical.0 / primary_scale, physical.1 / primary_scale)
+}
+
+/// Index of the screen containing `point`, if any.
+pub fn screen_at(point: (f64, f64), screens: &[Frame]) -> Option<usize> {
+    screens.iter().position(|s| {
+        point.0 >= s.x && point.0 < s.x + s.w && point.1 >= s.y && point.1 < s.y + s.h
+    })
+}
+
 /// A missing, unreadable or malformed file is "nothing saved".
 pub fn load(path: &Path) -> Option<Frame> {
     let raw = fs::read_to_string(path).ok()?;
@@ -186,6 +199,24 @@ mod tests {
         assert_eq!(resolve(None, &[], 0), None);
         let r = resolve(None, &[MAIN], 9).unwrap();
         assert_eq!((r.w, r.h), DEFAULT_SIZE);
+    }
+
+    #[test]
+    fn the_cursor_picks_its_screen_across_mixed_scale_factors() {
+        // Retina primary (2x) 1440x900 logical; a 1x external 1920x1080 to its right.
+        let full = [f(0.0, 0.0, 1440.0, 900.0), f(1440.0, 0.0, 1920.0, 1080.0)];
+        // Physical cursor on the primary at logical (700, 400).
+        assert_eq!(screen_at(cursor_logical((1400.0, 800.0), 2.0), &full), Some(0));
+        // Physical (3000, 600) is logical (1500, 300): the external. Read as
+        // logical it would be off every screen (the old bug).
+        assert_eq!(screen_at(cursor_logical((3000.0, 600.0), 2.0), &full), Some(1));
+        assert_eq!(screen_at((3000.0, 600.0), &full), None);
+        // Edges: the right edge belongs to the next screen; outside is None.
+        assert_eq!(screen_at((1440.0, 10.0), &full), Some(1));
+        assert_eq!(screen_at((-1.0, 10.0), &full), None);
+        // A screen above the primary has negative y.
+        let above = [full[0], f(0.0, -1080.0, 1920.0, 1080.0)];
+        assert_eq!(screen_at((100.0, -10.0), &above), Some(1));
     }
 
     #[test]
