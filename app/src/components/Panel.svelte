@@ -63,6 +63,11 @@
     if (st.replyFor === null) replyText = "";
   });
 
+  // A typed command is voice text: drop it when the field goes away.
+  $effect(() => {
+    if (!voiceInput) voiceText = "";
+  });
+
   // Drop drafts whose request is gone (answered, or replaced by a newer one).
   $effect(() => {
     const live = new Set(view.cards.map(draftKey));

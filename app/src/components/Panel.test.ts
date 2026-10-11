@@ -678,6 +678,15 @@ test("Enter in the typed command field sends it to voice; its letters are not sh
   expect(api.presentations.at(-1)?.selected).toBe("m/a");
 });
 
+test("turning the typed command field off drops its draft", async () => {
+  const props = { view: view({ cards: [card()] }), api: fakeApi(), voiceInput: true };
+  const { rerender } = render(Panel, props);
+  await userEvent.type(screen.getByRole("textbox", { name: "Voice command" }), "SECRET draft");
+  await rerender({ ...props, voiceInput: false });
+  await rerender({ ...props, voiceInput: true });
+  expect((screen.getByRole("textbox", { name: "Voice command" }) as HTMLTextAreaElement).value).toBe("");
+});
+
 test("Esc in the typed command field leaves the field before it closes the panel", async () => {
   const api = fakeApi();
   render(Panel, { view: view({ cards: [card()] }), api, voiceInput: true });

@@ -162,6 +162,65 @@ mod tests {
         assert_eq!(level(&f), Err(Refusal::NotPermitted));
     }
 
+    /// Spec §6.1 row by row, written from the table and not from `level`:
+    /// the exact result for one combination of facts.
+    fn table(f: &Facts) -> Result<Level, Refusal> {
+        let none_row = [StepKind::Cancel, StepKind::Read, StepKind::Summarize, StepKind::Select];
+        if none_row.contains(&f.kind) {
+            return Ok(Level::None);
+        }
+        // Confirm row: every model mutation, any allow_always option, any
+        // mutation on a target not on screen.
+        if f.origin == Origin::Model || f.effect == Some(AllowAlways) || f.off_screen {
+            return Ok(Level::Confirm);
+        }
+        // Countdown row: a fast-path answer on a selected or only-pending
+        // target, effect allow or deny, or a numbered choose option.
+        let countdown_effects = [(Some(Allow), false), (Some(Allow), true), (Some(Deny), false), (Some(Deny), true), (Some(Choose), true)];
+        let countdown_targets = [Some(Selected), Some(OnlyPending)];
+        if f.kind == StepKind::Answer
+            && countdown_targets.contains(&f.provenance)
+            && countdown_effects.contains(&(f.effect, f.by_number))
+        {
+            return Ok(Level::Countdown);
+        }
+        // Everything else is refused (default deny).
+        Err(Refusal::NotPermitted)
+    }
+
+    /// Every combination gets exactly the table's result, including the
+    /// default-deny refusals and level None.
+    #[test]
+    fn every_combination_matches_the_table() {
+        let mut seen = (0, 0, 0, 0);
+        for kind in KINDS {
+            for origin in [Origin::Fast, Origin::Model] {
+                for effect in EFFECTS {
+                    for by_number in [false, true] {
+                        for provenance in PROVENANCES {
+                            for off_screen in [false, true] {
+                                let f = Facts { kind, origin, effect, by_number, provenance, off_screen };
+                                let want = table(&f);
+                                assert_eq!(level(&f), want, "{f:?}");
+                                match want {
+                                    Ok(Level::None) => seen.0 += 1,
+                                    Ok(Level::Countdown) => seen.1 += 1,
+                                    Ok(Level::Confirm) => seen.2 += 1,
+                                    Err(_) => seen.3 += 1,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 4 non-mutating kinds x 2 x 6 x 2 x 5 x 2; 2 targets x 5 effect rows.
+        assert_eq!(seen.0, 960);
+        assert_eq!(seen.1, 10);
+        assert!(seen.2 > 0 && seen.3 > 0, "{seen:?}");
+        assert_eq!(seen.0 + seen.1 + seen.2 + seen.3, 7 * 2 * 6 * 2 * 5 * 2);
+    }
+
     /// The whole table: countdown happens exactly in the listed cases, and
     /// a mutation is never level None.
     #[test]

@@ -2,6 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/svelte";
 import { afterEach, expect, test } from "vitest";
 import App from "./App.svelte";
 import { card, fakeApi, view } from "./lib/fixtures";
+import type { VoiceSettings } from "./lib/voice";
 
 afterEach(cleanup);
 
@@ -63,4 +64,17 @@ test("the panel shows the typed command field only while voice and its debug inp
   expect(await screen.findByRole("textbox", { name: "Voice command" })).toBeTruthy();
   api.voiceSettings!({ enabled: false, debug_input: true });
   await waitFor(() => expect(screen.queryByRole("textbox", { name: "Voice command" })).toBeNull());
+});
+
+test("a voice settings load that an event overtook is discarded", async () => {
+  const api = fakeApi();
+  let release: ((s: VoiceSettings) => void) | undefined;
+  api.getVoiceSettings = () => new Promise<VoiceSettings>((r) => (release = r));
+  render(App, { api, label: "panel" });
+  await waitFor(() => expect(api.voiceSettings && release).toBeTruthy());
+  api.voiceSettings!({ enabled: true, debug_input: true });
+  expect(await screen.findByRole("textbox", { name: "Voice command" })).toBeTruthy();
+  release!({ enabled: false, debug_input: false });
+  await new Promise((r) => setTimeout(r, 20));
+  expect(screen.queryByRole("textbox", { name: "Voice command" })).toBeTruthy();
 });

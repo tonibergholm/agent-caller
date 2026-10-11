@@ -37,8 +37,27 @@
       }
     })();
     api.getHotkey().then((h) => (hotkey = h), () => {});
-    api.onVoiceSettings(applyVoice).then((un) => (closed ? un() : (offVoice = un)), () => {});
-    api.getVoiceSettings().then(applyVoice, () => {});
+    // Subscribe first, then load; an event after the load started wins.
+    let voiceEvents = 0;
+    void (async () => {
+      try {
+        const un = await api.onVoiceSettings((s) => {
+          voiceEvents += 1;
+          applyVoice(s);
+        });
+        if (closed) un();
+        else offVoice = un;
+      } catch {
+        // No events: the load below still sets the field.
+      }
+      const seen = voiceEvents;
+      try {
+        const s = await api.getVoiceSettings();
+        if (!closed && voiceEvents === seen) applyVoice(s);
+      } catch {
+        // Keep the field off.
+      }
+    })();
     return () => {
       closed = true;
       off?.();
