@@ -81,7 +81,8 @@ cfg, bak, blk = (open(p, "rb").read() for p in sys.argv[1:4])
 sys.exit(0 if cfg.startswith(bak) and blk.startswith(cfg[len(bak):]) else 1)
 PY
   then
-    { [ -f "$SUM" ] && replace_cfg "$BAK" "$cfg" && [ "$(sha "$cfg")" = "$(sha1 "$SUM")" ]; } \
+    { [ -f "$SUM" ] && [ "$(sha "$BAK")" = "$(sha1 "$SUM")" ] && replace_cfg "$BAK" "$cfg" \
+        && [ "$(sha "$cfg")" = "$(sha1 "$SUM")" ]; } \
       || { echo "RESTORE: copying the backup back failed or its sha256 differs; backup kept in $STATE" >&2; return 1; }
     echo "config.toml restored from the backup (unchanged since add; sha256 matches the original)"
   elif [ -s "$BLOCK" ] && python3 - "$cfg" "$BLOCK" <<'PY'
@@ -137,7 +138,10 @@ add)
   cp "$SCR_CODEX/hooks.json" "$PROJ/.codex/hooks.json"
   # Order matters for an interrupt: the sha and path first (a partial backup then still compares equal to
   # the untouched config), the backup next, the config is changed only after all of them exist.
-  echo "$CFG" >"$PATHF"; shasum -a 256 "$CFG" >"$SUM"; : >"$BLOCK"; cp -p "$CFG" "$BAK"
+  echo "$CFG" >"$PATHF"; shasum -a 256 "$CFG" >"$SUM"; : >"$BLOCK"
+  # A failed or short backup must stop here, before config.toml is touched.
+  cp -p "$CFG" "$BAK" && [ "$(sha "$BAK")" = "$(sha1 "$SUM")" ] \
+    || { echo "codex-trust: backup of $CFG failed; nothing changed" >&2; rm -f "$BAK" "$SUM" "$PATHF" "$BLOCK"; exit 1; }
   # Stage 1: trust the folder (needed before hooks/list reports the project hooks).
   printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$PROJ_REAL" >"$BLOCK"
   cat "$BLOCK" >>"$CFG"
