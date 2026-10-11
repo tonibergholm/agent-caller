@@ -184,10 +184,15 @@ Rust resolves the target and records how it was found (provenance):
 5. **Ambiguous:** the HUD lists numbered candidates (digits, a click, or
    "the first"); nothing runs until one is chosen.
 
-Visibility: subagent cards while subagents are hidden, and cards in a
-collapsed Done section, are never targets. A card hidden only by the
-machine filter can be targeted only when named; such a step always needs
-confirmation and the HUD shows its machine.
+Visibility: subagent cards while subagents are hidden are never targets.
+A card hidden only by the machine filter can be targeted only when named;
+such a step always needs confirmation and the HUD shows its machine. A
+card in a collapsed Done section, and an idle agent hidden by the idle
+setting, can be the target of `send` only, and only when named; the step
+always needs confirmation and the HUD shows the full target and payload.
+Answers, reads and selections never target them. (Decision of 2026-10-11,
+pending user confirmation; it replaces "cards in a collapsed Done section
+are never targets".)
 
 ### 5.3 Fast path
 
@@ -257,8 +262,8 @@ The table is exhaustive. Any case not listed is refused.
 |---|---|---|
 | None | `cancel`, `read`, `summarize`, `select` | none; `cancel` acts at once, the others change nothing |
 | Countdown | fast-path `answer` with effect `allow` or `deny` (or "option N") on a selected or only-pending target | none; 2 s countdown, the HUD shows the full command or question; Esc, a click, or the voice trigger cancels |
-| Confirm, then countdown | every model-produced `answer`, `answer_text` or `send`; any `allow_always` option; any target hidden only by the machine filter | Enter, a click, or "confirm"; the HUD shows target, action and full payload (including the whole persistent rule for `allow_always`) |
-| Refused | read-only or non-answerable request; offline machine; subagent hidden; collapsed Done; snapshot changed; validation failure | the HUD says why |
+| Confirm, then countdown | every model-produced `answer`, `answer_text` or `send`; any `allow_always` option; any target hidden by the machine filter; any `send` to a named card in a collapsed Done section or a hidden idle agent | Enter, a click, or "confirm"; the HUD shows target, action and full payload (including the whole persistent rule for `allow_always`) |
+| Refused | read-only or non-answerable request; offline machine; subagent hidden; anything but a named `send` to a collapsed Done card or hidden idle agent; snapshot changed; validation failure | the HUD says why |
 
 A fast-path "approve" is equivalent to pressing 1 on the selected card;
 it carries the same risk as the keyboard, and the HUD shows the full
