@@ -2904,7 +2904,7 @@ mod tests {
         };
         Track {
             kind: TrackKind::Permission,
-            agent_id: crate::ids::bounded("claude:", &sid),
+            agent_id: crate::ids::bounded("claude:", sid),
             session_id: sid.into(),
             key: CorrelationKey(rid.into()),
             op: 1,
