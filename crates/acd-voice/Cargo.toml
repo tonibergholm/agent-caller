@@ -21,3 +21,4 @@ thiserror.workspace = true
 acd-voice = { path = ".", features = ["testing"] }
 jsonschema.workspace = true
 tokio.workspace = true
+serde_json.workspace = true
