@@ -240,3 +240,49 @@ test("a failed machine chip keeps the kind short and exposes the reason", () => 
   expect(chips[2].getAttribute("title")).toBe("ok: online");
   expect(chips[2].querySelector(".reason")).toBeNull();
 });
+
+test("read-only cards in the panel name where to answer, per agent source", () => {
+  const t3 = card({ key: "m/t3", answerable: false });
+  t3.agent.source = "t3";
+  t3.agent.pending = { ...t3.agent.pending!, answer_path: "none" };
+  const herdr = card({ key: "m/herdr", answerable: false });
+  herdr.agent.source = "herdr";
+  herdr.agent.pending = { ...herdr.agent.pending!, answer_path: "none" };
+  render(Panel, { view: view({ cards: [t3, herdr] }), api: fakeApi() });
+  expect(screen.getAllByText("Answer in T3").length).toBe(1);
+  expect(screen.getAllByText("Answer in terminal").length).toBe(1);
+});
+
+test("a question card shows its text once", () => {
+  const c = card({ key: "m/q", answerable: true });
+  c.agent.pending = {
+    ...c.agent.pending!,
+    kind: "question",
+    detail: "Which branch?",
+    questions: [{ id: "q1", header: null, text: "Which branch?", multi_select: false, options: [] }],
+  };
+  render(Panel, { view: view({ cards: [c] }), api: fakeApi() });
+  expect(screen.getAllByText("Which branch?").length).toBe(1);
+});
+
+test("the panel has a drag region and J/K scroll the selection into view", async () => {
+  const calls: string[] = [];
+  const original = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = function (this: Element, arg?: boolean | ScrollIntoViewOptions) {
+    calls.push(`${(this as HTMLElement).dataset.key}:${JSON.stringify(arg)}`);
+  };
+  try {
+    const { container } = render(Panel, {
+      view: view({ cards: [card({ key: "m/a" }), card({ key: "m/b" })] }),
+      api: fakeApi(),
+    });
+    expect(container.querySelector("[data-tauri-drag-region]")).not.toBeNull();
+    await userEvent.keyboard("j");
+    expect(calls.at(-1)).toMatch(/^m\/[ab]:\{"block":"nearest"\}$/);
+    const before = calls.length;
+    await userEvent.keyboard("j");
+    expect(calls.length).toBeGreaterThan(before);
+  } finally {
+    Element.prototype.scrollIntoView = original;
+  }
+});

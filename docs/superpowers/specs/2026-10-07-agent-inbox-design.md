@@ -186,7 +186,9 @@ A request is **answerable** when all three conditions hold:
 - if it is a question, there is exactly one question and it is
   single-select.
 
-Anything else is shown read-only, with the label "answer in terminal".
+Anything else is shown read-only. The label says where to answer: "answer in
+T3" for a T3 agent (`source` is `t3`), "answer in terminal" for herdr, hook and
+unknown-source agents.
 
 **Free text.** `Request.free_text` is true only for an answerable `t3`
 question that takes a typed answer; the answerable rule above is unchanged.
@@ -1638,7 +1640,30 @@ react to events, such as notifications.
   2. `done`;
   3. `working`;
   4. `idle`, hidden behind a toggle.
-- Read-only requests show their content and "answer in terminal".
+- Each card's meta line shows the machine, a small badge for where the agent
+  runs (`herdr`, `T3`, `hooks` or `unknown`, from the agent's `source`), then
+  the project and working directory. The badge uses the text colour, so it
+  reads in light and dark mode.
+- Read-only requests show their content and where to answer: "answer in T3"
+  for T3 agents, "answer in terminal" for herdr, hook and unknown-source
+  agents.
+- A question shows its text once. The text is the request's `detail` (monospace
+  lines); the first question's text is shown separately only when it differs
+  from the detail.
+- The panel is user-resizable (drag its edges), with a minimum size, and
+  movable by dragging its header strip, which stays at the top while the cards
+  scroll. Its position and size are remembered
+  across hide/show and relaunch in `panel-frame.json` in the app config dir.
+  The user's own moves and resizes (mouse drags, window-management tools,
+  keyboard tiling) are saved, shortly after the last one, on hide and on quit;
+  a failed write is retried at the next save. Moves the app makes itself, and
+  those macOS makes within 2 seconds of a display configuration change, are
+  not saved. Each time the panel opens it is refitted from the
+  remembered frame, so it returns to a display when that display comes back.
+  A remembered frame that is still on a display is restored
+  there, clamped into the display's usable area. One that is off every display
+  is centered, at its saved size, on the display under the cursor when the
+  panel is placed (opened), else on the primary display.
 - `blocked_unparsed` shows the raw-screen preview.
 - A request's detail is shown as monospace lines. Each logical line is a
   block that wraps with a hanging indent, so a long or wrapped command still
