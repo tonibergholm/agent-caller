@@ -185,7 +185,9 @@ A request is **answerable** when all three conditions hold:
 - if it is a question, there is exactly one question and it is
   single-select.
 
-Anything else is shown read-only, with the label "answer in terminal".
+Anything else is shown read-only. The label says where to answer: "answer in
+T3" for a T3 agent (`source` is `t3`), "answer in terminal" for herdr and hook
+agents.
 
 ### 5.1 Request lifecycle and identity
 
@@ -1594,7 +1596,17 @@ react to events, such as notifications.
   2. `done`;
   3. `working`;
   4. `idle`, hidden behind a toggle.
-- Read-only requests show their content and "answer in terminal".
+- Read-only requests show their content and where to answer: "answer in T3"
+  for T3 agents, "answer in terminal" for herdr and hook agents.
+- A question shows its text once. The text is the request's `detail` (monospace
+  lines); the first question's text is shown separately only when it differs
+  from the detail.
+- The panel is user-resizable, with a minimum size. Its position and size are
+  remembered across hide/show and relaunch in `panel-frame.json` in the app
+  config dir (saved shortly after a drag stops, and on hide). A saved frame
+  that is still on a display is restored there, clamped into the display's
+  usable area; one that is off every display is centered, at its saved size,
+  on the display under the cursor.
 - `blocked_unparsed` shows the raw-screen preview.
 - A request's detail is shown as monospace lines. Each logical line is a
   block that wraps with a hanging indent, so a long or wrapped command still

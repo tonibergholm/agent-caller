@@ -21,7 +21,16 @@
   const hints = $derived(
     [card.can_reply ? "R reply" : null, card.can_mark_seen ? "E mark seen" : null].filter((h) => h !== null),
   );
-  const question = $derived(pending?.questions?.[0]?.text ?? null);
+  // For a question, acd copies the first question's text into `detail`, which
+  // is already shown as monospace lines. Show the question text separately
+  // only when it carries something the detail does not.
+  const question = $derived.by(() => {
+    const text = pending?.questions?.[0]?.text ?? null;
+    if (text === null || text.trim() === "") return null;
+    return text.trim() === pending?.detail.trim() ? null : text;
+  });
+  // Where the user answers a read-only request depends on where the agent lives.
+  const readonlyLabel = $derived(card.agent.source === "t3" ? "Answer in T3" : "Answer in terminal");
 </script>
 
 <div
@@ -78,7 +87,7 @@
         {/each}
       </ol>
     {:else if card.live && !card.busy && pending.status !== "answering"}
-      <div class="readonly">Answer in terminal</div>
+      <div class="readonly">{readonlyLabel}</div>
     {/if}
   {/if}
 

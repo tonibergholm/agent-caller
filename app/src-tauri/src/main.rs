@@ -1,4 +1,5 @@
 mod commands;
+mod frame;
 mod hotkey;
 mod keychain;
 mod notify;

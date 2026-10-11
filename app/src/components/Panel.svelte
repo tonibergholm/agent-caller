@@ -150,6 +150,10 @@
     gap: 8px;
     padding: 8px;
     font: 13px system-ui, sans-serif;
+    /* The window is user-resizable: fill it and scroll the cards. */
+    box-sizing: border-box;
+    height: 100vh;
+    overflow-y: auto;
   }
   .chip {
     margin-right: 6px;
