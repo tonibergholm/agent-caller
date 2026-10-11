@@ -8,7 +8,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Size, WebviewUrl, WebviewWindow,
 };
 use tauri_nspanel::{
-    CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask,
+    CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask, tauri_panel,
 };
 
 use crate::frame::{self, DEFAULT_SIZE, Frame, MIN_SIZE};
@@ -25,28 +25,24 @@ static USER_CHANGED: AtomicBool = AtomicBool::new(false);
 static FRAME_GENERATION: AtomicU64 = AtomicU64::new(0);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 
-// tauri_panel! requires an explicit return type, so `-> ()` is unavoidable;
-// the allow is scoped to the macro output.
-#[allow(clippy::unused_unit)]
-mod defs {
-    use tauri_nspanel::tauri_panel;
+// The macro requires an explicit return type; an alias keeps clippy's
+// `unused_unit` quiet without an allow.
+type Unit = ();
 
-    tauri_panel! {
-        panel!(InboxPanel {
-            config: {
-                can_become_key_window: true,
-                can_become_main_window: false,
-                is_floating_panel: true
-            }
-        })
-        panel_event!(InboxPanelEvents {
-            window_did_resign_key(notification: &NSNotification) -> bool,
-            window_did_resize(notification: &NSNotification) -> (),
-            window_did_move(notification: &NSNotification) -> ()
-        })
-    }
+tauri_panel! {
+    panel!(InboxPanel {
+        config: {
+            can_become_key_window: true,
+            can_become_main_window: false,
+            is_floating_panel: true
+        }
+    })
+    panel_event!(InboxPanelEvents {
+        window_did_resign_key(notification: &NSNotification) -> bool,
+        window_did_resize(notification: &NSNotification) -> Unit,
+        window_did_move(notification: &NSNotification) -> Unit
+    })
 }
-use defs::{InboxPanel, InboxPanelEvents};
 
 /// Creates the panel directly because Tauri `setup` runs on the main thread.
 /// This must only be called from `setup`.

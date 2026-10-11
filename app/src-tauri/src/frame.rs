@@ -207,10 +207,10 @@ mod tests {
         let full = [f(0.0, 0.0, 1440.0, 900.0), f(1440.0, 0.0, 1920.0, 1080.0)];
         // Physical cursor on the primary at logical (700, 400).
         assert_eq!(screen_at(cursor_logical((1400.0, 800.0), 2.0), &full), Some(0));
-        // Physical (3000, 600) is logical (1500, 300): the external. Read as
+        // Physical (5000, 600) is logical (2500, 300): the external. Read as
         // logical it would be off every screen (the old bug).
-        assert_eq!(screen_at(cursor_logical((3000.0, 600.0), 2.0), &full), Some(1));
-        assert_eq!(screen_at((3000.0, 600.0), &full), None);
+        assert_eq!(screen_at(cursor_logical((5000.0, 600.0), 2.0), &full), Some(1));
+        assert_eq!(screen_at((5000.0, 600.0), &full), None);
         // Edges: the right edge belongs to the next screen; outside is None.
         assert_eq!(screen_at((1440.0, 10.0), &full), Some(1));
         assert_eq!(screen_at((-1.0, 10.0), &full), None);
