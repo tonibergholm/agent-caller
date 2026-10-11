@@ -153,8 +153,13 @@ mod tests {
         // SAFETY: plain socket calls on a descriptor owned here and closed
         // before returning; `addr` is zeroed and then filled in bounds.
         unsafe {
+            #[cfg(target_os = "linux")]
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            #[cfg(not(target_os = "linux"))]
             let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
             assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+            #[cfg(not(target_os = "linux"))]
+            assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
             let mut addr: libc::sockaddr_un = std::mem::zeroed();
             addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
             let bytes = path.as_os_str().as_bytes();

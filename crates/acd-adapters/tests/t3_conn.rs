@@ -336,11 +336,22 @@ async fn a_stuck_writer_fills_the_control_lane_and_closes_promptly() {
 #[tokio::test]
 async fn a_peer_that_stops_reading_trips_the_write_timeout() {
     let fake = FakeT3::start().await;
-    let (conn, _rx) = open(&fake).await;
+    // No pings: a ping the stalled peer cannot answer would close the
+    // connection for the wrong reason.
+    let timing = ConnTiming {
+        ping_every: Duration::from_secs(600),
+        ..fast()
+    };
+    let (conn, _rx) = connect(&ws_url(&fake.url()).unwrap(), FAKE_TOKEN, &timing)
+        .await
+        .unwrap();
     fake.stop_reading(true);
     // Concurrent 8 MiB calls: the writer sends them back to back until the
     // socket blocks, whatever the buffer sizes.
     let big = "x".repeat(8 * 1024 * 1024);
+    // Hold the writer until every payload is built and queued, so the clock
+    // below starts at the first stalled write and not at serialisation.
+    let gate = conn.pause_writer();
     let calls: Vec<_> = (0..6)
         .map(|i| {
             let c = conn.clone();
@@ -351,13 +362,22 @@ async fn a_peer_that_stops_reading_trips_the_write_timeout() {
             })
         })
         .collect();
-    // The write timeout is 300 ms, but this bound also covers building and
-    // serialising six 8 MiB payloads in a debug build, which takes seconds
-    // on a loaded machine. It only has to catch a writer that never gives up.
+    // Spawned calls run up to their first wait before this task resumes:
+    // the request frames are built and queued.
+    tokio::task::yield_now().await;
+    let stalled_from = Instant::now();
+    gate.release();
+    // The write timeout is 300 ms. The close must follow the first stalled
+    // write closely; the outer bound only catches a writer that hangs.
     let why = tokio::time::timeout(Duration::from_secs(30), conn.closed())
         .await
         .expect("bounded shutdown");
     assert!(why.contains("stalled"), "{why}");
+    assert!(
+        stalled_from.elapsed() < Duration::from_secs(5),
+        "the write timeout closed the connection {:?} after the first write",
+        stalled_from.elapsed()
+    );
     let mut no_reply = 0;
     for call in calls {
         match call.await.unwrap() {
@@ -625,4 +645,129 @@ async fn a_frame_over_the_old_16_mib_cap_keeps_the_connection_and_decodes() {
     fake.put_thread(shell_thread("t1", "running", None));
     assert_eq!(next_chunk(&mut rx).await[0]["thread"]["status"], "running");
     assert_eq!(fake.connections(), 1);
+}
+
+/// A server that writes one text frame of `body_len` bytes slowly, then a
+/// pong behind it. The frame is written by hand so it is a single frame.
+async fn serve_slow_frame(
+    body_len: usize,
+    pieces: usize,
+    every: Duration,
+) -> (String, tokio::sync::oneshot::Receiver<()>) {
+    use futures_util::SinkExt;
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "ws://{}/ws?orchestrationProtocol=2",
+        listener.local_addr().unwrap()
+    );
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let body = "x".repeat(body_len);
+        let text =
+            format!(r#"{{"_tag":"Chunk","requestId":"gone","values":[{{"blob":"{body}"}}]}}"#);
+        let mut head = vec![0x81_u8, 127];
+        head.extend_from_slice(&(text.len() as u64).to_be_bytes());
+        let io = ws.get_mut();
+        let _ = io.write_all(&head).await;
+        for piece in text.as_bytes().chunks(text.len().div_ceil(pieces)) {
+            if io.write_all(piece).await.is_err() || io.flush().await.is_err() {
+                return;
+            }
+            tokio::time::sleep(every).await;
+        }
+        // The pong the client's ping earned, queued behind the big frame.
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"_tag":"Pong"}"#,
+            ))
+            .await;
+        let _ = done_tx.send(());
+        // Afterwards it answers pings like a healthy server.
+        while let Some(Ok(msg)) = futures_util::StreamExt::next(&mut ws).await {
+            if msg.to_text().is_ok_and(|t| t.contains("Ping")) {
+                let _ = ws
+                    .send(tokio_tungstenite::tungstenite::Message::text(
+                        r#"{"_tag":"Pong"}"#,
+                    ))
+                    .await;
+            }
+        }
+    });
+    (url, done_rx)
+}
+
+#[tokio::test]
+async fn a_frame_that_arrives_slower_than_the_pong_timeout_keeps_the_connection() {
+    // Pings go out every 100 ms and want an answer within 100 ms, but the
+    // 3 MiB frame (and the pong queued behind it) takes 1.2 s to arrive in pieces 20 ms apart.
+    let (url, done) = serve_slow_frame(3 * 1024 * 1024, 60, Duration::from_millis(20)).await;
+    let (conn, _rx) = connect(&url, FAKE_TOKEN, &fast()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), done)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!conn.is_closed(), "closed: {}", conn.closed().await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decode_that_outlasts_the_pong_timeout_keeps_the_connection() {
+    let fake = FakeT3::start().await;
+    let (conn, mut rx) = open(&fake).await;
+    let id = conn
+        .subscribe(SUBSCRIBE_SHELL, json!({"requestCompletionMarker": true}))
+        .unwrap();
+    loop {
+        if next_chunk(&mut rx)
+            .await
+            .iter()
+            .any(|v| v["kind"] == "synchronized")
+        {
+            break;
+        }
+    }
+    // The decode runs 700 ms; pings every 100 ms go unread meanwhile.
+    conn.slow_next_decode(Duration::from_millis(700));
+    fake.send_raw(&json!({"_tag":"Chunk","requestId":id,"values":[{"kind":"slow"}]}).to_string());
+    assert_eq!(next_chunk(&mut rx).await[0]["kind"], "slow");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!conn.is_closed(), "closed: {}", conn.closed().await);
+    fake.put_thread(shell_thread("t1", "running", None));
+    assert_eq!(next_chunk(&mut rx).await[0]["thread"]["status"], "running");
+}
+
+#[tokio::test]
+async fn a_reader_waiting_on_a_slow_consumer_keeps_the_connection() {
+    let fake = FakeT3::start().await;
+    let (conn, mut rx) = open(&fake).await;
+    let id = conn
+        .subscribe(SUBSCRIBE_SHELL, json!({"requestCompletionMarker": true}))
+        .unwrap();
+    loop {
+        if next_chunk(&mut rx)
+            .await
+            .iter()
+            .any(|v| v["kind"] == "synchronized")
+        {
+            break;
+        }
+    }
+    // More frames than the events channel holds, and nobody reading: the
+    // reader blocks in `events.send` and the pong stays unread.
+    for i in 0..400 {
+        fake.send_raw(
+            &json!({"_tag":"Chunk","requestId":id,"values":[{"kind":"n","i":i}]}).to_string(),
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(!conn.is_closed(), "closed: {}", conn.closed().await);
+    let mut seen = 0;
+    while seen < 400 {
+        seen += next_chunk(&mut rx).await.len();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!conn.is_closed(), "closed: {}", conn.closed().await);
 }

@@ -44,6 +44,10 @@ const EVENTS_CAPACITY: usize = 256;
 const MAX_MESSAGE: usize = 256 * 1024 * 1024;
 /// The cap before 256 MiB; a message above it is logged (size only).
 const OLD_MAX_MESSAGE: usize = 16 * 1024 * 1024;
+/// A busy reader holds off the pong deadline for at most
+/// `max(pong_timeout * BUSY_CAP_FACTOR, BUSY_CAP_FLOOR)`.
+const BUSY_CAP_FACTOR: u32 = 6;
+const BUSY_CAP_FLOOR: Duration = Duration::from_secs(60);
 const PONG_FRAME: &str = r#"{"_tag":"Pong"}"#;
 
 const QUEUED: u8 = 0;
@@ -226,6 +230,8 @@ impl Outgoing {
 struct Hooks {
     paused: watch::Sender<bool>,
     fail_after_write: AtomicBool,
+    /// Milliseconds the reader sleeps inside its next decode, then resets.
+    decode_delay_ms: AtomicU64,
 }
 
 struct Core {
@@ -235,8 +241,10 @@ struct Core {
     streams: Mutex<HashSet<String>>,
     next: AtomicU64,
     last_rx: RxClock,
-    /// Set while the reader decodes a message it has fully received.
-    decoding: AtomicBool,
+    /// Set while the reader works on a message it has fully received:
+    /// decoding it, then handing its frames on (which can wait for the
+    /// consumer). The pong stays unread for that long.
+    busy: AtomicBool,
     hooks: Hooks,
 }
 
@@ -363,6 +371,11 @@ pub async fn connect(
         ConnectError::Unreachable
     };
     let mut request = ws_url.into_client_request().map_err(|e| unreachable(&e))?;
+    // Plain TCP only, and never a guessed port: `wss` or a missing port
+    // would otherwise be dialled as plain `ws` on port 80.
+    if request.uri().scheme_str() != Some("ws") || request.uri().port_u16().is_none() {
+        return Err(unreachable(&"T3 URL must be ws:// with an explicit port"));
+    }
     let mut bearer = HeaderValue::from_str(&format!("Bearer {token}"))
         .map_err(|_| ConnectError::Unauthorized)?;
     bearer.set_sensitive(true);
@@ -416,10 +429,11 @@ fn start(ws: Ws, clock: RxClock, timing: &ConnTiming) -> (Conn, mpsc::Receiver<S
         streams: Mutex::new(HashSet::new()),
         next: AtomicU64::new(1),
         last_rx: clock,
-        decoding: AtomicBool::new(false),
+        busy: AtomicBool::new(false),
         hooks: Hooks {
             paused: watch::channel(false).0,
             fail_after_write: AtomicBool::new(false),
+            decode_delay_ms: AtomicU64::new(0),
         },
     });
     tokio::spawn(reader(stream, core.clone(), events_tx));
@@ -463,12 +477,18 @@ async fn reader(mut stream: SplitStream<Ws>, core: Arc<Core>, events: mpsc::Send
         if text.len() > OLD_MAX_MESSAGE {
             tracing::info!(bytes = text.len(), "T3 sent a message over 16 MiB");
         }
-        // Decoding a big frame can outlast the pong timeout; the keepalive
-        // waits it out instead of reading the silence as a dead peer.
-        core.decoding.store(true, SeqCst);
-        let parsed = parse_frames(text.as_str());
-        core.touch();
-        core.decoding.store(false, SeqCst);
+        // Decoding a big frame, or waiting for the consumer to take its
+        // frames, can outlast the pong timeout while the pong sits unread.
+        // The keepalive waits for the guard instead of reading that as a
+        // dead peer.
+        let _busy = BusyGuard::start(&core);
+        // The test delay is for frames; pongs and acks are not worth it.
+        let delay = if text.len() > 32 {
+            core.hooks.decode_delay_ms.swap(0, SeqCst)
+        } else {
+            0
+        };
+        let parsed = decode(text.as_str(), delay);
         let frames = match parsed {
             Ok(f) => f,
             Err(_) => {
@@ -485,6 +505,46 @@ async fn reader(mut stream: SplitStream<Ws>, core: Arc<Core>, events: mpsc::Send
     }
     // Dropping the reply slots and the events sender tells everyone waiting.
     core.calls.lock().expect("calls").clear();
+}
+
+/// Marks the reader busy with a received message. On drop (normal exit,
+/// break or panic) it counts the end of the work as a sign of life and then
+/// clears the flag, in that order: the keepalive reads the flag first, so a
+/// clear flag means the touch has already happened.
+struct BusyGuard<'a>(&'a Core);
+
+impl<'a> BusyGuard<'a> {
+    fn start(core: &'a Core) -> Self {
+        core.busy.store(true, SeqCst);
+        BusyGuard(core)
+    }
+}
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.touch();
+        self.0.busy.store(false, SeqCst);
+    }
+}
+
+/// Messages at least this large are decoded off the async worker when the
+/// runtime can spare one.
+const BLOCKING_DECODE_BYTES: usize = 1024 * 1024;
+
+fn decode(text: &str, test_delay_ms: u64) -> Result<Vec<ServerFrame>, serde_json::Error> {
+    let work = || {
+        if test_delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(test_delay_ms));
+        }
+        parse_frames(text)
+    };
+    let multi = tokio::runtime::Handle::try_current()
+        .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+    if multi && text.len() >= BLOCKING_DECODE_BYTES {
+        tokio::task::block_in_place(work)
+    } else {
+        work()
+    }
 }
 
 /// Returns false when the reader should stop.
@@ -654,18 +714,23 @@ async fn keepalive(core: Arc<Core>, timing: ConnTiming) {
             r = rx => match r { Ok(at) => at, Err(_) => return },
             _ = closed.wait() => return,
         };
+        // Liveness means bytes arriving from T3 (see `ProgressStream`), plus
+        // the reader being busy with a message that already arrived. The
+        // busy allowance is bounded: a reader stuck for `cap` stops
+        // counting, so dead-peer detection cannot be disabled for good.
+        let cap = (timing.pong_timeout * BUSY_CAP_FACTOR).max(BUSY_CAP_FLOOR);
         loop {
             tokio::select! {
                 _ = sleep(timing.pong_timeout) => {}
                 _ = closed.wait() => return,
             }
             // Read the flag first: the reader touches before it clears it,
-            // so a clear flag means any decode that overlapped has touched.
-            let decoding = core.decoding.load(SeqCst);
+            // so a clear flag means any work that overlapped has touched.
+            let busy = core.busy.load(SeqCst);
             if core.last_rx() >= sent_at {
                 break;
             }
-            if !decoding {
+            if !busy || sent_at.elapsed() > cap {
                 core.close("T3 did not answer a ping");
                 return;
             }
@@ -810,6 +875,13 @@ impl Conn {
     pub fn fail_after_write_next(&self) {
         self.core().hooks.fail_after_write.store(true, SeqCst);
     }
+
+    /// The reader's next decode takes `d` longer, as a huge frame would.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn slow_next_decode(&self, d: Duration) {
+        let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX).max(1);
+        self.core().hooks.decode_delay_ms.store(ms, SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -884,10 +956,11 @@ mod tests {
             streams: Mutex::new(HashSet::new()),
             next: AtomicU64::new(0),
             last_rx: Arc::new(Mutex::new(Instant::now())),
-            decoding: AtomicBool::new(false),
+            busy: AtomicBool::new(false),
             hooks: Hooks {
                 paused: watch::channel(false).0,
                 fail_after_write: AtomicBool::new(false),
+                decode_delay_ms: AtomicU64::new(0),
             },
         };
         let (event_tx, _events) = mpsc::channel(1);
