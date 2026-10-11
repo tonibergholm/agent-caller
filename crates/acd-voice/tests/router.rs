@@ -368,7 +368,7 @@ async fn payload_limits_and_normalisation() {
 /// Stripping a suffix payload may only narrow the names, never add one.
 #[tokio::test]
 async fn a_suffix_payload_cannot_create_a_name_through_an_ordinal() {
-    let s = select(snapshot(vec![pending("m", "a"), pending("m", "b")]), "m/a");
+    let s = select(snapshot(vec![working("m", "a"), working("m", "b")]), "m/a");
     // Prompt order: m/a is a1 (selected), m/b is a2.
     for (said, text) in [
         ("tell it the second option is better", "option is better"),
