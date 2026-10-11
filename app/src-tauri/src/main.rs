@@ -38,6 +38,7 @@ fn main() {
             commands::get_view,
             commands::pick_option,
             commands::send_reply,
+            commands::answer_text,
             commands::cancel_action,
             commands::escape,
             commands::mark_seen,

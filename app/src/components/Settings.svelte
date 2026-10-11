@@ -195,15 +195,31 @@
 </main>
 
 <style>
-  .slot {
-    min-width: 6em;
-  }
   .settings {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 12px;
-    font: 13px system-ui, sans-serif;
+    gap: 14px;
+    min-height: 100vh;
+    padding: 16px;
+    font: 13px var(--font-sans);
+    color: var(--text);
+    background: var(--canvas);
+  }
+  h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+  }
+  section {
+    padding: 12px 14px;
+    background: var(--glass);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-md);
+  }
+  section > p {
+    margin: 0 0 10px;
+    color: var(--text-muted);
   }
   ul {
     list-style: none;
@@ -211,15 +227,94 @@
     padding: 0;
   }
   .machine {
-    padding: 6px 0;
-    border-bottom: 1px solid #8884;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .machine:first-child {
+    padding-top: 0;
+  }
+  .machine:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
+  .name {
+    font-weight: 600;
   }
   .endpoint,
-  .status {
+  .status,
+  .pairing {
     font-size: 11px;
-    opacity: 0.7;
+    color: var(--text-dim);
+  }
+  .endpoint {
+    font-family: var(--font-mono);
+  }
+  .hint {
+    flex-basis: 100%;
+    font-size: 12px;
+    color: var(--amber-text);
+  }
+  .machine input {
+    flex: 1 1 8em;
+  }
+  .slot {
+    min-width: 6em;
+  }
+  code {
+    padding: 1px 5px;
+    font: 12px var(--font-mono);
+    background: var(--code-bg);
+    border-radius: var(--r-sm);
+  }
+  label {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+  }
+  input:not([type="checkbox"]) {
+    height: 28px;
+    padding: 0 10px;
+    font: inherit;
+    color: var(--text);
+    background: var(--code-bg);
+    border: 1px solid var(--stroke);
+    border-radius: var(--r);
+  }
+  input:not([type="checkbox"]):focus {
+    outline: none;
+    border-color: rgba(6, 182, 212, 0.55);
+    box-shadow: var(--glow);
+  }
+  input[type="checkbox"] {
+    accent-color: var(--cyan);
+  }
+  button {
+    height: 28px;
+    padding: 0 12px;
+    font: 500 12px var(--font-sans);
+    color: var(--text);
+    background: var(--fill-subtle);
+    border: 1px solid var(--stroke);
+    border-radius: var(--r);
+    cursor: pointer;
+  }
+  button:hover {
+    background: var(--fill-hover);
   }
   .error {
-    color: #c00;
+    padding: 6px 10px;
+    color: var(--crimson-text);
+    background: var(--crimson-fill);
+    border-radius: var(--r);
+  }
+  .ok {
+    padding: 6px 10px;
+    color: var(--emerald);
+    background: var(--emerald-fill);
+    border-radius: var(--r);
   }
 </style>

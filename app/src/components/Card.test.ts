@@ -78,11 +78,11 @@ test("answerable cards show numbered option buttons; unsupported ones are disabl
   const c = card({ key: "m/x", answerable: true, selectable_options: ["allow", "deny"] });
   render(Card, { ...props(c), onpick });
   const buttons = screen.getAllByRole("button");
-  expect(buttons.map((b) => b.textContent?.trim())).toEqual([
-    "1. Yes",
-    "2. No",
-    "3. Yes, always (Bash(npm test:*))",
-    "4. ?",
+  expect(buttons.map((b) => b.textContent?.replace(/\s+/g, " ").trim())).toEqual([
+    "1 Yes",
+    "2 No",
+    "3 Yes, always Bash(npm test:*)",
+    "4 ?",
   ]);
   expect((buttons[2] as HTMLButtonElement).disabled).toBe(true);
   expect(buttons[3].getAttribute("title")).toBe("Not supported here");
@@ -100,8 +100,8 @@ test("a question whose detail is its text shows that text once", () => {
   };
   const { container } = render(Card, props(c));
   expect(screen.getAllByText("Which branch?").length).toBe(1);
-  expect(container.querySelector(".detail")?.textContent).toContain("Which branch?");
-  expect(container.querySelector(".question")).toBeNull();
+  expect([...container.querySelectorAll(".question p")].map((p) => p.textContent)).toEqual(["Which branch?"]);
+  expect(container.querySelector(".detail")).toBeNull();
 });
 
 test("a question text that differs from the detail is still shown", () => {
@@ -113,8 +113,10 @@ test("a question text that differs from the detail is still shown", () => {
     questions: [{ id: "q", header: null, text: "Which branch?", multi_select: false, options: [] }],
   };
   const { container } = render(Card, props(c));
-  expect(container.querySelector(".detail")?.textContent).toContain("could not be read");
-  expect(container.querySelector(".question")?.textContent).toBe("Which branch?");
+  expect([...container.querySelectorAll(".question p")].map((p) => p.textContent)).toEqual([
+    "The question could not be read.",
+    "Which branch?",
+  ]);
 });
 
 test("a question with an empty detail falls back to the question text", () => {
@@ -176,19 +178,18 @@ test("answer in terminal is not shown while busy or answering", () => {
   expect(r.container.textContent).not.toMatch(/answer in terminal/i);
 });
 
-test("the selected card hints only at the keys it accepts", () => {
+test("reply and mark-seen are buttons that call back, shown only when the card allows them", async () => {
+  const onreply = vi.fn();
+  const onmarkseen = vi.fn();
   const both = card({ key: "m/x", can_reply: true, can_mark_seen: true });
-  const { container, unmount } = render(Card, { ...props(both), selected: true });
-  expect(container.querySelector(".keys")?.textContent).toBe("R reply · E mark seen");
-  unmount();
-  const reply = render(Card, { ...props(card({ key: "m/x", can_reply: true })), selected: true });
-  expect(reply.container.querySelector(".keys")?.textContent).toBe("R reply");
-  reply.unmount();
-  const none = render(Card, { ...props(card({ key: "m/x" })), selected: true });
-  expect(none.container.querySelector(".keys")).toBeNull();
-  none.unmount();
-  const unselected = render(Card, props(both));
-  expect(unselected.container.querySelector(".keys")).toBeNull();
+  const r = render(Card, { ...props(both), onreply, onmarkseen });
+  await userEvent.click(screen.getByRole("button", { name: /reply/i }));
+  await userEvent.click(screen.getByRole("button", { name: /mark seen/i }));
+  expect(onreply).toHaveBeenCalledOnce();
+  expect(onmarkseen).toHaveBeenCalledOnce();
+  r.unmount();
+  const none = render(Card, props(card({ key: "m/x" })));
+  expect(none.container.querySelector(".more-actions")).toBeNull();
 });
 
 test("a multi-line detail renders one hanging-indent block per logical line", () => {
@@ -204,7 +205,7 @@ test("a multi-line detail renders one hanging-indent block per logical line", ()
   expect(rule).toMatch(/white-space:\s*pre-wrap/);
   expect(rule).toMatch(/padding-left:\s*2ch/);
   expect(rule).toMatch(/text-indent:\s*-2ch/);
-  expect(css).toMatch(/\.detail\s*\{[^}]*monospace/);
+  expect(css).toMatch(/\.detail\s*\{[^}]*var\(--font-mono\)/);
 });
 
 test.each([
@@ -220,4 +221,138 @@ test.each([
   expect(badge?.textContent).toBe(text);
   expect(badge?.getAttribute("data-source")).toBe(source);
   expect(container.querySelector(".meta")?.textContent).toContain("Studio");
+});
+
+test.each([
+  ["Bash", "BASH APPROVAL"],
+  ["Edit", "EDIT APPROVAL"],
+  ["Waiting for input in the terminal", "APPROVAL"],
+  ["T3 request: command_execution_approval", "APPROVAL"],
+] as const)("a permission titled %j is tagged %j", (title, tag) => {
+  const c = card({ key: "m/x" });
+  c.agent.pending = { ...c.agent.pending!, title };
+  const { container } = render(Card, props(c));
+  expect(container.querySelector(".meta .tag")?.textContent).toBe(tag);
+});
+
+test("a tool-name title is not repeated as a reason line; a sentence title is", () => {
+  const tool = card({ key: "m/x" });
+  tool.agent.pending = { ...tool.agent.pending!, title: "Bash" };
+  const a = render(Card, props(tool));
+  expect(a.container.querySelector(".reason")).toBeNull();
+  a.unmount();
+  const sentence = card({ key: "m/y" });
+  const b = render(Card, props(sentence));
+  expect(b.container.querySelector(".reason")?.textContent).toBe("Run npm test?");
+});
+
+test("a Codex Reason line reads as prose above the command block", () => {
+  const c = card({ key: "m/x" });
+  c.agent.pending = { ...c.agent.pending!, title: "Bash", detail: "Reason: needs the network\n$ curl example.com" };
+  const { container } = render(Card, props(c));
+  expect(container.querySelector(".reason")?.textContent).toBe("Reason: needs the network");
+  expect([...container.querySelectorAll(".detail > .line")].map((e) => e.textContent)).toEqual(["$ curl example.com"]);
+});
+
+test("a question is tagged QUESTION and its text is not monospace", () => {
+  const c = card({ key: "m/x", answerable: true });
+  c.agent.pending = {
+    ...c.agent.pending!,
+    kind: "question",
+    title: "Branch",
+    detail: "Which branch?",
+    questions: [{ id: "q", header: "Branch", text: "Which branch?", multi_select: false, options: [] }],
+  };
+  const { container } = render(Card, props(c));
+  expect(container.querySelector(".tag")?.textContent).toBe("QUESTION");
+  expect(container.querySelector(".qhead")?.textContent).toBe("Branch");
+  expect(container.querySelector(".detail")).toBeNull();
+});
+
+test("the age comes from opened_at and is omitted when there is none", () => {
+  const opened = Date.parse("2026-10-08T10:00:00Z");
+  const c = card({ key: "m/x" });
+  const r = render(Card, props(c, opened + 12_000));
+  expect(r.container.querySelector("time")?.textContent).toBe("12s ago");
+  r.unmount();
+  const bad = card({ key: "m/y" });
+  bad.agent.pending = { ...bad.agent.pending!, opened_at: "" };
+  const r2 = render(Card, props(bad, opened));
+  expect(r2.container.querySelector("time")).toBeNull();
+});
+
+test("the project is shown by name with the full directory in a tooltip", () => {
+  const c = card({ key: "m/x" });
+  const { container } = render(Card, props(c));
+  const project = container.querySelector(".meta .project");
+  expect(project?.textContent).toBe("app");
+  expect(project?.getAttribute("title")).toBe("/work/app");
+  expect(container.querySelector(".meta")?.textContent).not.toContain("/work/app");
+});
+
+test("the first sendable allow option is primary and deny is destructive", () => {
+  const c = card({ key: "m/x", answerable: true, selectable_options: ["allow", "deny", "always"] });
+  const { container } = render(Card, props(c));
+  const [yes, no, always] = [...container.querySelectorAll("button.option")];
+  expect(yes.classList.contains("primary")).toBe(true);
+  expect(no.classList.contains("deny")).toBe(true);
+  expect(always.classList.contains("primary")).toBe(false);
+});
+
+test("a long question is clamped with Show more, and Show less folds it back", async () => {
+  const sh = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+  const ch = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => 200 });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => 60 });
+  try {
+    const c = card({ key: "m/x", answerable: true });
+    c.agent.pending = { ...c.agent.pending!, kind: "question", detail: "A very long question", questions: null };
+    const { container } = render(Card, props(c));
+    expect(container.querySelector(".question")?.classList.contains("clamped")).toBe(true);
+    await userEvent.click(await screen.findByRole("button", { name: "Show more" }));
+    expect(container.querySelector(".question")?.classList.contains("clamped")).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: "Show less" }));
+    expect(container.querySelector(".question")?.classList.contains("clamped")).toBe(true);
+  } finally {
+    if (sh) Object.defineProperty(HTMLElement.prototype, "scrollHeight", sh);
+    else delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollHeight;
+    if (ch) Object.defineProperty(HTMLElement.prototype, "clientHeight", ch);
+    else delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientHeight;
+  }
+});
+
+test("a short question has no Show more", () => {
+  const c = card({ key: "m/x", answerable: true });
+  c.agent.pending = { ...c.agent.pending!, kind: "question", detail: "Short?", questions: null };
+  render(Card, props(c));
+  expect(screen.queryByRole("button", { name: /show (more|less)/i })).toBeNull();
+});
+
+test("a free-text card shows the input; others do not", () => {
+  const free = card({ key: "m/x", answerable: true, free_text_answerable: true });
+  free.agent.pending = { ...free.agent.pending!, kind: "question", options: [], free_text: true };
+  const a = render(Card, props(free));
+  const box = a.container.querySelector("textarea");
+  expect(box?.getAttribute("placeholder")).toBe("Type an answer…");
+  expect(box?.getAttribute("data-field")).toBe("answer");
+  a.unmount();
+  const plain = render(Card, props(card({ key: "m/y", answerable: true, selectable_options: ["allow"] })));
+  expect(plain.container.querySelector("textarea")).toBeNull();
+});
+
+test("the countdown shows a progress bar that shrinks, and Esc to undo", () => {
+  const c = card({
+    key: "m/x",
+    action: { id: "a1", card_key: "m/x", label: "Yes", detail: null, fires_at_ms: 2000 },
+  });
+  const full = render(Card, props(c, 0));
+  expect(full.container.querySelector(".bar")?.getAttribute("style")).toContain("width: 100%");
+  expect(full.container.querySelector(".undo")?.textContent).toContain("Esc");
+  expect(full.container.querySelector(".undo")?.textContent).toContain("to undo");
+  full.unmount();
+  const half = render(Card, props(c, 1000));
+  expect(half.container.querySelector(".bar")?.getAttribute("style")).toContain("width: 50%");
+  half.unmount();
+  const done = render(Card, props(c, 5000));
+  expect(done.container.querySelector(".bar")?.getAttribute("style")).toContain("width: 0%");
 });

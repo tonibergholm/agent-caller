@@ -198,8 +198,9 @@ blank or holds control, bidi or separator characters (so a client sees the
 refusal before any countdown ends). A text answer resolves the request by
 `inbox` with `option_id` null. Free text is deferred on the `keys` and `hook`
 paths (§6.2, §11.1) and supported on `t3` (§6.5). A `t3` question with no
-options is read-only for now, with `free_text` false. It becomes answerable
-by text alone once clients render a text input (panel redesign).
+options is answerable by text alone when T3 takes a typed answer (the same
+rule as for a question with options), and read-only with `free_text` false
+otherwise.
 
 **Agent id bound.** Every published agent id is at most `MAX_ID_BYTES` (128)
 bytes, because the engine rejects any command id over that. An adapter builds
@@ -1346,10 +1347,10 @@ an answer. Otherwise:
     with `claude`), the one checked live (2026-10-11). Codex and others stay
     option-only until verified. Whether a Codex message-mode question takes
     the same `answers` shape is unverified.
-  A question with no options stays read-only for now, whatever the flags (the
-  app has no text input yet); it becomes answerable by text once clients
-  render one. Claude's own tool requires at least two options, so such a
-  question does not occur with Claude. A multi-select or multi-question
+  A question with no options follows the same flags: answerable by text alone
+  when `free_text` would be true, read-only otherwise. Claude's own tool
+  requires at least two options, so such a question does not occur with
+  Claude. A multi-select or multi-question
   request stays read-only. The adapter normalises CRLF to LF, trims outer
   whitespace (inner newlines stay), and rejects empty text, control characters
   other than `\n` and `\t`, bidi and separator characters, and text over
@@ -1632,6 +1633,22 @@ react to events, such as notifications.
 - The number of `needs_you` agents is shown next to it.
 
 **Floating panel.**
+- Visual language: `docs/design/obsidian-cockpit.md` (dark-first, Geist and
+  JetBrains Mono bundled locally, no network fonts). One column only; the
+  mockup's sidebar, voice HUD, attestation and telemetry panels are out of scope.
+- Layout: a sticky top bar (drag region) with the title, an "N need you · M
+  working" summary, one status dot per machine and a settings button; below it
+  machine filter chips ("All" plus one per machine with counts; client-side,
+  kept for the session). Sections follow: "Needs you", "Working", "Done" (dimmed,
+  collapsed; the idle toggle stays). A footer lists the keyboard hints.
+- A needs-you card has an amber accent bar, the title with the request's age,
+  a meta line (machine, source badge, project; the full directory is a
+  tooltip), a type tag ("<TOOL> APPROVAL" or "QUESTION"), the reason and command
+  in a monospace block, and keycap buttons for the options. During the
+  countdown a 2-second progress bar runs on the card ("Esc to undo"). A T3
+  question that takes typed text shows a text input (`T` focuses it, `Enter`
+  sends, `Shift+Enter` adds a line, IME-safe).
+- Working and done agents are one compact line each.
 - Opened by a global hotkey, by default ⌃⌥Space (Control+Option+Space). ⌥Space
   is commonly taken by launchers such as Raycast and Alfred. It is a non-activating
   `tauri-nspanel`, so focus stays where it was.
@@ -1673,6 +1690,7 @@ react to events, such as notifications.
 - `J`/`K` move between cards.
 - `1`–`9` pick an option.
 - `R` opens the reply field.
+- `T` focuses the typed-answer field of a free-text question.
 - `E` marks the agent seen.
 - `⏎` confirms.
 - `Esc` undoes during the countdown, or closes the panel.
@@ -1982,9 +2000,8 @@ result in the PR description):
 2. **Codex approval.** A Codex approval in herdr becomes answerable within
    3 s of appearing. Yes and No both act as chosen.
 3. **T3.** A T3 approval, a T3 single-select question and a T3 free-text
-   answer to a question with options can each be answered from the panel.
-   (A question with no options waits for the text input in the panel
-   redesign.)
+   answer to a question with or without options can each be answered from
+   the panel.
 4. **Answered elsewhere.**
    - Answering any of the above in the terminal or in T3 first resolves the
      card on every client within 2 s.
@@ -2190,3 +2207,5 @@ personal use (R7).
 **P7, 2026-10-11: free-text answers on T3.** A T3 question with no options (Claude `AskUserQuestion` without choices) was read-only, although T3 itself takes a typed string as `answers[question id]`. acd now publishes a single single-select T3 question as free-text answerable unless T3 says `allowCustomAnswer: false` (§5, §6.5). The daemon and client crates carry the typed answer (`Command::AnswerText`, `Inbox::answer_text`, `CardView.free_text_answerable`); the app UI follows separately. Free text on the `keys` and hook paths stays deferred (§11.1).
 
 **P7 review, 2026-10-11: free text narrowed.** A T3 question with no options stays read-only until the panel renders a text input (§5, §6.5). The default for an absent `allowCustomAnswer` is Claude-only; other providers need an explicit `true`. Core and the client share one check for typed text (blank, control, bidi and separator characters), so a bad answer fails before the undo countdown. A text answer resolves by `inbox` with `option_id` null.
+
+**P7 redesign, 2026-10-11: panel redesign and zero-option free text.** The panel adopts the Obsidian Cockpit tokens (`docs/design/obsidian-cockpit.md`): one column, sections, keycap buttons and a text input for typed answers. A T3 question with no options is therefore answerable by text alone when T3 takes a typed answer (§5, §6.5, §8); this supersedes the "stays read-only" rulings above.

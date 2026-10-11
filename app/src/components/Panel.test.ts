@@ -4,7 +4,7 @@ import { afterEach, expect, test } from "vitest";
 import Panel from "./Panel.svelte";
 import { card, view, fakeApi } from "../lib/fixtures";
 import type { InboxView } from "../lib/bindings/InboxView";
-import { MAX_REPLY_BYTES } from "../lib/limits";
+import { MAX_ANSWER_BYTES, MAX_REPLY_BYTES } from "../lib/limits";
 
 afterEach(cleanup);
 
@@ -53,7 +53,7 @@ test("a button pick sends the revision on screen", async () => {
   const api = fakeApi();
   const c = atRevision(7);
   render(Panel, { view: view({ cards: [c] }), api });
-  await userEvent.click(screen.getByRole("button", { name: /2\. No/ }));
+  await userEvent.click(screen.getByRole("button", { name: /^2 No$/ }));
   expect(api.calls).toEqual([["pick", "m/a", c.agent.pending!.id, "deny", 7]]);
 });
 
@@ -71,7 +71,7 @@ test("a pick keeps the revision it was made on when the view moves on afterwards
   // Effect built from revision 1 as rendered; later views do not rewrite it.
   expect(api.calls).toEqual([["pick", "m/a", "req-a", "allow", 1]]);
   // The next pick is made against what is now rendered.
-  await userEvent.click(screen.getByRole("button", { name: /1\. Yes/ }));
+  await userEvent.click(screen.getByRole("button", { name: /^1 Yes$/ }));
   expect(api.calls[1]).toEqual(["pick", "m/a", "req-a", "allow", 2]);
 });
 
@@ -206,7 +206,7 @@ test("rejected footer, card-button and countdown-cancel calls are shown", async 
   api.pick = boom;
   const c = card({ key: "m/a", answerable: true, selectable_options: ["allow"] });
   const r3 = render(Panel, { view: view({ cards: [c] }), api });
-  await userEvent.click(screen.getByRole("button", { name: /1\. Yes/ }));
+  await userEvent.click(screen.getByRole("button", { name: /^1 Yes$/ }));
   expect((await screen.findByRole("alert")).textContent).toContain("denied");
   r3.unmount();
 
@@ -221,24 +221,36 @@ test("rejected footer, card-button and countdown-cancel calls are shown", async 
   expect((await screen.findByRole("alert")).textContent).toContain("denied");
 });
 
-test("a failed machine chip keeps the kind short and exposes the reason", () => {
-  const m = (key: string, status: InboxView["machines"][number]["status"]) => ({
-    key, name: key, machine_id: key, status, is_local: false, duplicate_of: null,
-  });
+const machine = (key: string, status: InboxView["machines"][number]["status"]) => ({
+  key, name: key, machine_id: key, status, is_local: false, duplicate_of: null,
+});
+
+test("each machine gets a status dot; a failed one also shows its reason", () => {
   const v = view({
     machines: [
-      m("local", { kind: "local_unavailable", message: "socket missing" }),
-      m("box", { kind: "offline", since_ms: 0, error: "refused" }),
-      m("ok", { kind: "online" }),
+      machine("local", { kind: "local_unavailable", message: "socket missing" }),
+      machine("box", { kind: "offline", since_ms: 0, error: "refused" }),
+      machine("ok", { kind: "online" }),
+      machine("sync", { kind: "syncing" }),
     ],
   });
   const { container } = render(Panel, { view: v, api: fakeApi() });
-  const chips = [...container.querySelectorAll(".chip")];
-  expect(chips[0].getAttribute("title")).toBe("local: local unavailable: socket missing");
-  expect(chips[0].querySelector(".reason")?.textContent).toBe(": socket missing");
-  expect(chips[1].getAttribute("title")).toBe("box: offline: refused");
-  expect(chips[2].getAttribute("title")).toBe("ok: online");
-  expect(chips[2].querySelector(".reason")).toBeNull();
+  const dots = [...container.querySelectorAll(".dot")];
+  expect(dots.map((d) => d.getAttribute("data-dot"))).toEqual(["error", "offline", "online", "syncing"]);
+  expect(dots[0].getAttribute("title")).toBe("local: local unavailable: socket missing");
+  expect(dots[1].getAttribute("title")).toBe("box: offline: refused");
+  expect(dots[2].getAttribute("title")).toBe("ok: online");
+  const alerts = [...container.querySelectorAll(".machine-alert")].map((a) => a.textContent?.trim());
+  expect(alerts).toEqual(["local: local unavailable: socket missing", "box: offline: refused"]);
+});
+
+test("a duplicate machine entry gets no dot and no filter chip", () => {
+  const v = view({
+    machines: [machine("a", { kind: "online" }), { ...machine("b", { kind: "online" }), duplicate_of: "a" }, machine("c", { kind: "online" })],
+  });
+  const { container } = render(Panel, { view: v, api: fakeApi() });
+  expect(container.querySelectorAll(".dot").length).toBe(2);
+  expect(screen.queryByRole("button", { name: /^b/ })).toBeNull();
 });
 
 test("read-only cards in the panel name where to answer, per agent source", () => {
@@ -284,5 +296,230 @@ test("the panel has a drag region and J/K scroll the selection into view", async
     expect(calls.length).toBeGreaterThan(before);
   } finally {
     Element.prototype.scrollIntoView = original;
+  }
+});
+
+const waiting = (key: string, machineKey = "local", over: Partial<ReturnType<typeof card>> = {}) =>
+  card({ key, machine_key: machineKey, machine_name: machineKey, ...over });
+const working = (key: string, machineKey = "local") => {
+  const c = waiting(key, machineKey, { group: "working" });
+  c.agent.state = "working";
+  c.agent.pending = null;
+  c.agent.title = `Working ${key}`;
+  return c;
+};
+const done = (key: string, machineKey = "local") => {
+  const c = waiting(key, machineKey, { group: "done", can_mark_seen: true });
+  c.agent.state = "done";
+  c.agent.pending = null;
+  c.agent.title = `Done ${key}`;
+  return c;
+};
+
+test("sections list needs-you, working and done with counts; the summary counts the first two", () => {
+  const v = view({ cards: [waiting("local/a"), waiting("local/b"), working("local/c"), done("local/d")] });
+  const { container } = render(Panel, { view: v, api: fakeApi() });
+  expect(container.querySelector(".summary")?.textContent).toBe("2 need you · 1 working");
+  const heads = [...container.querySelectorAll("h2.sec")].map((h) => h.textContent?.replace(/\s+/g, " ").trim());
+  expect(heads).toEqual(["Needs you 2", "Working 1", "› Done 1"]);
+  expect(container.querySelectorAll("section[aria-label='Needs you'] article.card").length).toBe(2);
+  expect(container.querySelectorAll("section[aria-label='Working'] .row").length).toBe(1);
+});
+
+test("Done is collapsed until opened, and its rows then take J/K and E", async () => {
+  const api = fakeApi();
+  const v = view({ cards: [waiting("local/a"), done("local/d")] });
+  const { container } = render(Panel, { view: v, api });
+  expect(screen.queryByText("Done local/d")).toBeNull();
+  await userEvent.keyboard("jE");
+  expect(api.calls).toEqual([]);
+  await userEvent.click(screen.getByRole("button", { name: /^done/i }));
+  expect(screen.getByText("Done local/d")).toBeTruthy();
+  expect(container.querySelector(".dot[data-state=done]")).not.toBeNull();
+  await userEvent.keyboard("je");
+  expect(api.calls).toEqual([["markSeen", "local/d"]]);
+});
+
+test("a working row is one line with a working dot and no option buttons", () => {
+  const { container } = render(Panel, { view: view({ cards: [working("local/c")] }), api: fakeApi() });
+  const row = container.querySelector(".row")!;
+  expect(row.querySelector(".dot")?.getAttribute("data-state")).toBe("working");
+  expect(row.querySelector("button")).toBeNull();
+  expect(row.textContent).toContain("Working local/c");
+});
+
+test("machine chips filter the cards client-side and keep the choice", async () => {
+  const v = view({
+    machines: [machine("local", { kind: "online" }), machine("box", { kind: "online" })],
+    cards: [waiting("local/a"), waiting("box/b", "box"), working("box/w", "box")],
+  });
+  const { container, rerender } = render(Panel, { view: v, api: fakeApi() });
+  const chip = (name: RegExp) => screen.getByRole("button", { name });
+  expect(chip(/^All/).textContent?.replace(/\s+/g, " ").trim()).toBe("All 3");
+  expect(chip(/^box/).textContent?.replace(/\s+/g, " ").trim()).toBe("box 2");
+  expect(container.querySelectorAll("article.card").length).toBe(2);
+  await userEvent.click(chip(/^box/));
+  expect(chip(/^box/).getAttribute("aria-pressed")).toBe("true");
+  expect(container.querySelectorAll("article.card").length).toBe(1);
+  expect(container.querySelector("article.card")?.getAttribute("data-key")).toBe("box/b");
+  // The filter survives a view push, and J/K stay inside it.
+  await rerender({ view: { ...v, hidden_idle: 1 }, api: fakeApi() });
+  expect(container.querySelectorAll("article.card").length).toBe(1);
+  await userEvent.click(chip(/^All/));
+  expect(container.querySelectorAll("article.card").length).toBe(2);
+});
+
+test("a filter on a machine that went away falls back to All", async () => {
+  const v = view({
+    machines: [machine("local", { kind: "online" }), machine("box", { kind: "online" })],
+    cards: [waiting("local/a"), waiting("box/b", "box")],
+  });
+  const { container, rerender } = render(Panel, { view: v, api: fakeApi() });
+  await userEvent.click(screen.getByRole("button", { name: /^box/ }));
+  await rerender({ view: { ...v, machines: [v.machines[0]], cards: [v.cards[0]] }, api: fakeApi() });
+  expect(container.querySelectorAll("article.card").length).toBe(1);
+});
+
+test("J/K only visit the cards the filter leaves on screen", async () => {
+  const api = fakeApi();
+  const v = view({
+    machines: [machine("local", { kind: "online" }), machine("box", { kind: "online" })],
+    cards: [
+      waiting("local/a", "local", { answerable: true, selectable_options: ["allow"] }),
+      waiting("box/b", "box", { answerable: true, selectable_options: ["allow"] }),
+    ],
+  });
+  render(Panel, { view: v, api });
+  await userEvent.click(screen.getByRole("button", { name: /^box/ }));
+  await userEvent.keyboard("1");
+  expect(api.calls).toEqual([["pick", "box/b", "req-b", "allow", 1]]);
+});
+
+const freeText = (key = "m/q") => {
+  const c = card({ key, answerable: true, free_text_answerable: true });
+  c.agent.pending = {
+    ...c.agent.pending!,
+    kind: "question",
+    options: [],
+    detail: "Which colour?",
+    free_text: true,
+    questions: [{ id: "q", header: null, text: "Which colour?", multi_select: false, options: [] }],
+  };
+  return c;
+};
+
+test("Enter in the answer field sends it through answerText with the request on screen", async () => {
+  const api = fakeApi();
+  render(Panel, { view: view({ cards: [freeText()] }), api });
+  await userEvent.click(screen.getByRole("textbox", { name: "Type an answer" }));
+  await userEvent.keyboard("purple{Enter}");
+  expect(api.calls).toEqual([["answerText", "m/q", "req-q", 1, "purple"]]);
+  expect((screen.getByRole("textbox", { name: "Type an answer" }) as HTMLTextAreaElement).value).toBe("");
+});
+
+test("T focuses the answer field of the selected free-text card", async () => {
+  render(Panel, { view: view({ cards: [freeText()] }), api: fakeApi() });
+  const box = screen.getByRole("textbox", { name: "Type an answer" });
+  expect(document.activeElement).not.toBe(box);
+  await userEvent.keyboard("t");
+  expect(document.activeElement).toBe(box);
+  // Typing a "t" or a digit in the field is text, not a shortcut.
+  await userEvent.keyboard("t1");
+  expect((box as HTMLTextAreaElement).value).toBe("t1");
+});
+
+test("Shift+Enter adds a line and sends nothing", async () => {
+  const api = fakeApi();
+  render(Panel, { view: view({ cards: [freeText()] }), api });
+  await userEvent.keyboard("t");
+  await userEvent.keyboard("a{Shift>}{Enter}{/Shift}b");
+  expect(api.calls).toEqual([]);
+  expect((screen.getByRole("textbox", { name: "Type an answer" }) as HTMLTextAreaElement).value).toBe("a\nb");
+});
+
+test("composition Enter in the answer field does not send", async () => {
+  const api = fakeApi();
+  render(Panel, { view: view({ cards: [freeText()] }), api });
+  await userEvent.keyboard("t");
+  await userEvent.keyboard("hello");
+  const box = screen.getByRole("textbox", { name: "Type an answer" });
+  box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }));
+  box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true }));
+  expect(api.calls.filter((c) => c[0] === "answerText")).toEqual([]);
+});
+
+test("a blank or over-long answer is not sent", async () => {
+  const api = fakeApi();
+  render(Panel, { view: view({ cards: [freeText()] }), api });
+  await userEvent.keyboard("t");
+  await userEvent.keyboard("   {Enter}");
+  const box = screen.getByRole("textbox", { name: "Type an answer" });
+  await fireEvent.input(box, { target: { value: "x".repeat(MAX_ANSWER_BYTES + 1) } });
+  await userEvent.keyboard("{Enter}");
+  expect(api.calls.filter((c) => c[0] === "answerText")).toEqual([]);
+  expect(screen.getByRole("note").textContent).toContain("Too long");
+});
+
+test("a rejected answer is shown and the typed text stays", async () => {
+  const api = fakeApi();
+  api.answerText = async () => {
+    throw "StaleRequest";
+  };
+  render(Panel, { view: view({ cards: [freeText()] }), api });
+  await userEvent.keyboard("t");
+  await userEvent.keyboard("purple{Enter}");
+  expect((await screen.findByRole("alert")).textContent).toContain("StaleRequest");
+  expect((screen.getByRole("textbox", { name: "Type an answer" }) as HTMLTextAreaElement).value).toBe("purple");
+});
+
+test("the Send button sends the answer too", async () => {
+  const api = fakeApi();
+  render(Panel, { view: view({ cards: [freeText()] }), api });
+  await userEvent.type(screen.getByRole("textbox", { name: "Type an answer" }), "purple");
+  await userEvent.click(screen.getByRole("button", { name: "Send answer" }));
+  expect(api.calls).toEqual([["answerText", "m/q", "req-q", 1, "purple"]]);
+});
+
+test("typed text survives a view push", async () => {
+  const api = fakeApi();
+  const c = freeText();
+  const { rerender } = render(Panel, { view: view({ cards: [c] }), api });
+  await userEvent.keyboard("t");
+  await userEvent.keyboard("pur");
+  await rerender({ view: view({ cards: [freeText()], hidden_idle: 2 }), api });
+  expect((screen.getByRole("textbox", { name: "Type an answer" }) as HTMLTextAreaElement).value).toBe("pur");
+});
+
+test("Esc in the answer field leaves it first; the next Esc closes the panel", async () => {
+  const api = fakeApi({ escapeReturns: false });
+  render(Panel, { view: view({ cards: [freeText()] }), api });
+  const box = screen.getByRole("textbox", { name: "Type an answer" });
+  await userEvent.keyboard("t");
+  await userEvent.keyboard("{Escape}");
+  expect(document.activeElement).not.toBe(box);
+  expect(api.calls.filter((c) => c[0] === "hide")).toEqual([]);
+  await userEvent.keyboard("{Escape}");
+  expect(api.calls.filter((c) => c[0] === "hide").length).toBe(1);
+});
+
+test("the countdown on a card is shown with its progress bar and cancels on click", async () => {
+  const api = fakeApi();
+  const c = card({
+    key: "m/a",
+    answerable: true,
+    selectable_options: ["allow"],
+    action: { id: "a1", card_key: "m/a", label: "Yes", detail: null, fires_at_ms: Date.now() + 2000 },
+  });
+  const { container } = render(Panel, { view: view({ cards: [c] }), api });
+  expect(container.querySelector(".undo .bar")).not.toBeNull();
+  await userEvent.click(container.querySelector("button.undo")!);
+  expect(api.calls).toEqual([["cancel", "a1"]]);
+});
+
+test("the footer lists the keyboard hints", () => {
+  const { container } = render(Panel, { view: view(), api: fakeApi() });
+  const text = container.querySelector("footer .keys")?.textContent?.replace(/\s+/g, " ") ?? "";
+  for (const hint of ["J", "K", "move", "answer", "T", "type", "R", "reply", "Esc", "close / undo"]) {
+    expect(text).toContain(hint);
   }
 });

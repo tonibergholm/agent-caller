@@ -1,13 +1,16 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import type { CardView } from "../lib/bindings/CardView";
   import type { InboxView } from "../lib/bindings/InboxView";
   import type { Api } from "../lib/ipc";
   import { statusKind, statusReason, statusText } from "../lib/format";
   import { fromEvent, normalize, onKey, type Effect, type KeyState } from "../lib/keys";
+  import { dotKind, listedMachines, sections } from "../lib/panel";
   import Card from "./Card.svelte";
   import ReplyBox from "./ReplyBox.svelte";
+  import Row from "./Row.svelte";
 
-  import { MAX_REPLY_BYTES, byteLength } from "../lib/limits";
+  import { MAX_ANSWER_BYTES, MAX_REPLY_BYTES, byteLength } from "../lib/limits";
 
   let {
     view,
@@ -18,14 +21,30 @@
   // svelte-ignore state_referenced_locally
   let st = $state<KeyState>(normalize(view, { selected: null, replyFor: null }));
   let replyText = $state("");
+  // Typed answers per card, so a view push never loses what the user typed.
+  let answers = $state<Record<string, string>>({});
   let now = $state(Date.now());
   let error = $state<string | null>(null);
+  // Session state: the machine filter (null = All) and whether Done is open.
+  let machineFilter = $state<string | null>(null);
+  let doneOpen = $state(false);
 
   // The error is cleared only by the next user key or click, never by a
   // view push, so a rejection stays visible until the user acts again.
 
+  const machines = $derived(listedMachines(view.machines));
+  // A filter on a machine that no longer exists falls back to All.
+  const filter = $derived(machines.some((m) => m.key === machineFilter) ? machineFilter : null);
+  const secs = $derived(sections(view.cards, filter));
+  // What J/K, the digits and the other shortcuts see: only the cards on screen.
+  const visible = $derived([...secs.needs, ...secs.working, ...(doneOpen ? secs.done : [])]);
+  const nav = $derived<InboxView>({ ...view, cards: visible });
+  const needCount = $derived(view.cards.filter((c) => c.group === "request").length);
+  const workingCount = $derived(view.cards.filter((c) => c.group === "working").length);
+  const countFor = (key: string) => view.cards.filter((c) => c.machine_key === key).length;
+
   $effect(() => {
-    const next = normalize(view, st);
+    const next = normalize(nav, st);
     if (next !== st) st = next;
   });
 
@@ -46,6 +65,11 @@
     return () => clearInterval(timer);
   });
 
+  const answerField = (cardKey: string) =>
+    [...document.querySelectorAll<HTMLElement>("[data-key]")]
+      .find((e) => e.dataset.key === cardKey)
+      ?.querySelector<HTMLTextAreaElement>("textarea[data-field=answer]") ?? null;
+
   async function run(effect: Effect) {
     switch (effect.kind) {
       case "select":
@@ -57,6 +81,9 @@
       case "openReply":
         st = { ...st, selected: effect.cardKey, replyFor: effect.cardKey };
         return;
+      case "focusAnswer":
+        answerField(effect.cardKey)?.focus();
+        return;
       case "markSeen":
         await api.markSeen(effect.cardKey);
         return;
@@ -67,11 +94,28 @@
         st = { ...st, replyFor: null };
         return;
       }
+      case "submitAnswer": {
+        const text = answers[effect.cardKey] ?? "";
+        // Id and revision come from the request on screen now.
+        const c = view.cards.find((x) => x.key === effect.cardKey);
+        const pending = c?.agent.pending;
+        if (!c?.free_text_answerable || !pending) return;
+        if (text.trim() === "" || byteLength(text) > MAX_ANSWER_BYTES) return;
+        await api.answerText(effect.cardKey, pending.id, pending.revision, text);
+        answers[effect.cardKey] = "";
+        answerField(effect.cardKey)?.blur();
+        return;
+      }
       case "escape":
         // The decision never reads view.actions: it may be stale.
         if (await api.escape()) return;
         if (st.replyFor) {
           st = { ...st, replyFor: null };
+          return;
+        }
+        // Esc in the answer field leaves the field first; the next one closes.
+        if (document.activeElement instanceof HTMLElement && document.activeElement.dataset.field === "answer") {
+          document.activeElement.blur();
           return;
         }
         await api.hide();
@@ -81,7 +125,7 @@
 
   function handle(event: KeyboardEvent) {
     error = null;
-    const { state, effect } = onKey(view, st, fromEvent(event));
+    const { state, effect } = onKey(nav, st, fromEvent(event));
     st = state;
     if (effect.kind === "none") return;
     event.preventDefault();
@@ -98,9 +142,43 @@
 
   // Transient states read fine as just the kind; the rest show their reason.
   const quiet = new Set(["online", "connecting", "syncing"]);
+  const alerts = $derived(machines.filter((m) => !quiet.has(m.status.kind)));
 </script>
 
 <svelte:window onkeydown={handle} />
+
+{#snippet cardFor(c: CardView)}
+  <div class="slot">
+    {#if c.group === "request"}
+      <Card
+        card={c}
+        selected={st.selected === c.key}
+        {now}
+        bind:answer={() => answers[c.key] ?? "", (v) => (answers[c.key] = v)}
+        onpick={(optionId, requestId, revision) => {
+          // Id and revision come from the request the card rendered at click time.
+          act(run({ kind: "pick", cardKey: c.key, requestId, optionId, revision }));
+        }}
+        oncancel={(actionId) => act(api.cancel(actionId))}
+        onreply={() => act(run({ kind: "openReply", cardKey: c.key }))}
+        onmarkseen={() => act(run({ kind: "markSeen", cardKey: c.key }))}
+        onanswer={() => act(run({ kind: "submitAnswer", cardKey: c.key }))}
+      />
+    {:else}
+      <Row
+        card={c}
+        selected={st.selected === c.key}
+        {now}
+        oncancel={(actionId) => act(api.cancel(actionId))}
+        onreply={() => act(run({ kind: "openReply", cardKey: c.key }))}
+        onmarkseen={() => act(run({ kind: "markSeen", cardKey: c.key }))}
+      />
+    {/if}
+    {#if st.replyFor === c.key}
+      <ReplyBox bind:value={replyText} />
+    {/if}
+  </div>
+{/snippet}
 
 <main class="panel">
   <!-- The panel is borderless: this strip (and the header's empty space) drags it.
@@ -114,106 +192,346 @@
       if (e.detail >= 2) e.stopPropagation();
     }}
   >
-  <div class="grip" data-tauri-drag-region aria-hidden="true"></div>
-  <header data-tauri-drag-region>
-    {#each view.machines as m (m.key)}
-      {@const reason = quiet.has(m.status.kind) ? null : statusReason(m.status)}
-      <span class="chip" data-status={m.status.kind} title="{m.name}: {statusText(m.status)}"
-        >{m.name}: {statusKind(m.status)}{#if reason}<span class="reason">: {reason}</span>{/if}</span
-      >
-    {/each}
-  </header>
+    <div class="grip" data-tauri-drag-region aria-hidden="true"></div>
+    <header data-tauri-drag-region>
+      <h1>Inbox</h1>
+      <span class="summary">{needCount} need you · {workingCount} working</span>
+      <span class="dots">
+        {#each machines as m (m.key)}
+          <span
+            class="dot"
+            role="img"
+            data-status={m.status.kind}
+            data-dot={dotKind(m.status)}
+            title="{m.name}: {statusText(m.status)}"
+            aria-label="{m.name}: {statusText(m.status)}"
+          ></span>
+        {/each}
+      </span>
+      <button class="gear" aria-label="Settings" title="Settings" onclick={() => act(api.openSettings())}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+        </svg>
+      </button>
+    </header>
+    {#if machines.length > 1}
+      <nav class="filters" aria-label="Machines">
+        <button class="fchip" aria-pressed={filter === null} onclick={() => (machineFilter = null)}>
+          All <span class="n">{view.cards.length}</span>
+        </button>
+        {#each machines as m (m.key)}
+          <button class="fchip" aria-pressed={filter === m.key} onclick={() => (machineFilter = m.key)}>
+            {m.name} <span class="n">{countFor(m.key)}</span>
+          </button>
+        {/each}
+      </nav>
+    {/if}
   </div>
 
   {#if error}
     <div class="error" role="alert">{error}</div>
   {/if}
 
-  {#if view.cards.length === 0}
+  {#each alerts as m (m.key)}
+    {@const reason = statusReason(m.status)}
+    <div class="machine-alert" role="status" data-status={m.status.kind}>
+      {m.name}: {statusKind(m.status)}{#if reason}<span class="reason">: {reason}</span>{/if}
+    </div>
+  {/each}
+
+  {#if secs.needs.length + secs.working.length + secs.done.length === 0}
     <p class="empty">No agents need you.</p>
     <p class="hint">Press {hotkey} to open this panel.</p>
   {/if}
 
-  {#each view.cards as c (c.key)}
-    <div class="slot">
-      <Card
-        card={c}
-        selected={st.selected === c.key}
-        {now}
-        onpick={(optionId, requestId, revision) => {
-          // Id and revision come from the request the card rendered at click time.
-          act(run({ kind: "pick", cardKey: c.key, requestId, optionId, revision }));
-        }}
-        oncancel={(actionId) => {
-          act(api.cancel(actionId));
-        }}
-      />
-      {#if st.replyFor === c.key}
-        <ReplyBox bind:value={replyText} />
+  {#if secs.needs.length > 0}
+    <section aria-label="Needs you">
+      <h2 class="sec needs">Needs you <span class="count">{secs.needs.length}</span></h2>
+      {#each secs.needs as c (c.key)}{@render cardFor(c)}{/each}
+    </section>
+  {/if}
+
+  {#if secs.working.length > 0}
+    <section aria-label="Working">
+      <h2 class="sec working">Working <span class="count">{secs.working.length}</span></h2>
+      {#each secs.working as c (c.key)}{@render cardFor(c)}{/each}
+    </section>
+  {/if}
+
+  {#if secs.done.length > 0}
+    <section aria-label="Done">
+      <h2 class="sec done">
+        <button class="toggle" aria-expanded={doneOpen} onclick={() => (doneOpen = !doneOpen)}>
+          <span class="chev" class:open={doneOpen} aria-hidden="true">›</span>
+          Done <span class="count">{secs.done.length}</span>
+        </button>
+      </h2>
+      {#if doneOpen}
+        {#each secs.done as c (c.key)}{@render cardFor(c)}{/each}
       {/if}
-    </div>
-  {/each}
+    </section>
+  {/if}
 
   <footer>
+    <span class="keys">
+      <span><kbd>J</kbd><kbd>K</kbd> move</span>
+      <span><kbd>1</kbd>–<kbd>9</kbd> answer</span>
+      <span><kbd>T</kbd> type</span>
+      <span><kbd>R</kbd> reply</span>
+      <span><kbd>Esc</kbd> close / undo</span>
+    </span>
     {#if view.show_idle}
-      <button onclick={() => act(api.setShowIdle(false))}>Hide idle</button>
+      <button class="idle" onclick={() => act(api.setShowIdle(false))}>Hide idle</button>
     {:else if view.hidden_idle > 0}
-      <button onclick={() => act(api.setShowIdle(true))}>Show {view.hidden_idle} idle</button>
+      <button class="idle" onclick={() => act(api.setShowIdle(true))}>Show {view.hidden_idle} idle</button>
     {/if}
-    <button onclick={() => act(api.openSettings())}>Settings</button>
   </footer>
 </main>
 
 <style>
-  :global(html, body) {
-    margin: 0;
-    height: 100%;
+  .panel {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 0 12px 0;
+    /* The window is user-resizable: fill it and scroll the cards. */
+    height: 100vh;
+    overflow-y: auto;
+    background: var(--canvas);
   }
   .top {
     position: sticky;
-    top: -8px; /* cancels the panel's padding so the strip sits flush at the top */
-    z-index: 1;
-    margin: -8px -8px 0;
-    padding: 0 8px 4px;
-    background: Canvas;
-    color: CanvasText;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0 -12px;
+    padding: 0 12px 8px;
+    background: var(--glass-strong);
+    backdrop-filter: blur(24px);
+    border-bottom: 1px solid var(--hairline);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
   }
   .grip {
     flex: none;
     height: 12px;
-    margin: 0 -8px;
+    margin: 0 -12px;
     cursor: grab;
-    background: linear-gradient(transparent 4px, rgba(128, 128, 128, 0.35) 4px 6px, transparent 6px);
+    background: linear-gradient(transparent 4px, rgba(255, 255, 255, 0.14) 4px 6px, transparent 6px) center / 36px 12px no-repeat;
   }
-  .panel {
+  header {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    min-height: 28px;
+  }
+  /* Only the bare header takes the drag: Tauri ignores children. */
+  header > h1,
+  header > .summary {
+    pointer-events: none;
+  }
+  h1 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .summary {
+    flex: 1;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .dots {
+    display: flex;
+    gap: 7px;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--slate);
+  }
+  .dot[data-dot="online"] {
+    background: var(--emerald);
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
+  }
+  .dot[data-dot="syncing"] {
+    background: var(--cyan);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  .dot[data-dot="error"] {
+    background: var(--crimson);
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.3;
+    }
+  }
+  .gear {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    color: var(--text-muted);
+    background: none;
+    border: 0;
+    border-radius: var(--r);
+    cursor: pointer;
+  }
+  .gear:hover {
+    background: var(--fill-hover);
+  }
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .fchip {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    height: 22px;
+    padding: 0 9px;
+    font: 500 12px var(--font-sans);
+    color: var(--text-muted);
+    background: var(--fill-subtle);
+    border: 1px solid var(--stroke);
+    border-radius: var(--r-full);
+    cursor: pointer;
+  }
+  .fchip[aria-pressed="true"] {
+    color: var(--cyan-bright);
+    background: var(--cyan-fill);
+    border-color: rgba(6, 182, 212, 0.4);
+  }
+  .n {
+    font: 500 10.5px var(--font-mono);
+    opacity: 0.7;
+  }
+  section {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding: 8px;
-    font: 13px system-ui, sans-serif;
-    /* The window is user-resizable: fill it and scroll the cards. */
-    box-sizing: border-box;
-    height: 100vh;
-    overflow-y: auto;
   }
-  .chip {
-    margin-right: 6px;
-    font-size: 11px;
-    opacity: 0.8;
+  .sec {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin: 0;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
   }
-  .reason {
+  .sec.needs {
+    color: var(--amber-text);
+  }
+  .sec.working {
+    color: var(--cyan-bright);
+  }
+  .count {
+    padding: 0 6px;
+    font: 500 10.5px/16px var(--font-mono);
+    background: var(--fill-subtle);
+    border-radius: var(--r-full);
+  }
+  .toggle {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 0;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    cursor: pointer;
+  }
+  .chev {
     display: inline-block;
-    max-width: 14em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    vertical-align: bottom;
+    transition: transform 120ms;
+  }
+  .chev.open {
+    transform: rotate(90deg);
+  }
+  .slot {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
   .error {
-    color: #c00;
+    color: var(--crimson-text);
+    background: var(--crimson-fill);
+    padding: 6px 10px;
+    border-radius: var(--r);
+  }
+  .machine-alert {
+    font-size: 12px;
+    color: var(--crimson-text);
+    background: var(--crimson-fill);
+    padding: 6px 10px;
+    border-radius: var(--r);
+  }
+  .empty {
+    margin: 24px 0 0;
+    text-align: center;
+    font-size: 15px;
+    font-weight: 500;
+  }
+  .hint {
+    margin: -8px 0 0;
+    text-align: center;
+    color: var(--text-dim);
   }
   footer {
+    position: sticky;
+    bottom: 0;
     display: flex;
-    gap: 8px;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    margin: auto -12px 0;
+    padding: 8px 12px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--canvas);
+    border-top: 1px solid var(--hairline);
+  }
+  .keys {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+  }
+  .keys span {
+    display: inline-flex;
+    gap: 3px;
+    align-items: center;
+  }
+  kbd {
+    display: inline-grid;
+    place-items: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 3px;
+    font: 500 10px var(--font-mono);
+    color: rgba(255, 255, 255, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: var(--r-sm);
+  }
+  .idle {
+    flex: none;
+    padding: 2px 8px;
+    font: 500 11px var(--font-sans);
+    color: var(--text-muted);
+    background: var(--fill-subtle);
+    border: 1px solid var(--stroke);
+    border-radius: var(--r);
+    cursor: pointer;
   }
 </style>

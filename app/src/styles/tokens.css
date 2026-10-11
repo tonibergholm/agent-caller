@@ -1,0 +1,79 @@
+/* Obsidian Cockpit tokens (docs/design/obsidian-cockpit.md). Fonts are bundled
+   from npm packages (OFL-1.1, see app/licenses); nothing loads from the network. */
+@import "@fontsource-variable/geist/wght.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
+
+:root {
+  color-scheme: dark;
+
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --canvas: #090d16;
+  --canvas-deep: #05080f;
+  --glass: rgba(15, 23, 42, 0.72);
+  --glass-strong: rgba(9, 13, 22, 0.88);
+  --code-bg: #020408;
+  --hairline: rgba(255, 255, 255, 0.08);
+  --stroke: rgba(255, 255, 255, 0.09);
+  --fill-subtle: rgba(255, 255, 255, 0.04);
+  --fill-hover: rgba(255, 255, 255, 0.08);
+
+  --text: #dfe2ef;
+  --text-muted: #bcc9cd;
+  --text-dim: #869397;
+  --slate: #64748b;
+
+  --cyan: #06b6d4;
+  --cyan-bright: #4cd7f6;
+  --cyan-fill: rgba(6, 182, 212, 0.1);
+  --emerald: #10b981;
+  --emerald-fill: rgba(16, 185, 129, 0.1);
+  --amber: #f59e0b;
+  --amber-text: #fcd34d;
+  --amber-fill: rgba(245, 158, 11, 0.12);
+  --crimson: #ef4444;
+  --crimson-text: #ffb4ab;
+  --crimson-fill: rgba(239, 68, 68, 0.14);
+  --indigo: #6366f1;
+
+  --r-sm: 0.25rem;
+  --r: 0.5rem;
+  --r-md: 0.75rem;
+  --r-full: 9999px;
+
+  --glow: 0 0 20px -4px rgba(6, 182, 212, 0.15);
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--canvas);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.25rem;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

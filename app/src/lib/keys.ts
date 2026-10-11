@@ -10,6 +10,8 @@ export type KeyInput = {
   composing: boolean;
   keyCode: number;
   inField: boolean;
+  /** Which text field has focus: the reply box or a card's typed-answer input. */
+  field?: { kind: "reply" | "answer"; cardKey: string | null };
 };
 export type Effect =
   | { kind: "none" }
@@ -24,6 +26,8 @@ export type Effect =
     }
   | { kind: "openReply"; cardKey: string }
   | { kind: "submitReply"; cardKey: string }
+  | { kind: "submitAnswer"; cardKey: string }
+  | { kind: "focusAnswer"; cardKey: string }
   | { kind: "markSeen"; cardKey: string }
   | { kind: "escape" };
 
@@ -31,6 +35,7 @@ const NONE: Effect = { kind: "none" };
 
 export function fromEvent(e: KeyboardEvent): KeyInput {
   const target = e.target as HTMLElement | null;
+  const kind = target?.dataset?.field;
   return {
     key: e.key,
     shift: e.shiftKey,
@@ -40,6 +45,10 @@ export function fromEvent(e: KeyboardEvent): KeyInput {
     composing: e.isComposing,
     keyCode: e.keyCode,
     inField: target?.tagName === "TEXTAREA",
+    field:
+      kind === "reply" || kind === "answer"
+        ? { kind, cardKey: target?.closest<HTMLElement>("[data-key]")?.dataset.key ?? null }
+        : undefined,
   };
 }
 
@@ -65,7 +74,10 @@ export function onKey(
   if (ev.key === "Escape") return { state: st, effect: { kind: "escape" } };
 
   if (ev.inField) {
-    if (ev.key === "Enter" && !ev.shift && st.replyFor !== null) {
+    if (ev.key === "Enter" && !ev.shift && ev.field?.kind === "answer" && ev.field.cardKey !== null) {
+      return { state: st, effect: { kind: "submitAnswer", cardKey: ev.field.cardKey } };
+    }
+    if (ev.key === "Enter" && !ev.shift && ev.field?.kind !== "answer" && st.replyFor !== null) {
       return { state: st, effect: { kind: "submitReply", cardKey: st.replyFor } };
     }
     return none;
@@ -103,6 +115,9 @@ export function onKey(
         revision: pending.revision,
       },
     };
+  }
+  if (key === "t" && card.free_text_answerable) {
+    return { state: st, effect: { kind: "focusAnswer", cardKey: card.key } };
   }
   if (key === "r" && card.can_reply) {
     return { state: st, effect: { kind: "openReply", cardKey: card.key } };

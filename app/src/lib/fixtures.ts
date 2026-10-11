@@ -107,6 +107,7 @@ export function fakeApi(
     calls,
     pick: rec("pick", undefined),
     reply: rec("reply", "action-2"),
+    answerText: rec("answerText", "action-3"),
     cancel: rec("cancel", true),
     escape: rec("escape", opts.escapeReturns ?? false),
     markSeen: rec("markSeen", undefined),

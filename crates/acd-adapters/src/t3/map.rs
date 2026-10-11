@@ -240,17 +240,12 @@ pub fn request_obs(
             obs.kind = RequestKind::Question;
             obs.title = qs[0].header.clone().unwrap_or_else(|| "Question".into());
             obs.detail = qs[0].text.clone();
-            // Only a single single-select question with options can be
-            // answered. TODO(panel redesign): a question with no options and
-            // free text is answerable by text alone, but the app has no text
-            // input yet and would show an answerable card with no controls.
-            // Once clients render one, relax `!q0.options.is_empty()` to
-            // `(!q0.options.is_empty() || free_text)`; `respond_payload`
-            // already handles it. Until then such a question is read-only
-            // with `free_text` false, so the model never claims an answer
-            // the clients cannot give.
+            // Only a single single-select question can be answered: by one of
+            // its options, or, with none, by typed text alone (the panel
+            // renders a text input). A zero-option question T3 does not let
+            // the user type into stays read-only.
             let free_text = takes_free_text(q0, provider);
-            if questions.len() == 1 && !q0.multi_select && !q0.options.is_empty() {
+            if questions.len() == 1 && !q0.multi_select && (!q0.options.is_empty() || free_text) {
                 answer = TargetAnswer::Question {
                     question_id: q0.id.clone(),
                     choices: q0
@@ -376,12 +371,28 @@ mod tests {
     }
 
     #[test]
-    fn zero_option_questions_stay_read_only_whatever_the_provider_says() {
+    fn zero_option_questions_are_answerable_by_text_when_free_text_is_allowed() {
         for (provider, allow) in [
             (Some("claudeAgent"), None),
             (Some("claudeAgent"), Some(true)),
             (Some("codex"), Some(true)),
+        ] {
+            let (obs, target) = obs_for(provider, &question_view(true, allow));
+            assert_eq!(obs.answer_path, AnswerPath::T3, "{provider:?} {allow:?}");
+            assert!(obs.free_text && obs.options.is_empty());
+            assert!(matches!(
+                target.answer,
+                TargetAnswer::Question { free_text: true, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn zero_option_questions_stay_read_only_when_text_is_not_allowed() {
+        for (provider, allow) in [
             (Some("claudeAgent"), Some(false)),
+            (Some("codex"), None),
+            (None, None),
         ] {
             let (obs, target) = obs_for(provider, &question_view(true, allow));
             assert_eq!(obs.answer_path, AnswerPath::None, "{provider:?} {allow:?}");
