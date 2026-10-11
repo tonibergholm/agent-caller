@@ -124,7 +124,6 @@ pub fn toggle(app: &AppHandle) {
     }
 }
 
-#[allow(dead_code)] // Public thread-safe operation; toggle uses its main-thread implementation.
 pub fn show(app: &AppHandle) {
     let handle = app.clone();
     if let Err(error) = app.run_on_main_thread(move || show_on_main_thread(&handle)) {

@@ -102,13 +102,17 @@ impl Controller {
         true
     }
 
-    /// Voice on or off. Either way a new session starts, under the same
+    /// Voice on or off. A change starts a new session (no change does nothing), under the same
     /// lock as admission (B4), and the executor resets: in-flight routing
     /// is dropped, unsent work cancelled, voice text forgotten (spec §6.3)
     /// and the HUD hidden, so a bump never leaves the HUD on a state whose
     /// work was dropped.
     pub fn set_enabled(&self, on: bool) {
         let mut core = self.core.lock().unwrap();
+        // Saving unchanged settings must not cancel a running countdown.
+        if core.enabled == on {
+            return;
+        }
         core.enabled = on;
         core.session += 1;
         self.session_tx.send_replace(core.session);

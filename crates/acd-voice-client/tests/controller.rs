@@ -106,6 +106,19 @@ async fn hud_cancel_during_the_countdown_sends_nothing() {
     assert!(frames(&r.f, "request.answer").is_empty());
 }
 
+/// Saving settings unchanged must not cancel a running countdown.
+#[tokio::test]
+async fn a_redundant_set_enabled_leaves_a_countdown_running() {
+    let r = rig(vec![pending_agent()], None, Display::Acks).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.text_input("approve".into(), true).await.unwrap();
+    hud_until(&r.sink, "countdown", countdown_started).await;
+    r.voice.set_enabled(true);
+    let sent = frame(&r.f, "request.answer").await;
+    assert_eq!(sent["option_id"].as_str(), Some("allow"));
+    assert!(!r.sink.huds.lock().unwrap().iter().any(|(_, h)| *h == Hud::Hidden), "the HUD was not reset");
+}
+
 #[tokio::test]
 async fn a_second_command_cancels_the_running_countdown_at_once() {
     let r = rig(vec![pending_agent()], None, Display::Acks).await;
@@ -312,10 +325,11 @@ async fn a_lagged_outcome_stream_cancels_the_unfired_voice_action() {
     assert!(frames(&r.f, "request.answer").is_empty(), "the unfired action never sent");
 }
 
-/// Review I1: turning voice "on" while it is on still starts a new session,
-/// which drops the routing in flight; the HUD must not stay on Thinking.
+/// Review I1: a change of the switch starts a new session, which drops the
+/// routing in flight; the HUD must not stay on Thinking. (Re-saving the same
+/// value changes nothing: `a_redundant_set_enabled_leaves_a_countdown_running`.)
 #[tokio::test]
-async fn enabling_an_enabled_voice_does_not_strand_the_hud_on_thinking() {
+async fn disabling_voice_does_not_strand_the_hud_on_thinking() {
     let gate = Arc::new(tokio::sync::Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
     let model: Arc<dyn IntentModel> = Arc::new(Gated { gate: gate.clone(), dropped });
@@ -324,7 +338,7 @@ async fn enabling_an_enabled_voice_does_not_strand_the_hud_on_thinking() {
     let voice = r.voice.clone();
     let old = tokio::spawn(async move { voice.text_input("tell the box claude something".into(), true).await });
     hud_until(&r.sink, "thinking", |h| matches!(h, Hud::Thinking { .. })).await;
-    r.voice.set_enabled(true);
+    r.voice.set_enabled(false);
     assert_eq!(old.await.unwrap(), Ok(()));
     assert_eq!(r.sink.last(), Some(Hud::Hidden));
     gate.notify_waiters();

@@ -7,6 +7,7 @@ mod pairing;
 mod panel;
 mod settings_window;
 mod tray;
+mod voice;
 
 use std::sync::Arc;
 
@@ -53,6 +54,14 @@ fn main() {
             commands::set_hotkey,
             commands::hide_panel,
             commands::open_settings,
+            voice::commands::voice_get_settings,
+            voice::commands::voice_set_settings,
+            voice::commands::voice_publish_presentation,
+            voice::commands::voice_text_input,
+            voice::commands::voice_shown,
+            voice::commands::voice_confirm,
+            voice::commands::voice_choose,
+            voice::commands::voice_cancel,
         ])
         .setup(|app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -78,6 +87,18 @@ fn main() {
             });
             app.manage(commands::AppState {
                 inbox: inbox.clone(),
+            });
+            let voice_path = app.path().app_config_dir()?.join("voice.json");
+            let voice_settings = voice::settings::VoiceSettings::load(&voice_path);
+            let sink = Arc::new(voice::TauriSink::new(app.handle().clone()));
+            // Step 1 has no intent model (D14): the fast path only.
+            let controller = tauri::async_runtime::block_on(async {
+                acd_voice_client::Controller::start(inbox.clone(), None, sink, voice_settings.enabled)
+            });
+            app.manage(voice::VoiceState {
+                controller,
+                settings: std::sync::Mutex::new(voice_settings),
+                path: Some(voice_path),
             });
             tray::build(app.handle())?;
             panel::create(app.handle())?;

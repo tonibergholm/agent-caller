@@ -16,6 +16,8 @@ tauri-build = { version = "=2.7.1", features = [] }
 [dependencies]
 acd-client = { path = "../../crates/acd-client" }
 acd-protocol = { path = "../../crates/acd-protocol" }
+acd-voice = { path = "../../crates/acd-voice" }
+acd-voice-client = { path = "../../crates/acd-voice-client" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
