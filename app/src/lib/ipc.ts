@@ -6,11 +6,14 @@ import type { MachineEntryView } from "./bindings/MachineEntryView";
 export interface Api {
   pick(cardKey: string, requestId: string, optionId: string, revision: number): Promise<void>;
   reply(cardKey: string, text: string): Promise<string>;
+  /** A typed answer to a free-text request; starts the undo countdown. */
+  answerText(cardKey: string, requestId: string, revision: number, text: string): Promise<string>;
   cancel(actionId: string): Promise<boolean>;
   /** Atomic backend cancel of the newest countdown (D9). */
   escape(): Promise<boolean>;
   markSeen(cardKey: string): Promise<void>;
   setShowIdle(on: boolean): Promise<void>;
+  setShowSubagents(on: boolean): Promise<void>;
   hide(): Promise<void>;
   openSettings(): Promise<void>;
   listMachines(): Promise<MachineEntryView[]>;
@@ -29,10 +32,13 @@ export const tauriApi: Api = {
   pick: (cardKey, requestId, optionId, revision) =>
     invoke("pick_option", { cardKey, requestId, optionId, revision }),
   reply: (cardKey, text) => invoke("send_reply", { cardKey, text }),
+  answerText: (cardKey, requestId, revision, text) =>
+    invoke("answer_text", { cardKey, requestId, revision, text }),
   cancel: (actionId) => invoke("cancel_action", { actionId }),
   escape: () => invoke("escape"),
   markSeen: (cardKey) => invoke("mark_seen", { cardKey }),
   setShowIdle: (on) => invoke("set_show_idle", { on }),
+  setShowSubagents: (on) => invoke("set_show_subagents", { on }),
   hide: () => invoke("hide_panel"),
   openSettings: () => invoke("open_settings"),
   listMachines: () => invoke("list_machines"),

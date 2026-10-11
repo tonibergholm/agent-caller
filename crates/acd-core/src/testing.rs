@@ -67,7 +67,7 @@ pub fn test_machine() -> Machine {
 pub fn agent_obs(id: &str) -> AgentObs {
     AgentObs {
         id: id.into(), source: Source::Herdr, kind: AgentKind::Claude, title: "agent".into(),
-        cwd: None, project: None, state: AgentState::Working, failed: false, last_message: None, can_send: true,
+        cwd: None, project: None, state: AgentState::Working, failed: false, last_message: None, can_send: true, role: AgentRole::Main, parent_title: None,
     }
 }
 

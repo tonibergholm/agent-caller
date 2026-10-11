@@ -129,6 +129,20 @@ pub enum FrameChange {
 /// taken to be macOS refitting windows rather than the user.
 pub const SCREEN_CHANGE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Whether a user change at `changed_at` happened within `SCREEN_CHANGE_WINDOW`
+/// before or after the last display configuration change.
+pub fn near_screen_change(changed_at: std::time::Instant, screen_change: Option<std::time::Instant>) -> bool {
+    let Some(screen) = screen_change else {
+        return false;
+    };
+    let gap = if changed_at >= screen {
+        changed_at - screen
+    } else {
+        screen - changed_at
+    };
+    gap <= SCREEN_CHANGE_WINDOW
+}
+
 /// `expected` is the target of a recent `place()`, if still within its window.
 /// `since_screen_change` is the time since the last display configuration
 /// change, if there has been one. Our own placement wins; a change right after
@@ -296,6 +310,20 @@ mod tests {
         assert!(is_programmatic(&f(100.0, 100.0, 440.0, 560.0), &target));
         // A user drag to another place and size.
         assert!(!is_programmatic(&f(300.0, 200.0, 600.0, 700.0), &target));
+    }
+
+    #[test]
+    fn a_change_next_to_a_screen_change_is_discarded_on_either_side() {
+        use std::time::{Duration, Instant};
+        let base = Instant::now();
+        let at = |ms| base + Duration::from_millis(ms);
+        assert!(near_screen_change(at(10_000), Some(at(10_500))));
+        assert!(near_screen_change(at(10_500), Some(at(10_000))));
+        assert!(near_screen_change(at(12_000), Some(at(10_000))));
+        assert!(near_screen_change(at(10_000), Some(at(12_000))));
+        assert!(!near_screen_change(at(12_001), Some(at(10_000))));
+        assert!(!near_screen_change(at(10_000), Some(at(12_001))));
+        assert!(!near_screen_change(at(10_000), None));
     }
 
     #[test]

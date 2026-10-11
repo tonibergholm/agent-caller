@@ -224,6 +224,8 @@ fn agent_serializes_to_wire_shape() {
         last_message: Some("done?".into()),
         pending: Some(permission()),
         can_send: true,
+        role: AgentRole::Subagent,
+        parent_title: Some("Plan the rollout".into()),
     };
     let v = serde_json::to_value(&a).unwrap();
     assert_eq!(
@@ -232,8 +234,37 @@ fn agent_serializes_to_wire_shape() {
             "id": "t3:th_1", "machine_id": "m", "source": "t3", "kind": "codex", "title": "fix bug",
             "cwd": null, "project": "app", "state": "needs_you", "state_since": "2026-10-07T12:00:00.000Z",
             "failed": false, "last_message": "done?", "pending": serde_json::to_value(permission()).unwrap(),
-            "can_send": true
+            "can_send": true, "role": "subagent", "parent_title": "Plan the rollout"
         })
     );
     assert_eq!(serde_json::from_value::<Agent>(v).unwrap(), a);
+}
+
+#[test]
+fn an_agent_without_role_fields_is_a_main_agent() {
+    let mut v = serde_json::to_value(Agent {
+        id: "a".into(),
+        machine_id: "m".into(),
+        source: Source::Hooks,
+        kind: AgentKind::Claude,
+        title: "t".into(),
+        cwd: None,
+        project: None,
+        state: AgentState::Idle,
+        state_since: opened_at(),
+        failed: false,
+        last_message: None,
+        pending: None,
+        can_send: false,
+        role: AgentRole::Main,
+        parent_title: None,
+    })
+    .unwrap();
+    // An older server sends neither field; a newer one may send a role this build does not know.
+    v.as_object_mut().unwrap().remove("role");
+    v.as_object_mut().unwrap().remove("parent_title");
+    let a: Agent = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!((a.role, a.parent_title), (AgentRole::Main, None));
+    v["role"] = json!("something_new");
+    assert_eq!(serde_json::from_value::<Agent>(v).unwrap().role, AgentRole::Main);
 }

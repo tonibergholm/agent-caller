@@ -37,6 +37,10 @@ pub struct Settings {
     pub hotkey: String,
     #[serde(default)]
     pub show_idle: bool,
+    /// Show agents another agent spawned (T3 subagent threads). Off by
+    /// default: they usually cannot be answered here.
+    #[serde(default)]
+    pub show_subagents: bool,
     #[serde(default)]
     pub machines: Vec<MachineEntry>,
 }
@@ -149,6 +153,7 @@ impl Settings {
             client_id: uuid::Uuid::new_v4().to_string(),
             hotkey: DEFAULT_HOTKEY.into(),
             show_idle: false,
+            show_subagents: false,
             machines: vec![MachineEntry {
                 key: LOCAL_KEY.into(),
                 name: "This Mac".into(),

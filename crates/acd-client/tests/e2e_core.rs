@@ -29,6 +29,7 @@ fn inbox(d: &common::Daemon) -> Arc<Inbox> {
         client_id: "11111111-1111-4111-8111-111111111111".into(),
         hotkey: DEFAULT_HOTKEY.into(),
         show_idle: false,
+        show_subagents: false,
         machines: vec![MachineEntry {
             key: "m1".into(),
             name: "Test machine".into(),

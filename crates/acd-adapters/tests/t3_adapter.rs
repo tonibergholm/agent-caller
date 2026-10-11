@@ -792,21 +792,31 @@ async fn free_text_is_refused_when_t3_forbids_custom_answers() {
 }
 
 #[tokio::test]
-async fn zero_option_questions_stay_read_only_until_clients_render_a_text_input() {
-    // TODO(panel redesign): flips to answerable with the text input.
-    let (fake, req) = {
-        let fake = FakeT3::start().await;
-        fake.put_thread(shell_thread("a", "running", Some(("rq-1", "user_input"))));
-        fake.set_projection("a", question_with(true, None));
-        let r = rig(fake).await;
-        let req = until("pending", || r.core.agent("t3:a")?.pending).await;
-        (r, req)
-    };
+async fn zero_option_questions_are_answered_by_text_alone() {
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread("a", "running", Some(("rq-1", "user_input"))));
+    fake.set_projection("a", question_with(true, None));
+    let r = rig(fake).await;
+    let req = until("pending", || r.core.agent("t3:a")?.pending).await;
+    assert_eq!(req.answer_path, AnswerPath::T3);
+    assert!(req.free_text && req.options.is_empty());
+    let res = answer_text(&r, &req, "purple", "x1").await;
+    assert_eq!(res.outcome, Some(Outcome::Delivered), "{res:?}");
+    assert_eq!(r.fake.dispatched().len(), 1);
+}
+
+#[tokio::test]
+async fn zero_option_questions_stay_read_only_when_t3_forbids_custom_answers() {
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread("a", "running", Some(("rq-1", "user_input"))));
+    fake.set_projection("a", question_with(true, Some(false)));
+    let r = rig(fake).await;
+    let req = until("pending", || r.core.agent("t3:a")?.pending).await;
     assert_eq!(req.answer_path, AnswerPath::None);
     assert!(!req.free_text && req.options.is_empty());
-    let res = answer_text(&fake, &req, "purple", "x1").await;
+    let res = answer_text(&r, &req, "purple", "x1").await;
     assert_eq!(res.error_code(), Some(ErrorCode::NotAnswerable), "{res:?}");
-    assert!(fake.fake.dispatched().is_empty());
+    assert!(r.fake.dispatched().is_empty());
 }
 
 async fn with_pending_provider(provider: &str, projection: serde_json::Value) -> (Rig, Request) {

@@ -1634,6 +1634,106 @@ async fn rig_hidden_request_with(adapter: Option<Arc<FakeAdapter>>) -> (Rig, Req
 }
 
 #[tokio::test]
+async fn a_revealed_subagent_is_marked_with_its_role_and_parent_title() {
+    let fake = FakeT3::start().await;
+    let mut parent = root("root", "running");
+    parent["title"] = json!("Plan the rollout");
+    fake.put_thread(parent);
+    fake.put_thread(subagent("sub", "idle"));
+    let r = rig_with(fake, None, fast_timing()).await;
+    until("ok", || (t3_state(&r) == SourceState::Ok).then_some(())).await;
+    // The parent is a main agent.
+    let main = until("parent", || agent(&r, "root")).await;
+    assert_eq!((main.role, main.parent_title), (AgentRole::Main, None));
+    r.fake
+        .set_projection("sub", approval_projection("sub", "rq-1", None));
+    r.fake.put_thread(waiting_subagent("sub"));
+    until("request", || pending(&r, "sub")).await;
+    let sub = agent(&r, "sub").unwrap();
+    assert_eq!(sub.role, AgentRole::Subagent);
+    assert_eq!(sub.parent_title.as_deref(), Some("Plan the rollout"));
+    // A fork is a thread the user works in, not a subagent.
+    r.fake.put_thread(fork("fork", "running"));
+    let f = until("fork", || agent(&r, "fork")).await;
+    assert_eq!((f.role, f.parent_title), (AgentRole::Main, None));
+}
+
+fn titled(mut t: serde_json::Value, title: &str) -> serde_json::Value {
+    t["title"] = json!(title);
+    t
+}
+
+#[tokio::test]
+async fn a_subagent_follows_its_parent_being_renamed() {
+    let fake = FakeT3::start().await;
+    fake.put_thread(titled(root("root", "running"), "First name"));
+    fake.set_projection("sub", approval_projection("sub", "rq-1", None));
+    fake.put_thread(waiting_subagent("sub"));
+    let r = rig_with(fake, None, fast_timing()).await;
+    until("labelled", || {
+        (agent(&r, "sub")?.parent_title.as_deref() == Some("First name")).then_some(())
+    })
+    .await;
+    r.fake.put_thread(titled(root("root", "running"), "Second name"));
+    until("renamed", || {
+        (agent(&r, "sub")?.parent_title.as_deref() == Some("Second name")).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_subagent_loses_the_title_of_a_parent_that_is_archived_or_removed() {
+    let fake = FakeT3::start().await;
+    fake.put_thread(titled(root("root", "running"), "Plan"));
+    fake.set_projection("sub", approval_projection("sub", "rq-1", None));
+    fake.put_thread(waiting_subagent("sub"));
+    let r = rig_with(fake, None, fast_timing()).await;
+    until("labelled", || {
+        (agent(&r, "sub")?.parent_title.as_deref() == Some("Plan")).then_some(())
+    })
+    .await;
+    let mut archived = titled(root("root", "running"), "Plan");
+    archived["archivedAt"] = json!("2026-10-08T07:00:00.000Z");
+    r.fake.put_thread(archived);
+    until("cleared", || {
+        let a = agent(&r, "sub")?;
+        a.parent_title.is_none().then_some(())
+    })
+    .await;
+    assert!(agent(&r, "root").is_none());
+}
+
+#[tokio::test]
+async fn a_subagent_listed_before_its_parent_still_gets_the_parent_title() {
+    let fake = FakeT3::start().await;
+    // The child is put first, so the snapshot lists it before the parent.
+    fake.set_projection("sub", approval_projection("sub", "rq-1", None));
+    fake.put_thread(waiting_subagent("sub"));
+    fake.put_thread(titled(root("root", "running"), "Plan the rollout"));
+    let r = rig_with(fake, None, fast_timing()).await;
+    until("labelled", || {
+        (agent(&r, "sub")?.parent_title.as_deref() == Some("Plan the rollout")).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_subagent_of_a_hidden_parent_still_names_it() {
+    let fake = FakeT3::start().await;
+    let mut parent = titled(root("root", "idle"), "Put away");
+    parent["settledOverride"] = json!("settled");
+    fake.put_thread(parent);
+    fake.set_projection("sub", approval_projection("sub", "rq-1", None));
+    fake.put_thread(waiting_subagent("sub"));
+    let r = rig_with(fake, None, fast_timing()).await;
+    until("labelled", || {
+        (agent(&r, "sub")?.parent_title.as_deref() == Some("Put away")).then_some(())
+    })
+    .await;
+    assert!(agent(&r, "root").is_none(), "the parent itself stays hidden");
+}
+
+#[tokio::test]
 async fn hidden_thread_shows_while_it_has_a_request_and_resolves_terminal() {
     let (r, req) = rig_hidden_request().await;
     let (_, mut rx) = r.core.attach(None);
