@@ -1180,7 +1180,8 @@ Evidence: gate 3, a live check on T3 `v0.0.46-nightly.20261008.2801`
   tags, bad literals) or `Interrupt`.
 - `Ping` gets `Pong`. The server never pings, so acd does. A server
   shutdown closes sockets with code 1001.
-- acd accepts messages and frames up to 256 MiB. A thread stream starts with
+- acd accepts messages and frames up to 256 MiB (and logs at info any
+  message over 16 MiB, size only). A thread stream starts with
   the full thread snapshot, and a busy thread exceeds 16 MiB (one real
   snapshot was 23.7 MB), so a lower cap dropped the connection on every
   discovery pass.
@@ -1188,19 +1189,27 @@ Evidence: gate 3, a live check on T3 `v0.0.46-nightly.20261008.2801`
 **Visibility.** The shell lists every thread, including subagent threads
 and ones the user has put away. acd shows a thread only when all hold:
 
-- `lineage.parentThreadId` is absent or null (a subagent thread has it);
-- it is not settled: `settledOverride` is not `"settled"` and `settledAt` is
-  null or absent; `settledOverride: "unsettled"` wins over `settledAt`, and
-  an `unsettledAt` at or after `settledAt` counts as unsettled;
+- `lineage.relationshipToParent` is not `"subagent"`. Forks also set
+  `parentThreadId`, but they are threads the user works in and stay
+  visible;
+- it is not settled: `settledOverride` is not `"settled"` (T3 writes `null`,
+  `"settled"` or `"active"`; unsettling or pinning writes `"active"`). acd
+  ignores `settledAt`;
 - it is not snoozed: `snoozedUntil` is null, absent or in the past.
 
 A hidden thread is treated like an archived one: no agent, no discovery
-stream, no request stream. It becomes visible anyway while it needs the
-user: shell `status` is `waiting`, or `pendingRuntimeRequest` is set. Its
-streams then open as for any visible thread, and it is hidden again once
-neither holds. acd keeps the shell entries of hidden threads, so a snooze
-that ends shows the thread on the next tick. Missing or unreadable fields
-count as visible, so older T3 versions keep working.
+stream, no request stream. It becomes visible anyway while the shell lists
+a `pendingRuntimeRequest` for it (a bare `waiting` status does not reveal
+it). Its streams then open as for any visible thread. While acd holds an
+open request for the thread, the agent stays until that request has ended,
+so the request resolves with its real outcome (`terminal` or `inbox`) and
+is not lost with the agent; then the thread is hidden again. acd keeps the
+shell entries of hidden threads, so a snooze that ends shows the thread on
+the next tick. A hidden thread keeps the session claim acd learned while it
+was visible, so the Codex hooks adapter still treats its session as
+T3-owned; a thread that was never visible has no claim, because the shell
+does not carry the session id (only a thread stream does). Missing or
+unreadable fields count as visible, so older T3 versions keep working.
 
 A shell `status` of `completed` with a non-empty `pendingBackgroundTasks`
 maps to `working`: T3 still shows that thread as busy.
