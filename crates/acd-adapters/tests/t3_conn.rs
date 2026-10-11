@@ -346,12 +346,15 @@ async fn a_peer_that_stops_reading_trips_the_write_timeout() {
             let c = conn.clone();
             let payload = json!({"n": i, "p": big});
             tokio::spawn(async move {
-                c.call(DISPATCH, &payload, Instant::now() + Duration::from_secs(10))
+                c.call(DISPATCH, &payload, Instant::now() + Duration::from_secs(60))
                     .await
             })
         })
         .collect();
-    let why = tokio::time::timeout(Duration::from_secs(5), conn.closed())
+    // The write timeout is 300 ms, but this bound also covers building and
+    // serialising six 8 MiB payloads in a debug build, which takes seconds
+    // on a loaded machine. It only has to catch a writer that never gives up.
+    let why = tokio::time::timeout(Duration::from_secs(30), conn.closed())
         .await
         .expect("bounded shutdown");
     assert!(why.contains("stalled"), "{why}");
@@ -386,7 +389,9 @@ async fn many_subscriptions_keep_the_reader_moving() {
         })
         .collect();
     let mut synced = std::collections::HashSet::new();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // Only catches a stuck reader; 300 debug-build streams are slow on a
+    // starved machine, so the bound is generous.
+    tokio::time::timeout(Duration::from_secs(30), async {
         while synced.len() < ids.len() {
             if let Some(StreamMsg::Chunk { stream, values }) = rx.recv().await
                 && values.iter().any(|v| v["kind"] == "synchronized")

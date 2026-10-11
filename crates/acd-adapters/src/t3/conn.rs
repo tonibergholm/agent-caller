@@ -6,14 +6,18 @@
 //! connection. Calls use their own lane, which the writer serves only when
 //! the control lane is empty. Every socket write runs under a deadline.
 use std::collections::{HashMap, HashSet};
+use std::io::IoSlice;
 use std::net::IpAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -23,7 +27,7 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, Uri};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
+use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 
 use super::wire::{
     ExitValue, Failure, PING_FRAME, ServerFrame, ack_frame, failure, interrupt_frame, parse_frames,
@@ -48,7 +52,64 @@ const CANCELLED: u8 = 2;
 const FAILED: u8 = 3;
 const WRITTEN: u8 = 4;
 
-type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type Ws = WebSocketStream<ProgressStream>;
+
+/// When bytes last arrived from T3.
+type RxClock = Arc<Mutex<Instant>>;
+
+/// The socket, noting every read that returns bytes. Liveness has to follow
+/// bytes, not whole messages: T3's pong queues behind a large frame, so on a
+/// slow link or a slow machine a message-level clock would see no sign of
+/// life for as long as the frame takes to arrive.
+struct ProgressStream {
+    inner: TcpStream,
+    clock: RxClock,
+}
+
+impl AsyncRead for ProgressStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let r = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if matches!(r, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            *self.clock.lock().expect("last_rx") = Instant::now();
+        }
+        r
+    }
+}
+
+impl AsyncWrite for ProgressStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ConnTiming {
@@ -173,7 +234,9 @@ struct Core {
     calls: Mutex<HashMap<String, oneshot::Sender<ExitValue>>>,
     streams: Mutex<HashSet<String>>,
     next: AtomicU64,
-    last_rx: Mutex<Instant>,
+    last_rx: RxClock,
+    /// Set while the reader decodes a message it has fully received.
+    decoding: AtomicBool,
     hooks: Hooks,
 }
 
@@ -307,12 +370,26 @@ pub async fn connect(
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE))
         .max_frame_size(Some(MAX_MESSAGE));
-    let ws = match timeout(
-        timing.connect,
-        connect_async_with_config(request, Some(config), true),
-    )
-    .await
-    {
+    let clock: RxClock = Arc::new(Mutex::new(Instant::now()));
+    let uri = request.uri().clone();
+    let host = uri
+        .host()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let port = uri.port_u16().unwrap_or(80);
+    let dial = async {
+        let tcp = TcpStream::connect((host, port))
+            .await
+            .map_err(tungstenite::Error::Io)?;
+        let _ = tcp.set_nodelay(true);
+        let stream = ProgressStream {
+            inner: tcp,
+            clock: clock.clone(),
+        };
+        client_async_with_config(request, stream, Some(config)).await
+    };
+    let ws = match timeout(timing.connect, dial).await {
         Err(_) => return Err(unreachable(&"connect timed out")),
         Ok(Ok((ws, _response))) => ws,
         Ok(Err(tungstenite::Error::Http(resp))) => {
@@ -324,10 +401,10 @@ pub async fn connect(
         }
         Ok(Err(e)) => return Err(unreachable(&e)),
     };
-    Ok(start(ws, timing))
+    Ok(start(ws, clock, timing))
 }
 
-fn start(ws: Ws, timing: &ConnTiming) -> (Conn, mpsc::Receiver<StreamMsg>) {
+fn start(ws: Ws, clock: RxClock, timing: &ConnTiming) -> (Conn, mpsc::Receiver<StreamMsg>) {
     let (sink, stream) = ws.split();
     let (control_tx, control_rx) = mpsc::channel(CONTROL_CAPACITY);
     let (calls_tx, calls_rx) = mpsc::channel(CALL_CAPACITY);
@@ -338,7 +415,8 @@ fn start(ws: Ws, timing: &ConnTiming) -> (Conn, mpsc::Receiver<StreamMsg>) {
         calls: Mutex::new(HashMap::new()),
         streams: Mutex::new(HashSet::new()),
         next: AtomicU64::new(1),
-        last_rx: Mutex::new(Instant::now()),
+        last_rx: clock,
+        decoding: AtomicBool::new(false),
         hooks: Hooks {
             paused: watch::channel(false).0,
             fail_after_write: AtomicBool::new(false),
@@ -385,7 +463,13 @@ async fn reader(mut stream: SplitStream<Ws>, core: Arc<Core>, events: mpsc::Send
         if text.len() > OLD_MAX_MESSAGE {
             tracing::info!(bytes = text.len(), "T3 sent a message over 16 MiB");
         }
-        let frames = match parse_frames(text.as_str()) {
+        // Decoding a big frame can outlast the pong timeout; the keepalive
+        // waits it out instead of reading the silence as a dead peer.
+        core.decoding.store(true, SeqCst);
+        let parsed = parse_frames(text.as_str());
+        core.touch();
+        core.decoding.store(false, SeqCst);
+        let frames = match parsed {
             Ok(f) => f,
             Err(_) => {
                 tracing::debug!(frame = %redact_log(&string_fingerprint(text.as_str()).to_string()), "T3 frame cannot be read");
@@ -570,13 +654,21 @@ async fn keepalive(core: Arc<Core>, timing: ConnTiming) {
             r = rx => match r { Ok(at) => at, Err(_) => return },
             _ = closed.wait() => return,
         };
-        tokio::select! {
-            _ = sleep(timing.pong_timeout) => {}
-            _ = closed.wait() => return,
-        }
-        if core.last_rx() < sent_at {
-            core.close("T3 did not answer a ping");
-            return;
+        loop {
+            tokio::select! {
+                _ = sleep(timing.pong_timeout) => {}
+                _ = closed.wait() => return,
+            }
+            // Read the flag first: the reader touches before it clears it,
+            // so a clear flag means any decode that overlapped has touched.
+            let decoding = core.decoding.load(SeqCst);
+            if core.last_rx() >= sent_at {
+                break;
+            }
+            if !decoding {
+                core.close("T3 did not answer a ping");
+                return;
+            }
         }
     }
 }
@@ -791,7 +883,8 @@ mod tests {
             calls: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashSet::new()),
             next: AtomicU64::new(0),
-            last_rx: Mutex::new(Instant::now()),
+            last_rx: Arc::new(Mutex::new(Instant::now())),
+            decoding: AtomicBool::new(false),
             hooks: Hooks {
                 paused: watch::channel(false).0,
                 fail_after_write: AtomicBool::new(false),
