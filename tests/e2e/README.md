@@ -16,8 +16,11 @@ Prerequisites: `just`, `jq` >= 1.6, `curl`, `shasum`, `sandbox-exec` (macOS), `p
 - **Your own acd hooks in `~/.codex/hooks.json` must be untrusted (or disabled).** Codex isolation from your real
   acd rests on that: the scratch project's hooks are trusted, yours are not, so Codex runs only the scratch ones.
   Check with `python3 tests/e2e/codex_hooks.py /tmp/ace2e/proj` (read-only; starts no session, runs no hook) and
-  look for `untrusted`/`modified` on every non-`project` row. `codex-trust.sh add` runs the same check
-  (`codex_hooks.py --verify`) and rolls back with exit 1 if any hook outside the scratch project would run.
+  look for `untrusted`/`modified` on every `acd hook codex` row outside `project`. Your other hooks (own
+  scripts, plugins) may stay trusted. `codex-trust.sh add` runs the same check (`codex_hooks.py --verify`) and
+  rolls back with exit 1 if an acd hook outside the scratch project would run; the Codex scenarios are then
+  skipped. Once you trust acd's hooks for everyday use, the Codex scenarios stay skipped on that machine: Codex
+  runs its own Seatbelt sandbox, so it cannot be wrapped in the `sandbox-exec` deny profile the Claude runs use.
 - At Codex's "Hooks need review" prompt the scripts press **Esc** (continue without trusting). That covers only
   your untrusted hooks; the scratch ones stay active.
 

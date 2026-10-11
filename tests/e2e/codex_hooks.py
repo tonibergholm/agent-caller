@@ -4,7 +4,7 @@ session, runs no hook).
 
   codex_hooks.py CWD                        print source, trust status, event, command stem
   codex_hooks.py CWD --trust-project-hooks  print the [hooks.state] TOML that trusts the project-level hooks only
-  codex_hooks.py CWD --verify               exit 1 unless every non-project hook is untrusted/modified/disabled
+  codex_hooks.py CWD --verify               exit 1 unless every acd hook outside the project is untrusted/modified/disabled
                                             and every project hook is trusted and enabled
 
 Every read from the app-server has a deadline (READ_TIMEOUT seconds, select-based), so a hung server
@@ -68,6 +68,11 @@ def hooks(cwd):
             p.kill()
 
 
+def is_acd(h):
+    cmd = h.get("command") or ""
+    return " hook codex " in cmd and ("acd-managed" in cmd or "/acd" in cmd)
+
+
 def check(hs):
     """Returns a list of problems; empty means the isolation precondition holds."""
     bad = []
@@ -77,8 +82,10 @@ def check(hs):
         if h.get("source") == "project":
             if ts != "trusted" or not en:
                 bad.append("project hook not trusted/enabled (%s, enabled=%s): %s" % (ts, en, who))
-        elif en and ts not in ("untrusted", "modified"):
-            bad.append("NON-project hook would run (%s, enabled=%s): %s" % (ts, en, who))
+        elif is_acd(h) and en and ts not in ("untrusted", "modified"):
+            # Other hooks (the user's own scripts, plugins) may run; only an acd
+            # hook outside the scratch project would reach the user's real acd.
+            bad.append("acd hook outside the scratch project would run (%s, enabled=%s): %s" % (ts, en, who))
     if not any(h.get("source") == "project" for h in hs):
         bad.append("no project hooks listed")
     return bad
