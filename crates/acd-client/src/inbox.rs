@@ -377,6 +377,7 @@ impl Inbox {
             candidate.save(path).map_err(|e| e.to_string())?;
         }
         inner.settings = candidate;
+        drop_hidden_actions(&mut inner);
         drop(inner);
         self.wake();
         Ok(())
@@ -456,6 +457,7 @@ impl Inbox {
     }
     async fn rebuild(&self) {
         let mut inner = self.inner.lock().unwrap();
+        drop_hidden_actions(&mut inner);
         let now = Instant::now();
         inner.notices.retain(|_, (_, expires)| *expires > now);
         let states: HashMap<String, MachineState> = inner
@@ -902,8 +904,33 @@ impl Inbox {
     pub fn set_show_idle(&self, on: bool) {
         let mut inner = self.inner.lock().unwrap();
         inner.settings.show_idle = on;
+        drop_hidden_actions(&mut inner);
         drop(inner);
         self.wake();
+    }
+}
+/// Cancels the countdown of a card the panel no longer shows (a hidden
+/// subagent, a hidden idle agent), so nothing fires unseen and Esc never
+/// cancels an action the user cannot see. No notice: the card is not on screen.
+fn drop_hidden_actions(inner: &mut Inner) {
+    let (show_subagents, show_idle) = (inner.settings.show_subagents, inner.settings.show_idle);
+    let states: Vec<(String, MachineState)> = inner
+        .machines
+        .iter()
+        .filter_map(|m| {
+            m.handle
+                .as_ref()
+                .map(|h| (m.entry.key.clone(), h.state().borrow().clone()))
+        })
+        .collect();
+    for (key, state) in &states {
+        inner.actions.remove_where(|a| {
+            a.machine_key == *key
+                && state.session.agents.get(&a.agent_id).is_some_and(|agent| {
+                    (!show_subagents && agent.role == acd_protocol::AgentRole::Subagent)
+                        || (!show_idle && view::group(agent) == view::CardGroup::Idle)
+                })
+        });
     }
 }
 fn notice(text: &str, tone: NoticeTone) -> Notice {

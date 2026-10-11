@@ -1036,3 +1036,24 @@ async fn show_subagents_is_remembered() {
     assert!(Settings::load_or_init(&path).unwrap().show_subagents);
     assert!(ib.settings().show_subagents);
 }
+
+#[tokio::test]
+async fn hiding_subagents_cancels_their_countdown_so_nothing_fires_unseen() {
+    let (f, c, ib) = setup().await;
+    ib.set_show_subagents(true).unwrap();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), subagent_agent()]}))
+        .await;
+    view_until(&ib, "subagent shown", |v| v.cards.len() == 2).await;
+    ib.pick("m1/a2", "r2", "allow", 1).unwrap();
+    view_until(&ib, "counting", |v| v.actions.len() == 1).await;
+    ib.set_show_subagents(false).unwrap();
+    // Esc has nothing invisible to cancel, and nothing is left to fire.
+    assert!(!ib.escape(), "no hidden action is left for Esc");
+    view_until(&ib, "no actions", |v| v.actions.is_empty() && v.cards.len() == 1).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(answers(&f), 0, "the hidden countdown never fired");
+    // Showing them again does not bring the action back.
+    ib.set_show_subagents(true).unwrap();
+    view_until(&ib, "shown again", |v| v.cards.len() == 2).await;
+    assert!(ib.view().borrow().actions.is_empty());
+}

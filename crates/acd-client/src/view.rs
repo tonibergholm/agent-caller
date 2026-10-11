@@ -272,7 +272,7 @@ pub fn resolution_notice(by: ResolvedBy, reason: Option<ResolveReason>) -> Optio
     }
 }
 
-fn group(agent: &Agent) -> CardGroup {
+pub(crate) fn group(agent: &Agent) -> CardGroup {
     if agent.pending.is_some() || agent.state == AgentState::NeedsYou {
         CardGroup::Request
     } else {

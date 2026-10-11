@@ -812,6 +812,7 @@ impl Reconciler {
         for id in stale {
             self.gone(conn, &id);
         }
+        self.refresh_subagents();
         self.shell_cursor = Some(snapshot.snapshot_sequence);
     }
 
@@ -844,6 +845,61 @@ impl Reconciler {
     /// (`hide_settled_requests` hides it then), so the request resolves with
     /// its real outcome instead of being lost with the agent.
     fn apply_shell(&mut self, conn: &Conn, shell: ShellThread) {
+        let id = shell.id.clone();
+        self.apply_shell_entry(conn, shell);
+        // A renamed, revealed or hidden parent changes its subagents' label.
+        self.refresh_children(&id);
+    }
+
+    /// The title of a subagent's parent thread, whether the parent is shown
+    /// or hidden (settled, snoozed, itself a subagent).
+    fn parent_title(&self, shell: &ShellThread) -> Option<String> {
+        if !shell.is_subagent() {
+            return None;
+        }
+        let parent = shell.parent_thread_id()?;
+        let title = self
+            .threads
+            .get(parent)
+            .and_then(|t| t.shell.as_ref())
+            .or_else(|| self.hidden_shells.get(parent))?
+            .title
+            .as_deref()?;
+        Some(clean_display(title, TITLE_CHARS))
+    }
+
+    /// Publishes again every shown subagent whose parent is `parent`.
+    fn refresh_children(&mut self, parent: &str) {
+        let ids: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|(_, t)| {
+                t.shell
+                    .as_ref()
+                    .is_some_and(|s| s.is_subagent() && s.parent_thread_id() == Some(parent))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.upsert(&id);
+        }
+    }
+
+    /// Publishes again every shown subagent, once the whole snapshot is known
+    /// (a child can arrive before its parent).
+    fn refresh_subagents(&mut self) {
+        let ids: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|(_, t)| t.shell.as_ref().is_some_and(|s| s.is_subagent()))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.upsert(&id);
+        }
+    }
+
+    fn apply_shell_entry(&mut self, conn: &Conn, shell: ShellThread) {
         // An answer in flight keeps the agent too: it is pending in the core
         // until T3 acks the command.
         let keep = self
@@ -979,20 +1035,13 @@ impl Reconciler {
     }
 
     fn upsert(&mut self, thread_id: &str) {
-        // Only a subagent needs its parent's title; collect it before the
+        // Only a subagent needs its parent's title; look it up before the
         // mutable borrow of the thread.
-        let parent_titles: HashMap<String, String> = self
+        let parent_title = self
             .threads
             .get(thread_id)
             .and_then(|t| t.shell.as_ref())
-            .filter(|s| s.is_subagent())
-            .and_then(|s| s.parent_thread_id())
-            .and_then(|p| {
-                let title = self.threads.get(p)?.shell.as_ref()?.title.as_deref()?;
-                Some((p.to_owned(), clean_display(title, TITLE_CHARS)))
-            })
-            .into_iter()
-            .collect();
+            .and_then(|s| self.parent_title(s));
         let Some(t) = self.threads.get_mut(thread_id) else {
             return;
         };
@@ -1001,10 +1050,7 @@ impl Reconciler {
                 let project = s.project_id.as_ref().and_then(|p| self.projects.get(p));
                 let mut obs = map::agent_obs(s, project, &t.hidden);
                 if obs.role == AgentRole::Subagent {
-                    obs.parent_title = s
-                        .parent_thread_id()
-                        .and_then(|p| parent_titles.get(p))
-                        .cloned();
+                    obs.parent_title = parent_title;
                 }
                 obs
             }

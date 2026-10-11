@@ -116,7 +116,7 @@ impl Actions {
     pub fn end_machine(&mut self, machine_key: &str) -> Vec<Action> {
         self.remove_where(|a| a.machine_key == machine_key)
     }
-    fn remove_where(&mut self, mut f: impl FnMut(&Action) -> bool) -> Vec<Action> {
+    pub(crate) fn remove_where(&mut self, mut f: impl FnMut(&Action) -> bool) -> Vec<Action> {
         let mut out = Vec::new();
         let mut i = 0;
         while i < self.items.len() {
