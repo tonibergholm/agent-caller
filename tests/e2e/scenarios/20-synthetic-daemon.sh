@@ -2,7 +2,7 @@
 # SYNTHETIC daemon-level checks.  A hand-made client plays Claude's http hook
 # (hookpost.py) and Codex's command shim is run for real.  These are NOT live agent runs:
 # they show the daemon's behavior at the hook boundary only.  Needs ./up.sh first.
-. "$(dirname "$0")/../lib.sh"
+. "$(dirname "$0")/../lib.sh" || exit 1
 SCEN=20-synthetic; : >"$RESULTS/$SCEN.txt"; FAILED=0
 CODEX_PAYLOAD='{"session_id":"cx-synth","cwd":"/private/tmp/ace2e/synth","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"touch /tmp/ace2e/x-codex.txt"}}'
 shim_ms() { # event -> "<ms> <stdout-bytes> <exit>"

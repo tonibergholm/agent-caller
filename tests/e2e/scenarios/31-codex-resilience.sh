@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # LIVE Codex while acd is up, down, stalled (SIGSTOP) and restarted mid-dialog (spec 13, 14.6, 14.8).
 # Needs ./up.sh, ./codex-trust.sh add and a running Codex pane (30-codex-live.sh starts it).
-. "$(dirname "$0")/../lib.sh"
+. "$(dirname "$0")/../lib.sh" || exit 1
 SCEN=31-codex-resilience; : >"$RESULTS/$SCEN.txt"; FAILED=0
 P=${P:-w1:p1}
 ms() { python3 -c "print(round(($2-$1)*1000))"; }

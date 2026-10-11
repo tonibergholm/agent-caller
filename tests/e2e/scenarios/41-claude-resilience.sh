@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # LIVE Claude while acd is down, stalled, restarted mid-hold, and with a short hold (spec 13, 14.6, 14.8).
 # Needs ./up.sh and a running Claude pane (40-claude-live.sh starts it).
-. "$(dirname "$0")/../lib.sh"
+. "$(dirname "$0")/../lib.sh" || exit 1
 SCEN=41-claude-resilience; : >"$RESULTS/$SCEN.txt"; FAILED=0
 Q=${Q:-w2:p1}
 ms() { python3 -c "print(round(($2-$1)*1000))"; }

@@ -2,7 +2,7 @@
 # Diagnosis of "Esc on a held Claude dialog resolves uncertain" (run doc, bug 1).  Runs Esc 3 times in two
 # variants: (a) with a foreign PermissionRequest command hook in the project settings, (b) without it.
 # Needs ./up.sh.  Best with a daemon built with the temporary `e2ediag` tracing (see the run doc).
-. "$(dirname "$0")/../lib.sh"
+. "$(dirname "$0")/../lib.sh" || exit 1
 SCEN=60-esc-diag; : >"$RESULTS/$SCEN.txt"; FAILED=0
 Q=${Q:-w2:p1}
 ms() { python3 -c "print(round(($2-$1)*1000))"; }

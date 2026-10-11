@@ -1,24 +1,39 @@
 #!/usr/bin/env bash
-# Brings up the isolated environment: scratch herdr session in its own tmux
-# server, scratch acd (fresh `acd init`, moved ports, T3 off), scratch hook
+# Brings up the isolated environment: scratch herdr session (herdr's own headless
+# server), scratch acd (fresh `acd init`, moved ports, T3 off), scratch hook
 # install for Claude, and the acd/1 logger.  Idempotent only after down.sh.
 set -euo pipefail
-. "$(dirname "$0")/lib.sh"
+. "$(dirname "$0")/lib.sh" || exit 1
 
 [ -x "$ACD_BIN" ] || { echo "build first: cargo build --release -p acd --locked" >&2; exit 1; }
 [ ! -e "$E2E_ROOT/acd.pid" ] || { echo "already up (acd.pid exists); run down.sh" >&2; exit 1; }
-mkdir -p "$SCRATCH_HOME/.config/herdr" "$E2E_ROOT" "$SCRATCH_HOME" "$PROJ" "$RESULTS" "$CLAUDE_CFG"
+[ ! -e "$E2E_ROOT/herdr.pid" ] || { echo "already up (herdr.pid exists); run down.sh" >&2; exit 1; }
+mkdir -p "$E2E_ROOT" "$SCRATCH_HOME/.config/herdr" "$PROJ" "$CLAUDE_CFG"
 chmod 700 "$E2E_ROOT"
+# Fresh results every run, so a FAIL from an earlier run cannot leak into this one.
+rm -rf "$RESULTS"; mkdir -p "$RESULTS"
 [ -d "$PROJ/.git" ] || git -C "$PROJ" init -q
 
 printf "onboarding = false\n" >"$SCRATCH_HOME/herdr-config.toml"
-# 1. herdr: own session in an own tmux server (-L), clean environment.
-if ! tmux -L $TMUX_SOCK has-session -t $HERDR_SESSION 2>/dev/null; then
-  clean_env HOME="$SCRATCH_HOME" HERDR_CONFIG_PATH="$SCRATCH_HOME/herdr-config.toml" tmux -L $TMUX_SOCK new-session -d -s $HERDR_SESSION -c "$PROJ" -x 200 -y 50 "herdr --session $HERDR_SESSION" >/dev/null 2>&1
+# 1. herdr: its own headless server (`herdr --session NAME server`), detached, clean environment,
+#    HOME=$SCRATCH_HOME so the session socket is not under the real ~/.config/herdr.
+if [ ! -S "$HERDR_SOCK" ]; then
+  ( exec env -i HOME="$SCRATCH_HOME" PATH="$PATH" TERM=xterm-256color LANG="${LANG:-en_US.UTF-8}" \
+      USER="$USER" SHELL="${SHELL:-/bin/zsh}" TMPDIR="${TMPDIR:-/tmp}" HERDR_CONFIG_PATH="$SCRATCH_HOME/herdr-config.toml" \
+      nohup herdr --session "$HERDR_SESSION" server >"$E2E_ROOT/herdr.log" 2>&1 </dev/null & echo $! >"$E2E_ROOT/herdr.pid" )
+else
+  echo "herdr socket $HERDR_SOCK already exists but no herdr.pid; run down.sh" >&2; exit 1
 fi
 for _ in $(seq 100); do [ -S "$HERDR_SOCK" ] && break; sleep 0.1; done
 [ -S "$HERDR_SOCK" ] || { echo "herdr socket $HERDR_SOCK did not appear" >&2; exit 1; }
-hd workspace create --cwd "$PROJ" --label e2e --no-focus >/dev/null
+pid_cmd_matches "$(cat "$E2E_ROOT/herdr.pid")" "$HERDR_RE" || log "note: herdr.pid does not match the server command; down.sh will use 'herdr server stop'"
+# Two workspaces: w1 (Codex scenarios, P=w1:p1) and w2 (Claude scenarios, Q=w2:p1).  A headless server
+# starts with none, unlike the old tmux-hosted TUI, which came with a default w1.
+hd workspace create --cwd "$PROJ" --label e2e-codex --no-focus >/dev/null
+hd workspace create --cwd "$PROJ" --label e2e-claude --no-focus >/dev/null
+for want in w1:p1 w2:p1; do
+  hd pane list | grep -q "$want" || echo "WARNING: pane $want not found; set P / Q for the scenarios (hd pane list)" >&2
+done
 log "herdr session $HERDR_SESSION up: $(hd pane list | head -3 | tr '\n' ' ')"
 
 # 2. acd: fresh init, then moved ports, T3 off (the default would try the desktop T3).

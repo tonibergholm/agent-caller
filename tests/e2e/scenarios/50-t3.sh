@@ -3,10 +3,12 @@
 # a T3 approval and a T3 single-select question, answered through acd/1.  The T3 server (and so its
 # Claude provider processes) runs under the sandbox-exec deny profile so they cannot reach the user's acd.
 # Also 14.4 for t3 requests (late answer -> request_gone) and 14.5 for T3 follow-ups (exactly once).
-. "$(dirname "$0")/../lib.sh"
+. "$(dirname "$0")/../lib.sh" || exit 1
 SCEN=50-t3; : >"$RESULTS/$SCEN.txt"; FAILED=0
 T3H=$E2E_ROOT/t3home; T3P=$E2E_ROOT/t3proj; T3TOK=$E2E_ROOT/t3.token
 ms() { python3 -c "print(round(($2-$1)*1000))"; }
+# The T3 CLI is always pointed at the scratch data dir explicitly (--base-dir on every subcommand that has
+# state), with T3CODE_HOME as a second guard; the desktop T3 (~/.t3, port 3773) must never be reached.
 t3() { clean_env T3CODE_HOME="$T3H" "$@"; }
 mkdir -p "$T3H" "$T3P"; [ -d "$T3P/.git" ] || { git -C "$T3P" init -q; echo hi >"$T3P/f.txt"; git -C "$T3P" add f.txt; git -C "$T3P" -c user.email=e@e -c user.name=e commit -qm init; }
 write_deny_profile
@@ -25,15 +27,20 @@ cat >"$T3H/userdata/settings.json" <<J
 J
 chmod 600 "$T3H/userdata/settings.json"
 if ! [ -f "$E2E_ROOT/t3.pid" ]; then
-  ( cd "$E2E_ROOT"; clean_env T3CODE_HOME="$T3H" t3 serve --base-dir "$T3H" --port "$T3_PORT" --host 127.0.0.1 --no-browser "$T3P" >"$E2E_ROOT/t3.log" 2>&1 </dev/null & echo $! >"$E2E_ROOT/t3.pid" )
+  # Own session (setsid via python3) so the whole process tree is one group and down.sh can kill the group;
+  # the exec keeps the pid, which is recorded for the ps command-line check in down.sh.
+  ( cd "$E2E_ROOT"; exec env -i HOME="$HOME" PATH="$PATH" TERM=xterm-256color LANG="${LANG:-en_US.UTF-8}" USER="$USER" \
+      SHELL="${SHELL:-/bin/zsh}" TMPDIR="${TMPDIR:-/tmp}" T3CODE_HOME="$T3H" \
+      python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+      t3 serve --base-dir "$T3H" --port "$T3_PORT" --host 127.0.0.1 --no-browser "$T3P" >"$E2E_ROOT/t3.log" 2>&1 </dev/null & echo $! >"$E2E_ROOT/t3.pid" )
 fi
 for _ in $(seq 60); do curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$T3_PORT/" && break; sleep 1; done
 curl -s -o /dev/null -w "%{http_code}" --max-time 2 "http://127.0.0.1:$T3_PORT/" | grep -q 200 || { fail "scratch t3 did not come up: $(tail -3 "$E2E_ROOT/t3.log")"; exit 1; }
 note "scratch T3 on 127.0.0.1:$T3_PORT, T3CODE_HOME=$T3H (desktop T3 untouched)"
-( umask 077; t3 t3 auth session issue --scope orchestration:read --scope orchestration:operate --ttl 2h --token-only >"$T3TOK" 2>/dev/null ) || { fail "token issue failed"; exit 1; }
+( umask 077; t3 t3 auth session issue --base-dir "$T3H" --scope orchestration:read --scope orchestration:operate --ttl 2h --token-only >"$T3TOK" 2>/dev/null ) || { fail "token issue failed"; exit 1; }
 chmod 600 "$T3TOK"; [ -s "$T3TOK" ] || { fail "empty t3 token"; exit 1; }
 # project registered for the scratch server
-t3 t3 project add "$T3P" >/dev/null 2>&1 || true
+t3 t3 project add --base-dir "$T3H" "$T3P" >/dev/null 2>&1 || true
 
 # Point the scratch acd at the scratch T3 (token file in the scratch config dir).
 stop_acd; cp "$T3TOK" "$ACD_CONFIG_DIR/t3.token"; chmod 600 "$ACD_CONFIG_DIR/t3.token"

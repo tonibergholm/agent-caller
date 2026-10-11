@@ -5,8 +5,14 @@
 
 E2E_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$E2E_DIR/../.." && pwd)
-E2E_ROOT=${E2E_ROOT:-/tmp/ace2e}
-case "$E2E_ROOT" in /tmp/ace2e*) ;; *) echo "E2E_ROOT must be under /tmp/ace2e" >&2; return 1 2>/dev/null || exit 1;; esac
+readonly E2E_ROOT=/tmp/ace2e
+# /tmp/ace2e must be a real directory we own: not a symlink, not someone else's.
+if [ -L "$E2E_ROOT" ]; then echo "$E2E_ROOT is a symlink; refusing" >&2; return 1; fi
+if [ -e "$E2E_ROOT" ]; then
+  [ -d "$E2E_ROOT" ] && [ -O "$E2E_ROOT" ] \
+    || { echo "$E2E_ROOT is not a directory owned by you; refusing" >&2; return 1; }
+  case "$(cd "$E2E_ROOT" && pwd -P)" in /tmp/ace2e|/private/tmp/ace2e) ;; *) echo "$E2E_ROOT resolves elsewhere; refusing" >&2; return 1;; esac
+fi
 
 ACD_BIN=${ACD_BIN:-$REPO/target/release/acd}
 export ACD_CONFIG_DIR=$E2E_ROOT/acd
@@ -16,12 +22,11 @@ HERDR_SESSION=ace2e
 # herdr runs with HOME=$SCRATCH_HOME so its session socket is NOT under the real
 # ~/.config/herdr/sessions, which the user's own acd scans (it would adopt our panes).
 HERDR_SOCK=$SCRATCH_HOME/.config/herdr/sessions/$HERDR_SESSION/herdr.sock
-TMUX_SOCK=ace2e
 CLIENT_PORT=${E2E_CLIENT_PORT:-52956}
 HOOK_PORT=${E2E_HOOK_PORT:-52955}
 T3_PORT=${E2E_T3_PORT:-52957}
 for p in $CLIENT_PORT $HOOK_PORT $T3_PORT; do
-  case $p in 47800|47801|3773) echo "port $p belongs to the user's real services" >&2; return 1 2>/dev/null || exit 1;; esac
+  case $p in 47800|47801|3773) echo "port $p belongs to the user's real services" >&2; return 1;; esac
 done
 INBOX_LOG=$E2E_ROOT/inbox.jsonl
 ACD_LOG=$E2E_ROOT/acd.log
@@ -39,12 +44,39 @@ clean_env() {
 }
 
 # Every herdr call goes through the scratch session's socket.
-hd() { HERDR_SOCKET_PATH=$HERDR_SOCK herdr "$@"; }
+hd() {
+  [ -S "$HERDR_SOCK" ] || { echo "scratch herdr socket missing" >&2; return 1; }
+  HERDR_SOCKET_PATH=$HERDR_SOCK herdr "$@"
+}
 inbox() { python3 "$E2E_DIR/inbox.py" -d "$ACD_CONFIG_DIR" "$@"; }
 acd() { HOME=$SCRATCH_HOME HERDR_SOCKET_PATH=$HERDR_SOCK "$ACD_BIN" "$@"; }
-acd_pid() { cat "$E2E_ROOT/acd.pid" 2>/dev/null; }
+# The scratch acd pid, only if the pid file still points at a scratch `acd run` (the scenarios SIGSTOP/CONT it).
+acd_pid() { local p; p=$(cat "$E2E_ROOT/acd.pid" 2>/dev/null) && pid_cmd_matches "$p" "$ACD_RE" && echo "$p"; }
 now_iso() { python3 -c 'from datetime import datetime,timezone;print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]+"Z")'; }
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
+
+# pid_cmd_matches PID REGEX: true when PID is alive and its command line matches REGEX.  Every kill of
+# a pid read from a pid file goes through this, so a stale file cannot kill an unrelated process.
+pid_cmd_matches() { [ -n "${1:-}" ] && ps -p "$1" -o command= 2>/dev/null | grep -Eq -- "$2"; }
+# kill_pidfile FILE REGEX [group]: TERM, wait, KILL a verified pid; with "group" the whole process group.
+kill_pidfile() {
+  local f=$1 re=$2 grp=${3:-} p t=
+  [ -f "$f" ] || return 0
+  p=$(cat "$f" 2>/dev/null)
+  if pid_cmd_matches "$p" "$re"; then
+    [ -n "$grp" ] && [ "$(ps -p "$p" -o pgid= | tr -d ' ')" = "$p" ] && t=-
+    kill -CONT -- "${t}$p" 2>/dev/null; kill -TERM -- "${t}$p" 2>/dev/null
+    for _ in $(seq 50); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
+    kill -0 "$p" 2>/dev/null && kill -KILL -- "${t}$p" 2>/dev/null
+  elif [ -n "$p" ]; then
+    echo "pid file $f: pid $p is not ours (stale); not killing" >&2
+  fi
+  rm -f "$f"; return 0
+}
+ACD_RE='acd run( |$)'
+LOGGER_RE='inbox\.py --name logger'
+T3_RE='--base-dir /tmp/ace2e/t3home|--base-dir /private/tmp/ace2e/t3home'
+HERDR_RE="herdr --session $HERDR_SESSION server"
 
 start_acd() {
   ( cd "$E2E_ROOT"; HOME=$SCRATCH_HOME HERDR_SOCKET_PATH=$HERDR_SOCK RUST_LOG=${RUST_LOG:-debug} \
@@ -52,13 +84,7 @@ start_acd() {
   for _ in $(seq 100); do [ -S "$ACD_CONFIG_DIR/acd.sock" ] && return 0; sleep 0.1; done
   echo "acd did not create acd.sock" >&2; return 1
 }
-stop_acd() {
-  local p; p=$(acd_pid) || return 0
-  [ -n "$p" ] && kill -CONT "$p" 2>/dev/null; [ -n "$p" ] && kill -TERM "$p" 2>/dev/null
-  for _ in $(seq 50); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
-  kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
-  rm -f "$E2E_ROOT/acd.pid"; return 0
-}
+stop_acd() { kill_pidfile "$E2E_ROOT/acd.pid" "$ACD_RE"; }
 
 # Pane helpers.  PANE ids come from `hd pane list`.
 pane_text() { hd pane read "$1" --source visible 2>/dev/null; }
@@ -69,9 +95,11 @@ wait_pane_text() { # pane regex timeout
 }
 
 start_logger() {
+  stop_logger
   python3 "$E2E_DIR/inbox.py" --name logger log --out "$INBOX_LOG" >/dev/null 2>>"$E2E_ROOT/logger.err" </dev/null &
   echo $! >"$E2E_ROOT/logger.pid"
 }
+stop_logger() { kill_pidfile "$E2E_ROOT/logger.pid" "$LOGGER_RE"; }
 epoch_now() { python3 -c 'import time;print(time.time())'; }
 # hookpost: a synthetic Claude http hook (see hookpost.py); clearly not a live Claude.
 hp() { python3 "$E2E_DIR/hookpost.py" --settings "$CLAUDE_CFG/settings.json" --port "$HOOK_PORT" "$@"; }
@@ -89,7 +117,21 @@ note() { echo "      $*" | tee -a "$RESULTS/$SCEN.txt"; }
 # (Not used for Codex: its own seatbelt cannot nest.  Codex is isolated by hook trust instead.)
 DENY_SB=$E2E_ROOT/deny-real-acd.sb
 write_deny_profile() {
-  printf '(version 1)\n(allow default)\n(deny network-outbound (remote tcp "*:47801"))\n(deny network-outbound (remote tcp "*:47800"))\n' >"$DENY_SB"
+  # Deny: connecting to the user's acd (tcp 47800/47801 and its unix sockets) and writing the user's
+  # acd / Claude / Codex hook configuration.  Everything else is allowed.
+  local h=$REAL_HOME
+  cat >"$DENY_SB" <<SB
+(version 1)
+(allow default)
+(deny network-outbound (remote tcp "*:47801"))
+(deny network-outbound (remote tcp "*:47800"))
+(deny network-outbound (remote unix-socket (path-literal "$h/.config/acd/acd.sock")))
+(deny network-outbound (remote unix-socket (path-literal "$h/.config/acd/hook.sock")))
+(deny file-write* (subpath "$h/.config/acd"))
+(deny file-write* (literal "$h/.claude/settings.json"))
+(deny file-write* (literal "$h/.codex/hooks.json"))
+(deny file-write* (literal "$h/.codex/config.toml"))
+SB
 }
 claude_launch() { # pane [extra claude args...]
   local pane=$1; shift

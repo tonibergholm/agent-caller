@@ -2,7 +2,7 @@
 # §13 "running hook install and uninstall twice each" / §14.9 / coexisting permission hooks.
 # Pure file test in scratch dirs; needs no daemon and no agent.  Seeds contain a foreign
 # PermissionRequest hook so coexistence is part of the round trip.
-. "$(dirname "$0")/../lib.sh"
+. "$(dirname "$0")/../lib.sh" || exit 1
 RT=$E2E_ROOT/rt; rm -rf "$RT"; mkdir -p "$RT/home" "$RT/claude" "$RT/codex" "$RT/acd"; chmod 700 "$RT/acd"
 export ACD_CONFIG_DIR=$RT/acd CLAUDE_CONFIG_DIR=$RT/claude CODEX_HOME=$RT/codex
 A() { HOME=$RT/home "$ACD_BIN" "$@"; }

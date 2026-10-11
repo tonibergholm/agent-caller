@@ -3,18 +3,9 @@
 
 e2e_dir := "tests/e2e"
 
-# Build, bring the scratch environment up, run every scenario, tear down.
-e2e: e2e-build e2e-up
-    -{{e2e_dir}}/scenarios/10-hooks-roundtrip.sh
-    -{{e2e_dir}}/scenarios/20-synthetic-daemon.sh
-    {{e2e_dir}}/codex-trust.sh add
-    -{{e2e_dir}}/scenarios/30-codex-live.sh
-    -{{e2e_dir}}/scenarios/31-codex-resilience.sh
-    -{{e2e_dir}}/scenarios/40-claude-live.sh
-    -{{e2e_dir}}/scenarios/41-claude-resilience.sh
-    -{{e2e_dir}}/scenarios/50-t3.sh
-    @just e2e-down
-    @grep -hE '^(PASS|FAIL)' /tmp/ace2e/results/*.txt; true
+# Build, up, every scenario, down (trap-protected; non-zero on any FAIL, interrupt or failed teardown).  See tests/e2e/run-all.sh.
+e2e: e2e-build
+    {{e2e_dir}}/run-all.sh
 
 e2e-build:
     cargo build --release -p acd --locked

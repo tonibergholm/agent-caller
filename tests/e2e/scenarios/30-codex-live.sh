@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # LIVE Codex in the scratch herdr session (embedded mode, read-only sandbox, so `touch` needs approval).
 # Needs ./up.sh and ./codex-trust.sh add first.  Only `touch /tmp/ace2e/x-*.txt` is ever approved.
-. "$(dirname "$0")/../lib.sh"
+. "$(dirname "$0")/../lib.sh" || exit 1
 SCEN=30-codex; : >"$RESULTS/$SCEN.txt"; FAILED=0
 P=${P:-w1:p1}; TS=$(date +%s)
 ms() { python3 -c "print(round(($2-$1)*1000))"; }

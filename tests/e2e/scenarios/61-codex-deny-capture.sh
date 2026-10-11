@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Captures the Codex pane after a No (inbox), and after a terminal Esc / `n`, for designing a cancellation
-# signature (run doc, bug 2).  Saves fixture candidates under tests/fixtures/herdr/.
+# signature (run doc, bug 2).  Saves fixture candidates under $E2E_ROOT/fixtures (copy the good ones into tests/fixtures/herdr by hand).
 # Needs ./up.sh and ./codex-trust.sh add.
-. "$(dirname "$0")/../lib.sh"
+. "$(dirname "$0")/../lib.sh" || exit 1
 SCEN=61-codex-deny-capture; : >"$RESULTS/$SCEN.txt"; P=${P:-w1:p1}
-OUT=$REPO/tests/fixtures/herdr; mkdir -p "$OUT"
+OUT=$E2E_ROOT/fixtures; mkdir -p "$OUT"   # scratch, not the repo: copy what is worth keeping into tests/fixtures/herdr by hand
 cx_prompt() { hd pane send-text $P "$1"; sleep 0.3; hd pane send-keys $P Enter; }
 codex_up() {
   hd agent list | jq -e '.result.agents[]|select(.agent=="codex")' >/dev/null && return 0

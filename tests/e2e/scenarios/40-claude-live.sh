@@ -2,7 +2,7 @@
 # LIVE Claude Code (haiku) in the scratch herdr session, under sandbox-exec so its http hooks
 # cannot reach the user's own acd (see lib.sh claude_launch).  Hooks come from the scratch
 # `acd hooks install claude` (--settings).  Only `touch /tmp/ace2e/x-*.txt` is approved.
-. "$(dirname "$0")/../lib.sh"
+. "$(dirname "$0")/../lib.sh" || exit 1
 SCEN=40-claude; : >"$RESULTS/$SCEN.txt"; FAILED=0
 Q=${Q:-w2:p1}
 ms() { python3 -c "print(round(($2-$1)*1000))"; }
