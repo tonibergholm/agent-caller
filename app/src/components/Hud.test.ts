@@ -19,6 +19,7 @@ const target: TargetView = {
   title: "Fix the build",
   request: "bash approval",
   off_screen: false,
+  disambiguator: null,
 };
 
 const proposal = (o: Partial<ProposalView> = {}): ProposalView => ({
@@ -139,6 +140,25 @@ test("a long payload scrolls inside its block and the buttons stay outside it", 
 test("a target off screen is marked", async () => {
   await show({ state: "confirm", proposal: proposal({ target: { ...target, off_screen: true } }), proposal_id: 6 });
   expect(screen.getByText("@ minos").classList.contains("off-screen")).toBe(true);
+});
+
+test("look-alike targets show their disambiguator and full names", async () => {
+  const long = `${"m".repeat(150)}-one`;
+  await show({
+    state: "which_one",
+    transcript: "approve",
+    choice_id: 41,
+    candidates: [
+      { ...target, machine: long, disambiguator: "api" },
+      { ...target, card: "minos/b", disambiguator: "web" },
+    ],
+  });
+  expect(screen.getByText(`@ ${long}`)).toBeTruthy();
+  expect(screen.getByRole("button", { name: /api/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /web/ })).toBeTruthy();
+  cleanup();
+  await show({ state: "confirm", proposal: proposal({ target: { ...target, disambiguator: "minos/a" } }), proposal_id: 42 });
+  expect(document.querySelector(".target .which")?.textContent).toBe("minos/a");
 });
 
 test("which-one lists numbered candidates; digits and clicks choose", async () => {

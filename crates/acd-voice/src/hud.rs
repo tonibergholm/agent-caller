@@ -21,6 +21,9 @@ pub struct TargetView {
     /// Not on screen (machine filter, collapsed Done, hidden idle): the
     /// HUD stresses the machine (spec §5.2, D7).
     pub off_screen: bool,
+    /// Set only when another card would show the same agent, machine and
+    /// title: its project, or else its card key.
+    pub disambiguator: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

@@ -133,6 +133,7 @@
           <span class="agent">{p.target.agent}</span>
           <span class="machine" class:off-screen={p.target.off_screen}>@ {p.target.machine}</span>
           <span class="title" title={p.target.title}>{p.target.title}</span>
+          {#if p.target.disambiguator}<span class="which">{p.target.disambiguator}</span>{/if}
         </header>
         <p class="what">{verb(p)}</p>
         {#if p.question}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block" tabindex="0" aria-label="Request">{p.question}</pre>{/if}
@@ -152,6 +153,7 @@
                 <span class="agent">{c.agent}</span>
                 <span class="machine" class:off-screen={c.off_screen}>@ {c.machine}</span>
                 <span class="title" title={c.title}>{c.title}</span>
+                {#if c.disambiguator}<span class="which">{c.disambiguator}</span>{/if}
                 {#if c.request}<span class="tag">{c.request}</span>{/if}
               </button>
             </li>
@@ -233,8 +235,17 @@
     font-weight: 600;
   }
   .machine {
+    min-width: 0;
+    overflow-wrap: anywhere;
     font: 500 11px var(--font-mono);
     color: var(--text-dim);
+  }
+  /* Tells apart targets that would otherwise look the same. */
+  .which {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font: 500 11px var(--font-mono);
+    color: var(--text-muted);
   }
   .machine.off-screen {
     color: var(--amber-text);
@@ -339,6 +350,8 @@
   .candidates button {
     width: 100%;
     text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
   .tag {
     margin-left: auto;

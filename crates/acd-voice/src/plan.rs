@@ -7,7 +7,6 @@ use serde::Serialize;
 use crate::fast::{self, Locale, Reply};
 use crate::hud::{Hud, OutcomeView, ProposalAction, ProposalView, TargetView};
 use crate::refusal::Refusal;
-use crate::router::prompt::{LABEL_MAX, TITLE_MAX};
 use crate::router::target::Provenance;
 use crate::router::{self, Choice, Proposal, Routed, Step};
 use crate::safety::Level;
@@ -515,14 +514,42 @@ fn refusal_for(e: EnqueueError) -> Refusal {
     }
 }
 
+/// How long a machine name, title or disambiguator may be on the HUD. Far
+/// above the model-context caps, so names that differ late still differ
+/// (final review B5); the HUD wraps them.
+pub const HUD_NAME_MAX: usize = 200;
+
+/// What identifies a target on the HUD: agent kind, machine and title.
+fn shown_as(card: &CardSnap) -> (&'static str, String, String) {
+    (speech::kind_name(card.kind), clean(&card.machine_name, HUD_NAME_MAX), clean(&card.title, HUD_NAME_MAX))
+}
+
+/// The project, or the card key when the project does not tell `card`
+/// apart from the other cards that would look the same. `None` when no
+/// other card looks the same.
+fn disambiguator(snapshot: &Snapshot, card: &CardSnap) -> Option<String> {
+    let me = shown_as(card);
+    let twins: Vec<&CardSnap> = snapshot.cards.iter().filter(|c| c.key != card.key && shown_as(c) == me).collect();
+    if twins.is_empty() {
+        return None;
+    }
+    let project = |c: &CardSnap| c.project.as_deref().map(|p| clean(p, HUD_NAME_MAX)).filter(|p| !p.is_empty());
+    match project(card) {
+        Some(p) if twins.iter().all(|t| project(t).as_ref() != Some(&p)) => Some(p),
+        _ => Some(clean(&card.key, HUD_NAME_MAX)),
+    }
+}
+
 fn target_view(snapshot: &Snapshot, card: &CardSnap) -> TargetView {
+    let (agent, machine, title) = shown_as(card);
     TargetView {
         card: card.key.clone(),
-        machine: clean(&card.machine_name, LABEL_MAX),
-        agent: speech::kind_name(card.kind).to_owned(),
-        title: clean(&card.title, TITLE_MAX),
+        machine,
+        agent: agent.to_owned(),
+        title,
         request: card.pending.as_ref().map(speech::request_label),
         off_screen: snapshot.visibility(card) != Visibility::Visible,
+        disambiguator: disambiguator(snapshot, card),
     }
 }
 

@@ -355,6 +355,52 @@ async fn which_one_then_a_digit_presents_the_choice() {
     assert_eq!(port.enqueued(), [pick("m/b", "r-b", "allow")]);
 }
 
+/// Final review B5: targets that differ only past the model-context caps
+/// show in full, and targets that would look the same get a disambiguator.
+#[tokio::test]
+async fn targets_with_shared_prefixes_render_distinguishably() {
+    let (prefix, title) = ("m".repeat(150), "t".repeat(150));
+    let mut a = pending("m1", "a");
+    (a.machine_name, a.title) = (format!("{prefix}-one"), format!("{title}-A"));
+    let mut b = pending("m2", "b");
+    (b.machine_name, b.title) = (format!("{prefix}-two"), format!("{title}-B"));
+    let s = snapshot(vec![a.clone(), b.clone()]);
+    let port = FakePort::with(&[&a, &b]);
+    let Hud::WhichOne { candidates, .. } = say(&mut Executor::new(), &port, &s, "approve").await.hud else {
+        panic!("expected which-one")
+    };
+    assert_eq!((candidates[0].machine.as_str(), candidates[0].title.as_str()), (a.machine_name.as_str(), a.title.as_str()));
+    assert_eq!((candidates[1].machine.as_str(), candidates[1].title.as_str()), (b.machine_name.as_str(), b.title.as_str()));
+    assert_eq!((candidates[0].disambiguator.as_deref(), candidates[1].disambiguator.as_deref()), (None, None));
+
+    // The same agent, machine and title: the project tells them apart.
+    let mut c = pending("m", "c");
+    (c.machine_name, c.title, c.project) = ("box".into(), "build".into(), Some("api".into()));
+    let mut d = pending("m", "d");
+    (d.machine_name, d.title, d.project) = ("box".into(), "build".into(), Some("web".into()));
+    let s = snapshot(vec![c.clone(), d.clone()]);
+    let port = FakePort::with(&[&c, &d]);
+    let Hud::WhichOne { candidates, .. } = say(&mut Executor::new(), &port, &s, "approve").await.hud else {
+        panic!("expected which-one")
+    };
+    let shown: Vec<_> = candidates.iter().map(|t| t.disambiguator.as_deref()).collect();
+    assert_eq!(shown, [Some("api"), Some("web")]);
+    // A proposal's single target is told apart from the other card too.
+    let Hud::Confirm { proposal, .. } = say(&mut Executor::new(), &port, &select(s, "m/c"), "yes always").await.hud else {
+        panic!("expected confirm")
+    };
+    assert_eq!(proposal.target.disambiguator.as_deref(), Some("api"));
+    // The same project as well: the card key.
+    d.project = Some("api".into());
+    let s = snapshot(vec![c.clone(), d.clone()]);
+    let port = FakePort::with(&[&c, &d]);
+    let Hud::WhichOne { candidates, .. } = say(&mut Executor::new(), &port, &s, "approve").await.hud else {
+        panic!("expected which-one")
+    };
+    let shown: Vec<_> = candidates.iter().map(|t| t.disambiguator.as_deref()).collect();
+    assert_eq!(shown, [Some("m/c"), Some("m/d")]);
+}
+
 #[tokio::test]
 async fn a_pick_binds_against_the_frozen_snapshot_not_a_newer_one() {
     let (a, b) = (pending("m", "a"), pending("m", "b"));
@@ -546,6 +592,7 @@ fn the_hud_json_shape_is_the_frontend_contract() {
         title: "Fix".into(),
         request: Some("bash approval".into()),
         off_screen: false,
+        disambiguator: Some("api".into()),
     };
     let hud = Hud::WhichOne { candidates: vec![target], transcript: VoiceText::new("approve"), choice_id: 4 };
     let v = serde_json::to_value(HudEvent::new(7, &hud)).unwrap();
@@ -555,6 +602,7 @@ fn the_hud_json_shape_is_the_frontend_contract() {
     assert_eq!(v["hud"]["state"], "which_one");
     assert_eq!(v["hud"]["candidates"][0]["request"], "bash approval");
     assert_eq!(v["hud"]["candidates"][0]["off_screen"], false);
+    assert_eq!(v["hud"]["candidates"][0]["disambiguator"], "api");
     let v = serde_json::to_value(Hud::Done { proposal: None, outcome: OutcomeView::Rejected { code: ErrorCode::RequestGone } }).unwrap();
     assert_eq!(v["outcome"], serde_json::json!({"kind": "rejected", "code": "request_gone"}));
     let v = serde_json::to_value(Hud::Error { refusal: Refusal::DisplayFailed, transcript: None }).unwrap();

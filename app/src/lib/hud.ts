@@ -49,6 +49,8 @@ export type TargetView = {
   title: string;
   request: string | null;
   off_screen: boolean;
+  /** Only when another card would look the same: its project or card key. */
+  disambiguator: string | null;
 };
 
 export type ProposalView = {
