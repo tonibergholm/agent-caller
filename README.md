@@ -38,10 +38,15 @@ can speak `acd/1` to the same daemon. The protocol is in
 
 | Source | Agents | How acd answers |
 |---|---|---|
-| Claude Code hooks | Claude Code | Replies to the held `PermissionRequest` hook |
-| Codex hooks | Codex | Sends keys through herdr when the agent runs in herdr |
-| herdr | Claude Code, Codex, others read-only | Sends one option key after checking the dialog on screen |
+| Claude Code hooks | Claude Code | Permissions: replies to the held `PermissionRequest` hook. Questions: one key through herdr. |
+| Codex hooks | Codex | One key through herdr |
+| herdr | Claude Code, Codex, others read-only | One option key, after checking the dialog on screen |
 | T3 Code | T3 threads | T3 RPC commands |
+
+Answering through herdr needs the agent to run in a herdr pane that acd
+can identify. When it cannot, the request is shown read-only and you
+answer in the terminal. Follow-ups go through herdr or T3, so an agent
+that acd sees only through hooks cannot receive one.
 
 ## How it stays safe
 
@@ -57,8 +62,11 @@ rules are fixed:
 - **No free-form input.** acd sends a single option key for a matching
   dialog, or a follow-up that herdr accepts only when the agent is not
   blocked. Nothing else.
-- **First answer wins.** Answering in the terminal and in the app at the
-  same time is safe. The late answer gets "Answered elsewhere".
+- **First answer wins.** For hook and T3 answers, the agent accepts
+  exactly one answer and the late one gets "Answered elsewhere". Key
+  answers through herdr are best effort: a terminal answer can land
+  between acd's screen check and its keystroke. acd then reports the
+  outcome as uncertain and never retries.
 - **Narrow network exposure.** acd listens only on loopback and on its
   own Tailscale addresses. TCP connections use TLS 1.3 with a pinned
   certificate. Tokens are 32 random bytes in owner-only files and never
@@ -74,7 +82,7 @@ spec §9, "Hook endpoint trust", for details.
 - Rust 1.90 or newer.
 - macOS or Linux for the daemon. Service install uses launchd on macOS and
   a systemd user unit on Linux.
-- macOS and Node.js for the app.
+- macOS and Node.js 24 for the app. CI builds with Node 24.
 - [Tailscale](https://tailscale.com) for remote machines.
 - Optional sources: [herdr](https://github.com/herdrdev/herdr)
   0.9.3 or newer (below 0.10), and T3 Code.
@@ -95,7 +103,8 @@ acd status              # sources, agents and open requests
 
 Use `acd run` instead of `acd service install` to run it in the
 foreground. `acd service install --print` shows the service file without
-writing it.
+writing it. The daemon reads its config at startup. After you edit it,
+run `acd service install` again to restart the service.
 
 ### Connect the sources
 
@@ -109,13 +118,13 @@ acd hooks status
 
 Start new agent sessions afterwards. Running Claude sessions keep the
 hook config they started with. `acd hooks uninstall claude|codex` removes
-exactly the entries acd recorded at install and leaves your other hooks
-alone.
+the entries acd manages and leaves your other hooks alone. Codex may ask
+you to review the hooks the first time it runs them.
 
-**herdr.** No setup. acd finds `~/.config/herdr/herdr.sock`,
-`$HERDR_SOCKET_PATH` and session sockets under
-`~/.config/herdr/sessions/`. Add other sockets with `herdr.extra_sockets`
-in the config.
+**herdr.** No setup. acd checks `$HERDR_SOCKET_PATH`, or
+`~/.config/herdr/herdr.sock` when that is unset, plus the session
+sockets under `~/.config/herdr/sessions/`, every 30 seconds. Add other
+sockets with `herdr.extra_sockets` in the config.
 
 **T3 Code.** Issue a token and set the server URL:
 
@@ -125,9 +134,16 @@ in the config.
   > ~/.config/acd/t3.token)
 ```
 
-Then set `t3.url` in `~/.config/acd/config.toml`. The URL must be a
-loopback or Tailscale address, because the token travels over plain
-`ws://`.
+Then set the T3 server address in `~/.config/acd/config.toml`:
+
+```toml
+[t3]
+url = "http://127.0.0.1:3773"
+```
+
+Use the port your T3 server listens on. The URL is scheme, host and port only. The host must be `localhost`, a
+loopback IP or a Tailscale IP, because the token travels over plain
+`ws://`. MagicDNS names are refused here.
 
 ## Install the app (macOS)
 
@@ -161,14 +177,14 @@ using.
 | Key | Action |
 |---|---|
 | `J` / `K` | Move between cards |
-| `1`–`9` | Pick an option |
+| `1`–`9` | Pick an option and start the countdown |
 | `R` | Reply to an idle or finished agent |
 | `E` | Mark the agent seen |
-| `Enter` | Confirm |
+| `Enter` | Send the reply (in the reply field) |
 | `Esc` | Undo during the countdown, or close the panel |
 
-Every answer waits 2 seconds before acd sends it. `Esc` or a click in that
-window cancels it.
+The app waits 2 seconds before it sends an answer or reply. Press `Esc`
+or click the countdown button to cancel.
 
 ## Configuration
 
