@@ -739,7 +739,10 @@ impl Registry {
                 }
             }
             Answer::Text(t) => {
-                if !e.req.free_text || t.trim().is_empty() || has_forbidden_control(t) {
+                if !e.req.free_text
+                    || t.trim().is_empty()
+                    || acd_protocol::text::has_forbidden_chars(t)
+                {
                     return Err(ErrorCode::BadRequest);
                 }
             }

@@ -135,7 +135,7 @@ agent.updated    {epoch, seq, agent}
 agent.removed    {epoch, seq, agent_id}
 request.opened   {epoch, seq, request}
 request.resolved {epoch, seq, request_id, agent_id,
-                  by: "inbox"|"terminal"|"agent"|"superseded"|"uncertain"|"lost", option_id?, reason?}
+                  by: "inbox"|"terminal"|"agent"|"superseded"|"uncertain"|"lost", option_id?, reason?}   // option_id is absent/null for a text answer
 machine.updated  {epoch, seq, machine}
 result           {id, ok: true, outcome?} | {id, ok: false, error: {code, message}}
 pong             {id}
@@ -282,7 +282,7 @@ Request {
   detail: string
   options: RequestOption[]           // permission options; for a question, the options of questions[0]
   questions: Question[] | null       // kind=question: the full original structure
-  free_text: bool                    // whether a typed answer is accepted (questions only)
+  free_text: bool                    // whether a typed answer is accepted (questions only; v1: T3 only)
   raw_screen: string | null          // blocked_unparsed only; at most 40 lines
   opened_at: timestamp
 }

@@ -62,10 +62,28 @@ def main():
     p = sub.add_parser("launch"); p.add_argument("text"); p.add_argument("--model", default="claude-sonnet-5-5")
     p.add_argument("--instance", default="claudeAgent"); p.add_argument("--title", default="e2e")
     sub.add_parser("threads")
+    p = sub.add_parser("dump", help="write the thread projection (first snapshot) to --out; print message roles and texts")
+    p.add_argument("thread_id"); p.add_argument("--out")
     p = sub.add_parser("count"); p.add_argument("thread_id"); p.add_argument("needle")
     a = ap.parse_args()
     token = open(a.token_file).read().strip()
     c = T3(a.port, token)
+    if a.mode == "dump":
+        c.call("t", "orchestration.subscribeThread", {"threadId": a.thread_id})
+        end, proj = time.time() + 20, None
+        while time.time() < end and proj is None:
+            m = c.recv(1.0)
+            if m and m.get("_tag") == "Chunk":
+                c.send_raw({"_tag": "Ack", "requestId": m["requestId"]})
+                for v in m["values"]:
+                    if isinstance(v, dict) and v.get("projection") is not None: proj = v["projection"]
+        if proj is None: sys.exit("no thread projection within 20 s")
+        if a.out:
+            fd = os.open(a.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f: json.dump(proj, f, indent=1)
+        print(json.dumps({"keys": sorted(proj.keys()),
+                          "messages": [{"role": x.get("role"), "text": x.get("text")} for x in proj.get("messages", [])]}))
+        return
     if a.mode == "count":
         c.call("t", "orchestration.subscribeThread", {"threadId": a.thread_id})
         end, n = time.time() + 15, None

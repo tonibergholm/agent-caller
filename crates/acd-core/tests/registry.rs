@@ -934,3 +934,33 @@ fn answering_agent_gone_is_uncertain_but_open_agent_gone_is_lost() {
         vec![(id, ResolvedBy::Lost, None)]
     );
 }
+
+#[test]
+fn typed_answers_with_bidi_or_control_characters_are_refused_at_claim() {
+    let mut r = reg_with_agent();
+    let mut obs = perm("a1", "k", "q");
+    obs.kind = RequestKind::Question;
+    obs.answer_path = AnswerPath::T3;
+    obs.free_text = true;
+    obs.questions = Some(vec![Question {
+        id: "q".into(),
+        header: None,
+        text: "q".into(),
+        multi_select: false,
+        options: obs.options.clone(),
+    }]);
+    let rid = opened(&r.apply(Observation::RequestSeen(obs)))[0]
+        .id
+        .clone();
+    for bad in ["a\u{202E}b", "a\u{2028}b", "a\u{1b}b", "   "] {
+        assert_eq!(
+            r.claim(&rid, Answer::Text(bad.into()), None).unwrap_err(),
+            ErrorCode::BadRequest,
+            "{bad:?}"
+        );
+    }
+    assert!(
+        r.claim(&rid, Answer::Text("fine\ntext".into()), None)
+            .is_ok()
+    );
+}

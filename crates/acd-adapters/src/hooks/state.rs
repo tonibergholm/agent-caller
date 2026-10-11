@@ -734,7 +734,7 @@ impl Reconciler {
             && s.hooks_only
         {
             self.core.observe(Observation::AgentGone {
-                agent_id: format!("claude:{victim}"),
+                agent_id: crate::ids::bounded("claude:", &victim),
             });
         }
         true
@@ -2483,7 +2483,7 @@ impl Reconciler {
     }
 
     async fn apply_owner(&mut self, sid: &str, owner: Owner) {
-        let hooks_id = format!("claude:{sid}");
+        let hooks_id = crate::ids::bounded("claude:", sid);
         let mut migrated_to = None;
         // A binding whose migration still waits for core's herdr agent keeps
         // its requests on the hooks-only agent: it transitions as `Hooks`.
@@ -2792,7 +2792,7 @@ impl Reconciler {
                 && session.hooks_only
             {
                 self.core.observe(Observation::AgentGone {
-                    agent_id: format!("claude:{sid}"),
+                    agent_id: crate::ids::bounded("claude:", &sid),
                 });
             }
         }
@@ -2904,7 +2904,7 @@ mod tests {
         };
         Track {
             kind: TrackKind::Permission,
-            agent_id: format!("claude:{sid}"),
+            agent_id: crate::ids::bounded("claude:", sid),
             session_id: sid.into(),
             key: CorrelationKey(rid.into()),
             op: 1,

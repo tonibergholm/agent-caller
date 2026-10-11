@@ -31,7 +31,7 @@ const FALLBACK: [(&str, &str, Effect); 3] = [
 ];
 
 pub fn agent_id(thread_id: &str) -> String {
-    format!("t3:{thread_id}")
+    crate::ids::bounded("t3:", thread_id)
 }
 
 pub fn kind(provider_instance_id: Option<&str>) -> AgentKind {
@@ -114,6 +114,8 @@ pub enum TargetAnswer {
     Question {
         question_id: String,
         choices: Vec<Choice>,
+        /// A typed answer is accepted (`answers[question_id] = text`).
+        free_text: bool,
     },
     ReadOnly,
 }
@@ -130,7 +132,24 @@ fn detail(s: &str) -> String {
     cap_chars(clean_screen(s).trim(), DETAIL_CHARS)
 }
 
-pub fn request_obs(agent_id: &str, thread_id: &str, view: &PendingView) -> (RequestObs, Target) {
+/// Whether a typed answer is offered for `q`. T3's own UI treats an absent
+/// `allowCustomAnswer` as allowed, but only Claude is verified to take a typed
+/// string (live check, 2026-10-11). Any other provider needs an explicit
+/// `true`, and an explicit `false` always wins.
+fn takes_free_text(q: &super::wire::T3Question, provider: Option<&str>) -> bool {
+    match q.allow_custom_answer {
+        Some(allowed) => allowed,
+        None => provider.is_some_and(|p| p.starts_with("claude")),
+    }
+}
+
+/// `provider` is the shell thread's `providerInstanceId`.
+pub fn request_obs(
+    agent_id: &str,
+    thread_id: &str,
+    provider: Option<&str>,
+    view: &PendingView,
+) -> (RequestObs, Target) {
     let rid = view.request.id.clone();
     let mut obs = RequestObs {
         agent_id: agent_id.into(),
@@ -221,7 +240,16 @@ pub fn request_obs(agent_id: &str, thread_id: &str, view: &PendingView) -> (Requ
             obs.kind = RequestKind::Question;
             obs.title = qs[0].header.clone().unwrap_or_else(|| "Question".into());
             obs.detail = qs[0].text.clone();
-            // Only a single single-select question can be answered.
+            // Only a single single-select question with options can be
+            // answered. TODO(panel redesign): a question with no options and
+            // free text is answerable by text alone, but the app has no text
+            // input yet and would show an answerable card with no controls.
+            // Once clients render one, relax `!q0.options.is_empty()` to
+            // `(!q0.options.is_empty() || free_text)`; `respond_payload`
+            // already handles it. Until then such a question is read-only
+            // with `free_text` false, so the model never claims an answer
+            // the clients cannot give.
+            let free_text = takes_free_text(q0, provider);
             if questions.len() == 1 && !q0.multi_select && !q0.options.is_empty() {
                 answer = TargetAnswer::Question {
                     question_id: q0.id.clone(),
@@ -235,7 +263,9 @@ pub fn request_obs(agent_id: &str, thread_id: &str, view: &PendingView) -> (Requ
                             value: o.value.clone().unwrap_or_else(|| o.label.clone()),
                         })
                         .collect(),
+                    free_text,
                 };
+                obs.free_text = free_text;
                 obs.options = qs[0].options.clone();
                 obs.answer_path = AnswerPath::T3;
             }
@@ -260,13 +290,27 @@ pub fn respond_payload(
     request: &Request,
     answer: &Answer,
 ) -> Result<Value, &'static str> {
-    let Answer::Option(option_id) = answer else {
-        return Err("T3 requests take an option, not text");
-    };
     let mut p = json!({
         "type": "runtime-request.respond", "commandId": command_id,
         "threadId": target.thread_id, "requestId": target.t3_request_id,
     });
+    if let Answer::Text(text) = answer {
+        let TargetAnswer::Question {
+            question_id,
+            free_text: true,
+            ..
+        } = &target.answer
+        else {
+            return Err("this T3 request takes no typed answer");
+        };
+        let text = text.trim();
+        crate::text::check_prompt_text(text)?;
+        p["answers"] = json!({ question_id.clone(): text });
+        return Ok(p);
+    }
+    let Answer::Option(option_id) = answer else {
+        unreachable!("text handled above")
+    };
     match &target.answer {
         TargetAnswer::Decision => {
             if !DECISIONS.contains(&option_id.as_str()) {
@@ -277,6 +321,7 @@ pub fn respond_payload(
         TargetAnswer::Question {
             question_id,
             choices,
+            ..
         } => {
             let shown = request
                 .options
@@ -308,20 +353,55 @@ mod tests {
     use super::*;
     use crate::t3::{detail::ThreadDetail, fake::question_projection};
 
-    #[test]
-    fn single_select_question_without_options_is_read_only() {
+    fn question_view(zero_options: bool, allow: Option<bool>) -> PendingView {
         let mut projection = question_projection("thread", "request");
-        let questions = projection["turnItems"]
+        let item = projection["turnItems"]
             .as_array_mut()
             .unwrap()
             .iter_mut()
             .find(|item| item["type"] == "user_input_request")
             .unwrap();
-        questions["questions"][0]["options"] = json!([]);
+        if zero_options {
+            item["questions"][0]["options"] = json!([]);
+        }
+        if let Some(a) = allow {
+            item["questions"][0]["allowCustomAnswer"] = json!(a);
+        }
         let (detail, _) = ThreadDetail::from_projection(&projection);
-        let view = detail.pending_view("request").unwrap();
-        let (obs, target) = request_obs("t3:thread", "thread", &view);
-        assert_eq!(obs.answer_path, AnswerPath::None);
-        assert!(matches!(target.answer, TargetAnswer::ReadOnly));
+        detail.pending_view("request").unwrap()
+    }
+
+    fn obs_for(provider: Option<&str>, view: &PendingView) -> (RequestObs, Target) {
+        request_obs("t3:thread", "thread", provider, view)
+    }
+
+    #[test]
+    fn zero_option_questions_stay_read_only_whatever_the_provider_says() {
+        for (provider, allow) in [
+            (Some("claudeAgent"), None),
+            (Some("claudeAgent"), Some(true)),
+            (Some("codex"), Some(true)),
+            (Some("claudeAgent"), Some(false)),
+        ] {
+            let (obs, target) = obs_for(provider, &question_view(true, allow));
+            assert_eq!(obs.answer_path, AnswerPath::None, "{provider:?} {allow:?}");
+            assert!(!obs.free_text);
+            assert!(matches!(target.answer, TargetAnswer::ReadOnly));
+        }
+    }
+
+    #[test]
+    fn free_text_is_offered_to_claude_by_default_and_to_others_only_when_explicit() {
+        let free = |provider, allow| obs_for(provider, &question_view(false, allow)).0.free_text;
+        assert!(free(Some("claudeAgent"), None));
+        assert!(free(Some("claudeAgent"), Some(true)));
+        assert!(!free(Some("claudeAgent"), Some(false)));
+        assert!(!free(Some("codex"), None));
+        assert!(!free(None, None));
+        assert!(free(Some("codex"), Some(true)));
+        assert!(!free(Some("opencode"), Some(false)));
+        // Options stay answerable either way.
+        let (obs, _) = obs_for(Some("codex"), &question_view(false, None));
+        assert_eq!(obs.answer_path, AnswerPath::T3);
     }
 }

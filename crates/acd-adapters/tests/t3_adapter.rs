@@ -609,3 +609,249 @@ async fn disabled_and_unconfigured_report_status() {
         assert_eq!(machine.sources.t3.state, want);
     }
 }
+
+fn subagent_thread(tail: &str) -> String {
+    format!(
+        "thread:provider:claudeAgent:native-thread:provider-thread%3Aprovider%3AclaudeAgent%3Anative-thread%3Apending%253Arun%253Athread%253A2f1c9d1e-7b1a-4c55-9a53-0b6f3f1d2a10%253Aordinal%253A1%3A{tail}"
+    )
+}
+
+fn agent_ids(core: &Core) -> Vec<String> {
+    let (initial, _) = core.attach(None);
+    let ServerMessage::Snapshot { agents, .. } = &initial[0] else {
+        panic!("expected snapshot")
+    };
+    agents.iter().map(|a| a.id.clone()).collect()
+}
+
+#[tokio::test]
+async fn long_subagent_thread_ids_publish_bounded_addressable_agents() {
+    let long_a = subagent_thread("aaaa");
+    let long_b = subagent_thread("bbbb");
+    assert!(long_a.len() > 128);
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread(&long_a, "running", Some(("rq-1", "command"))));
+    fake.set_projection(&long_a, approval_projection(&long_a, "rq-1", None));
+    fake.put_thread(shell_thread(&long_b, "completed", None));
+    fake.put_thread(shell_thread("short", "completed", None));
+    let r = rig(fake).await;
+    until("three agents", || {
+        (agent_ids(&r.core).len() == 3).then_some(())
+    })
+    .await;
+    let ids = agent_ids(&r.core);
+    assert!(ids.iter().all(|i| i.len() <= 128), "{ids:?}");
+    assert!(ids.contains(&"t3:short".to_string()), "short ids unchanged");
+    let long_ids: Vec<_> = ids.iter().filter(|i| *i != "t3:short").collect();
+    assert_ne!(long_ids[0], long_ids[1], "common prefix must not collide");
+
+    let id_a = acd_adapters::t3::map::agent_id(&long_a);
+    let agent = until("long agent", || r.core.agent(&id_a)).await;
+    assert!(id_a.len() <= 128);
+    r.adapter.send(&agent, "hello").await.unwrap();
+    let req = until("pending", || r.core.agent(&id_a)?.pending).await;
+    let res = answer(&r, &req, "accept").await;
+    assert_eq!(res.outcome, Some(Outcome::Delivered), "{res:?}");
+    let sent = r.fake.dispatched();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0]["threadId"].as_str(), Some(long_a.as_str()));
+    assert_eq!(sent[1]["threadId"].as_str(), Some(long_a.as_str()));
+    assert_eq!(sent[1]["requestId"].as_str(), Some("rq-1"));
+}
+
+const QUESTION_ID: &str = "Which color do you prefer?";
+
+/// The recorded question re-shaped: `options` emptied when `zero_options`,
+/// `allowCustomAnswer` set when given.
+fn question_with(zero_options: bool, allow_custom: Option<bool>) -> serde_json::Value {
+    let mut p = question_projection("a", "rq-1");
+    let item = p["turnItems"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|i| i["type"] == "user_input_request")
+        .unwrap();
+    if zero_options {
+        item["questions"][0]["options"] = json!([]);
+    }
+    if let Some(a) = allow_custom {
+        item["questions"][0]["allowCustomAnswer"] = json!(a);
+    }
+    p
+}
+
+async fn answer_text(r: &Rig, req: &Request, text: &str, command_id: &str) -> CommandResult {
+    r.core
+        .handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: command_id.into(),
+                request_id: req.id.clone(),
+                revision: None,
+                option_id: None,
+                text: Some(text.into()),
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn typed_answer_to_a_question_with_options_is_trimmed_delivered_and_never_logged() {
+    use std::sync::Mutex as StdMutex;
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<StdMutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+
+    let (r, req) = with_pending(question_with(false, None), "user_input").await;
+    assert!(req.free_text && req.options.len() == 2);
+    assert_eq!(req.answer_path, AnswerPath::T3);
+    let (_, mut rx) = r.core.attach(None);
+    let secret = "SECRET-free-text-7731";
+    let res = answer_text(&r, &req, &format!("  {secret}\nsecond line \n"), "x1").await;
+    assert_eq!(res.outcome, Some(Outcome::Delivered), "{res:?}");
+    let sent = r.fake.dispatched();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["type"], "runtime-request.respond");
+    assert_eq!(sent[0]["requestId"], "rq-1");
+    assert_eq!(
+        sent[0]["answers"],
+        json!({ QUESTION_ID: format!("{secret}\nsecond line") })
+    );
+    assert!(sent[0].get("decision").is_none());
+    loop {
+        if let ServerMessage::RequestResolved {
+            by: resolved_by, ..
+        } = rx.recv().await.unwrap()
+        {
+            assert_eq!(resolved_by, ResolvedBy::Inbox);
+            break;
+        }
+    }
+    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert!(!logs.contains(secret), "free text leaked into logs");
+}
+
+#[tokio::test]
+async fn typed_and_option_answers_both_work_on_a_question_with_options() {
+    let (r, req) = with_pending(question_with(false, None), "user_input").await;
+    assert!(req.free_text && req.options.len() == 2);
+    let res = answer_text(&r, &req, "purple", "x1").await;
+    assert_eq!(res.outcome, Some(Outcome::Delivered), "{res:?}");
+    assert_eq!(
+        r.fake.dispatched()[0]["answers"],
+        json!({ QUESTION_ID: "purple" })
+    );
+
+    let (r, req) = with_pending(question_with(false, None), "user_input").await;
+    assert_eq!(
+        answer(&r, &req, "o2").await.outcome,
+        Some(Outcome::Delivered)
+    );
+    assert_eq!(
+        r.fake.dispatched()[0]["answers"],
+        json!({ QUESTION_ID: "blue" })
+    );
+}
+
+#[tokio::test]
+async fn free_text_is_refused_when_t3_forbids_custom_answers() {
+    let (r, req) = with_pending(question_with(false, Some(false)), "user_input").await;
+    assert!(!req.free_text);
+    let res = answer_text(&r, &req, "purple", "x1").await;
+    assert_eq!(res.error_code(), Some(ErrorCode::BadRequest), "{res:?}");
+    assert!(r.fake.dispatched().is_empty());
+    assert_eq!(
+        answer_with_id(&r, &req, "o1", "x2").await.outcome,
+        Some(Outcome::Delivered)
+    );
+
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread("a", "running", Some(("rq-1", "user_input"))));
+    fake.set_projection("a", question_with(true, Some(false)));
+    let r = rig(fake).await;
+    let req = until("pending", || r.core.agent("t3:a")?.pending).await;
+    assert_eq!(req.answer_path, AnswerPath::None, "read-only");
+    assert!(!req.free_text);
+}
+
+#[tokio::test]
+async fn zero_option_questions_stay_read_only_until_clients_render_a_text_input() {
+    // TODO(panel redesign): flips to answerable with the text input.
+    let (fake, req) = {
+        let fake = FakeT3::start().await;
+        fake.put_thread(shell_thread("a", "running", Some(("rq-1", "user_input"))));
+        fake.set_projection("a", question_with(true, None));
+        let r = rig(fake).await;
+        let req = until("pending", || r.core.agent("t3:a")?.pending).await;
+        (r, req)
+    };
+    assert_eq!(req.answer_path, AnswerPath::None);
+    assert!(!req.free_text && req.options.is_empty());
+    let res = answer_text(&fake, &req, "purple", "x1").await;
+    assert_eq!(res.error_code(), Some(ErrorCode::NotAnswerable), "{res:?}");
+    assert!(fake.fake.dispatched().is_empty());
+}
+
+async fn with_pending_provider(provider: &str, projection: serde_json::Value) -> (Rig, Request) {
+    let fake = FakeT3::start().await;
+    let mut shell = shell_thread("a", "running", Some(("rq-1", "user_input")));
+    shell["providerInstanceId"] = json!(provider);
+    fake.put_thread(shell);
+    fake.set_projection("a", projection);
+    let r = rig(fake).await;
+    let req = until("pending", || r.core.agent("t3:a")?.pending).await;
+    (r, req)
+}
+
+#[tokio::test]
+async fn only_claude_takes_typed_answers_by_default() {
+    let (r, req) = with_pending_provider("codex", question_with(false, None)).await;
+    assert!(!req.free_text && req.answer_path == AnswerPath::T3);
+    let res = answer_text(&r, &req, "purple", "x1").await;
+    assert_eq!(res.error_code(), Some(ErrorCode::BadRequest), "{res:?}");
+    assert!(r.fake.dispatched().is_empty());
+    assert_eq!(
+        answer_with_id(&r, &req, "o2", "x2").await.outcome,
+        Some(Outcome::Delivered)
+    );
+
+    let (r, req) = with_pending_provider("codex", question_with(false, Some(true))).await;
+    assert!(req.free_text);
+    let res = answer_text(&r, &req, "purple", "x1").await;
+    assert_eq!(res.outcome, Some(Outcome::Delivered), "{res:?}");
+}
+
+#[tokio::test]
+async fn free_text_is_validated_before_anything_is_sent() {
+    let (r, req) = with_pending(question_with(false, None), "user_input").await;
+    for (i, bad) in [
+        "   ",
+        "a\u{1b}[31m",
+        "a\u{202E}b",
+        &"x".repeat(16 * 1024 + 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let res = answer_text(&r, &req, bad, &format!("x{i}")).await;
+        assert!(res.error_code().is_some(), "{bad:?} must fail: {res:?}");
+    }
+    assert!(r.fake.dispatched().is_empty());
+}

@@ -460,6 +460,10 @@ pub struct T3Question {
     pub options: Vec<T3Option>,
     #[serde(default)]
     pub multi_select: bool,
+    /// `false` when the provider takes only listed options (ACP, OpenCode);
+    /// absent means T3's UI allows a typed answer.
+    #[serde(default)]
+    pub allow_custom_answer: Option<bool>,
 }
 
 /// The turn items acd reads. Every other `type` is `Other`.

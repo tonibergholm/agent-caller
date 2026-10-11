@@ -1254,7 +1254,12 @@ impl Reconciler {
         if let Some(p) = shell_pending.filter(|p| !hidden.contains(p) && !ended.contains(p))
             && let Some(view) = detail.pending_view(&p)
         {
-            let (obs, target) = map::request_obs(&agent_id, thread_id, &view);
+            let provider = self
+                .threads
+                .get(thread_id)
+                .and_then(|t| t.shell.as_ref())
+                .and_then(|s| s.provider_instance_id.clone());
+            let (obs, target) = map::request_obs(&agent_id, thread_id, provider.as_deref(), &view);
             self.shared.targets.retain_thread(thread_id, Some(&p));
             self.shared.targets.insert(target);
             self.core.observe(Observation::RequestSeen(obs));

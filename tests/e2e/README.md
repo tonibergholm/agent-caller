@@ -121,15 +121,17 @@ Codex writes rollouts under `~/.codex/sessions/`.
 |---|---|
 | `run-all.sh` | body of `just e2e`: up, scenarios, trap-protected down, exit status |
 | `up.sh`, `down.sh`, `lib.sh` | environment up/down and shared helpers |
-| `inbox.py` | acd/1 client: `log`, `list`, `agents`, `wait-open`, `answer`, `race`, `send` (idempotency key, repeat) |
+| `inbox.py` | acd/1 client: `log`, `list`, `agents`, `wait-open`, `answer`, `answer-text`, `race`, `send` (idempotency key, repeat) |
 | `hookpost.py` | synthetic Claude http hook client (not a live Claude) |
-| `t3drive.py` | scratch-T3 driver: launch a thread, count messages |
+| `t3drive.py` | scratch-T3 driver: launch a thread, count messages, `dump` a thread projection |
+| `t3-up.sh`, `t3tap.py` | scratch T3 + acd setup shared by 50/51; recording tap that keeps only `runtime-request.respond` commands and their Exit (never the upgrade request or token) |
 | `codex_hooks.py`, `codex-trust.sh` | Codex hook trust inspection and the reversible trust entries |
 | `scenarios/10-hooks-roundtrip.sh` | install x2 then uninstall x1, `jq -S` compare, foreign PermissionRequest hook kept |
 | `scenarios/20-synthetic-daemon.sh` | acd down, stalled, hold, late answer, race, expiry, restart at the hook boundary (synthetic) |
 | `scenarios/30-codex-live.sh`, `31-codex-resilience.sh` | live Codex: Yes/No, terminal first, race, follow-up x3 with one key; acd down, stalled, restart |
 | `scenarios/40-claude-live.sh`, `41-claude-resilience.sh` | live Claude: same, plus question, coexisting hook, Esc; hold expiry |
 | `scenarios/50-t3.sh` | T3 approval, single-select question, late answer, follow-up exactly once |
+| `scenarios/51-t3-free-text.sh` | T3 free-text answers (spec 6.5 "Typed answers"): echoed verbatim, recorded by T3, Claude acts on it; zero-option probe; candidate fixtures to `/tmp/ace2e/fixtures/t3` |
 | `scenarios/60-esc-diag.sh` | diagnosis (not part of `just e2e`): Esc on a held Claude dialog, with and without a foreign hook; `Q`, `ESC_DELAY` |
 | `scenarios/61-codex-deny-capture.sh` | capture (not part of `just e2e`): Codex pane after No / Esc / `n`; writes fixture candidates to `/tmp/ace2e/fixtures`, copy by hand into `tests/fixtures/herdr`; `P` |
 

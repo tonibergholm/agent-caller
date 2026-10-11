@@ -34,9 +34,35 @@ impl Semantics {
         })
     }
 }
+/// What a typed answer was made against; `check` re-reads the request and
+/// refuses to send if any of it changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextSemantics {
+    pub request_id: String,
+    pub revision: u64,
+    pub kind: RequestKind,
+    pub answer_path: AnswerPath,
+    pub title: String,
+    pub detail: String,
+    pub text: String,
+}
+impl TextSemantics {
+    pub fn of(req: &Request, text: &str) -> Self {
+        Self {
+            request_id: req.id.clone(),
+            revision: req.revision,
+            kind: req.kind,
+            answer_path: req.answer_path,
+            title: req.title.clone(),
+            detail: req.detail.clone(),
+            text: text.to_owned(),
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionKind {
     Answer(Semantics),
+    AnswerText(TextSemantics),
     Reply { text: String },
 }
 #[derive(Clone, Debug)]
@@ -143,7 +169,7 @@ pub fn check(a: &Action, state: &MachineState) -> Result<(), Notice> {
         return Err(notice("Offline. Nothing was sent.", NoticeTone::Warning));
     }
     let cap = match a.kind {
-        ActionKind::Answer(_) => "answer",
+        ActionKind::Answer(_) | ActionKind::AnswerText(_) => "answer",
         ActionKind::Reply { .. } => "send",
     };
     if !state.session.has(cap) {
@@ -164,6 +190,20 @@ pub fn check(a: &Action, state: &MachineState) -> Result<(), Notice> {
                 || Semantics::of(req, &sem.option.id).as_ref() != Some(sem)
                 || sem.option.effect == Effect::Unknown
             {
+                return Err(notice(
+                    "The request changed. Nothing was sent.",
+                    NoticeTone::Warning,
+                ));
+            }
+        }
+        ActionKind::AnswerText(sem) => {
+            let Some(req) = agent.pending.as_ref() else {
+                return Err(notice("Answered elsewhere", NoticeTone::Info));
+            };
+            if req.id != sem.request_id || req.status != RequestStatus::Open {
+                return Err(notice("Answered elsewhere", NoticeTone::Info));
+            }
+            if !req.is_answerable() || !req.free_text || TextSemantics::of(req, &sem.text) != *sem {
                 return Err(notice(
                     "The request changed. Nothing was sent.",
                     NoticeTone::Warning,

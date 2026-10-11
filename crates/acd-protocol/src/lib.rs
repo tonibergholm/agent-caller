@@ -3,6 +3,7 @@ mod messages;
 mod model;
 pub mod pairing;
 pub mod schema;
+pub mod text;
 
 pub use messages::*;
 pub use model::*;
