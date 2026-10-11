@@ -364,3 +364,35 @@ async fn payload_limits_and_normalisation() {
     let p = proposal(model(&s, "tell it", &reply).await);
     assert_eq!(p.step, Step::Send { card: "m/w".into(), text: VoiceText::new("line one\nline two") });
 }
+
+/// Stripping a suffix payload may only narrow the names, never add one.
+#[tokio::test]
+async fn a_suffix_payload_cannot_create_a_name_through_an_ordinal() {
+    let s = select(snapshot(vec![pending("m", "a"), pending("m", "b")]), "m/a");
+    // Prompt order: m/a is a1 (selected), m/b is a2.
+    for (said, text) in [
+        ("tell it the second option is better", "option is better"),
+        ("Tell it: the SECOND option, is better!", "option, is better!"),
+    ] {
+        let reply = serde_json::json!({"step": "send", "agent": "a2", "text": text}).to_string();
+        let r = model(&s, said, &reply).await;
+        assert!(!matches!(r, Routed::Proposal(_)), "{said}: {r:?}");
+    }
+}
+
+#[tokio::test]
+async fn stripping_cannot_turn_an_empty_name_set_into_a_name() {
+    let mut codex = working("minos", "a");
+    codex.kind = acd_protocol::AgentKind::Codex;
+    let s = snapshot(vec![codex, working("studio", "b")]);
+    // "minos" + "claude" names nothing (minos is codex); cutting the tail
+    // "ask claude for help" would leave "tell minos to" naming minos/a.
+    let reply = r#"{"step":"send","agent":"a1","text":"ask claude for help"}"#;
+    let r = model(&s, "tell minos to ask claude for help", reply).await;
+    assert_eq!(r, Routed::Refused(Refusal::TargetMismatch));
+    // The honest suffix case still resolves.
+    let s = snapshot(vec![working("minos", "a"), working("studio", "b")]);
+    let ok = r#"{"step":"send","agent":"a2","text":"deploy minos"}"#;
+    let p = proposal(model(&s, "tell studio to deploy minos", ok).await);
+    assert_eq!(p.step.card(), Some("studio/b"));
+}

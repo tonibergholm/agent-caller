@@ -87,10 +87,18 @@ fn aim(
     payload: Option<&str>,
 ) -> Routed {
     let said = said_for_names(transcript.expose(), payload);
-    // The payload may only carry words, never remove the user's naming:
-    // if the whole transcript names cards and what is left names none, the
-    // payload swallowed the name and the model's pick cannot stand in.
-    if target::named(snapshot, &normalize(transcript.expose())).is_some() && target::named(snapshot, &said).is_none() {
+    // Removing the payload may only narrow what the transcript names: it
+    // must not drop the user's names, and must not add or create one that
+    // the whole transcript does not name (ordinals are read from the full
+    // transcript's own words).
+    let full = target::named(snapshot, &normalize(transcript.expose()));
+    let stripped = target::named(snapshot, &said);
+    let consistent = match (&full, &stripped) {
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+        (Some(f), Some(st)) => st.iter().all(|k| f.contains(k)),
+    };
+    if !consistent {
         return Routed::Refused(Refusal::TargetMismatch);
     }
     if let Some(candidates) = &plan.candidates {
