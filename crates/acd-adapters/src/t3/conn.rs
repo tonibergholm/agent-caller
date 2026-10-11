@@ -38,6 +38,8 @@ const EVENTS_CAPACITY: usize = 256;
 /// the full thread snapshot, and busy threads exceed 16 MiB (a real one was
 /// 23.7 MB), so a smaller cap dropped the connection on every discovery pass.
 const MAX_MESSAGE: usize = 256 * 1024 * 1024;
+/// The cap before 256 MiB; a message above it is logged (size only).
+const OLD_MAX_MESSAGE: usize = 16 * 1024 * 1024;
 const PONG_FRAME: &str = r#"{"_tag":"Pong"}"#;
 
 const QUEUED: u8 = 0;
@@ -380,6 +382,9 @@ async fn reader(mut stream: SplitStream<Ws>, core: Arc<Core>, events: mpsc::Send
             }
         };
         core.touch();
+        if text.len() > OLD_MAX_MESSAGE {
+            tracing::info!(bytes = text.len(), "T3 sent a message over 16 MiB");
+        }
         let frames = match parse_frames(text.as_str()) {
             Ok(f) => f,
             Err(_) => {

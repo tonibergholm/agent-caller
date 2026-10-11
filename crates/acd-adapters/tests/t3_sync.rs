@@ -1544,6 +1544,12 @@ fn subagent(id: &str, status: &str) -> serde_json::Value {
     t["lineage"] = json!({"parentThreadId": "root", "relationshipToParent": "subagent", "rootThreadId": "root"});
     t
 }
+fn fork(id: &str, status: &str) -> serde_json::Value {
+    let mut t = root(id, status);
+    t["lineage"] =
+        json!({"parentThreadId": "root", "relationshipToParent": "fork", "rootThreadId": "root"});
+    t
+}
 fn hidden_subs(r: &Rig, id: &str) -> usize {
     r.fake
         .subscriptions()
@@ -1569,11 +1575,13 @@ async fn subagent_settled_and_snoozed_threads_are_hidden() {
     let mut woken = root("woken", "idle");
     woken["snoozedUntil"] = json!("2020-01-01T00:00:00.000Z");
     fake.put_thread(woken);
+    // T3 writes "active" when the user unsettles or pins a thread.
     let mut unsettled = root("unsettled", "idle");
-    unsettled["settledAt"] = json!("2026-10-08T07:00:00.000Z");
-    unsettled["settledOverride"] = json!("unsettled");
+    unsettled["settledOverride"] = json!("active");
     fake.put_thread(unsettled);
-    for id in ["root", "woken", "unsettled"] {
+    // Forks are threads the user works in; only subagents are hidden.
+    fake.put_thread(fork("forked", "idle"));
+    for id in ["root", "woken", "unsettled", "forked"] {
         fake.set_projection(
             id,
             with_provider(approval_projection(id, "rq-unused", None), "pt-1", None),
@@ -1581,7 +1589,7 @@ async fn subagent_settled_and_snoozed_threads_are_hidden() {
     }
     let r = rig(fake).await;
     until("ok", || (t3_state(&r) == SourceState::Ok).then_some(())).await;
-    for id in ["root", "woken", "unsettled"] {
+    for id in ["root", "woken", "unsettled", "forked"] {
         until("visible", || agent(&r, id)).await;
         until("discovery", || (hidden_subs(&r, id) > 0).then_some(())).await;
     }
@@ -1598,8 +1606,14 @@ async fn subagent_settled_and_snoozed_threads_are_hidden() {
     );
 }
 
-#[tokio::test]
-async fn hidden_thread_shows_while_it_needs_the_user() {
+fn waiting_subagent(id: &str) -> serde_json::Value {
+    let mut waiting = subagent(id, "waiting");
+    waiting["pendingRuntimeRequest"] =
+        json!({"id": "rq-1", "kind": "command", "createdAt": "2026-10-08T07:00:00.000Z"});
+    waiting
+}
+
+async fn rig_hidden_request() -> (Rig, Request) {
     let fake = FakeT3::start().await;
     fake.put_thread(subagent("sub", "idle"));
     let r = rig(fake).await;
@@ -1608,31 +1622,89 @@ async fn hidden_thread_shows_while_it_needs_the_user() {
     assert!(agent(&r, "sub").is_none());
     r.fake
         .set_projection("sub", approval_projection("sub", "rq-1", None));
-    let mut waiting = subagent("sub", "waiting");
-    waiting["pendingRuntimeRequest"] =
-        json!({"id": "rq-1", "kind": "command", "createdAt": "2026-10-08T07:00:00.000Z"});
-    r.fake.put_thread(waiting);
+    r.fake.put_thread(waiting_subagent("sub"));
     let req = until("request", || pending(&r, "sub")).await;
     assert_eq!(req.answer_path, AnswerPath::T3);
     assert_eq!(agent(&r, "sub").unwrap().state, AgentState::NeedsYou);
-    // Back to idle: the request is gone and so is the agent.
+    (r, req)
+}
+
+#[tokio::test]
+async fn hidden_thread_shows_while_it_has_a_request_and_resolves_terminal() {
+    let (r, req) = rig_hidden_request().await;
+    let (_, mut rx) = r.core.attach(None);
+    // The shell clears the request first; the projection's resolution
+    // follows. The agent must outlive the request.
     r.fake.put_thread(subagent("sub", "idle"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(agent(&r, "sub").is_some(), "kept while the request is open");
+    r.fake.push_thread_event(
+        "sub",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "resolved", "decision": "decline"}),
+    );
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Terminal);
+    until("hidden again", || agent(&r, "sub").is_none().then_some(())).await;
+    assert!(
+        r.fake.live_thread_streams().is_empty(),
+        "no stream for the hidden thread"
+    );
+}
+
+#[tokio::test]
+async fn hidden_thread_answered_in_the_inbox_resolves_inbox_not_uncertain() {
+    let (r, req) = rig_hidden_request().await;
+    let (_, mut rx) = r.core.attach(None);
+    r.fake.put_thread(subagent("sub", "idle"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(agent(&r, "sub").is_some());
+    r.core.observe(Observation::RequestEndedById {
+        request_id: req.id.clone(),
+        by: ResolvedBy::Inbox,
+    });
+    r.shared.mailbox.answered("sub", "rq-1");
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Inbox);
     until("hidden again", || agent(&r, "sub").is_none().then_some(())).await;
 }
 
 #[tokio::test]
-async fn hidden_thread_with_waiting_status_and_no_request_shows_as_working() {
+async fn bare_waiting_status_does_not_reveal_a_hidden_thread() {
     let fake = FakeT3::start().await;
     fake.put_thread(subagent("sub", "idle"));
     let r = rig(fake).await;
     until("ok", || (t3_state(&r) == SourceState::Ok).then_some(())).await;
     r.fake.put_thread(subagent("sub", "waiting"));
-    until("sub working", || {
-        (agent(&r, "sub")?.state == AgentState::Working).then_some(())
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(agent(&r, "sub").is_none());
+    assert_eq!(hidden_subs(&r, "sub"), 0);
+}
+
+#[tokio::test]
+async fn hidden_thread_keeps_its_session_claim() {
+    let fake = FakeT3::start().await;
+    fake.put_thread(root("x", "idle"));
+    fake.set_projection(
+        "x",
+        with_provider(
+            approval_projection("x", "rq-unused", None),
+            "pt-1",
+            Some("sess-1"),
+        ),
+    );
+    let r = rig(fake).await;
+    until("claim", || r.shared.sessions.owner("sess-1")).await;
+    let mut settled = root("x", "idle");
+    settled["settledOverride"] = json!("settled");
+    r.fake.put_thread(settled.clone());
+    until("hidden", || agent(&r, "x").is_none().then_some(())).await;
+    assert_eq!(r.shared.sessions.owner("sess-1").as_deref(), Some("t3:x"));
+    // Another provider thread: the old claim is stale.
+    settled["activeProviderThreadId"] = json!("pt-2");
+    r.fake.put_thread(settled);
+    until("claim dropped", || {
+        r.shared.sessions.owner("sess-1").is_none().then_some(())
     })
     .await;
-    r.fake.put_thread(subagent("sub", "completed"));
-    until("hidden", || agent(&r, "sub").is_none().then_some(())).await;
 }
 
 #[tokio::test]

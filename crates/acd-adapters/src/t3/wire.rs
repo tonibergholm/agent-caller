@@ -319,13 +319,10 @@ pub struct ShellThread {
     /// missing means "visible" (older T3 versions).
     #[serde(default)]
     pub lineage: Option<Value>,
-    /// `"settled"` or `"unsettled"` when the user overrode auto-settling.
+    /// `null`, `"settled"` or `"active"` (T3 writes `"active"` when the user
+    /// unsettles or pins a thread).
     #[serde(default)]
     pub settled_override: Option<Value>,
-    #[serde(default)]
-    pub settled_at: Option<Value>,
-    #[serde(default)]
-    pub unsettled_at: Option<Value>,
     #[serde(default)]
     pub snoozed_until: Option<Value>,
     /// Non-empty while background work keeps a `completed` thread busy.
@@ -341,29 +338,18 @@ impl ShellThread {
         }
     }
 
+    /// Only `relationshipToParent: "subagent"` hides a thread. A fork also
+    /// has a `parentThreadId` but is a thread the user works in.
     fn is_subagent(&self) -> bool {
         self.lineage
             .as_ref()
-            .and_then(|l| l.get("parentThreadId"))
-            .is_some_and(|p| !p.is_null())
+            .and_then(|l| l.get("relationshipToParent"))
+            .and_then(Value::as_str)
+            == Some("subagent")
     }
 
     fn is_settled(&self) -> bool {
-        let text = |v: &Option<Value>| v.as_ref().and_then(Value::as_str).map(str::to_owned);
-        match text(&self.settled_override).as_deref() {
-            Some("unsettled") => return false,
-            Some("settled") => return true,
-            _ => {}
-        }
-        let Some(settled) = text(&self.settled_at) else {
-            return false;
-        };
-        // An unsettle recorded at or after the settle wins.
-        let time = |s: &str| DateTime::parse_from_rfc3339(s).ok();
-        match (text(&self.unsettled_at), time(&settled)) {
-            (Some(u), Some(s)) => time(&u).is_none_or(|u| u < s),
-            _ => true,
-        }
+        self.settled_override.as_ref().and_then(Value::as_str) == Some("settled")
     }
 
     fn is_snoozed(&self, now: DateTime<Utc>) -> bool {
@@ -374,9 +360,9 @@ impl ShellThread {
             .is_some_and(|until| until > now)
     }
 
-    /// The thread is waiting on the user.
+    /// The thread has an open request for the user.
     pub fn needs_user(&self) -> bool {
-        self.status.as_deref() == Some("waiting") || self.pending_runtime_request.is_some()
+        self.pending_runtime_request.is_some()
     }
 
     /// Whether acd shows this thread (spec 6.5, "Visibility"): a root,
