@@ -55,7 +55,7 @@ It is built for two audiences, in this order:
 
 ### Not in v1 (planned later; the protocol leaves room through `capabilities`)
 
-- Voice router (planned reuse of Handy's crates: `transcribe-rs`, `vad-rs`,
+- Voice router: designed in `2026-10-11-voice-design.md` (Handy crates for Linux and Windows: `transcribe-rs`, `vad-rs`,
   `handy-keys`)
 - Phone client and push notifications
 - A self-hosted end-to-end encrypted relay
