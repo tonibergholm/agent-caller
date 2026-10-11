@@ -124,6 +124,7 @@ mod tests {
                 hidden_idle: hidden_idle_cards.len() as u32,
                 show_idle: false,
                 show_subagents: true,
+                show_hook_only: false,
                 tray: TraySummary { color: TrayColor::Grey, needs_you: 0 },
                 actions: vec![],
             },

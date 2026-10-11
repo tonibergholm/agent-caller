@@ -12,6 +12,7 @@
   let statuses = $state<Record<string, MachineStatus>>({});
   let showIdle = $state(false);
   let showSubagents = $state(false);
+  let showHookOnly = $state(false);
   let hotkey = $state("");
   let voice = $state<VoiceSettings>(VOICE_OFF);
   let names = $state<Record<string, string>>({});
@@ -28,7 +29,7 @@
 
   let hotkeyEdited = false;
 
-  function applyView(v: { machines: { key: string; status: MachineStatus }[]; show_idle: boolean; show_subagents: boolean }) {
+  function applyView(v: { machines: { key: string; status: MachineStatus }[]; show_idle: boolean; show_subagents: boolean; show_hook_only: boolean }) {
     const known = new Set(machines.map((m) => m.key));
     if (v.machines.length !== known.size || v.machines.some((m) => !known.has(m.key))) {
       refresh().catch((e) => (error ??= `Could not list machines: ${message(e)}`));
@@ -36,6 +37,7 @@
     statuses = Object.fromEntries(v.machines.map((m) => [m.key, m.status]));
     showIdle = v.show_idle;
     showSubagents = v.show_subagents;
+    showHookOnly = v.show_hook_only;
   }
 
   async function refresh() {
@@ -155,6 +157,18 @@
         throw e;
       }
     }, "Could not change subagent threads");
+
+  const toggleHookOnly = (box: HTMLInputElement) =>
+    act(async () => {
+      const on = box.checked;
+      try {
+        await api.setShowHookOnly(on);
+        showHookOnly = on;
+      } catch (e) {
+        box.checked = showHookOnly;
+        throw e;
+      }
+    }, "Could not change hook-only agents");
 </script>
 
 <main class="settings">
@@ -246,6 +260,14 @@
       Show the typed command field
     </label>
     <p class="note">There is no microphone yet. Commands are typed into a field in the inbox panel and handled as if spoken. Nothing you type is logged or saved.</p>
+  </section>
+
+  <section aria-label="Hook-only agents">
+    <label>
+      <input type="checkbox" checked={showHookOnly} onchange={(e) => toggleHookOnly(e.currentTarget)} />
+      Show hook-only agents
+    </label>
+    <p class="note">Sessions known only through hooks cannot be messaged or opened from here. They appear only while they have a request for you, unless this is on.</p>
   </section>
 </main>
 

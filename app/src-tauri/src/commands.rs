@@ -82,6 +82,11 @@ pub fn set_show_subagents(state: State<'_, AppState>, on: bool) -> Result<(), St
 }
 
 #[tauri::command]
+pub fn set_show_hook_only(state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    state.inbox.set_show_hook_only(on)
+}
+
+#[tauri::command]
 pub fn list_machines(state: State<'_, AppState>) -> Vec<MachineEntryView> {
     state.inbox.machines()
 }

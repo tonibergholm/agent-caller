@@ -125,6 +125,7 @@ impl Inbox {
             hidden_idle: 0,
             show_idle: settings.show_idle,
             show_subagents: settings.show_subagents,
+            show_hook_only: settings.show_hook_only,
             tray: view::TraySummary {
                 color: view::TrayColor::Grey,
                 needs_you: 0,
@@ -447,6 +448,23 @@ impl Inbox {
         self.wake();
         Ok(())
     }
+    /// Shows or hides hook-only agents that have no request, and remembers
+    /// the choice. A pending request always shows.
+    pub fn set_show_hook_only(&self, on: bool) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut candidate = inner.settings.clone();
+        candidate.show_hook_only = on;
+        if let Some(path) = &self.opts.settings_path {
+            candidate.save(path).map_err(|e| e.to_string())?;
+        }
+        inner.settings = candidate;
+        for a in drop_hidden_actions(&mut inner) {
+            self.emit(&a.id, ActionOutcome::NotSent { reason: NotSentReason::Hidden });
+        }
+        drop(inner);
+        self.wake();
+        Ok(())
+    }
     #[cfg(feature = "testing")]
     pub fn drop_connections_for_test(&self) {
         for m in &self.inner.lock().unwrap().machines {
@@ -568,6 +586,7 @@ impl Inbox {
             notices: &notices,
             show_idle: inner.settings.show_idle,
             show_subagents: inner.settings.show_subagents,
+            show_hook_only: inner.settings.show_hook_only,
         };
         let v = view::build_view(&input);
         // Voice (plan D5, D7): the idle cards this view hides, and the
@@ -1060,12 +1079,17 @@ impl Inbox {
         self.wake();
     }
 }
-/// Cancels the countdown of a card the user just chose to hide (subagents or
-/// idle agents turned off), so nothing fires unseen and Esc never cancels an
-/// action nobody can see. Not run on rebuild: an agent that turns idle on its
-/// own keeps its card while a countdown runs. No notice: the card is gone.
+/// Cancels the countdown of a card the user just chose to hide (subagents,
+/// idle or hook-only agents turned off), so nothing fires unseen and Esc
+/// never cancels an action nobody can see. Not run on rebuild: an agent that
+/// turns idle on its own keeps its card while a countdown runs. No notice:
+/// the card is gone.
 fn drop_hidden_actions(inner: &mut Inner) -> Vec<Action> {
-    let (show_subagents, show_idle) = (inner.settings.show_subagents, inner.settings.show_idle);
+    let (show_subagents, show_idle, show_hook_only) = (
+        inner.settings.show_subagents,
+        inner.settings.show_idle,
+        inner.settings.show_hook_only,
+    );
     let states: Vec<(String, MachineState)> = inner
         .machines
         .iter()
@@ -1082,6 +1106,7 @@ fn drop_hidden_actions(inner: &mut Inner) -> Vec<Action> {
                 && state.session.agents.get(&a.agent_id).is_some_and(|agent| {
                     (!show_subagents && agent.role == acd_protocol::AgentRole::Subagent)
                         || (!show_idle && view::group(agent) == view::CardGroup::Idle)
+                        || view::hook_only_hidden(agent, show_hook_only)
                 })
         }));
     }

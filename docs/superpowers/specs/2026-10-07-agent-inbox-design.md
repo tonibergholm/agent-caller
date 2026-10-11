@@ -1645,6 +1645,21 @@ agent with `role: "subagent"` is left out of cards, the summary and filter
 counts, the tray colour and badge, and notifications. While it is on, its
 card or row carries a "subagent" badge and "↳ <parent title>" in the meta line.
 
+**Hook-only agents.** The app acts on what needs the user, and a hook-only
+agent (`source: "hooks"`: a Claude session known only through acd's
+hooks, bound to no herdr pane and owned by no T3 thread) cannot be messaged
+and has no pane to open. The app therefore hides it unless it has a pending
+request, which is answerable through the held hook and shows and notifies as
+for any agent. The setting "Show hook-only agents", off by default and stored
+in `settings.json` (`show_hook_only`), shows them all the time. While a
+hook-only agent is hidden it is left out of cards, the summary and filter
+counts, the tray colour and badge. A card with a running countdown stays
+visible until the action ends, as for an idle card. Turning the setting off
+cancels the countdowns of hook-only cards that have no request. Subagent
+hiding wins over a pending hook-only request. A hook-only agent waiting on
+the user without a held request (a prompt passed through to the terminal)
+stays visible and counted, with the read-only "Answer in terminal" card.
+
 **Floating panel.**
 - Visual language: `docs/design/obsidian-cockpit.md` (dark-first, Geist and
   JetBrains Mono bundled locally, no network fonts). One column only; the
@@ -2224,3 +2239,5 @@ personal use (R7).
 **P7 redesign, 2026-10-11: panel redesign and zero-option free text.** The panel adopts the Obsidian Cockpit tokens (`docs/design/obsidian-cockpit.md`): one column, sections, keycap buttons and a text input for typed answers. A T3 question with no options is therefore answerable by text alone when T3 takes a typed answer (§5, §6.5, §8); this supersedes the "stays read-only" rulings above.
 
 **P7, 2026-10-11: subagent role.** T3 subagent threads that need the user were published like any other agent, though they usually cannot be answered. `Agent` gains `role` ("main" or "subagent", default main) and `parent_title`, both additive (§5, §6.5). The Mac app hides subagents everywhere, notifications included, unless "Show subagent threads" is on, and badges them when shown (§8). Debounced panel-frame saves now wait about two seconds so a display change right after a move can discard it.
+
+**P8, 2026-10-11: hook-only agents hidden unless they need the user.** A Claude session known only through hooks cannot be messaged and has no pane to open, so its card without a request was noise against the product's purpose, acting when agents need something from the user. The Mac app now hides an agent with `source: "hooks"`, no pending request and a state other than `needs_you`, with its counts and tray contribution, unless the new setting "Show hook-only agents" (`show_hook_only`, default off) is on. A pending request shows and notifies as before; a running countdown keeps the card visible; turning the setting off cancels countdowns on hidden cards (§8). No protocol change.

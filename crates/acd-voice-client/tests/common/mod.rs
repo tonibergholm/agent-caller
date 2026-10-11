@@ -69,6 +69,7 @@ pub async fn inbox_rig(agents: Vec<Value>) -> InboxRig {
         hotkey: DEFAULT_HOTKEY.into(),
         show_idle: false,
         show_subagents: false,
+        show_hook_only: false,
         machines: vec![MachineEntry {
             key: "m1".into(),
             name: "Box".into(),
