@@ -26,6 +26,7 @@ pub struct InboxView {
     pub hidden_idle: u32,
     pub show_idle: bool,
     pub show_subagents: bool,
+    pub show_hook_only: bool,
     pub tray: TraySummary,
     pub actions: Vec<ActionView>,
 }
@@ -121,6 +122,18 @@ pub struct MachineInput<'a> {
     pub state: Option<&'a MachineState>,
 }
 
+/// A hook-only agent (known through acd's hooks alone: no herdr pane, not
+/// T3) cannot be messaged and has no pane to open, so it earns a card only
+/// while it has a request. An agent waiting on the user without a held
+/// request (a prompt passed through to the terminal) stays visible. Used by
+/// the view and by `drop_hidden_actions`.
+pub(crate) fn hook_only_hidden(agent: &Agent, show_hook_only: bool) -> bool {
+    !show_hook_only
+        && agent.source == acd_protocol::Source::Hooks
+        && agent.pending.is_none()
+        && agent.state != AgentState::NeedsYou
+}
+
 pub struct ViewInput<'a> {
     pub machines: Vec<MachineInput<'a>>,
     pub actions: &'a [ActionView],
@@ -128,6 +141,7 @@ pub struct ViewInput<'a> {
     pub notices: &'a HashMap<String, Notice>,
     pub show_idle: bool,
     pub show_subagents: bool,
+    pub show_hook_only: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -336,6 +350,12 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
                 continue;
             }
             let key = card_key(&entry.key, &agent.id);
+            let action = input.actions.iter().find(|a| a.card_key == key).cloned();
+            // A hook-only agent without a request is noise, unless a
+            // countdown runs on it (same rule as an idle card).
+            if hook_only_hidden(agent, input.show_hook_only) && action.is_none() {
+                continue;
+            }
             let card_group = group(agent);
             if live {
                 needs_you += u32::from(agent.state == AgentState::NeedsYou);
@@ -384,7 +404,7 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
                     .is_some_and(|p| p.status == RequestStatus::Answering)
                     || input.busy.contains(&key),
                 notice: input.notices.get(&key).cloned(),
-                action: input.actions.iter().find(|a| a.card_key == key).cloned(),
+                action,
             });
         }
     }
@@ -448,6 +468,7 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
         hidden_idle,
         show_idle: input.show_idle,
         show_subagents: input.show_subagents,
+        show_hook_only: input.show_hook_only,
         tray: TraySummary { color, needs_you },
         actions,
     }
@@ -534,6 +555,7 @@ mod tests {
             notices: &notices,
             show_idle,
             show_subagents: false,
+            show_hook_only: false,
         })
     }
 
@@ -594,6 +616,7 @@ mod tests {
             notices: &HashMap::new(),
             show_idle: false,
             show_subagents: false,
+            show_hook_only: false,
         });
         assert_eq!(
             v.actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
@@ -627,6 +650,7 @@ mod tests {
             notices: &notices,
             show_idle: false,
             show_subagents: false,
+            show_hook_only: false,
         });
         assert_eq!(v.cards[0].notice, Some(notice));
         assert_eq!(v.cards[0].action, Some(action));
@@ -818,6 +842,7 @@ mod tests {
             notices: &HashMap::new(),
             show_idle: false,
             show_subagents: false,
+            show_hook_only: false,
         })
         .cards;
         assert!(cards.iter().all(|c| c.busy));
@@ -863,6 +888,7 @@ mod tests {
             notices: &HashMap::new(),
             show_idle: false,
             show_subagents: false,
+            show_hook_only: false,
         });
         assert_eq!(
             v.machines[0].status,
@@ -1075,6 +1101,7 @@ mod tests {
                 notices: &notices,
                 show_idle: true,
                 show_subagents,
+                show_hook_only: false,
             })
         };
         let hidden = build(false);
@@ -1093,5 +1120,121 @@ mod tests {
         let card = shown.cards.iter().find(|c| c.agent.id == "sub").unwrap();
         assert_eq!(card.agent.role, AgentRole::Subagent);
         assert_eq!(card.agent.parent_title.as_deref(), Some("Parent"));
+    }
+
+    #[test]
+    fn hook_only_agents_show_only_with_a_request_or_an_action() {
+        let t = "2026-10-08T00:00:00.000Z";
+        let hooks = |id: &str, state: &str| {
+            let mut a = agent(id, state, t);
+            a.source = acd_protocol::Source::Hooks;
+            a
+        };
+        let quiet = hooks("quiet", "working");
+        let needy = with_request(hooks("needy", "needs_you"), t);
+        let counting = hooks("counting", "working");
+        let herdr = agent("herdr", "working", t);
+        let (e, s) = (entry("m1"), state(true, ALL, vec![quiet, needy, counting, herdr]));
+        let action = ActionView {
+            id: "act".into(),
+            card_key: "m1/counting".into(),
+            label: "Reply".into(),
+            detail: None,
+            fires_at_ms: 10.0,
+        };
+        let build = |show_hook_only, actions: &[ActionView]| {
+            let (busy, notices) = (HashSet::new(), HashMap::new());
+            build_view(&ViewInput {
+                machines: vec![MachineInput {
+                    entry: &e,
+                    state: Some(&s),
+                }],
+                actions,
+                busy: &busy,
+                notices: &notices,
+                show_idle: true,
+                show_subagents: false,
+                show_hook_only,
+            })
+        };
+        let ids = |v: &InboxView| {
+            let mut ids: Vec<_> = v.cards.iter().map(|c| c.agent.id.clone()).collect();
+            ids.sort();
+            ids
+        };
+        let hidden = build(false, &[]);
+        assert_eq!(ids(&hidden), ["herdr", "needy"]);
+        assert_eq!(hidden.tray.needs_you, 1, "a pending hook-only request counts");
+        assert!(!hidden.show_hook_only);
+        // A running countdown keeps its card.
+        assert_eq!(ids(&build(false, &[action])), ["counting", "herdr", "needy"]);
+        let shown = build(true, &[]);
+        assert_eq!(ids(&shown), ["counting", "herdr", "needy", "quiet"]);
+        assert!(shown.show_hook_only);
+    }
+
+    #[test]
+    fn hidden_hook_only_agents_do_not_colour_the_tray() {
+        let t = "2026-10-08T00:00:00.000Z";
+        let mut done = agent("done", "done", t);
+        done.source = acd_protocol::Source::Hooks;
+        let (e, s) = (entry("m1"), state(true, ALL, vec![done]));
+        let (busy, notices) = (HashSet::new(), HashMap::new());
+        let v = build_view(&ViewInput {
+            machines: vec![MachineInput {
+                entry: &e,
+                state: Some(&s),
+            }],
+            actions: &[],
+            busy: &busy,
+            notices: &notices,
+            show_idle: true,
+            show_subagents: false,
+            show_hook_only: false,
+        });
+        assert!(v.cards.is_empty());
+        assert_eq!(v.tray.color, TrayColor::Grey);
+    }
+
+    #[test]
+    fn hook_only_corner_cases() {
+        let t = "2026-10-08T00:00:00.000Z";
+        let hooks = |id: &str, state: &str| {
+            let mut a = agent(id, state, t);
+            a.source = acd_protocol::Source::Hooks;
+            a.can_send = false;
+            a
+        };
+        let waiting = hooks("waiting", "needs_you");
+        let idle = hooks("idle", "idle");
+        let mut sub = with_request(hooks("sub", "needs_you"), t);
+        sub.role = AgentRole::Subagent;
+        let (e, s) = (entry("m1"), state(true, ALL, vec![waiting, idle, sub]));
+        let build = |show_hook_only, show_idle| {
+            let (busy, notices) = (HashSet::new(), HashMap::new());
+            build_view(&ViewInput {
+                machines: vec![MachineInput {
+                    entry: &e,
+                    state: Some(&s),
+                }],
+                actions: &[],
+                busy: &busy,
+                notices: &notices,
+                show_idle,
+                show_subagents: false,
+                show_hook_only,
+            })
+        };
+        // Waiting on the user without a held request: visible and counted.
+        let v = build(false, true);
+        assert_eq!(v.cards.iter().map(|c| c.agent.id.as_str()).collect::<Vec<_>>(), ["waiting"]);
+        assert_eq!(v.tray.needs_you, 1);
+        assert_eq!(v.tray.color, TrayColor::Amber);
+        // Subagent hiding wins over a pending hook-only request.
+        assert!(v.cards.iter().all(|c| c.agent.id != "sub"));
+        // Shown hook-only idle agents still fall under the idle setting.
+        let v = build(true, false);
+        assert_eq!(v.hidden_idle, 1);
+        assert_eq!(v.cards.iter().map(|c| c.agent.id.as_str()).collect::<Vec<_>>(), ["waiting"]);
     }
 }

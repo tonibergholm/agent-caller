@@ -44,6 +44,7 @@ fn main() {
             commands::mark_seen,
             commands::set_show_idle,
             commands::set_show_subagents,
+            commands::set_show_hook_only,
             commands::list_machines,
             commands::import_pairing_from_clipboard,
             commands::rename_machine,
