@@ -121,7 +121,7 @@ let v: InboxView = view({ machines, cards, hidden_idle: 2 });
 
 if (scene === "undo") {
   const c = cards[0];
-  v = { ...v, cards: [{ ...c, selectable_options: c.selectable_options, action: { id: "a1", card_key: c.key, label: "Yes, always", detail: "Bash(cargo test --workspace --locked)", fires_at_ms: now + 1300 } }, ...cards.slice(1)] };
+  v = { ...v, cards: [{ ...c, selectable_options: c.selectable_options, action: { id: "a1", card_key: c.key, label: "Yes, always", detail: "Bash(cargo test --workspace --locked)", fires_at_ms: now + 7300 /* headless shots run ~6 s of virtual time */ } }, ...cards.slice(1)] };
 }
 if (scene === "empty") v = view({ machines });
 if (scene === "offline") {

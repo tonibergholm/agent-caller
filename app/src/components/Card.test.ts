@@ -51,7 +51,7 @@ test("allow_always shows the exact rule during its countdown", () => {
   });
   const { container } = render(Card, props(c, 1000));
   expect(container.textContent).toContain("Bash(npm test:*)");
-  expect(container.textContent).toMatch(/sending .* in 1/i);
+  expect(container.textContent).toMatch(/sending “yes, always”\s*1\.0s/i);
 });
 
 test("the countdown never goes below zero and a click cancels it", async () => {
@@ -61,7 +61,7 @@ test("the countdown never goes below zero and a click cancels it", async () => {
     action: { id: "a1", card_key: "m/x", label: "Yes", detail: null, fires_at_ms: 1000 },
   });
   render(Card, { ...props(c, 5000), oncancel });
-  const bar = screen.getByRole("button", { name: /sending yes in 0/i });
+  const bar = screen.getByRole("button", { name: /sending “yes”\s*0\.0s/i });
   await userEvent.click(bar);
   expect(oncancel).toHaveBeenCalledWith("a1");
 });

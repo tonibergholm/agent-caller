@@ -217,7 +217,7 @@ test("rejected footer, card-button and countdown-cancel calls are shown", async 
     action: { id: "a1", card_key: "m/a", label: "Yes", detail: null, fires_at_ms: Date.now() + 2000 },
   });
   render(Panel, { view: view({ cards: [a] }), api });
-  await userEvent.click(screen.getByRole("button", { name: /sending yes/i }));
+  await userEvent.click(screen.getByRole("button", { name: /sending “yes”/i }));
   expect((await screen.findByRole("alert")).textContent).toContain("denied");
 });
 

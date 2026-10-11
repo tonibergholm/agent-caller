@@ -11,13 +11,16 @@
   }: { action: ActionView; now: number; oncancel: (actionId: string) => void } = $props();
 
   const remaining = $derived(Math.max(0, action.fires_at_ms - now));
-  const seconds = $derived(Math.ceil(remaining / 1000));
+  const seconds = $derived((remaining / 1000).toFixed(1));
   const fraction = $derived(Math.min(1, remaining / WINDOW_MS));
 </script>
 
 <button class="undo" onclick={() => oncancel(action.id)}>
   <span class="line">
-    <span class="what">Sending {action.label} in {seconds}…</span>
+    <span class="what">
+      <span class="lbl">Sending “{action.label}”</span>
+      <span class="secs">{seconds}s</span>
+    </span>
     <span class="esc"><kbd>Esc</kbd> to undo</span>
   </span>
   {#if action.detail}<span class="rule">{action.detail}</span>{/if}
@@ -47,7 +50,28 @@
     gap: 8px;
     font-weight: 500;
   }
+  .what {
+    display: flex;
+    flex: 1 1 auto;
+    gap: 6px;
+    min-width: 0;
+  }
+  .lbl {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .secs {
+    flex: none;
+    min-width: 3.4ch;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
   .esc {
+    flex: none;
+    white-space: nowrap;
     color: var(--text-dim);
     font-size: 11px;
   }
