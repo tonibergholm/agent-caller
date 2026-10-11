@@ -65,8 +65,9 @@ rules are fixed:
 - **First answer wins.** For hook and T3 answers, the agent accepts
   exactly one answer and the late one gets "Answered elsewhere". Key
   answers through herdr are best effort: a terminal answer can land
-  between acd's screen check and its keystroke. acd then reports the
-  outcome as uncertain and never retries.
+  between acd's screen check and its keystroke. acd never retries. It
+  reports who answered when the screen shows it, and "uncertain"
+  otherwise.
 - **Narrow network exposure.** acd listens only on loopback and on its
   own Tailscale addresses. TCP connections use TLS 1.3 with a pinned
   certificate. Tokens are 32 random bytes in owner-only files and never
@@ -82,7 +83,7 @@ spec §9, "Hook endpoint trust", for details.
 - Rust 1.90 or newer.
 - macOS or Linux for the daemon. Service install uses launchd on macOS and
   a systemd user unit on Linux.
-- macOS and Node.js 24 for the app. CI builds with Node 24.
+- macOS and Node.js 24.15 or newer for the app. CI builds with Node 24.
 - [Tailscale](https://tailscale.com) for remote machines.
 - Optional sources: [herdr](https://github.com/herdrdev/herdr)
   0.9.3 or newer (below 0.10), and T3 Code.
