@@ -119,16 +119,27 @@ pub fn is_full_target(live: &Frame, target: &Frame) -> bool {
 pub enum FrameChange {
     /// Caused by our own `place()`; `done` once the full target landed.
     Placement { done: bool },
-    /// The user is dragging or resizing (a mouse button is down).
-    User,
-    /// Anything else, such as macOS refitting windows after a display change.
+    /// Moved by macOS right after a display configuration change.
     System,
+    /// Anything else: mouse drags, window tools, keyboard tiling.
+    User,
 }
 
+/// How long after a display configuration change a move or resize is still
+/// taken to be macOS refitting windows rather than the user.
+pub const SCREEN_CHANGE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// `expected` is the target of a recent `place()`, if still within its window.
-/// A callback is the user's only when a mouse button is held: macOS moves and
-/// resizes the panel on its own when displays change, with no button down.
-pub fn classify(live: &Frame, expected: Option<&Frame>, mouse_down: bool) -> FrameChange {
+/// `since_screen_change` is the time since the last display configuration
+/// change, if there has been one. Our own placement wins; a change right after
+/// a screen change is the system's; everything else is the user's (the
+/// window server can report a drag after the button is up, and tools and
+/// keyboard moves hold no button at all).
+pub fn classify(
+    live: &Frame,
+    expected: Option<&Frame>,
+    since_screen_change: Option<std::time::Duration>,
+) -> FrameChange {
     if let Some(target) = expected
         && is_programmatic(live, target)
     {
@@ -136,10 +147,9 @@ pub fn classify(live: &Frame, expected: Option<&Frame>, mouse_down: bool) -> Fra
             done: is_full_target(live, target),
         };
     }
-    if mouse_down {
-        FrameChange::User
-    } else {
-        FrameChange::System
+    match since_screen_change {
+        Some(d) if d <= SCREEN_CHANGE_WINDOW => FrameChange::System,
+        _ => FrameChange::User,
     }
 }
 
@@ -289,21 +299,23 @@ mod tests {
     }
 
     #[test]
-    fn only_a_held_mouse_button_makes_a_change_the_users() {
+    fn a_change_is_the_systems_only_right_after_a_screen_change() {
+        use std::time::Duration;
         let target = f(100.0, 100.0, 560.0, 720.0);
         let elsewhere = f(300.0, 200.0, 600.0, 700.0);
-        // Our own placement wins even with a button down.
-        assert_eq!(classify(&target, Some(&target), true), FrameChange::Placement { done: true });
+        let ms = Duration::from_millis;
+        // Our own placement wins, even right after a screen change.
+        assert_eq!(classify(&target, Some(&target), Some(ms(10))), FrameChange::Placement { done: true });
         assert_eq!(
-            classify(&f(900.0, 40.0, 560.0, 720.0), Some(&target), false),
+            classify(&f(900.0, 40.0, 560.0, 720.0), Some(&target), None),
             FrameChange::Placement { done: false }
         );
-        // A drag or live resize: button down, not ours.
-        assert_eq!(classify(&elsewhere, Some(&target), true), FrameChange::User);
-        assert_eq!(classify(&elsewhere, None, true), FrameChange::User);
-        // The system refitting after a display change: no button.
-        assert_eq!(classify(&elsewhere, Some(&target), false), FrameChange::System);
-        assert_eq!(classify(&elsewhere, None, false), FrameChange::System);
+        // Within the window after a screen change: macOS refitting.
+        assert_eq!(classify(&elsewhere, Some(&target), Some(ms(500))), FrameChange::System);
+        assert_eq!(classify(&elsewhere, None, Some(SCREEN_CHANGE_WINDOW)), FrameChange::System);
+        // Later, or no screen change at all: the user (drag, tool or keyboard).
+        assert_eq!(classify(&elsewhere, None, Some(ms(2001))), FrameChange::User);
+        assert_eq!(classify(&elsewhere, Some(&target), None), FrameChange::User);
     }
 
     #[test]

@@ -21,6 +21,8 @@ static VISIBLE: AtomicBool = AtomicBool::new(false);
 /// `windowDidMove` fire after `place()` has returned (and possibly between
 /// the two calls). A "currently placing" flag therefore cannot tell them from
 /// the user dragging; comparing the live frame with the requested one can.
+/// When the display configuration last changed.
+static LAST_SCREEN_CHANGE: Mutex<Option<Instant>> = Mutex::new(None);
 static EXPECTED: Mutex<Option<(Frame, Instant)>> = Mutex::new(None);
 /// Backstop for how long after `place()` its own callbacks can still arrive
 /// (a slow launch can deliver them late). Normally `EXPECTED` is cleared as
@@ -80,6 +82,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         hide(&handle);
         false
     });
+    observe_screen_changes();
     let handle = app.clone();
     events.window_did_resize(move |_| on_frame_event(&handle));
     let handle = app.clone();
@@ -265,7 +268,12 @@ fn on_frame_event(app: &AppHandle) {
     let target = (*expected)
         .filter(|(_, until)| Instant::now() < *until)
         .map(|(target, _)| target);
-    match frame::classify(&live, target.as_ref(), mouse_button_down()) {
+    let since_screen_change = LAST_SCREEN_CHANGE
+        .lock()
+        .ok()
+        .and_then(|t| *t)
+        .map(|t| t.elapsed());
+    match frame::classify(&live, target.as_ref(), since_screen_change) {
         frame::FrameChange::Placement { done } => {
             // Both queued operations have landed: nothing more is ours.
             if done {
@@ -282,9 +290,33 @@ fn on_frame_event(app: &AppHandle) {
     }
 }
 
-/// Whether any mouse button is down right now (a drag or live resize).
-fn mouse_button_down() -> bool {
-    tauri_nspanel::objc2_app_kit::NSEvent::pressedMouseButtons() != 0
+/// Records display configuration changes (a display added, removed or
+/// rearranged) so the moves macOS makes in response are not remembered.
+/// Main thread only; call once from `create`.
+fn observe_screen_changes() {
+    use block2::RcBlock;
+    use std::ptr::NonNull;
+    use tauri_nspanel::objc2_app_kit::NSApplicationDidChangeScreenParametersNotification;
+    use tauri_nspanel::objc2_foundation::{NSNotification, NSNotificationCenter};
+
+    let block = RcBlock::new(|_: NonNull<NSNotification>| {
+        if let Ok(mut last) = LAST_SCREEN_CHANGE.lock() {
+            *last = Some(Instant::now());
+        }
+    });
+    // SAFETY: the name is the system constant; no queue means the block runs
+    // on the posting (main) thread; the block only touches a static Mutex.
+    // The returned observer token is dropped on purpose: the observer lives
+    // for the whole process.
+    let _observer = unsafe {
+        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+            Some(NSApplicationDidChangeScreenParametersNotification),
+            None,
+            None,
+            &block,
+        )
+    };
+    std::mem::forget(_observer);
 }
 
 /// Saves the frame shortly after the user stops dragging or resizing.

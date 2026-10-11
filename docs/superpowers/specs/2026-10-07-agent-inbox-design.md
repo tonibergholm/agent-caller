@@ -1610,10 +1610,11 @@ react to events, such as notifications.
   movable by dragging its header strip, which stays at the top while the cards
   scroll. Its position and size are remembered
   across hide/show and relaunch in `panel-frame.json` in the app config dir.
-  Only the user's own moves and resizes (made with a mouse button held) are
-  saved, shortly after a drag stops, on hide and on quit; a failed write is
-  retried at the next save. Moves that macOS or the app make when a display
-  goes away are not saved. Each time the panel opens it is refitted from the
+  The user's own moves and resizes (mouse drags, window-management tools,
+  keyboard tiling) are saved, shortly after the last one, on hide and on quit;
+  a failed write is retried at the next save. Moves the app makes itself, and
+  those macOS makes within 2 seconds of a display configuration change, are
+  not saved. Each time the panel opens it is refitted from the
   remembered frame, so it returns to a display when that display comes back.
   A remembered frame that is still on a display is restored
   there, clamped into the display's usable area. One that is off every display
