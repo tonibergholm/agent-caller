@@ -486,4 +486,31 @@ mod tests {
         assert_eq!(c.inner.inner.get("k").unwrap(), None);
         assert_eq!(*c.inner.reads.lock().unwrap(), 2);
     }
+
+    /// Every write fails.
+    struct ReadOnly(MemorySecrets);
+
+    impl SecretStore for ReadOnly {
+        fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+            self.0.get(key)
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), SecretError> {
+            Err(SecretError("denied".into()))
+        }
+        fn delete(&self, _: &str) -> Result<(), SecretError> {
+            Err(SecretError("denied".into()))
+        }
+    }
+
+    #[test]
+    fn a_failed_write_drops_the_cached_value() {
+        let c = CachedSecrets::new(ReadOnly(MemorySecrets::default()));
+        c.inner.0.set("k", "old").unwrap();
+        assert_eq!(c.get("k").unwrap().as_deref(), Some("old"));
+        c.inner.0.set("k", "external").unwrap();
+        assert!(c.set("k", "new").is_err());
+        assert_eq!(c.get("k").unwrap().as_deref(), Some("external"));
+        assert!(c.delete("k").is_err());
+        assert_eq!(c.get("k").unwrap().as_deref(), Some("external"));
+    }
 }
