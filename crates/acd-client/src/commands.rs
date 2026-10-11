@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::fmt;
 
 use acd_protocol::{ClientMessage, CommandResult, ErrorCode, Outcome as ProtocolOutcome};
 use tokio::{sync::oneshot, time::Instant};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Command {
     Answer {
         request_id: String,
@@ -25,6 +26,49 @@ pub enum Command {
     },
 }
 
+/// Typed text and daemon messages stay out of `Debug` (voice spec §3.7):
+/// lengths only.
+impl fmt::Debug for Command {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Answer { request_id, revision, option_id } => f
+                .debug_struct("Answer")
+                .field("request_id", request_id)
+                .field("revision", revision)
+                .field("option_id", option_id)
+                .finish(),
+            Self::AnswerText { request_id, revision, text } => f
+                .debug_struct("AnswerText")
+                .field("request_id", request_id)
+                .field("revision", revision)
+                .field("text_bytes", &text.len())
+                .finish(),
+            Self::Send { agent_id, text } => f
+                .debug_struct("Send")
+                .field("agent_id", agent_id)
+                .field("text_bytes", &text.len())
+                .finish(),
+            Self::MarkSeen { agent_id } => f.debug_struct("MarkSeen").field("agent_id", agent_id).finish(),
+        }
+    }
+}
+
+impl fmt::Debug for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Delivered => f.write_str("Delivered"),
+            Self::Done => f.write_str("Done"),
+            Self::Failed { code, message } => f
+                .debug_struct("Failed")
+                .field("code", code)
+                .field("message_bytes", &message.len())
+                .finish(),
+            Self::Uncertain => f.write_str("Uncertain"),
+            Self::NotSent(n) => f.debug_tuple("NotSent").field(n).finish(),
+        }
+    }
+}
+
 impl Command {
     pub fn capability(&self) -> &'static str {
         match self {
@@ -35,7 +79,7 @@ impl Command {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Outcome {
     Delivered,
     Done,

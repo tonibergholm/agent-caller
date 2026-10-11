@@ -88,7 +88,7 @@ pub enum NoticeTone {
     Warning,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ActionView {
     pub id: String,
@@ -96,6 +96,20 @@ pub struct ActionView {
     pub label: String,
     pub detail: Option<String>,
     pub fires_at_ms: f64,
+}
+
+/// `detail` is the user's typed reply or answer (voice spec §3.7): `Debug`
+/// shows its length, so no derived `Debug` above this type can print it.
+impl std::fmt::Debug for ActionView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionView")
+            .field("id", &self.id)
+            .field("card_key", &self.card_key)
+            .field("label", &self.label)
+            .field("detail_bytes", &self.detail.as_ref().map(String::len))
+            .field("fires_at_ms", &self.fires_at_ms)
+            .finish()
+    }
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]

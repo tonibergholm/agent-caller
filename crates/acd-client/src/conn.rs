@@ -388,7 +388,8 @@ async fn serve(
                 let decoded = match acd_protocol::decode_server(&text) { Ok(Some(m)) => m, Ok(None) => continue, Err(_) => return End::Resync("undecodable frame") };
                 match decoded {
                     acd_protocol::ServerMessage::Result(result) => commands.on_result(&result, Instant::now(), timing),
-                    acd_protocol::ServerMessage::Error { message, .. } => tracing::warn!("daemon error: {message}"),
+                    // The code classifies it; the message is never logged (voice spec §6.3).
+                    acd_protocol::ServerMessage::Error { code, .. } => tracing::warn!(?code, "daemon error"),
                     acd_protocol::ServerMessage::Pong { .. } => {},
                     other => {
                         let applied = session.apply(&other);
