@@ -1607,7 +1607,9 @@ async fn unavailable_hold_end_reads_resolve_uncertain() {
 #[tokio::test]
 async fn a_capture_result_waits_for_the_herdr_delivery_lock_before_applying() {
     let (r, agent, _filler) = unheld_bound_rig().await;
-    let gate = r.fake.as_ref().unwrap().block_next("agent.read");
+    // Gate p1's capture read only: the held filler on p2 polls its own
+    // screen, and a global gate could take that poll instead.
+    let gate = r.fake.as_ref().unwrap().block_next("agent.read@w1:p1");
     let port = r.port;
     let mut payload = fx("claude/payload-PermissionRequest-Bash.json");
     payload["session_id"] = "target-session".into();
@@ -1655,7 +1657,9 @@ async fn a_capture_result_waits_for_the_herdr_delivery_lock_before_applying() {
 #[tokio::test]
 async fn a_capture_from_a_replaced_pane_is_discarded() {
     let (r, agent, _filler) = unheld_bound_rig().await;
-    let gate = r.fake.as_ref().unwrap().block_next("agent.read");
+    // Gate p1's capture read only: the held filler on p2 polls its own
+    // screen, and a global gate could take that poll instead.
+    let gate = r.fake.as_ref().unwrap().block_next("agent.read@w1:p1");
     let port = r.port;
     let mut payload = fx("claude/payload-PermissionRequest-Bash.json");
     payload["session_id"] = "target-session".into();
@@ -1700,7 +1704,9 @@ async fn a_capture_from_a_replaced_pane_is_discarded() {
 async fn a_capture_result_after_t3_takeover_is_discarded() {
     let (r, agent, _filler) = unheld_bound_rig().await;
     let (_, mut rx) = r.core.attach(None);
-    let gate = r.fake.as_ref().unwrap().block_next("agent.read");
+    // Gate p1's capture read only: the held filler on p2 polls its own
+    // screen, and a global gate could take that poll instead.
+    let gate = r.fake.as_ref().unwrap().block_next("agent.read@w1:p1");
     let port = r.port;
     let mut payload = fx("claude/payload-PermissionRequest-Bash.json");
     payload["session_id"] = "target-session".into();

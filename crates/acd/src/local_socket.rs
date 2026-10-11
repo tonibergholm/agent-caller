@@ -145,6 +145,39 @@ mod tests {
         acd_securefs::euid()
     }
 
+    /// Leaves a socket file that refuses connections. It is bound but never
+    /// listens, so no copy of its descriptor (one a concurrent spawn in
+    /// another test thread can hold until its exec) can make it accept.
+    fn leave_stale_socket(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        // SAFETY: plain socket calls on a descriptor owned here and closed
+        // before returning; `addr` is zeroed and then filled in bounds.
+        unsafe {
+            #[cfg(target_os = "linux")]
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            #[cfg(not(target_os = "linux"))]
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+            #[cfg(not(target_os = "linux"))]
+            assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
+            let mut addr: libc::sockaddr_un = std::mem::zeroed();
+            addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            let bytes = path.as_os_str().as_bytes();
+            assert!(bytes.len() < addr.sun_path.len(), "socket path too long");
+            for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
+                *dst = *src as libc::c_char;
+            }
+            let rc = libc::bind(
+                fd,
+                (&raw const addr).cast::<libc::sockaddr>(),
+                std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            );
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            assert_eq!(rc, 0, "{err}");
+        }
+    }
+
     #[test]
     fn a_second_lock_is_refused_while_the_first_is_held() {
         let d = tempfile::tempdir().unwrap();
@@ -152,7 +185,22 @@ mod tests {
         let e = format!("{:#}", lock_daemon(d.path()).err().expect("refused"));
         assert!(e.contains("another acd is running"), "{e}");
         drop(first);
-        lock_daemon(d.path()).unwrap();
+        // Another test thread can spawn a process while `first` is open, and
+        // the child holds a copy of the descriptor (and so the flock) until
+        // its exec closes it. Wait for the release.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match lock_daemon(d.path()) {
+                Ok(_) => break,
+                Err(e) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "lock not released: {e:#}"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
     }
 
     #[test]
@@ -169,10 +217,13 @@ mod tests {
     fn a_stale_socket_is_replaced() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("s.sock");
-        drop(UnixListener::bind(&p).unwrap());
+        leave_stale_socket(&p);
         // The old socket refuses connections; the inode number may be
         // reused (it is on Linux), so prove the replacement by serving.
-        assert!(UnixStream::connect(&p).is_err());
+        assert_eq!(
+            UnixStream::connect(&p).err().and_then(|e| e.raw_os_error()),
+            Some(libc::ECONNREFUSED)
+        );
         let (l, _owned) = bind_as(&p, euid()).unwrap();
         drop(UnixStream::connect(&p).unwrap());
         assert!(l.accept().is_ok());

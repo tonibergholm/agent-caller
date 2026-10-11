@@ -135,13 +135,19 @@ pub async fn rig_with(
     }
 }
 pub async fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
-    for _ in 0..250 {
+    // A deadline, not an iteration count: on a starved machine the sleeps
+    // overrun, and the bound only has to catch a condition that never comes.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
         if let Some(v) = f() {
             return v;
         }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("timed out waiting for {what}");
 }
 pub fn fx(rel: &str) -> Value {
     let p = format!(
