@@ -155,6 +155,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "acd-voice-client"
+version = "0.1.0"
+dependencies = [
+ "acd-client",
+ "acd-protocol",
+ "acd-voice",
+ "async-trait",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

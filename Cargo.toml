@@ -16,6 +16,7 @@ acd-core = { path = "crates/acd-core" }
 acd-adapters = { path = "crates/acd-adapters" }
 acd-securefs = { path = "crates/acd-securefs" }
 acd-voice = { path = "crates/acd-voice" }
+acd-voice-client = { path = "crates/acd-voice-client" }
 anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
