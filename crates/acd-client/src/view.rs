@@ -420,13 +420,16 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
             .then_with(|| a.machine_name.cmp(&b.machine_name))
             .then_with(|| a.agent.id.cmp(&b.agent.id))
     });
+    // An idle card with a countdown stays on screen, so the countdown and
+    // the Esc that cancels it are never invisible.
+    let hide = |c: &CardView| c.group == CardGroup::Idle && c.action.is_none();
     let hidden_idle = if input.show_idle {
         0
     } else {
-        cards.iter().filter(|c| c.group == CardGroup::Idle).count() as u32
+        cards.iter().filter(|c| hide(c)).count() as u32
     };
     if !input.show_idle {
-        cards.retain(|c| c.group != CardGroup::Idle);
+        cards.retain(|c| !hide(c));
     }
     let color = if needs_you > 0 {
         TrayColor::Amber

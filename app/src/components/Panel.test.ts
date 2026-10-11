@@ -594,3 +594,24 @@ test("the scroll container keeps the selection clear of the sticky bars", () => 
   expect(style).toContain("scroll-padding-top");
   expect(style).toContain("scroll-padding-bottom");
 });
+
+test("a card with a countdown stays on screen when Done is collapsed or the filter excludes it", async () => {
+  const counting = (key: string, machineKey: string) => {
+    const c = done(key, machineKey);
+    c.action = { id: "a7", card_key: key, label: "Reply", detail: null, fires_at_ms: Date.now() + 2000 };
+    return c;
+  };
+  const v = view({
+    machines: [machine("local", { kind: "online" }), machine("box", { kind: "online" })],
+    cards: [waiting("local/a"), counting("box/d", "box"), done("box/e", "box")],
+  });
+  const { container } = render(Panel, { view: v, api: fakeApi() });
+  // Done is collapsed: only the counting row shows.
+  expect(screen.getByText("Done box/d")).toBeTruthy();
+  expect(screen.queryByText("Done box/e")).toBeNull();
+  expect(container.querySelector("button.undo")).not.toBeNull();
+  // Filtering to "This Mac" does not hide it either.
+  await userEvent.click(screen.getByRole("button", { name: /^local/ }));
+  expect(screen.getByText("Done box/d")).toBeTruthy();
+  expect(container.querySelector("button.undo")).not.toBeNull();
+});

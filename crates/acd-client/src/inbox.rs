@@ -457,7 +457,6 @@ impl Inbox {
     }
     async fn rebuild(&self) {
         let mut inner = self.inner.lock().unwrap();
-        drop_hidden_actions(&mut inner);
         let now = Instant::now();
         inner.notices.retain(|_, (_, expires)| *expires > now);
         let states: HashMap<String, MachineState> = inner
@@ -909,9 +908,10 @@ impl Inbox {
         self.wake();
     }
 }
-/// Cancels the countdown of a card the panel no longer shows (a hidden
-/// subagent, a hidden idle agent), so nothing fires unseen and Esc never
-/// cancels an action the user cannot see. No notice: the card is not on screen.
+/// Cancels the countdown of a card the user just chose to hide (subagents or
+/// idle agents turned off), so nothing fires unseen and Esc never cancels an
+/// action nobody can see. Not run on rebuild: an agent that turns idle on its
+/// own keeps its card while a countdown runs. No notice: the card is gone.
 fn drop_hidden_actions(inner: &mut Inner) {
     let (show_subagents, show_idle) = (inner.settings.show_subagents, inner.settings.show_idle);
     let states: Vec<(String, MachineState)> = inner

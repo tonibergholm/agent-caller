@@ -1057,3 +1057,34 @@ async fn hiding_subagents_cancels_their_countdown_so_nothing_fires_unseen() {
     view_until(&ib, "shown again", |v| v.cards.len() == 2).await;
     assert!(ib.view().borrow().actions.is_empty());
 }
+
+#[tokio::test]
+async fn a_reply_countdown_survives_the_agent_turning_idle_with_idle_hidden() {
+    let (f, c, ib) = setup().await;
+    let mut working = pending_agent();
+    working["state"] = Value::String("working".into());
+    working["pending"] = Value::Null;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":working.clone()}))
+        .await;
+    view_until(&ib, "reply card", |v| v.cards.iter().any(|c| c.can_reply)).await;
+    ib.reply("m1/a1", "next step".into()).unwrap();
+    view_until(&ib, "counting", |v| v.actions.len() == 1).await;
+    // A remote event idles the agent while idle agents are hidden.
+    let mut idle = working;
+    idle["state"] = Value::String("idle".into());
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":idle}))
+        .await;
+    view_until(&ib, "idle but kept", |v| {
+        v.cards.iter().any(|c| c.agent.state == acd_protocol::AgentState::Idle && c.action.is_some())
+    })
+    .await;
+    assert_eq!(ib.view().borrow().hidden_idle, 0);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let sent = f
+        .received()
+        .iter()
+        .filter(|v| v["type"] == "agent.send" && v["text"] == "next step")
+        .count();
+    assert_eq!(sent, 1, "the reply was still delivered");
+    view_until(&ib, "hidden once done", |v| v.cards.is_empty() && v.hidden_idle == 1).await;
+}

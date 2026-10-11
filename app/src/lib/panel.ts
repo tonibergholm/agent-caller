@@ -48,9 +48,14 @@ export function typeTag(card: CardView): string {
 
 export type Sections = { needs: CardView[]; working: CardView[]; done: CardView[] };
 
-/** The three panel sections, in on-screen order. Idle and done agents share "Done". */
+/**
+ * The three panel sections, in on-screen order. Idle and done agents share
+ * "Done". A card with a countdown stays in view whatever the machine filter
+ * says: filtering is a view change, it must not hide a pending send.
+ */
 export function sections(cards: CardView[], machine: string | null): Sections {
-  const shown = machine === null ? cards : cards.filter((c) => c.machine_key === machine);
+  const shown =
+    machine === null ? cards : cards.filter((c) => c.machine_key === machine || c.action !== null);
   const needs = shown.filter((c) => c.group === "request");
   const working = shown.filter((c) => c.group === "working" || c.group === "unknown");
   const done = shown.filter((c) => c.group === "done" || c.group === "idle");

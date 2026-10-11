@@ -1682,6 +1682,28 @@ async fn a_subagent_follows_its_parent_being_renamed() {
 }
 
 #[tokio::test]
+async fn a_subagent_loses_the_title_of_a_parent_that_is_archived_or_removed() {
+    let fake = FakeT3::start().await;
+    fake.put_thread(titled(root("root", "running"), "Plan"));
+    fake.set_projection("sub", approval_projection("sub", "rq-1", None));
+    fake.put_thread(waiting_subagent("sub"));
+    let r = rig_with(fake, None, fast_timing()).await;
+    until("labelled", || {
+        (agent(&r, "sub")?.parent_title.as_deref() == Some("Plan")).then_some(())
+    })
+    .await;
+    let mut archived = titled(root("root", "running"), "Plan");
+    archived["archivedAt"] = json!("2026-10-08T07:00:00.000Z");
+    r.fake.put_thread(archived);
+    until("cleared", || {
+        let a = agent(&r, "sub")?;
+        a.parent_title.is_none().then_some(())
+    })
+    .await;
+    assert!(agent(&r, "root").is_none());
+}
+
+#[tokio::test]
 async fn a_subagent_listed_before_its_parent_still_gets_the_parent_title() {
     let fake = FakeT3::start().await;
     // The child is put first, so the snapshot lists it before the parent.

@@ -41,7 +41,9 @@
   const filter = $derived(machines.some((m) => m.key === machineFilter) ? machineFilter : null);
   const secs = $derived(sections(view.cards, filter));
   // What J/K, the digits and the other shortcuts see: only the cards on screen.
-  const visible = $derived([...secs.needs, ...secs.working, ...(doneOpen ? secs.done : [])]);
+  // A Done card with a countdown stays out of the collapse, so Esc has a target on screen.
+  const doneShown = $derived(doneOpen ? secs.done : secs.done.filter((c) => c.action !== null));
+  const visible = $derived([...secs.needs, ...secs.working, ...doneShown]);
   const nav = $derived<InboxView>({ ...view, cards: visible });
   // The summary counts what the sections show (all machines, no filter).
   const overall = $derived(sections(view.cards, null));
@@ -286,9 +288,7 @@
           Done <span class="count">{secs.done.length}</span>
         </button>
       </h2>
-      {#if doneOpen}
-        {#each secs.done as c (c.key)}{@render cardFor(c)}{/each}
-      {/if}
+      {#each doneShown as c (c.key)}{@render cardFor(c)}{/each}
     </section>
   {/if}
 

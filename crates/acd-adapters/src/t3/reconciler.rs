@@ -1084,6 +1084,8 @@ impl Reconciler {
         self.hidden_shells.remove(thread_id);
         self.hidden_owners.remove(thread_id);
         self.retire(conn, thread_id, false);
+        // Its subagents lose a parent title that no longer exists.
+        self.refresh_children(thread_id);
     }
 
     /// Removes the thread's agent and streams. `keep_claim` leaves its
