@@ -68,16 +68,18 @@ const STOP: &[&str] = &[
     "then", "there", "this", "what", "with", "your",
 ];
 
-/// The transcript as matched for names, with the payload removed, so
-/// that "tell studio to deploy minos" does not name minos.
+/// The transcript as matched for names. The payload is removed only when
+/// it is the tail of the transcript ("tell studio to deploy minos" does
+/// not name minos). A payload from the middle is not cut out, because
+/// removing it could create or recombine a name.
 pub fn said_for_names(transcript: &str, payload: Option<&str>) -> String {
     let said = normalize(transcript);
     let Some(payload) = payload.map(normalize).filter(|p| !p.is_empty()) else {
         return said;
     };
-    match said.rfind(&payload) {
-        Some(at) => normalize(&format!("{} {}", &said[..at], &said[at + payload.len()..])),
-        None => said,
+    match said.strip_suffix(payload.as_str()) {
+        Some(head) if head.is_empty() || head.ends_with(' ') => normalize(head),
+        _ => said,
     }
 }
 
