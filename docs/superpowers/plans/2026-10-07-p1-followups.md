@@ -332,6 +332,40 @@ From the 2026-10-09 production-bundle checklist:
 
 ## Process
 
-- There is no git remote yet, so CI (`.github/workflows/ci.yml`) has never
-  run.
+- CI (`.github/workflows/ci.yml`) runs on GitHub for every push and pull
+  request (Ubuntu and macOS, plus the app on macOS).
 - `cargo fmt` has not been applied to the workspace.
+
+
+## P6/P7 (2026-10-11)
+
+Open items from the live end-to-end run, the v1 acceptance checks and the panel work (PRs #10, #12, #14, #18, #19, #20). Each was found by a run or a review and was judged non-blocking.
+
+### Daemon
+
+- **Esc before Claude draws the dialog.** A terminal Esc that arrives before the held dialog is drawn leaves acd without a capture; the request resolves `uncertain` after 30 s instead of `terminal`. Only reproducible by a script pressing Esc about 65 ms after the hook.
+- **Restart with a Claude dialog on screen.** After an acd restart, a dialog still on screen comes back as `blocked_unparsed`, read-only, because the hook payload M1 needs is gone (spec §12 "requests still on screen reappear" holds, but they are not answerable).
+- **Stale T3 requests on subagent threads.** On minos, two subagent threads keep a `pendingRuntimeRequest` long after the user considers them answered. Hidden by default since #19; find out whether T3 or acd is wrong.
+- **First-seen hidden Codex subagents.** Their session id is only in a thread stream, so a T3-run Codex subagent never claims its session. Its hook events reach acd but create no agent without a herdr binding (spec §6.5).
+- **Codex and other providers' free text.** Typed T3 answers are live-verified for Claude only. Codex questions stay option-only unless T3 sends `allowCustomAnswer: true`; "OpenCode sets false" is unverified.
+- **T3 keepalive.** No paused-clock test for the busy cap; the slow-decode test does not reach `block_in_place`; a reader busy past the cap closes with "T3 did not answer a ping" (a distinct reason would help); `write_timeout` covers a whole frame, not write progress.
+- **T3 cursor retention.** A busy root thread re-pulls a ~24 MB snapshot after each `release()`; keep the cursor for Working-class releases.
+- **`acd status | head`** panics on a broken pipe.
+- **herdr machines.** herdr's own SSH machines could reach remote panes without a per-machine acd; acd would still be needed on each machine for the hook endpoint.
+
+### Mac app
+
+- **Signing.** The app is ad-hoc signed, so every rebuild asks for Keychain access once per machine. A stable signing identity removes this.
+- **Panel frame.** No unit test for `save_now`; the order of the screen-parameters notification and macOS's refit moves needs a runtime check with a display unplugged.
+- **Countdowns.** Turning idle agents off cancels a countdown on an Idle card that the view would now keep; the Done header count includes an out-of-filter card kept for its countdown; no panel test for J/K and Esc on a counting Done row while Done is collapsed.
+
+### Harness (`just e2e`)
+
+- `run.lock` has two millisecond races, and `just e2e-down` ignores the lock.
+- Once the user trusts acd's Codex hooks, the Codex scenarios skip themselves on that machine.
+- §14.10's blocked-screen half was not testable (no provider for opencode or pi); `screen_mismatch` (§14.4) was never observed.
+
+### Machines
+
+- omarchy: `loginctl enable-linger toni` keeps acd running while logged out (optional).
+- minos: agents started over SSH cannot use the login keychain; acceptance there relies on locally started sessions.
