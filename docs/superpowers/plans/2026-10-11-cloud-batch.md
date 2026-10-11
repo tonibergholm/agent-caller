@@ -239,6 +239,10 @@ Owned files: that one research doc.
   (`crates/acd-adapters/src/herdr/keys.rs`).
 - `t3_conn.rs` `a_peer_that_stops_reading_trips_the_write_timeout`:
   widen its 5 s bound or fix the cause, using the soak results.
+- `hooks_claude.rs` `a_capture_from_a_replaced_pane_is_discarded` failed
+  once on macOS CI (run 38139461287, 2026-10-11, line 1695: the keys
+  target was still set) and passed on the PR run of the same commit. It
+  waits a fixed 150 ms after the hook returns; find what it races.
 - A Codex agent's title showed `<environment_context>`. Find which
   adapter sets it and sanitize it.
 
