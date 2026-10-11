@@ -40,6 +40,7 @@ fn client(g: &Guard) -> ClientGuard {
         conn: ClientStamp { instance: g.conn.instance, conn_gen: g.conn.conn_gen },
         agent_id: g.agent_id.clone(),
         request: g.request.clone(),
+        named_send_only: g.named_send_only,
     }
 }
 
@@ -52,6 +53,7 @@ fn enqueue_error(e: PickError) -> EnqueueError {
         PickError::BadText | PickError::BadAnswerText => EnqueueError::BadText,
         PickError::CannotReply => EnqueueError::CannotReply,
         PickError::ConnectionChanged => EnqueueError::ConnectionChanged,
+        PickError::Hidden => EnqueueError::Hidden,
     }
 }
 

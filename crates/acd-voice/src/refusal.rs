@@ -47,4 +47,7 @@ pub enum Refusal {
     /// The HUD did not confirm it showed the step in time; nothing was
     /// sent (D22).
     DisplayFailed,
+    /// The user hid the agent (subagents, hook-only or idle agents turned
+    /// off) after the step was planned; nothing was sent.
+    Hidden,
 }

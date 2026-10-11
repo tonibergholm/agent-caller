@@ -193,6 +193,32 @@ async fn a_named_send_reaches_a_hidden_idle_agent() {
     assert_eq!((sent["agent_id"].as_str(), sent["text"].as_str()), (Some("a3"), Some("rebase")));
 }
 
+/// Final review B1: the step was planned on a visible subagent; the user
+/// hid subagents while Confirm waited. Confirm sends nothing.
+#[tokio::test]
+async fn a_subagent_hidden_while_confirm_waits_is_never_answered() {
+    let mut sub = pending_agent();
+    sub["role"] = "subagent".into();
+    let r = rig(vec![], None, Display::Acks).await;
+    r.inbox.set_show_subagents(true).unwrap();
+    r.c.send(json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[sub]})).await;
+    view_until(&r.inbox, "subagent shown", |v| v.cards.len() == 1).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.text_input("yes always".into(), true).await.unwrap();
+    let Hud::Confirm { proposal_id, .. } = hud_until(&r.sink, "confirm", |h| matches!(h, Hud::Confirm { .. })).await else {
+        unreachable!()
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await; // let the ack land
+    // Keep the published card, so only the live check can refuse.
+    r.inbox.hold_rebuild_for_test(true);
+    r.inbox.set_show_subagents(false).unwrap();
+    r.voice.confirm(proposal_id);
+    hud_until(&r.sink, "refused", |h| *h == Hud::Error { refusal: Refusal::Hidden, transcript: None }).await;
+    r.inbox.hold_rebuild_for_test(false);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(frames(&r.f, "request.answer").is_empty(), "no daemon operation");
+}
+
 /// A model that waits until released, and notes when its call is dropped.
 struct Gated {
     gate: Arc<tokio::sync::Notify>,

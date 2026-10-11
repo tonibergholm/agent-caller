@@ -26,7 +26,8 @@ export type Refusal =
   | "nothing_to_cancel"
   | "already_sent"
   | "not_permitted"
-  | "display_failed";
+  | "display_failed"
+  | "hidden";
 
 export type NotSentReason =
   | "offline"
@@ -109,6 +110,7 @@ export const refusalText: Record<Refusal, string> = {
   already_sent: "Already sent. It can't be undone.",
   not_permitted: "Voice can't do that.",
   display_failed: "The HUD could not show the step. Nothing was sent.",
+  hidden: "That agent is hidden now. Nothing was sent.",
 };
 
 const notSentText: Record<NotSentReason, string> = {

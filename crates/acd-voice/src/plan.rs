@@ -8,6 +8,7 @@ use crate::fast::{self, Locale, Reply};
 use crate::hud::{Hud, OutcomeView, ProposalAction, ProposalView, TargetView};
 use crate::refusal::Refusal;
 use crate::router::prompt::{LABEL_MAX, TITLE_MAX};
+use crate::router::target::Provenance;
 use crate::router::{self, Choice, Proposal, Routed, Step};
 use crate::safety::Level;
 use crate::snapshot::{CardSnap, ConnStamp, Snapshot, Visibility};
@@ -46,6 +47,9 @@ pub struct Guard {
     pub conn: ConnStamp,
     pub agent_id: String,
     pub request: Option<(String, u64)>,
+    /// A send whose target the transcript named while it was send-only
+    /// (D7): it may still reach an idle agent the panel hides.
+    pub named_send_only: bool,
 }
 
 /// One client operation with its guard.
@@ -72,6 +76,8 @@ pub enum EnqueueError {
     ConnectionChanged,
     #[error("unknown card")]
     UnknownCard,
+    #[error("the agent is hidden now")]
+    Hidden,
 }
 
 /// The inbox operations voice uses; acd-voice-client implements it over
@@ -463,6 +469,9 @@ fn operation(snapshot: &Snapshot, p: &Proposal) -> Option<Enqueue> {
         conn: frozen.conn?,
         agent_id: frozen.agent_id.clone(),
         request: frozen.pending.as_ref().map(|r| (r.id.clone(), r.revision)),
+        named_send_only: matches!(p.step, Step::Send { .. })
+            && p.provenance == Some(Provenance::Named)
+            && snapshot.visibility(frozen) == Visibility::SendOnly,
     };
     match &p.step {
         Step::Answer { card, request_id, revision, option_id } => {
@@ -485,6 +494,7 @@ fn refusal_for(e: EnqueueError) -> Refusal {
         EnqueueError::AlreadyCounting => Refusal::AlreadyCounting,
         EnqueueError::BadText => Refusal::BadText,
         EnqueueError::CannotReply => Refusal::CannotReply,
+        EnqueueError::Hidden => Refusal::Hidden,
     }
 }
 

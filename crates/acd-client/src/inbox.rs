@@ -54,6 +54,8 @@ pub enum PickError {
     CannotReply,
     #[error("The connection changed. Nothing was sent.")]
     ConnectionChanged,
+    #[error("The agent is hidden now. Nothing was sent.")]
+    Hidden,
 }
 struct Machine {
     entry: MachineEntry,
@@ -803,7 +805,7 @@ impl Inbox {
         let mut inner = self.inner.lock().unwrap();
         let (machine_key, handle, entry) = find_card(&inner, card_key)?;
         let state = handle.state().borrow().clone();
-        guard(&state, card_key, expect)?;
+        guard(&inner.settings, &state, card_key, expect)?;
         let current_view = self.view_tx.borrow().clone();
         let card = current_view
             .cards
@@ -887,7 +889,7 @@ impl Inbox {
         let mut inner = self.inner.lock().unwrap();
         let (machine_key, handle, _) = find_card(&inner, card_key)?;
         let state = handle.state().borrow().clone();
-        guard(&state, card_key, expect)?;
+        guard(&inner.settings, &state, card_key, expect)?;
         if state.status != conn::MachineStatus::Online || !state.session.has("answer") {
             return Err(PickError::NotAnswerable);
         }
@@ -939,7 +941,7 @@ impl Inbox {
         let mut inner = self.inner.lock().unwrap();
         let (machine_key, handle, _) = find_card(&inner, card_key)?;
         let state = handle.state().borrow().clone();
-        guard(&state, card_key, expect)?;
+        guard(&inner.settings, &state, card_key, expect)?;
         let agent_id = match expect {
             // Voice: live state only; no published card is needed (D7, B2).
             Some(g) => {
@@ -1120,9 +1122,9 @@ fn notice(text: &str, tone: NoticeTone) -> Notice {
 }
 /// Refuses an operation whose plan no longer matches the machine (voice
 /// spec §5.6): connection, agent, and pending request or its absence.
-/// Checked on the live machine state, under the lock that records the
-/// action, never on the published view.
-fn guard(state: &MachineState, card_key: &str, expect: Option<&Guard>) -> Result<(), PickError> {
+/// Checked on the live machine state and the live settings, under the lock
+/// that records the action, never on the published view.
+fn guard(settings: &Settings, state: &MachineState, card_key: &str, expect: Option<&Guard>) -> Result<(), PickError> {
     let Some(g) = expect else {
         return Ok(());
     };
@@ -1136,6 +1138,14 @@ fn guard(state: &MachineState, card_key: &str, expect: Option<&Guard>) -> Result
     let live = agent.pending.as_ref().map(|r| (r.id.clone(), r.revision));
     if live != g.request {
         return Err(PickError::StaleRequest);
+    }
+    // The user may have hidden the agent since the step was planned. A
+    // hidden subagent or hook-only agent takes nothing; a hidden idle agent
+    // takes only a send that named it (D7).
+    let hidden_role = !settings.show_subagents && agent.role == acd_protocol::AgentRole::Subagent;
+    let hidden_idle = !settings.show_idle && view::group(agent) == view::CardGroup::Idle;
+    if hidden_role || view::hook_only_hidden(agent, settings.show_hook_only) || (hidden_idle && !g.named_send_only) {
+        return Err(PickError::Hidden);
     }
     Ok(())
 }

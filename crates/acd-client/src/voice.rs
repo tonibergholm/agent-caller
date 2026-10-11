@@ -71,6 +71,9 @@ pub struct Guard {
     pub conn: ConnStamp,
     pub agent_id: String,
     pub request: Option<(String, u64)>,
+    /// A send to an agent the transcript named while it was out of view
+    /// (D7). Only such a send may reach an idle agent the panel hides.
+    pub named_send_only: bool,
 }
 
 /// One rebuild's output: the view, the idle cards it hides, and the

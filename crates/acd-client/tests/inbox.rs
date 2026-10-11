@@ -1148,7 +1148,7 @@ fn guard_for(ib: &Inbox, card: &str) -> Guard {
         .iter()
         .find(|c| c.key == card)
         .and_then(|c| c.agent.pending.as_ref().map(|r| (r.id.clone(), r.revision)));
-    Guard { conn: ib.conn_stamp(machine).unwrap(), agent_id: agent.into(), request }
+    Guard { conn: ib.conn_stamp(machine).unwrap(), agent_id: agent.into(), request, named_send_only: false }
 }
 
 #[tokio::test]
@@ -1328,6 +1328,7 @@ async fn the_stamped_view_never_pairs_new_stamps_with_old_cards() {
         conn: held.stamps["m1"],
         agent_id: "a1".into(),
         request: Some((ANSWER_REQ.into(), 1)),
+        named_send_only: false,
     };
     assert_eq!(ib.pick_guarded("m1/a1", "allow", &planned), Err(PickError::ConnectionChanged));
     ib.hold_rebuild_for_test(false);
@@ -1425,10 +1426,60 @@ async fn a_guarded_send_reaches_a_hidden_idle_agent() {
     .await
     .expect("the hidden idle card");
     assert_eq!(ib.reply("m1/a3", "x".into()), Err(PickError::UnknownCard), "keyboard path unchanged");
-    let guard = Guard { conn: ib.conn_stamp("m1").unwrap(), agent_id: "a3".into(), request: None };
+    // Only a send that named it while it was out of view reaches it (D7).
+    let unnamed = Guard { conn: ib.conn_stamp("m1").unwrap(), agent_id: "a3".into(), request: None, named_send_only: false };
+    assert_eq!(ib.reply_guarded("m1/a3", "rebase".into(), &unnamed), Err(PickError::Hidden));
+    let guard = Guard { named_send_only: true, ..unnamed };
     ib.reply_guarded("m1/a3", "rebase".into(), &guard).unwrap();
     let sent = frame_of_type(&f, "agent.send").await;
     assert_eq!((sent["agent_id"].as_str(), sent["text"].as_str()), (Some("a3"), Some("rebase")));
+}
+
+/// The frozen plan passed its identity guard, but the user hid the agent
+/// while the step waited for Confirm. Every guarded operation checks the
+/// live settings under the action lock and sends nothing (final review B1).
+#[tokio::test]
+async fn a_guarded_step_on_a_subagent_hidden_since_the_freeze_is_refused() {
+    let (f, c, ib) = setup_with(held()).await;
+    ib.set_show_subagents(true).unwrap();
+    let mut sub = subagent_agent();
+    sub["can_send"] = true.into();
+    sub["pending"]["free_text"] = true.into();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), sub]})).await;
+    view_until(&ib, "subagent shown", |v| v.cards.len() == 2).await;
+    let frozen = guard_for(&ib, "m1/a2");
+    // Keep the published card, so only the live check can refuse.
+    ib.hold_rebuild_for_test(true);
+    ib.set_show_subagents(false).unwrap();
+    assert_eq!(ib.pick_guarded("m1/a2", "allow", &frozen), Err(PickError::Hidden));
+    assert_eq!(ib.answer_text_guarded("m1/a2", "SECRET".into(), &frozen), Err(PickError::Hidden));
+    let named = Guard { named_send_only: true, ..frozen.clone() };
+    assert_eq!(ib.reply_guarded("m1/a2", "go on".into(), &named), Err(PickError::Hidden), "D7 does not reach a hidden subagent");
+    ib.hold_rebuild_for_test(false);
+    ib.expire_countdowns_for_test();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let ops = f.received().iter().filter(|v| v["type"] == "request.answer" || v["type"] == "agent.send").count();
+    assert_eq!(ops, 0, "no daemon operation");
+}
+
+#[tokio::test]
+async fn a_guarded_send_to_a_hook_only_agent_hidden_since_the_freeze_is_refused() {
+    let (f, c, ib) = setup_with(held()).await;
+    ib.set_show_hook_only(true).unwrap();
+    let mut quiet = quiet_hook_only_agent();
+    quiet["can_send"] = true.into();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), quiet]})).await;
+    view_until(&ib, "hook-only shown", |v| v.cards.iter().any(|c| c.key == "m1/a3")).await;
+    let frozen = guard_for(&ib, "m1/a3");
+    ib.hold_rebuild_for_test(true);
+    ib.set_show_hook_only(false).unwrap();
+    assert_eq!(ib.reply_guarded("m1/a3", "go on".into(), &frozen), Err(PickError::Hidden));
+    let named = Guard { named_send_only: true, ..frozen };
+    assert_eq!(ib.reply_guarded("m1/a3", "go on".into(), &named), Err(PickError::Hidden), "D7 covers idle agents only");
+    ib.hold_rebuild_for_test(false);
+    ib.expire_countdowns_for_test();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!f.received().iter().any(|v| v["type"] == "agent.send"), "no daemon operation");
 }
 
 #[test]

@@ -12,7 +12,7 @@ async fn the_port_enqueues_only_on_the_state_the_step_was_planned_on() {
     let port = AcdPort::new(r.inbox.clone());
     let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
     let card = snap.card("m1/a1").unwrap();
-    let guard = Guard { conn: card.conn.unwrap(), agent_id: "a1".into(), request: Some(("r1".into(), 1)) };
+    let guard = Guard { conn: card.conn.unwrap(), agent_id: "a1".into(), request: Some(("r1".into(), 1)), named_send_only: false };
     let stale = Guard { request: Some(("r1".into(), 9)), ..guard.clone() };
     let pick = |guard| Enqueue::Pick { card: "m1/a1".into(), option_id: "allow".into(), guard };
     assert_eq!(port.enqueue(pick(stale)), Err(EnqueueError::Stale));
@@ -29,7 +29,7 @@ async fn a_send_reaches_an_idle_agent_the_panel_hides() {
     let snap = freeze(&r.inbox.stamped_view(), shown(None, &["m1/a1"]), false);
     let idle = snap.card("m1/a3").expect("frozen although hidden");
     assert!(idle.idle_hidden);
-    let guard = Guard { conn: idle.conn.unwrap(), agent_id: "a3".into(), request: None };
+    let guard = Guard { conn: idle.conn.unwrap(), agent_id: "a3".into(), request: None, named_send_only: true };
     let port = AcdPort::new(r.inbox.clone());
     port.enqueue(Enqueue::Reply { card: "m1/a3".into(), text: VoiceText::new("run the tests"), guard }).unwrap();
     let sent = frame(&r.f, "agent.send").await;
@@ -65,7 +65,7 @@ async fn answer_text_is_refused_on_a_stale_revision() {
     let port = AcdPort::new(r.inbox.clone());
     let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
     let conn = snap.card("m1/a1").unwrap().conn.unwrap();
-    let guard = Guard { conn, agent_id: "a1".into(), request: Some(("r1".into(), 1)) };
+    let guard = Guard { conn, agent_id: "a1".into(), request: Some(("r1".into(), 1)), named_send_only: false };
     let answer = |guard| Enqueue::AnswerText { card: "m1/a1".into(), text: VoiceText::new("use main"), guard };
     let stale = Guard { request: Some(("r1".into(), 9)), ..guard.clone() };
     assert_eq!(port.enqueue(answer(stale)), Err(EnqueueError::Stale));
@@ -82,7 +82,7 @@ async fn a_guard_from_another_connection_is_refused() {
     let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
     let conn = snap.card("m1/a1").unwrap().conn.unwrap();
     let other_conn = acd_voice::snapshot::ConnStamp { conn_gen: conn.conn_gen + 1, ..conn };
-    let guard = Guard { conn: other_conn, agent_id: "a1".into(), request: Some(("r1".into(), 1)) };
+    let guard = Guard { conn: other_conn, agent_id: "a1".into(), request: Some(("r1".into(), 1)), named_send_only: false };
     let card = || "m1/a1".to_owned();
     for op in [
         Enqueue::Pick { card: card(), option_id: "allow".into(), guard: guard.clone() },

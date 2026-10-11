@@ -30,6 +30,7 @@ fn guard_of(c: &CardSnap) -> Guard {
         conn: c.conn.unwrap(),
         agent_id: c.agent_id.clone(),
         request: c.pending.as_ref().map(|r| (r.id.clone(), r.revision)),
+        named_send_only: false,
     }
 }
 
@@ -69,7 +70,8 @@ impl InboxPort for FakePort {
         if live.conn != guard.conn {
             return Err(EnqueueError::ConnectionChanged);
         }
-        if live != guard {
+        // The flag is the planner's, not live state; acd-client checks it.
+        if (live.agent_id, live.request) != (guard.agent_id, guard.request) {
             return Err(EnqueueError::Stale);
         }
         self.enqueued.lock().unwrap().push(op);
@@ -105,6 +107,7 @@ fn pick(card: &str, request: &str, option: &str) -> Enqueue {
             conn: ConnStamp { instance: 1, conn_gen: 1 },
             agent_id: card.split_once('/').unwrap().1.into(),
             request: Some((request.into(), 1)),
+            named_send_only: false,
         },
     }
 }
