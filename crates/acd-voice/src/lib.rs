@@ -3,5 +3,6 @@
 pub mod fast;
 pub mod refusal;
 pub mod router;
+pub mod safety;
 pub mod snapshot;
 pub mod text;
