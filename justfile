@@ -23,3 +23,15 @@ e2e-one name:
 # Inspect the live inbox of the scratch acd
 e2e-inbox:
     python3 {{e2e_dir}}/inbox.py -d /tmp/ace2e/acd list
+
+# Build the Mac app and install it to /Applications. Signs with
+# $APPLE_SIGNING_IDENTITY when set (a stable identity keeps Keychain and
+# privacy grants across rebuilds); otherwise the build is ad-hoc signed.
+app-install:
+    cd app && npm ci --silent && npx tauri build --bundles app --ci
+    -pkill -f "Agent Caller.app/Contents/MacOS/agent-caller-app"
+    sleep 1
+    rm -rf "/Applications/Agent Caller.app"
+    ditto "app/src-tauri/target/release/bundle/macos/Agent Caller.app" "/Applications/Agent Caller.app"
+    codesign -dvv "/Applications/Agent Caller.app" 2>&1 | grep -E "^(Authority|Signature)=" | head -1
+    open "/Applications/Agent Caller.app"
