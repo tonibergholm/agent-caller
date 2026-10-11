@@ -106,11 +106,23 @@ pub fn screen_at(point: (f64, f64), screens: &[Frame]) -> Option<usize> {
 /// old size, or the target size with the old position, as well as the full
 /// target. Either half matching (within rounding) counts.
 pub fn is_programmatic(live: &Frame, target: &Frame) -> bool {
-    const EPS: f64 = 1.5;
-    let near = |a: f64, b: f64| (a - b).abs() <= EPS;
-    let same_pos = near(live.x, target.x) && near(live.y, target.y);
-    let same_size = near(live.w, target.w) && near(live.h, target.h);
-    same_pos || same_size
+    same_pos(live, target) || same_size(live, target)
+}
+
+/// Position and size both match: the last queued operation has landed.
+pub fn is_full_target(live: &Frame, target: &Frame) -> bool {
+    same_pos(live, target) && same_size(live, target)
+}
+
+const EPS: f64 = 1.5;
+fn near(a: f64, b: f64) -> bool {
+    (a - b).abs() <= EPS
+}
+fn same_pos(a: &Frame, b: &Frame) -> bool {
+    near(a.x, b.x) && near(a.y, b.y)
+}
+fn same_size(a: &Frame, b: &Frame) -> bool {
+    near(a.w, b.w) && near(a.h, b.h)
 }
 
 /// A missing, unreadable or malformed file is "nothing saved".
@@ -237,6 +249,9 @@ mod tests {
         let target = f(100.0, 100.0, 560.0, 720.0);
         // Fully applied, with rounding.
         assert!(is_programmatic(&f(100.4, 99.6, 560.0, 720.4), &target));
+        assert!(is_full_target(&f(100.4, 99.6, 560.0, 720.4), &target));
+        assert!(!is_full_target(&f(900.0, 40.0, 560.0, 720.0), &target));
+        assert!(!is_full_target(&f(100.0, 100.0, 440.0, 560.0), &target));
         // Size applied, position not yet (and the reverse).
         assert!(is_programmatic(&f(900.0, 40.0, 560.0, 720.0), &target));
         assert!(is_programmatic(&f(100.0, 100.0, 440.0, 560.0), &target));

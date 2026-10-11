@@ -104,14 +104,14 @@
 
 <main class="panel">
   <!-- The panel is borderless: this strip (and the header's empty space) drags it.
-       It sticks to the top so the handle never scrolls away. A double click must not
-       reach the window's maximize toggle, which a panel refuses. -->
+       It sticks to the top so the handle never scrolls away. Tauri's drag script
+       toggles maximize from a document-level mouseup with detail 2 (a double click),
+       which a panel refuses; stopping that mouseup here keeps it from firing. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="top"
-    ondblclick={(e) => {
-      e.preventDefault();
-      e.stopPropagation();
+    onmouseup={(e) => {
+      if (e.detail >= 2) e.stopPropagation();
     }}
   >
   <div class="grip" data-tauri-drag-region aria-hidden="true"></div>

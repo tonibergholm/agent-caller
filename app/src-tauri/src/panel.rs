@@ -22,8 +22,10 @@ static VISIBLE: AtomicBool = AtomicBool::new(false);
 /// the two calls). A "currently placing" flag therefore cannot tell them from
 /// the user dragging; comparing the live frame with the requested one can.
 static EXPECTED: Mutex<Option<(Frame, Instant)>> = Mutex::new(None);
-/// How long after `place()` its own callbacks can still arrive.
-const PLACE_SETTLE: Duration = Duration::from_millis(1000);
+/// Backstop for how long after `place()` its own callbacks can still arrive
+/// (a slow launch can deliver them late). Normally `EXPECTED` is cleared as
+/// soon as a callback shows the full target.
+const PLACE_SETTLE: Duration = Duration::from_secs(5);
 /// The user moved or resized the panel since the last save. Only then is the
 /// frame written, so a frame refitted after a display went away never
 /// replaces the remembered one.
@@ -249,7 +251,13 @@ fn on_frame_event(app: &AppHandle) {
     let live = app.get_webview_window("panel").and_then(|w| live_frame(&w));
     if let (Some(live), Ok(mut expected)) = (live, EXPECTED.lock()) {
         match *expected {
-            Some((target, until)) if Instant::now() < until && frame::is_programmatic(&live, &target) => {
+            Some((target, until))
+                if Instant::now() < until && frame::is_programmatic(&live, &target) =>
+            {
+                // Both queued operations have landed: nothing more is ours.
+                if frame::is_full_target(&live, &target) {
+                    *expected = None;
+                }
                 return;
             }
             _ => *expected = None,
