@@ -17,7 +17,7 @@ pub fn socket_hash(path: &Path) -> String {
 /// Pane ids contain colons (`w1:p7`), so ids are never parsed back; callers
 /// keep a map from agent id to `(socket, pane_id)`.
 pub fn agent_id(socket_hash: &str, pane_id: &str) -> String {
-    format!("herdr:{socket_hash}:{pane_id}")
+    crate::ids::bounded(&format!("herdr:{socket_hash}:"), pane_id)
 }
 
 /// `None` for a pane with no detected agent.

@@ -515,3 +515,15 @@ async fn accessors_return_current_state() {
     });
     assert!(core.request(&rid).is_none());
 }
+
+#[tokio::test]
+async fn an_agent_id_over_the_command_limit_is_never_published() {
+    let core = Core::new(test_machine(), vec![FakeAdapter::new()]);
+    let long = "x".repeat(MAX_ID_BYTES + 1);
+    core.observe(Observation::AgentUpsert(agent_obs(&long)));
+    core.observe(Observation::RequestSeen(permission_obs(&long, "k")));
+    assert!(core.agent(&long).is_none());
+    let ok = "y".repeat(MAX_ID_BYTES);
+    core.observe(Observation::AgentUpsert(agent_obs(&ok)));
+    assert!(core.agent(&ok).is_some());
+}

@@ -144,6 +144,7 @@ SourceStatus { state: "ok"|"degraded"|"disabled"|"unconfigured", message?: strin
 
 Agent {
   id: string               // "herdr:<socket_hash>:<pane_id>" | "t3:<thread_id>" | "claude:<session_id>"
+                           // at most 128 bytes; see "Agent id bound" below
   machine_id: string
   source: "herdr" | "t3" | "hooks"
   kind: "claude" | "codex" | "other"
@@ -186,6 +187,17 @@ A request is **answerable** when all three conditions hold:
   single-select.
 
 Anything else is shown read-only, with the label "answer in terminal".
+
+**Agent id bound.** Every published agent id is at most `MAX_ID_BYTES` (128)
+bytes, because the engine rejects any command id over that. An adapter builds
+`<prefix><source id>` when it fits. Otherwise it uses
+`<prefix>h:` plus the first 20 bytes of `sha256(source id)` as 40 hex chars
+(160 bits): stable, and distinct for ids that share a long prefix. A source id
+that itself starts with `h:` is hashed too, so the two forms cannot collide.
+The short form is one-way, so adapters keep a map from agent id back to the
+source id (T3 `threads`, herdr pane map) and never parse ids. T3 subagent
+thread ids run past 300 bytes. Core drops and logs an observation whose agent
+id is over the limit instead of truncating it, which could merge two agents.
 
 ### 5.1 Request lifecycle and identity
 
@@ -2113,3 +2125,5 @@ personal use (R7).
 **P3 final, 2026-10-10 (revision 5.0).** The draft's pending points are closed against the approved tasks 17 to 19, 30 and 31: C7 and R12 (§6.3), R13 and A8 (§6.1, §6.2), the daemon socket rules and `acd.lock` (§6.1, §9), the random `hook_port`, the squat warning and the install trust note (§9), and the R8 clarification (§6.2). The unverified points stay in §11 and live checks 10 to 14 remain open.
 
 **P6, 2026-10-11: Codex deny resolves from the cancellation tail.** Codex fires no `PostToolUse` or `Stop` hook after a cancel, so an inbox "No" waited the full 35 s evidence window and resolved `uncertain` while `agent.send` returned `agent_busy`. The e2e run found it. The screen's cancellation tail for the tracked command is now correlated evidence for Codex `keys` requests (§4).
+
+**P7, 2026-10-11: agent ids are bounded to 128 bytes.** The Mac app showed "Could not send: id longer than 128 bytes" when replying to a T3 subagent, whose thread id (and so `t3:<thread_id>`) is over 300 bytes. Agent ids now fall back to a hashed form when they would exceed the limit (§5, "Agent id bound"); short ids are unchanged. The same helper covers herdr pane ids and hooks session ids (`claude:<session_id>` could reach 135 bytes). Core drops over-long agent ids with an error log.

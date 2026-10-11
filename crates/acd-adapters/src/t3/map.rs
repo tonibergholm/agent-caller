@@ -31,7 +31,7 @@ const FALLBACK: [(&str, &str, Effect); 3] = [
 ];
 
 pub fn agent_id(thread_id: &str) -> String {
-    format!("t3:{thread_id}")
+    crate::ids::bounded("t3:", thread_id)
 }
 
 pub fn kind(provider_instance_id: Option<&str>) -> AgentKind {

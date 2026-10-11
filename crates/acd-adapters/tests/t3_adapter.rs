@@ -609,3 +609,52 @@ async fn disabled_and_unconfigured_report_status() {
         assert_eq!(machine.sources.t3.state, want);
     }
 }
+
+fn subagent_thread(tail: &str) -> String {
+    format!(
+        "thread:provider:claudeAgent:native-thread:provider-thread%3Aprovider%3AclaudeAgent%3Anative-thread%3Apending%253Arun%253Athread%253A2f1c9d1e-7b1a-4c55-9a53-0b6f3f1d2a10%253Aordinal%253A1%3A{tail}"
+    )
+}
+
+fn agent_ids(core: &Core) -> Vec<String> {
+    let (initial, _) = core.attach(None);
+    let ServerMessage::Snapshot { agents, .. } = &initial[0] else {
+        panic!("expected snapshot")
+    };
+    agents.iter().map(|a| a.id.clone()).collect()
+}
+
+#[tokio::test]
+async fn long_subagent_thread_ids_publish_bounded_addressable_agents() {
+    let long_a = subagent_thread("aaaa");
+    let long_b = subagent_thread("bbbb");
+    assert!(long_a.len() > 128);
+    let fake = FakeT3::start().await;
+    fake.put_thread(shell_thread(&long_a, "running", Some(("rq-1", "command"))));
+    fake.set_projection(&long_a, approval_projection(&long_a, "rq-1", None));
+    fake.put_thread(shell_thread(&long_b, "completed", None));
+    fake.put_thread(shell_thread("short", "completed", None));
+    let r = rig(fake).await;
+    until("three agents", || {
+        (agent_ids(&r.core).len() == 3).then_some(())
+    })
+    .await;
+    let ids = agent_ids(&r.core);
+    assert!(ids.iter().all(|i| i.len() <= 128), "{ids:?}");
+    assert!(ids.contains(&"t3:short".to_string()), "short ids unchanged");
+    let long_ids: Vec<_> = ids.iter().filter(|i| *i != "t3:short").collect();
+    assert_ne!(long_ids[0], long_ids[1], "common prefix must not collide");
+
+    let id_a = acd_adapters::t3::map::agent_id(&long_a);
+    let agent = until("long agent", || r.core.agent(&id_a)).await;
+    assert!(id_a.len() <= 128);
+    r.adapter.send(&agent, "hello").await.unwrap();
+    let req = until("pending", || r.core.agent(&id_a)?.pending).await;
+    let res = answer(&r, &req, "accept").await;
+    assert_eq!(res.outcome, Some(Outcome::Delivered), "{res:?}");
+    let sent = r.fake.dispatched();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0]["threadId"].as_str(), Some(long_a.as_str()));
+    assert_eq!(sent[1]["threadId"].as_str(), Some(long_a.as_str()));
+    assert_eq!(sent[1]["requestId"].as_str(), Some("rq-1"));
+}

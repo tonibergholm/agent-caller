@@ -74,6 +74,21 @@ impl Core {
     }
 
     pub fn observe(&self, obs: Observation) {
+        // A client cannot address an agent whose id is over the command limit
+        // (`check_limits`), so publishing one is a source bug. Drop it loudly
+        // rather than truncate, which could merge two agents.
+        let published = match &obs {
+            Observation::AgentUpsert(a) => Some(&a.id),
+            Observation::RequestSeen(r) => Some(&r.agent_id),
+            _ => None,
+        };
+        if let Some(id) = published.filter(|id| id.len() > MAX_ID_BYTES) {
+            tracing::error!(
+                len = id.len(),
+                "adapter published an agent id over 128 bytes; dropped"
+            );
+            return;
+        }
         let mut st = self.inner.lock().unwrap();
         let changes = st.registry.apply(obs);
         self.publish(&mut st, changes);
