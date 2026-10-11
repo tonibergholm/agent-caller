@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { InboxView } from "./bindings/InboxView";
 import type { MachineEntryView } from "./bindings/MachineEntryView";
+import type { HudEvent } from "./hud";
 import type { Presentation, VoiceSettings } from "./voice";
 
 export interface Api {
@@ -35,6 +36,15 @@ export interface Api {
   setVoiceSettings(s: VoiceSettings): Promise<VoiceSettings>;
   onVoiceSettings(cb: (s: VoiceSettings) => void): Promise<() => void>;
   onVoiceSelect(cb: (cardKey: string) => void): Promise<() => void>;
+  onHud(cb: (e: HudEvent) => void): Promise<() => void>;
+  onHudClear(cb: (seq: number) => void): Promise<() => void>;
+  /** The HUD rendered this proposal (D22). */
+  voiceShown(proposalId: number): Promise<void>;
+  voiceConfirm(proposalId: number): Promise<void>;
+  /** `choiceId` is the `id` of the which-one state the digit or click was for. */
+  voiceChoose(choiceId: number, index: number): Promise<void>;
+  /** `id` is the `id` of the shown state; states without one send no cancel. */
+  voiceCancel(id: number): Promise<void>;
 }
 
 export const tauriApi: Api = {
@@ -66,4 +76,10 @@ export const tauriApi: Api = {
   setVoiceSettings: (s) => invoke("voice_set_settings", { enabled: s.enabled, debugInput: s.debug_input }),
   onVoiceSettings: (cb) => listen<VoiceSettings>("voice://settings", (e) => cb(e.payload)),
   onVoiceSelect: (cb) => listen<string>("voice://select", (e) => cb(e.payload)),
+  onHud: (cb) => listen<HudEvent>("voice://hud", (e) => cb(e.payload)),
+  onHudClear: (cb) => listen<number>("voice://hud-clear", (e) => cb(e.payload)),
+  voiceShown: (proposalId) => invoke("voice_shown", { proposalId }),
+  voiceConfirm: (proposalId) => invoke("voice_confirm", { proposalId }),
+  voiceChoose: (choiceId, index) => invoke("voice_choose", { choiceId, index }),
+  voiceCancel: (id) => invoke("voice_cancel", { id }),
 };

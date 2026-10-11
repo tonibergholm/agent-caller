@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
+  import Hud from "./components/Hud.svelte";
   import Panel from "./components/Panel.svelte";
   import Settings from "./components/Settings.svelte";
   import type { InboxView } from "./lib/bindings/InboxView";
@@ -49,7 +50,8 @@
 {#if resolvedLabel === "settings"}
   <Settings {api} />
 {:else if resolvedLabel === "hud"}
-  <!-- The voice HUD (Task 15). Never the panel: a second panel would publish its own presentation. -->
+  <!-- Never the panel: a second panel would publish its own presentation. -->
+  <Hud {api} view={v} />
 {:else if v}
   <Panel view={v} {api} {hotkey} {voiceInput} />
 {:else if loadError}

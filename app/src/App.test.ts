@@ -46,12 +46,15 @@ test("the empty-state hint shows the stored hotkey", async () => {
   expect(await screen.findByText(/Command\+Shift\+K/)).toBeTruthy();
 });
 
-test("the hud label never renders the panel", async () => {
+test("the hud label renders the HUD, never the panel", async () => {
   const api = fakeApi();
   api.getView = async () => view({ cards: [card({ key: "m/a" })] });
   render(App, { api, label: "hud" });
   await new Promise((r) => setTimeout(r, 20));
   expect(screen.queryByText("Fix the build")).toBeNull();
+  expect(api.presentations).toEqual([]);
+  api.hud!({ seq: 1, id: null, hud: { state: "speaking", text: "Nothing needs you." } });
+  expect(await screen.findByText("Nothing needs you.")).toBeTruthy();
 });
 
 test("the panel shows the typed command field only while voice and its debug input are on", async () => {

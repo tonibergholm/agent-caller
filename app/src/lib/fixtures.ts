@@ -2,6 +2,7 @@ import type { Api } from "./ipc";
 import type { CardView } from "./bindings/CardView";
 import type { InboxView } from "./bindings/InboxView";
 import type { MachineEntryView } from "./bindings/MachineEntryView";
+import type { HudEvent } from "./hud";
 import { VOICE_OFF, type Presentation, type VoiceSettings } from "./voice";
 
 export function card(overrides: Partial<CardView> = {}): CardView {
@@ -95,6 +96,8 @@ export type FakeApi = Api & {
   presentations: Presentation[];
   voiceSelect?: (cardKey: string) => void;
   voiceSettings?: (s: VoiceSettings) => void;
+  hud?: (e: HudEvent) => void;
+  hudClear?: (seq: number) => void;
 };
 
 export function fakeApi(
@@ -154,6 +157,18 @@ export function fakeApi(
       api.voiceSelect = cb;
       return () => {};
     },
+    onHud: async (cb: (e: HudEvent) => void) => {
+      api.hud = cb;
+      return () => {};
+    },
+    onHudClear: async (cb: (seq: number) => void) => {
+      api.hudClear = cb;
+      return () => {};
+    },
+    voiceShown: rec("voiceShown", undefined),
+    voiceConfirm: rec("voiceConfirm", undefined),
+    voiceChoose: rec("voiceChoose", undefined),
+    voiceCancel: rec("voiceCancel", undefined),
   } as FakeApi;
   return api;
 }

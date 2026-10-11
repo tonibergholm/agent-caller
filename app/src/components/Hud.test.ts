@@ -1,0 +1,234 @@
+import { cleanup, render, screen } from "@testing-library/svelte";
+import userEvent from "@testing-library/user-event";
+import { tick } from "svelte";
+import { afterEach, expect, test, vi } from "vitest";
+import Hud from "./Hud.svelte";
+import { fakeApi, view } from "../lib/fixtures";
+import type { InboxView } from "../lib/bindings/InboxView";
+import type { Hud as HudState, ProposalView, TargetView } from "../lib/hud";
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+const target: TargetView = {
+  card: "minos/a",
+  machine: "minos",
+  agent: "Claude",
+  title: "Fix the build",
+  request: "bash approval",
+  off_screen: false,
+};
+
+const proposal = (o: Partial<ProposalView> = {}): ProposalView => ({
+  action: "answer",
+  target,
+  option: "Yes, always",
+  effect: "allow_always",
+  rule: "Bash(npm test:*)",
+  question: "npm test",
+  text: null,
+  provenance: "selected",
+  level: "confirm",
+  ...o,
+});
+
+let seq = 0;
+
+const inputId = (s: HudState): number | null =>
+  s.state === "confirm" || s.state === "countdown" ? s.proposal_id : s.state === "thinking" ? s.id : s.state === "which_one" ? s.choice_id : null;
+
+async function show(state: HudState, v: InboxView = view()) {
+  const api = fakeApi();
+  render(Hud, { api, view: v });
+  await tick();
+  api.hud!({ seq: ++seq, id: inputId(state), hud: state });
+  await tick();
+  await tick();
+  return api;
+}
+
+const others = (calls: unknown[][]) => calls.filter((c) => c[0] !== "voiceShown");
+
+test("hidden shows nothing", () => {
+  const { container } = render(Hud, { api: fakeApi(), view: view() });
+  expect(container.querySelector(".hud")).toBeNull();
+});
+
+test("a rendered proposal is acknowledged with its id; other states are not", async () => {
+  let api = await show({ state: "confirm", proposal: proposal(), proposal_id: 7 });
+  expect(api.calls).toContainEqual(["voiceShown", 7]);
+  cleanup();
+  api = await show({ state: "countdown", proposal: proposal({ level: "countdown" }), proposal_id: 8, action_id: null });
+  expect(api.calls).toContainEqual(["voiceShown", 8]);
+  expect(screen.getByText(/Starting/)).toBeTruthy();
+  cleanup();
+  api = await show({ state: "countdown", proposal: proposal({ level: "countdown" }), proposal_id: 8, action_id: "act-1" });
+  expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+});
+
+test("a proposal replaced before the DOM flush is never acknowledged", async () => {
+  const api = fakeApi();
+  render(Hud, { api, view: view() });
+  await tick();
+  // Two events with no flush between them: only the second renders.
+  api.hud!({ seq: ++seq, id: 20, hud: { state: "confirm", proposal: proposal(), proposal_id: 20 } });
+  api.hud!({ seq: ++seq, id: 21, hud: { state: "confirm", proposal: proposal({ option: "Yes" }), proposal_id: 21 } });
+  await tick();
+  await tick();
+  expect(api.calls.filter((c) => c[0] === "voiceShown")).toEqual([["voiceShown", 21]]);
+  api.hud!({ seq: ++seq, id: 22, hud: { state: "countdown", proposal: proposal({ level: "countdown" }), proposal_id: 22, action_id: null } });
+  api.hud!({ seq: ++seq, id: null, hud: { state: "speaking", text: "Nothing needs you." } });
+  await tick();
+  await tick();
+  expect(api.calls.filter((c) => c[0] === "voiceShown")).toEqual([["voiceShown", 21]]);
+});
+
+test("an older state arriving late is dropped", async () => {
+  const api = fakeApi();
+  render(Hud, { api, view: view() });
+  await tick();
+  api.hud!({ seq: 10, id: null, hud: { state: "speaking", text: "newer" } });
+  api.hud!({ seq: 9, id: null, hud: { state: "speaking", text: "older" } });
+  await tick();
+  expect(screen.getByText("newer")).toBeTruthy();
+  expect(screen.queryByText("older")).toBeNull();
+  api.hudClear!(9);
+  await tick();
+  expect(screen.getByText("newer")).toBeTruthy();
+  api.hudClear!(10);
+  await tick();
+  expect(screen.queryByText("newer")).toBeNull();
+});
+
+test("confirm shows target, action and the whole payload; Enter confirms its id, Esc cancels", async () => {
+  const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 3 });
+  expect(screen.getByText("Fix the build")).toBeTruthy();
+  expect(screen.getByText("@ minos")).toBeTruthy();
+  expect(screen.getByText("Bash(npm test:*)")).toBeTruthy();
+  expect(screen.getByText("npm test")).toBeTruthy();
+  await userEvent.keyboard("{Enter}");
+  await userEvent.keyboard("{Escape}");
+  expect(others(api.calls)).toEqual([["voiceConfirm", 3], ["voiceCancel", 3]]);
+});
+
+test("confirm and cancel have buttons too", async () => {
+  const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 4 });
+  await userEvent.click(screen.getByRole("button", { name: /Confirm/ }));
+  await userEvent.click(screen.getByRole("button", { name: /Cancel/ }));
+  expect(others(api.calls)).toEqual([["voiceConfirm", 4], ["voiceCancel", 4]]);
+});
+
+test("a long payload scrolls inside its block and the buttons stay outside it", async () => {
+  const text = `${"run the tests and then report back\n".repeat(400)}END`;
+  await show({
+    state: "confirm",
+    proposal: proposal({ action: "send", option: null, effect: null, rule: null, question: null, text }),
+    proposal_id: 5,
+  });
+  const payload = document.querySelector<HTMLElement>(".payload")!;
+  expect(payload.textContent).toBe(text);
+  expect(payload.classList.contains("block")).toBe(true);
+  const body = document.querySelector<HTMLElement>(".body")!;
+  for (const name of [/Confirm/, /Cancel/]) {
+    expect(body.contains(screen.getByRole("button", { name }))).toBe(false);
+  }
+});
+
+test("a target off screen is marked", async () => {
+  await show({ state: "confirm", proposal: proposal({ target: { ...target, off_screen: true } }), proposal_id: 6 });
+  expect(screen.getByText("@ minos").classList.contains("off-screen")).toBe(true);
+});
+
+test("which-one lists numbered candidates; digits and clicks choose", async () => {
+  const api = await show({
+    state: "which_one",
+    transcript: "approve",
+    choice_id: 40,
+    candidates: [target, { ...target, card: "minos/b", title: "Write docs" }],
+  });
+  await userEvent.keyboard("2");
+  await userEvent.keyboard("9");
+  await userEvent.click(screen.getByRole("button", { name: /Fix the build/ }));
+  expect(api.calls).toEqual([["voiceChoose", 40, 1], ["voiceChoose", 40, 0]]);
+});
+
+test("the countdown reads the inbox action and cancels on Esc, not Enter", async () => {
+  const v = view({ actions: [{ id: "act-1", card_key: "minos/a", label: "Yes", detail: null, fires_at_ms: Date.now() + 1500 }] });
+  const api = await show(
+    { state: "countdown", proposal_id: 9, action_id: "act-1", proposal: proposal({ level: "countdown", option: "Yes", effect: "allow", rule: null }) },
+    v,
+  );
+  expect(screen.getByText(/Sending in 1\.\ds/)).toBeTruthy();
+  await userEvent.keyboard("{Enter}");
+  await userEvent.keyboard("{Escape}");
+  expect(api.calls).toEqual([["voiceCancel", 9]]);
+});
+
+test("states that do not wait for input ignore keys", async () => {
+  const api = await show({ state: "thinking", transcript: "approve", id: 30 });
+  await userEvent.keyboard("{Escape}{Enter}1");
+  expect(api.calls).toEqual([]);
+});
+
+test("after firing it says it is waiting for the result", async () => {
+  await show({ state: "sending", proposal: proposal(), too_late_to_cancel: false });
+  expect(screen.getByText("Sent. Waiting for the result.")).toBeTruthy();
+});
+
+test("errors are classified; only 'didn't understand' repeats the transcript", async () => {
+  await show({ state: "error", refusal: "did_not_understand", transcript: "frobnicate the thing" });
+  expect(screen.getByText("Didn't understand.")).toBeTruthy();
+  expect(screen.getByText(/frobnicate the thing/)).toBeTruthy();
+  cleanup();
+  await show({ state: "error", refusal: "display_failed", transcript: null });
+  expect(screen.getByText("The HUD could not show the step. Nothing was sent.")).toBeTruthy();
+});
+
+test("outcomes and spoken text are shown", async () => {
+  await show({ state: "done", proposal: null, outcome: { kind: "not_sent", reason: "answered_elsewhere" } });
+  expect(screen.getByText("Answered elsewhere.")).toBeTruthy();
+  cleanup();
+  await show({ state: "speaking", text: "2 need you. On minos: Claude, Fix: bash approval." });
+  expect(screen.getByText(/2 need you/)).toBeTruthy();
+});
+
+test("voice text never reaches the console", async () => {
+  const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) => vi.spyOn(console, m));
+  const api = await show({ state: "thinking", transcript: "SECRET-T", id: 31 });
+  api.voiceConfirm = async () => {
+    throw new Error("SECRET-E");
+  };
+  api.voiceShown = async () => {
+    throw new Error("SECRET-S");
+  };
+  api.hud!({ seq: ++seq, id: 11, hud: { state: "confirm", proposal: proposal({ action: "send", text: "SECRET-P" }), proposal_id: 11 } });
+  await tick();
+  await userEvent.keyboard("{Enter}");
+  await tick();
+  for (const spy of spies) {
+    expect(spy).not.toHaveBeenCalled();
+  }
+});
+
+test("Esc on a state without an input id sends nothing", async () => {
+  const api = await show({ state: "sending", proposal: proposal(), too_late_to_cancel: false });
+  await userEvent.keyboard("{Escape}");
+  expect(api.calls).toEqual([]);
+});
+
+test("a stale clear is ignored and the current clear hides the state", async () => {
+  const api = fakeApi();
+  render(Hud, { api, view: view() });
+  await tick();
+  api.hud!({ seq: 50, id: null, hud: { state: "speaking", text: "kept" } });
+  await tick();
+  api.hudClear!(49);
+  api.hudClear!(51);
+  await tick();
+  expect(screen.getByText("kept")).toBeTruthy();
+  api.hudClear!(50);
+  await tick();
+  expect(screen.queryByText("kept")).toBeNull();
+});
