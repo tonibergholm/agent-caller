@@ -53,6 +53,7 @@ export function card(overrides: Partial<CardView> = {}): CardView {
     live: true,
     offline_since_ms: null,
     answerable: false,
+    free_text_answerable: false,
     selectable_options: [],
     can_reply: false,
     can_mark_seen: false,
