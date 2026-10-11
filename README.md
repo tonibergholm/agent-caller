@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/tonibergholm/agent-caller/actions/workflows/ci.yml/badge.svg)](https://github.com/tonibergholm/agent-caller/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/tonibergholm/agent-caller?utm_source=oss&utm_medium=github&utm_campaign=tonibergholm%2Fagent-caller&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 An inbox for coding agents. When Claude Code asks for a permission, Codex
 waits on a question, or an agent in herdr or T3 Code finishes, the request
