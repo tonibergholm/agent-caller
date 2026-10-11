@@ -190,9 +190,9 @@ such a step always needs confirmation and the HUD shows its machine. A
 card in a collapsed Done section, and an idle agent hidden by the idle
 setting, can be the target of `send` only, and only when named; the step
 always needs confirmation and the HUD shows the full target and payload.
-Answers, reads and selections never target them. (Decision of 2026-10-11,
-pending user confirmation; it replaces "cards in a collapsed Done section
-are never targets".)
+Answers, reads and selections never target them. (Decided 2026-10-11 by
+the orchestrator; revisit with the user. It replaces "cards in a collapsed
+Done section are never targets".)
 
 ### 5.3 Fast path
 
