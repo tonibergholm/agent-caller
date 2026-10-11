@@ -90,15 +90,61 @@ test("answerable cards show numbered option buttons; unsupported ones are disabl
   expect(onpick).toHaveBeenCalledWith("deny", c.agent.pending!.id, 1);
 });
 
-test("a question shows its first question text", () => {
+test("a question whose detail is its text shows that text once", () => {
   const c = card({ key: "m/x", answerable: true });
   c.agent.pending = {
     ...c.agent.pending!,
     kind: "question",
+    detail: "Which branch?",
+    questions: [{ id: "q", header: null, text: "Which branch?", multi_select: false, options: [] }],
+  };
+  const { container } = render(Card, props(c));
+  expect(screen.getAllByText("Which branch?").length).toBe(1);
+  expect(container.querySelector(".detail")?.textContent).toContain("Which branch?");
+  expect(container.querySelector(".question")).toBeNull();
+});
+
+test("a question text that differs from the detail is still shown", () => {
+  const c = card({ key: "m/x", answerable: true });
+  c.agent.pending = {
+    ...c.agent.pending!,
+    kind: "question",
+    detail: "The question could not be read.",
+    questions: [{ id: "q", header: null, text: "Which branch?", multi_select: false, options: [] }],
+  };
+  const { container } = render(Card, props(c));
+  expect(container.querySelector(".detail")?.textContent).toContain("could not be read");
+  expect(container.querySelector(".question")?.textContent).toBe("Which branch?");
+});
+
+test("a question with an empty detail falls back to the question text", () => {
+  const c = card({ key: "m/x", answerable: true });
+  c.agent.pending = {
+    ...c.agent.pending!,
+    kind: "question",
+    detail: "",
     questions: [{ id: "q", header: null, text: "Which branch?", multi_select: false, options: [] }],
   };
   render(Card, props(c));
-  expect(screen.getByText("Which branch?")).toBeTruthy();
+  expect(screen.getAllByText("Which branch?").length).toBe(1);
+});
+
+test("a read-only T3 request says to answer in T3", () => {
+  const c = card({ key: "m/x", answerable: false });
+  c.agent.source = "t3";
+  c.agent.pending = { ...c.agent.pending!, answer_path: "none" };
+  const { container } = render(Card, props(c));
+  expect(screen.getByText("Answer in T3")).toBeTruthy();
+  expect(container.textContent).not.toMatch(/answer in terminal/i);
+});
+
+test.each(["herdr", "hooks", "unknown"] as const)("a read-only %s request says to answer in the terminal", (source) => {
+  const c = card({ key: "m/x", answerable: false });
+  c.agent.source = source;
+  c.agent.pending = { ...c.agent.pending!, answer_path: "none" };
+  const { container } = render(Card, props(c));
+  expect(screen.getByText("Answer in terminal")).toBeTruthy();
+  expect(container.textContent).not.toMatch(/answer in t3/i);
 });
 
 test("an offline card still shows the request but no options, countdown or terminal hint", () => {
@@ -159,4 +205,19 @@ test("a multi-line detail renders one hanging-indent block per logical line", ()
   expect(rule).toMatch(/padding-left:\s*2ch/);
   expect(rule).toMatch(/text-indent:\s*-2ch/);
   expect(css).toMatch(/\.detail\s*\{[^}]*monospace/);
+});
+
+test.each([
+  ["herdr", "herdr"],
+  ["t3", "T3"],
+  ["hooks", "hooks"],
+  ["unknown", "unknown"],
+] as const)("the %s source is shown as a badge in the meta line", (source, text) => {
+  const c = card({ key: "m/x" });
+  c.agent.source = source;
+  const { container } = render(Card, props(c));
+  const badge = container.querySelector(".meta .source");
+  expect(badge?.textContent).toBe(text);
+  expect(badge?.getAttribute("data-source")).toBe(source);
+  expect(container.querySelector(".meta")?.textContent).toContain("Studio");
 });

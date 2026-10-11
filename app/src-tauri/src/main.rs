@@ -1,4 +1,5 @@
 mod commands;
+mod frame;
 mod hotkey;
 mod keychain;
 mod notify;
@@ -108,13 +109,13 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("failed to build agent-caller");
-    app.run(|_, event| {
+    app.run(|handle, event| match event {
         // Menu bar app: closing the settings window must not quit.
-        if let RunEvent::ExitRequested {
+        RunEvent::ExitRequested {
             api, code: None, ..
-        } = event
-        {
-            api.prevent_exit();
-        }
+        } => api.prevent_exit(),
+        // Keep a drag made just before quitting.
+        RunEvent::Exit => panel::save_now(handle),
+        _ => {}
     });
 }

@@ -33,6 +33,14 @@
     if (st.replyFor === null) replyText = "";
   });
 
+  // Keep the J/K selection in view in the scrolling panel.
+  $effect(() => {
+    const key = st.selected;
+    if (key === null) return;
+    const el = [...document.querySelectorAll<HTMLElement>("[data-key]")].find((e) => e.dataset.key === key);
+    el?.scrollIntoView?.({ block: "nearest" });
+  });
+
   onMount(() => {
     const timer = setInterval(() => (now = Date.now()), 100);
     return () => clearInterval(timer);
@@ -95,7 +103,19 @@
 <svelte:window onkeydown={handle} />
 
 <main class="panel">
-  <header>
+  <!-- The panel is borderless: this strip (and the header's empty space) drags it.
+       It sticks to the top so the handle never scrolls away. Tauri's drag script
+       toggles maximize from a document-level mouseup with detail 2 (a double click),
+       which a panel refuses; stopping that mouseup here keeps it from firing. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="top"
+    onmouseup={(e) => {
+      if (e.detail >= 2) e.stopPropagation();
+    }}
+  >
+  <div class="grip" data-tauri-drag-region aria-hidden="true"></div>
+  <header data-tauri-drag-region>
     {#each view.machines as m (m.key)}
       {@const reason = quiet.has(m.status.kind) ? null : statusReason(m.status)}
       <span class="chip" data-status={m.status.kind} title="{m.name}: {statusText(m.status)}"
@@ -103,6 +123,7 @@
       >
     {/each}
   </header>
+  </div>
 
   {#if error}
     <div class="error" role="alert">{error}</div>
@@ -144,12 +165,36 @@
 </main>
 
 <style>
+  :global(html, body) {
+    margin: 0;
+    height: 100%;
+  }
+  .top {
+    position: sticky;
+    top: -8px; /* cancels the panel's padding so the strip sits flush at the top */
+    z-index: 1;
+    margin: -8px -8px 0;
+    padding: 0 8px 4px;
+    background: Canvas;
+    color: CanvasText;
+  }
+  .grip {
+    flex: none;
+    height: 12px;
+    margin: 0 -8px;
+    cursor: grab;
+    background: linear-gradient(transparent 4px, rgba(128, 128, 128, 0.35) 4px 6px, transparent 6px);
+  }
   .panel {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 8px;
     font: 13px system-ui, sans-serif;
+    /* The window is user-resizable: fill it and scroll the cards. */
+    box-sizing: border-box;
+    height: 100vh;
+    overflow-y: auto;
   }
   .chip {
     margin-right: 6px;
