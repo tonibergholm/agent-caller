@@ -90,8 +90,14 @@ fn has_phrase(said: &str, phrase: &str) -> bool {
     !phrase.is_empty() && format!(" {said} ").contains(&format!(" {phrase} "))
 }
 
+/// An ordinal that names a card. "The first option" and "the second
+/// choice" pick an option, not a card.
 fn ordinal(said: &str) -> Option<usize> {
-    words(said).into_iter().find_map(ordinal_index)
+    let words = words(said);
+    words.iter().enumerate().find_map(|(i, w)| {
+        let about_options = matches!(words.get(i + 1), Some(&("option" | "options" | "choice" | "choices")));
+        ordinal_index(w).filter(|_| !about_options)
+    })
 }
 
 fn kinds(said: &str) -> Vec<AgentKind> {
@@ -235,7 +241,7 @@ fn resolve_named(snapshot: &Snapshot, named: &[String], purpose: Purpose, pick: 
 }
 
 /// Visibility, then `fits`: a send-only card takes only a send (D7).
-fn reach(snapshot: &Snapshot, card: &CardSnap, purpose: Purpose) -> Result<(), Refusal> {
+pub fn reach(snapshot: &Snapshot, card: &CardSnap, purpose: Purpose) -> Result<(), Refusal> {
     if snapshot.visibility(card) == Visibility::SendOnly && purpose != Purpose::Send {
         return Err(Refusal::OutOfView);
     }

@@ -219,8 +219,10 @@ and the whole context is capped (about 4 KB). Request details are sent to
 local models, and to the cloud model only when the user enables it
 (§6.3).
 
-Output: JSON with a fixed schema, one step, using only the given ids, or
-`ambiguous` with candidate ids. Local models use guided generation
+Output: JSON with a fixed schema, one step, using only the given ids.
+When unsure which agent is meant, the step carries a `candidates` list
+of agent ids instead of `agent` or `request`; there is no separate
+`ambiguous` step. Local models use guided generation
 (Foundation Models `@Generable`); the cloud model uses a JSON schema.
 The model has no tools and cannot claim provenance or confirmation.
 
@@ -349,7 +351,8 @@ Nothing is sent in any of these cases.
 | Speech assets for the language missing | offer the system download; English until installed |
 | Local model unavailable (Apple Intelligence off, model not ready) | fast path still works; other phrases: "Model unavailable" with the reason |
 | Cloud model timeout (5 s) or error | same fallback; a classified error, never the provider body or key |
-| Invalid or ineligible plan | "Didn't understand" with the transcript; no retry loop |
+| Invalid plan (bad JSON, unknown ids, no step) | "Didn't understand" with the transcript; no retry loop |
+| Ineligible plan (valid, but the target or option cannot take the step) | the HUD shows the specific reason (for example "Read-only request", "No such option"); no retry loop |
 | Snapshot changed before the step is enqueued | step dropped, HUD says so |
 | Event tap disabled by the system | hold key off until re-enabled; HUD says so |
 
