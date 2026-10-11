@@ -10,6 +10,7 @@
   let machines = $state<MachineEntryView[]>([]);
   let statuses = $state<Record<string, MachineStatus>>({});
   let showIdle = $state(false);
+  let showSubagents = $state(false);
   let hotkey = $state("");
   let names = $state<Record<string, string>>({});
   let error = $state<string | null>(null);
@@ -25,13 +26,14 @@
 
   let hotkeyEdited = false;
 
-  function applyView(v: { machines: { key: string; status: MachineStatus }[]; show_idle: boolean }) {
+  function applyView(v: { machines: { key: string; status: MachineStatus }[]; show_idle: boolean; show_subagents: boolean }) {
     const known = new Set(machines.map((m) => m.key));
     if (v.machines.length !== known.size || v.machines.some((m) => !known.has(m.key))) {
       refresh().catch((e) => (error ??= `Could not list machines: ${message(e)}`));
     }
     statuses = Object.fromEntries(v.machines.map((m) => [m.key, m.status]));
     showIdle = v.show_idle;
+    showSubagents = v.show_subagents;
   }
 
   async function refresh() {
@@ -125,6 +127,18 @@
         throw e;
       }
     }, "Could not change idle agents");
+
+  const toggleSubagents = (box: HTMLInputElement) =>
+    act(async () => {
+      const on = box.checked;
+      try {
+        await api.setShowSubagents(on);
+        showSubagents = on;
+      } catch (e) {
+        box.checked = showSubagents;
+        throw e;
+      }
+    }, "Could not change subagent threads");
 </script>
 
 <main class="settings">
@@ -192,6 +206,14 @@
       Show idle agents
     </label>
   </section>
+
+  <section aria-label="Subagent threads">
+    <label>
+      <input type="checkbox" checked={showSubagents} onchange={(e) => toggleSubagents(e.currentTarget)} />
+      Show subagent threads
+    </label>
+    <p class="note">Threads another agent started usually cannot be answered here. They are hidden, with their requests, counts and notifications, unless this is on.</p>
+  </section>
 </main>
 
 <style>
@@ -217,7 +239,12 @@
     border: 1px solid var(--hairline);
     border-radius: var(--r-md);
   }
-  section > p {
+  .note {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  section > p:not(.note) {
     margin: 0 0 10px;
     color: var(--text-muted);
   }

@@ -356,3 +356,27 @@ test("the countdown shows a progress bar that shrinks, and Esc to undo", () => {
   const done = render(Card, props(c, 5000));
   expect(done.container.querySelector(".bar")?.getAttribute("style")).toContain("width: 0%");
 });
+
+test("a subagent card shows a subagent badge and its parent's title; a main one does not", () => {
+  const sub = card({ key: "m/s" });
+  sub.agent.role = "subagent";
+  sub.agent.parent_title = "Plan the rollout";
+  const a = render(Card, props(sub));
+  expect(a.container.querySelector(".meta .subagent")?.textContent).toBe("subagent");
+  expect(a.container.querySelector(".meta .parent")?.textContent).toBe("↳ Plan the rollout");
+  a.unmount();
+  const noParent = card({ key: "m/t" });
+  noParent.agent.role = "subagent";
+  const b = render(Card, props(noParent));
+  expect(b.container.querySelector(".meta .subagent")).not.toBeNull();
+  expect(b.container.querySelector(".meta .parent")).toBeNull();
+  b.unmount();
+  const main = render(Card, props(card({ key: "m/u" })));
+  expect(main.container.querySelector(".subagent")).toBeNull();
+});
+
+test("an offline card dims its content but not the offline note", () => {
+  const css = cardSource.match(/<style>[\s\S]*<\/style>/)![0];
+  expect(css).toMatch(/\.card\.offline > :not\(\.offline-note\)[^{]*\{[^}]*opacity:\s*0\.5/);
+  expect(css).not.toMatch(/\.card\.offline\s*\{[^}]*opacity/);
+});

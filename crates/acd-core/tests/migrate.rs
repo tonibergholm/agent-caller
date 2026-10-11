@@ -6,6 +6,8 @@ fn hooks_agent(id: &str) -> AgentObs {
     AgentObs {
         source: Source::Hooks,
         can_send: false,
+        role: acd_protocol::AgentRole::Main,
+        parent_title: None,
         ..agent_obs(id)
     }
 }

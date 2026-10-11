@@ -157,6 +157,8 @@ Agent {
   last_message: string | null        // at most 500 characters
   pending: Request | null
   can_send: bool                     // whether a follow-up through agent.send is possible
+  role: "main" | "subagent"          // default "main"; additive, older clients ignore it
+  parent_title: string | null        // a subagent's parent thread title when known
 }
 
 Request {
@@ -1243,7 +1245,12 @@ and ones the user has put away. acd shows a thread only when all hold:
 A hidden thread is treated like an archived one: no agent, no discovery
 stream, no request stream. It becomes visible anyway while the shell lists
 a `pendingRuntimeRequest` for it (a bare `waiting` status does not reveal
-it). Its streams then open as for any visible thread. While acd holds an
+it). Its streams then open as for any visible thread. A revealed subagent
+thread is published with `role: "subagent"` and `parent_title` set to the
+title of `lineage.parentThreadId`'s thread when acd knows that thread (a fork
+and every other agent is `main`). acd still reveals it so each client can
+decide: the Mac app hides subagent agents, with their requests, counts, tray
+badge and notifications, unless "Show subagent threads" is on (§8). While acd holds an
 open request for the thread, the agent stays until that request has ended,
 so the request resolves with its real outcome (`terminal` or `inbox`) and
 is not lost with the agent. An answer still in flight keeps it too, and a
@@ -1632,6 +1639,12 @@ react to events, such as notifications.
   blue for `working`, then green for `done`.
 - The number of `needs_you` agents is shown next to it.
 
+**Subagent threads.** The app has a setting "Show subagent threads", off by
+default and stored in `settings.json` (`show_subagents`). While it is off, an
+agent with `role: "subagent"` is left out of cards, the summary and filter
+counts, the tray colour and badge, and notifications. While it is on, its
+card or row carries a "subagent" badge and "↳ <parent title>" in the meta line.
+
 **Floating panel.**
 - Visual language: `docs/design/obsidian-cockpit.md` (dark-first, Geist and
   JetBrains Mono bundled locally, no network fonts). One column only; the
@@ -1672,7 +1685,7 @@ react to events, such as notifications.
   scroll. Its position and size are remembered
   across hide/show and relaunch in `panel-frame.json` in the app config dir.
   The user's own moves and resizes (mouse drags, window-management tools,
-  keyboard tiling) are saved, shortly after the last one, on hide and on quit;
+  keyboard tiling) are saved, about two seconds after the last one, on hide and on quit;
   a failed write is retried at the next save. Moves the app makes itself, and
   those macOS makes within 2 seconds of a display configuration change, are
   not saved. Each time the panel opens it is refitted from the
@@ -2209,3 +2222,5 @@ personal use (R7).
 **P7 review, 2026-10-11: free text narrowed.** A T3 question with no options stays read-only until the panel renders a text input (§5, §6.5). The default for an absent `allowCustomAnswer` is Claude-only; other providers need an explicit `true`. Core and the client share one check for typed text (blank, control, bidi and separator characters), so a bad answer fails before the undo countdown. A text answer resolves by `inbox` with `option_id` null.
 
 **P7 redesign, 2026-10-11: panel redesign and zero-option free text.** The panel adopts the Obsidian Cockpit tokens (`docs/design/obsidian-cockpit.md`): one column, sections, keycap buttons and a text input for typed answers. A T3 question with no options is therefore answerable by text alone when T3 takes a typed answer (§5, §6.5, §8); this supersedes the "stays read-only" rulings above.
+
+**P7, 2026-10-11: subagent role.** T3 subagent threads that need the user were published like any other agent, though they usually cannot be answered. `Agent` gains `role` ("main" or "subagent", default main) and `parent_title`, both additive (§5, §6.5). The Mac app hides subagents everywhere, notifications included, unless "Show subagent threads" is on, and badges them when shown (§8). Debounced panel-frame saves now wait about two seconds so a display change right after a move can discard it.

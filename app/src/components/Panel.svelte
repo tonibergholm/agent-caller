@@ -21,8 +21,12 @@
   // svelte-ignore state_referenced_locally
   let st = $state<KeyState>(normalize(view, { selected: null, replyFor: null }));
   let replyText = $state("");
-  // Typed answers per card, so a view push never loses what the user typed.
+  // Typed answers, one per request: keyed by card and request id, so a draft
+  // typed for one request can never be sent to a newer one on the same card.
   let answers = $state<Record<string, string>>({});
+  const draftKey = (c: CardView) => `${c.key}\0${c.agent.pending?.id ?? ""}`;
+  let topH = $state(0);
+  let footH = $state(0);
   let now = $state(Date.now());
   let error = $state<string | null>(null);
   // Session state: the machine filter (null = All) and whether Done is open.
@@ -39,8 +43,10 @@
   // What J/K, the digits and the other shortcuts see: only the cards on screen.
   const visible = $derived([...secs.needs, ...secs.working, ...(doneOpen ? secs.done : [])]);
   const nav = $derived<InboxView>({ ...view, cards: visible });
-  const needCount = $derived(view.cards.filter((c) => c.group === "request").length);
-  const workingCount = $derived(view.cards.filter((c) => c.group === "working").length);
+  // The summary counts what the sections show (all machines, no filter).
+  const overall = $derived(sections(view.cards, null));
+  const needCount = $derived(overall.needs.length);
+  const workingCount = $derived(overall.working.length);
   const countFor = (key: string) => view.cards.filter((c) => c.machine_key === key).length;
 
   $effect(() => {
@@ -50,6 +56,12 @@
 
   $effect(() => {
     if (st.replyFor === null) replyText = "";
+  });
+
+  // Drop drafts whose request is gone (answered, or replaced by a newer one).
+  $effect(() => {
+    const live = new Set(view.cards.map(draftKey));
+    for (const k of Object.keys(answers)) if (!live.has(k)) delete answers[k];
   });
 
   // Keep the J/K selection in view in the scrolling panel.
@@ -95,14 +107,16 @@
         return;
       }
       case "submitAnswer": {
-        const text = answers[effect.cardKey] ?? "";
-        // Id and revision come from the request on screen now.
+        // Id and revision come from the request on screen now, and so does the draft.
         const c = view.cards.find((x) => x.key === effect.cardKey);
         const pending = c?.agent.pending;
         if (!c?.free_text_answerable || !pending) return;
+        // A countdown is already running for this card: nothing more to send.
+        if (c.action !== null || c.busy) return;
+        const text = answers[draftKey(c)] ?? "";
         if (text.trim() === "" || byteLength(text) > MAX_ANSWER_BYTES) return;
         await api.answerText(effect.cardKey, pending.id, pending.revision, text);
-        answers[effect.cardKey] = "";
+        // The draft stays until the request resolves, so an undo gets it back.
         answerField(effect.cardKey)?.blur();
         return;
       }
@@ -154,7 +168,7 @@
         card={c}
         selected={st.selected === c.key}
         {now}
-        bind:answer={() => answers[c.key] ?? "", (v) => (answers[c.key] = v)}
+        bind:answer={() => answers[draftKey(c)] ?? "", (v) => (answers[draftKey(c)] = v)}
         onpick={(optionId, requestId, revision) => {
           // Id and revision come from the request the card rendered at click time.
           act(run({ kind: "pick", cardKey: c.key, requestId, optionId, revision }));
@@ -180,7 +194,11 @@
   </div>
 {/snippet}
 
-<main class="panel">
+<main
+  class="panel"
+  style:scroll-padding-top="{topH}px"
+  style:scroll-padding-bottom="{footH}px"
+>
   <!-- The panel is borderless: this strip (and the header's empty space) drags it.
        It sticks to the top so the handle never scrolls away. Tauri's drag script
        toggles maximize from a document-level mouseup with detail 2 (a double click),
@@ -188,6 +206,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="top"
+    bind:clientHeight={topH}
     onmouseup={(e) => {
       if (e.detail >= 2) e.stopPropagation();
     }}
@@ -273,7 +292,7 @@
     </section>
   {/if}
 
-  <footer>
+  <footer bind:clientHeight={footH}>
     <span class="keys">
       <span><kbd>J</kbd><kbd>K</kbd> move</span>
       <span><kbd>1</kbd>–<kbd>9</kbd> answer</span>

@@ -13,6 +13,7 @@ export interface Api {
   escape(): Promise<boolean>;
   markSeen(cardKey: string): Promise<void>;
   setShowIdle(on: boolean): Promise<void>;
+  setShowSubagents(on: boolean): Promise<void>;
   hide(): Promise<void>;
   openSettings(): Promise<void>;
   listMachines(): Promise<MachineEntryView[]>;
@@ -37,6 +38,7 @@ export const tauriApi: Api = {
   escape: () => invoke("escape"),
   markSeen: (cardKey) => invoke("mark_seen", { cardKey }),
   setShowIdle: (on) => invoke("set_show_idle", { on }),
+  setShowSubagents: (on) => invoke("set_show_subagents", { on }),
   hide: () => invoke("hide_panel"),
   openSettings: () => invoke("open_settings"),
   listMachines: () => invoke("list_machines"),

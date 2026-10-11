@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use acd_core::{AgentObs, Core, CorrelationKey, Observation};
-use acd_protocol::{AgentKind, AgentState, ResolvedBy, Source, SourceState, SourceStatus};
+use acd_protocol::{
+    AgentKind, AgentRole, AgentState, ResolvedBy, Source, SourceState, SourceStatus,
+};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
@@ -23,7 +25,7 @@ use super::map;
 use super::sessions::SessionMap;
 use super::targets::Targets;
 use super::wire::{self, Failure, Project, ShellItem, ShellSnapshot, ShellThread, ThreadItem};
-use crate::text::redact_log;
+use crate::text::{TITLE_CHARS, clean_display, redact_log};
 
 /// Most consecutive discovery picks from the overflow group while the recent
 /// group has an eligible candidate.
@@ -977,13 +979,34 @@ impl Reconciler {
     }
 
     fn upsert(&mut self, thread_id: &str) {
+        // Only a subagent needs its parent's title; collect it before the
+        // mutable borrow of the thread.
+        let parent_titles: HashMap<String, String> = self
+            .threads
+            .get(thread_id)
+            .and_then(|t| t.shell.as_ref())
+            .filter(|s| s.is_subagent())
+            .and_then(|s| s.parent_thread_id())
+            .and_then(|p| {
+                let title = self.threads.get(p)?.shell.as_ref()?.title.as_deref()?;
+                Some((p.to_owned(), clean_display(title, TITLE_CHARS)))
+            })
+            .into_iter()
+            .collect();
         let Some(t) = self.threads.get_mut(thread_id) else {
             return;
         };
         let obs = match &t.shell {
             Some(s) if !t.unreadable => {
                 let project = s.project_id.as_ref().and_then(|p| self.projects.get(p));
-                map::agent_obs(s, project, &t.hidden)
+                let mut obs = map::agent_obs(s, project, &t.hidden);
+                if obs.role == AgentRole::Subagent {
+                    obs.parent_title = s
+                        .parent_thread_id()
+                        .and_then(|p| parent_titles.get(p))
+                        .cloned();
+                }
+                obs
             }
             _ => unknown_obs(thread_id, t.last_obs.as_ref()),
         };
@@ -1619,6 +1642,8 @@ fn unknown_obs(thread_id: &str, last: Option<&AgentObs>) -> AgentObs {
         failed: false,
         last_message: None,
         can_send: true,
+        role: acd_protocol::AgentRole::Main,
+        parent_title: None,
     });
     obs.state = AgentState::Unknown;
     obs.failed = false;

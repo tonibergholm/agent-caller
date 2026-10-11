@@ -114,6 +114,7 @@ impl Inbox {
             cards: vec![],
             hidden_idle: 0,
             show_idle: settings.show_idle,
+            show_subagents: settings.show_subagents,
             tray: view::TraySummary {
                 color: view::TrayColor::Grey,
                 needs_you: 0,
@@ -366,6 +367,20 @@ impl Inbox {
         inner.settings = candidate;
         Ok(())
     }
+    /// Shows or hides subagent agents everywhere (cards, counts, tray,
+    /// notifications) and remembers the choice.
+    pub fn set_show_subagents(&self, on: bool) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut candidate = inner.settings.clone();
+        candidate.show_subagents = on;
+        if let Some(path) = &self.opts.settings_path {
+            candidate.save(path).map_err(|e| e.to_string())?;
+        }
+        inner.settings = candidate;
+        drop(inner);
+        self.wake();
+        Ok(())
+    }
     #[cfg(feature = "testing")]
     pub fn drop_connections_for_test(&self) {
         for m in &self.inner.lock().unwrap().machines {
@@ -482,6 +497,7 @@ impl Inbox {
             busy: &busy,
             notices: &notices,
             show_idle: inner.settings.show_idle,
+            show_subagents: inner.settings.show_subagents,
         });
         self.view_tx.send_replace(v);
     }
@@ -605,14 +621,14 @@ impl Inbox {
                     .as_ref()
                     .map(|m| m.id.clone())
                     .unwrap_or_else(|| key.to_owned());
-                let agent_title = state
-                    .session
-                    .agents
-                    .get(&req.agent_id)
+                let agent = state.session.agents.get(&req.agent_id);
+                let hidden_subagent = !inner.settings.show_subagents
+                    && agent.is_some_and(|a| a.role == acd_protocol::AgentRole::Subagent);
+                let agent_title = agent
                     .map(|a| a.title.clone())
                     .unwrap_or_else(|| req.agent_id.clone());
                 drop(state);
-                if inner.notified.insert((machine_id, req.id.clone())) {
+                if !hidden_subagent && inner.notified.insert((machine_id, req.id.clone())) {
                     let _ = self.events_tx.send(InboxEvent::RequestOpened {
                         machine_key: key.to_owned(),
                         machine_name,

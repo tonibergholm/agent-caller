@@ -39,7 +39,11 @@ fn has_unsaved_change() -> bool {
 }
 /// Bumped on every move or resize; a save runs only if no newer change arrived.
 static FRAME_GENERATION: AtomicU64 = AtomicU64::new(0);
-const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
+/// The debounced save waits this long after the last change, a little more
+/// than `SCREEN_CHANGE_WINDOW`, so a display change that follows a move within
+/// that window is known by the time `save_now` judges it. Hide and quit save
+/// at once and cannot wait; a display change reported after them is not seen.
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(2_100);
 
 // The macro requires an explicit return type; an alias keeps clippy's
 // `unused_unit` quiet without an allow.

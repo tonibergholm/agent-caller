@@ -1634,6 +1634,31 @@ async fn rig_hidden_request_with(adapter: Option<Arc<FakeAdapter>>) -> (Rig, Req
 }
 
 #[tokio::test]
+async fn a_revealed_subagent_is_marked_with_its_role_and_parent_title() {
+    let fake = FakeT3::start().await;
+    let mut parent = root("root", "running");
+    parent["title"] = json!("Plan the rollout");
+    fake.put_thread(parent);
+    fake.put_thread(subagent("sub", "idle"));
+    let r = rig_with(fake, None, fast_timing()).await;
+    until("ok", || (t3_state(&r) == SourceState::Ok).then_some(())).await;
+    // The parent is a main agent.
+    let main = until("parent", || agent(&r, "root")).await;
+    assert_eq!((main.role, main.parent_title), (AgentRole::Main, None));
+    r.fake
+        .set_projection("sub", approval_projection("sub", "rq-1", None));
+    r.fake.put_thread(waiting_subagent("sub"));
+    until("request", || pending(&r, "sub")).await;
+    let sub = agent(&r, "sub").unwrap();
+    assert_eq!(sub.role, AgentRole::Subagent);
+    assert_eq!(sub.parent_title.as_deref(), Some("Plan the rollout"));
+    // A fork is a thread the user works in, not a subagent.
+    r.fake.put_thread(fork("fork", "running"));
+    let f = until("fork", || agent(&r, "fork")).await;
+    assert_eq!((f.role, f.parent_title), (AgentRole::Main, None));
+}
+
+#[tokio::test]
 async fn hidden_thread_shows_while_it_has_a_request_and_resolves_terminal() {
     let (r, req) = rig_hidden_request().await;
     let (_, mut rx) = r.core.attach(None);

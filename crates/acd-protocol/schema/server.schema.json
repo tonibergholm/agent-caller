@@ -29,6 +29,14 @@
         "machine_id": {
           "type": "string"
         },
+        "parent_title": {
+          "default": null,
+          "description": "The parent thread's title, for a subagent when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "pending": {
           "anyOf": [
             {
@@ -44,6 +52,11 @@
             "string",
             "null"
           ]
+        },
+        "role": {
+          "$ref": "#/$defs/AgentRole",
+          "default": "main",
+          "description": "`subagent` for a thread another agent spawned (T3 lineage). Additive:\nabsent means `main`."
         },
         "source": {
           "$ref": "#/$defs/Source"
@@ -78,6 +91,14 @@
         "codex",
         "other",
         "unknown"
+      ],
+      "type": "string"
+    },
+    "AgentRole": {
+      "description": "Whether an agent is a thread the user works in or one an agent spawned.\nClients that predate the field treat every agent as `main`.",
+      "enum": [
+        "subagent",
+        "main"
       ],
       "type": "string"
     },

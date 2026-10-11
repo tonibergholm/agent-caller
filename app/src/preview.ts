@@ -123,6 +123,28 @@ if (scene === "undo") {
   const c = cards[0];
   v = { ...v, cards: [{ ...c, selectable_options: c.selectable_options, action: { id: "a1", card_key: c.key, label: "Yes, always", detail: "Bash(cargo test --workspace --locked)", fires_at_ms: now + 7300 /* headless shots run ~6 s of virtual time */ } }, ...cards.slice(1)] };
 }
+if (scene === "subagent") {
+  const sub = mk("sa", "local", { answerable: true, selectable_options: ["allow", "deny"] }, {
+    title: "Explore the auth module",
+    source: "t3",
+    role: "subagent",
+    parent_title: "Plan the OAuth2 rollout",
+    cwd: "/Users/dev/portal",
+    project: "portal",
+    pending: {
+      ...card().agent.pending!,
+      id: "r9",
+      title: "Bash",
+      detail: "$ grep -rn \"token\" src/auth",
+      options: card().agent.pending!.options.filter((o) => o.id === "allow" || o.id === "deny"),
+      opened_at: ago(20),
+    },
+  });
+  const subw = work("sw", "local", "Index the docs", "Reading 40 files", 90);
+  subw.agent.role = "subagent";
+  subw.agent.parent_title = "Plan the OAuth2 rollout";
+  v = { ...v, show_subagents: true, cards: [sub, bash, subw, ...cards.slice(4)] };
+}
 if (scene === "empty") v = view({ machines });
 if (scene === "offline") {
   const off = machines.map((m) => (m.key === "gpu" ? { ...m, status: { kind: "offline" as const, since_ms: now - 300_000, error: "connection refused" } } : m));

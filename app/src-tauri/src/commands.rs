@@ -77,6 +77,11 @@ pub fn set_show_idle(state: State<'_, AppState>, on: bool) {
 }
 
 #[tauri::command]
+pub fn set_show_subagents(state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    state.inbox.set_show_subagents(on)
+}
+
+#[tauri::command]
 pub fn list_machines(state: State<'_, AppState>) -> Vec<MachineEntryView> {
     state.inbox.machines()
 }

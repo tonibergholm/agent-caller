@@ -242,3 +242,26 @@ test("a successful import names the new machine and clears a previous error", as
   await userEvent.click(await screen.findByRole("button", { name: /add from clipboard/i }));
   expect(await screen.findByText("Added This Mac")).toBeTruthy();
 });
+
+test("Show subagent threads is off by default and persisted through the api", async () => {
+  const api = fakeApi();
+  render(Settings, { api });
+  const box = (await screen.findByRole("checkbox", { name: /show subagent threads/i })) as HTMLInputElement;
+  expect(box.checked).toBe(false);
+  await userEvent.click(box);
+  expect(api.calls).toContainEqual(["setShowSubagents", true]);
+});
+
+test("the subagent toggle reflects the daemon's view and reverts when saving fails", async () => {
+  const api = fakeApi();
+  api.getView = async () => view({ show_subagents: true });
+  api.setShowSubagents = async () => {
+    throw "disk full";
+  };
+  render(Settings, { api });
+  const box = (await screen.findByRole("checkbox", { name: /show subagent threads/i })) as HTMLInputElement;
+  await vi.waitFor(() => expect(box.checked).toBe(true));
+  await userEvent.click(box);
+  expect((await screen.findByRole("alert")).textContent).toContain("disk full");
+  expect(box.checked).toBe(true);
+});

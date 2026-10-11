@@ -2833,6 +2833,8 @@ fn hooks_only_obs(id: &str, session: &Session) -> AgentObs {
         failed: false,
         last_message: session.last_message.clone(),
         can_send: false,
+        role: acd_protocol::AgentRole::Main,
+        parent_title: None,
     }
 }
 
@@ -2944,6 +2946,8 @@ mod tests {
             failed: false,
             last_message: None,
             can_send: true,
+            role: acd_protocol::AgentRole::Main,
+            parent_title: None,
         }
     }
 

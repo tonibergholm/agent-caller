@@ -3,8 +3,8 @@ use std::collections::HashSet;
 
 use acd_core::{AgentObs, Answer, CorrelationKey, RequestObs};
 use acd_protocol::{
-    AgentKind, AgentState, AnswerPath, Effect, Question, Request, RequestKind, RequestOption,
-    Source,
+    AgentKind, AgentRole, AgentState, AnswerPath, Effect, Question, Request, RequestKind,
+    RequestOption, Source,
 };
 use serde_json::{Value, json};
 
@@ -98,6 +98,13 @@ pub fn agent_obs(t: &ShellThread, project: Option<&Project>, hidden: &HashSet<St
             .map(|m| clean_display(m, LAST_MESSAGE_CHARS))
             .filter(|m| !m.is_empty()),
         can_send: true,
+        // The reconciler fills in the parent's title; the shell alone lacks it.
+        role: if t.is_subagent() {
+            AgentRole::Subagent
+        } else {
+            AgentRole::Main
+        },
+        parent_title: None,
     }
 }
 
@@ -382,7 +389,10 @@ mod tests {
             assert!(obs.free_text && obs.options.is_empty());
             assert!(matches!(
                 target.answer,
-                TargetAnswer::Question { free_text: true, .. }
+                TargetAnswer::Question {
+                    free_text: true,
+                    ..
+                }
             ));
         }
     }

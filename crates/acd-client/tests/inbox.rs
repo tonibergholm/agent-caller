@@ -23,6 +23,7 @@ async fn setup() -> (FakeServer, FakeConn, Arc<Inbox>) {
         client_id: "00000000-0000-4000-8000-000000000001".into(),
         hotkey: DEFAULT_HOTKEY.into(),
         show_idle: false,
+        show_subagents: false,
         machines: vec![MachineEntry {
             key: "m1".into(),
             name: "Box".into(),
@@ -432,6 +433,7 @@ async fn duplicate_machine_is_hidden() {
         client_id: settings_client_id().into(),
         hotkey: DEFAULT_HOTKEY.into(),
         show_idle: false,
+        show_subagents: false,
         machines: vec![],
     };
     for (key, name) in [("m1", "One"), ("m2", "Two")] {
@@ -977,4 +979,60 @@ async fn typed_answer_countdown_cancels_when_the_revision_bumps() {
         .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(answers(&f), 0, "a changed revision must not send");
+}
+
+fn subagent_agent() -> Value {
+    let mut a = pending_agent();
+    a["id"] = "a2".into();
+    a["title"] = "sub".into();
+    a["role"] = "subagent".into();
+    a["parent_title"] = "agent".into();
+    a["pending"]["id"] = "r2".into();
+    a["pending"]["agent_id"] = "a2".into();
+    a
+}
+
+#[tokio::test]
+async fn subagents_are_hidden_and_silent_until_shown() {
+    let (_f, c, ib) = setup().await;
+    let mut events = ib.events();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), subagent_agent()]}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let v = ib.view().borrow().clone();
+    assert_eq!(v.cards.len(), 1, "the subagent is not a card");
+    assert_eq!(v.tray.needs_you, 1, "nor is it counted");
+    assert!(!v.show_subagents);
+    // Its request does not notify while hidden.
+    c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":3,"request":subagent_agent()["pending"]}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    ib.set_show_subagents(true).unwrap();
+    view_until(&ib, "subagent shown", |v| {
+        v.show_subagents
+            && v.cards.len() == 2
+            && v.tray.needs_you == 2
+            && v.cards.iter().any(|c| {
+                c.agent.role == acd_protocol::AgentRole::Subagent
+                    && c.agent.parent_title.as_deref() == Some("agent")
+            })
+    })
+    .await;
+    ib.set_show_subagents(false).unwrap();
+    view_until(&ib, "hidden again", |v| v.cards.len() == 1 && v.tray.needs_you == 1).await;
+}
+
+#[tokio::test]
+async fn show_subagents_is_remembered() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("settings.json");
+    let ib = empty_inbox(Arc::new(MemorySecrets::default()), Some(path.clone()));
+    assert!(!Settings::load_or_init(&path).map(|s| s.show_subagents).unwrap_or(false));
+    ib.set_show_subagents(true).unwrap();
+    assert!(Settings::load_or_init(&path).unwrap().show_subagents);
+    assert!(ib.settings().show_subagents);
 }

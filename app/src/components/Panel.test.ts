@@ -414,7 +414,8 @@ test("Enter in the answer field sends it through answerText with the request on 
   await userEvent.click(screen.getByRole("textbox", { name: "Type an answer" }));
   await userEvent.keyboard("purple{Enter}");
   expect(api.calls).toEqual([["answerText", "m/q", "req-q", 1, "purple"]]);
-  expect((screen.getByRole("textbox", { name: "Type an answer" }) as HTMLTextAreaElement).value).toBe("");
+  // The draft stays until the request resolves, so an undo gets it back.
+  expect((screen.getByRole("textbox", { name: "Type an answer" }) as HTMLTextAreaElement).value).toBe("purple");
 });
 
 test("T focuses the answer field of the selected free-text card", async () => {
@@ -522,4 +523,74 @@ test("the footer lists the keyboard hints", () => {
   for (const hint of ["J", "K", "move", "answer", "T", "type", "R", "reply", "Esc", "close / undo"]) {
     expect(text).toContain(hint);
   }
+});
+
+test("a subagent row shows its badge and parent title in the meta line", () => {
+  const c = working("local/s");
+  c.agent.role = "subagent";
+  c.agent.parent_title = "Fix the build";
+  const { container } = render(Panel, { view: view({ cards: [c], show_subagents: true }), api: fakeApi() });
+  expect(container.querySelector(".row .subagent")?.textContent).toBe("subagent");
+  expect(container.querySelector(".row .parent")?.textContent).toBe("↳ Fix the build");
+});
+
+test("the summary's working count matches the Working section, unknown agents included", () => {
+  const unknown = working("local/u");
+  unknown.group = "unknown";
+  unknown.agent.state = "unknown";
+  const { container } = render(Panel, { view: view({ cards: [working("local/w"), unknown] }), api: fakeApi() });
+  expect(container.querySelector(".summary")?.textContent).toBe("0 need you · 2 working");
+  expect(container.querySelector("h2.sec.working .count")?.textContent).toBe("2");
+});
+
+test("a draft belongs to the request it was typed for, not a newer one on the same card", async () => {
+  const api = fakeApi();
+  const { rerender } = render(Panel, { view: view({ cards: [freeText()] }), api });
+  await userEvent.keyboard("t");
+  await userEvent.keyboard("old answer");
+  const newer = freeText();
+  newer.agent.pending = { ...newer.agent.pending!, id: "req-new", revision: 1 };
+  await rerender({ view: view({ cards: [newer] }), api });
+  const box = screen.getByRole("textbox", { name: "Type an answer" }) as HTMLTextAreaElement;
+  expect(box.value).toBe("");
+  // The box still has focus: Enter would send the old draft if it had followed the card.
+  await userEvent.keyboard("{Enter}");
+  expect(api.calls.filter((c) => c[0] === "answerText")).toEqual([]);
+});
+
+test("the draft is kept while the answer counts down and is there again after an undo", async () => {
+  const api = fakeApi();
+  const { rerender } = render(Panel, { view: view({ cards: [freeText()] }), api });
+  await userEvent.keyboard("t");
+  await userEvent.keyboard("purple{Enter}");
+  expect(api.calls).toEqual([["answerText", "m/q", "req-q", 1, "purple"]]);
+  const counting = freeText();
+  counting.action = { id: "a9", card_key: "m/q", label: "Answer", detail: null, fires_at_ms: Date.now() + 2000 };
+  await rerender({ view: view({ cards: [counting] }), api });
+  const box = screen.getByRole("textbox", { name: "Type an answer" }) as HTMLTextAreaElement;
+  expect(box.value).toBe("purple");
+  expect(box.disabled).toBe(true);
+  // Undo: the countdown ends without the request resolving.
+  await rerender({ view: view({ cards: [freeText()] }), api });
+  const again = screen.getByRole("textbox", { name: "Type an answer" }) as HTMLTextAreaElement;
+  expect(again.disabled).toBe(false);
+  expect(again.value).toBe("purple");
+});
+
+test("Enter during the card's own countdown sends nothing", async () => {
+  const api = fakeApi();
+  const c = freeText();
+  c.action = { id: "a9", card_key: "m/q", label: "Answer", detail: null, fires_at_ms: Date.now() + 2000 };
+  render(Panel, { view: view({ cards: [c] }), api });
+  const box = screen.getByRole("textbox", { name: "Type an answer" }) as HTMLTextAreaElement;
+  expect(box.disabled).toBe(true);
+  box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  expect(api.calls.filter((x) => x[0] === "answerText")).toEqual([]);
+});
+
+test("the scroll container keeps the selection clear of the sticky bars", () => {
+  const { container } = render(Panel, { view: view({ cards: [waiting("local/a")] }), api: fakeApi() });
+  const style = container.querySelector("main.panel")?.getAttribute("style") ?? "";
+  expect(style).toContain("scroll-padding-top");
+  expect(style).toContain("scroll-padding-bottom");
 });

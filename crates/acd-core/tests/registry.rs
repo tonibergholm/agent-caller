@@ -13,6 +13,8 @@ fn agent(id: &str) -> AgentObs {
         failed: false,
         last_message: None,
         can_send: true,
+        role: acd_protocol::AgentRole::Main,
+        parent_title: None,
     }
 }
 

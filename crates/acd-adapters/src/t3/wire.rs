@@ -338,9 +338,17 @@ impl ShellThread {
         }
     }
 
+    /// The parent's thread id from `lineage.parentThreadId`, if any.
+    pub fn parent_thread_id(&self) -> Option<&str> {
+        self.lineage
+            .as_ref()
+            .and_then(|l| l.get("parentThreadId"))
+            .and_then(Value::as_str)
+    }
+
     /// Only `relationshipToParent: "subagent"` hides a thread. A fork also
     /// has a `parentThreadId` but is a thread the user works in.
-    fn is_subagent(&self) -> bool {
+    pub fn is_subagent(&self) -> bool {
         self.lineage
             .as_ref()
             .and_then(|l| l.get("relationshipToParent"))

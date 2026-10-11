@@ -19,6 +19,8 @@ pub struct AgentObs {
     pub failed: bool,
     pub last_message: Option<String>,
     pub can_send: bool,
+    pub role: AgentRole,
+    pub parent_title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -510,6 +512,8 @@ impl Registry {
             last_message: o.last_message,
             pending,
             can_send: o.can_send,
+            role: o.role,
+            parent_title: o.parent_title,
         };
         if self.agents.get(&o.id) == Some(&agent) {
             return vec![];
@@ -848,6 +852,8 @@ mod tests {
             failed: false,
             last_message: None,
             can_send: true,
+            role: AgentRole::Main,
+            parent_title: None,
         }));
         let mut request = RequestObs {
             agent_id: "agent".into(),

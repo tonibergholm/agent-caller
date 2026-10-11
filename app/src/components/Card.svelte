@@ -91,6 +91,10 @@
   <div class="meta">
     <span class="machine">{card.machine_name}</span>
     <span class="source" data-source={card.agent.source}>{sourceLabel}</span>
+    {#if card.agent.role === "subagent"}
+      <span class="subagent">subagent</span>
+      {#if card.agent.parent_title}<span class="parent" title={card.agent.parent_title}>↳ {card.agent.parent_title}</span>{/if}
+    {/if}
     {#if place}<span class="project" title={card.agent.cwd ?? undefined}>{place}</span>{/if}
     <span class="tag">{typeTag(card)}</span>
   </div>
@@ -153,7 +157,7 @@
         </div>
       {/if}
       {#if card.free_text_answerable}
-        <AnswerBox bind:value={answer} onsubmit={onanswer} disabled={card.busy} />
+        <AnswerBox bind:value={answer} onsubmit={onanswer} disabled={card.busy || card.action !== null} />
       {/if}
     {:else if card.live && !card.busy && pending.status !== "answering"}
       <div class="readonly">{readonlyLabel}</div>
@@ -201,9 +205,33 @@
     border-color: rgba(6, 182, 212, 0.4);
     box-shadow: var(--glow);
   }
-  .card.offline {
+  /* Dim the content only: the offline note stays at full contrast. */
+  .card.offline > :not(.offline-note),
+  .card.offline::before {
     opacity: 0.5;
     filter: grayscale(1);
+  }
+  .card.offline .offline-note {
+    color: var(--text-muted);
+  }
+  .subagent {
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    padding: 0 6px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #a5b4fc;
+    background: rgba(99, 102, 241, 0.16);
+    border-radius: var(--r-sm);
+  }
+  .parent {
+    max-width: 16em;
+    overflow: hidden;
+    color: var(--text-dim);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .head {
     display: flex;

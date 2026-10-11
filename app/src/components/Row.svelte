@@ -31,6 +31,10 @@
   <div class="line">
     <span class="dot" data-state={state} aria-hidden="true"></span>
     <span class="title" title={card.agent.cwd ?? undefined}>{card.agent.title}</span>
+    {#if card.agent.role === "subagent"}
+      <span class="subagent">subagent</span>
+      {#if card.agent.parent_title}<span class="parent" title={card.agent.parent_title}>↳ {card.agent.parent_title}</span>{/if}
+    {/if}
     {#if card.agent.last_message}<span class="last">{card.agent.last_message}</span>{/if}
     <span class="machine">{card.machine_name}</span>
     <span class="source" data-source={card.agent.source}>{sourceLabel}</span>
@@ -71,9 +75,33 @@
   .row.dim .line {
     opacity: 0.6;
   }
-  .row.offline {
+  /* Dim the content only: the offline note stays at full contrast. */
+  .row.offline .line > :not(.time) {
     opacity: 0.5;
     filter: grayscale(1);
+  }
+  .row.offline .time {
+    color: var(--text-muted);
+  }
+  .subagent {
+    flex: none;
+    padding: 0 6px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    line-height: 16px;
+    color: #a5b4fc;
+    background: rgba(99, 102, 241, 0.16);
+    border-radius: var(--r-sm);
+  }
+  .parent {
+    flex: 0 1 12em;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .line {
     display: flex;

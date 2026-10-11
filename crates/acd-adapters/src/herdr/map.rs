@@ -69,6 +69,8 @@ pub fn agent_obs(socket_hash: &str, info: &wire::AgentInfo) -> Option<AgentObs> 
         last_message: None,
         // herdr refuses agent.prompt while blocked; the core rejects send while needs_you.
         can_send: true,
+        role: acd_protocol::AgentRole::Main,
+        parent_title: None,
     })
 }
 
