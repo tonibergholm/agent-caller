@@ -301,6 +301,19 @@ enough. The evidence per answer path:
     `uncertain`: clients show "check the terminal", and acd sends nothing
     further.
   - Codex's transient `working` state while hooks run is not evidence.
+  - **Codex cancellation tail.** Codex fires no hook after a denied
+    request, so a `keys` request on a Codex pane also counts the screen
+    as correlated evidence. After the dialog closes, acd reads the screen
+    at 0.25, 0.5, 1, 2 and 4 s (reads only, never a key). The evidence is
+    exactly this block at the tail, ahead of Codex's composer and footer,
+    for the tracked command (one exact row): `✗ You canceled the request
+    to run <command>`, optionally `• Failed (exit 1) <command>` and
+    `└ (no output)`, then `■ Conversation interrupted`. Only the tail
+    counts, not scrollback; anything else between the rows, or another or
+    wrapped command, is not evidence. For the deny option the tail gives
+    `inbox`; for an allow option it contradicts the answer and gives
+    `terminal`. Hook evidence that arrives first wins; with neither, the
+    rules above apply and the result is `uncertain` after 35 s.
 - **`t3`.** T3 acknowledges acd's command. T3 accepts one answer per
   request, so the acknowledgement is the outcome evidence (§6.5).
 - **Terminal answer.**
@@ -2056,3 +2069,5 @@ after the header update, not "when every older session has exited"
 personal use (R7).
 
 **P3 final, 2026-10-10 (revision 5.0).** The draft's pending points are closed against the approved tasks 17 to 19, 30 and 31: C7 and R12 (§6.3), R13 and A8 (§6.1, §6.2), the daemon socket rules and `acd.lock` (§6.1, §9), the random `hook_port`, the squat warning and the install trust note (§9), and the R8 clarification (§6.2). The unverified points stay in §11 and live checks 10 to 14 remain open.
+
+**P6, 2026-10-11: Codex deny resolves from the cancellation tail.** Codex fires no `PostToolUse` or `Stop` hook after a cancel, so an inbox "No" waited the full 35 s evidence window and resolved `uncertain` while `agent.send` returned `agent_busy`. The e2e run found it. The screen's cancellation tail for the tracked command is now correlated evidence for Codex `keys` requests (§4).

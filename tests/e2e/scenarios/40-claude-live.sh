@@ -74,7 +74,7 @@ ESC_MS=""
 for i in 1 2 3; do
   ask_touch x-cl-esc$i.txt
   req=$(inbox wait-open --agent "$AID" --timeout 60 --ready); RID=$(echo "$req" | jq -r .id)
-  dlg >/dev/null; T_KEY=$(epoch_now); hd pane send-keys $Q esc
+  dlg >/dev/null || fail "3d.$i dialog never drawn"; sleep 1; T_KEY=$(epoch_now); hd pane send-keys $Q esc  # Esc before acd matched the dialog is a different case (docs/research/2026-10-11-e2e-run.md, bug 1)
   r=$(wait_resolved $T_KEY $RID 60); by=$(echo "$r" | jq -r .by 2>/dev/null); t=$(echo "$r" | jq -r .t 2>/dev/null)
   if [ "$by" = terminal ]; then ESC_MS="$ESC_MS $(ms $T_KEY $t)"; else ESC_MS="$ESC_MS FAIL($r)"; fi
   wait_agent_idle; sleep 1

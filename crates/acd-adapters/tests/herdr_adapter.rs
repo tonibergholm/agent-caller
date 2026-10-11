@@ -34,6 +34,18 @@ async fn rig(agents: &[(&str, &str, &str)]) -> Rig {
 
 /// `poll` is the reconciler's screen-read interval.
 async fn rig_with_timing(agents: &[(&str, &str, &str)], poll: Duration) -> Rig {
+    rig_with_keys(
+        agents,
+        poll,
+        KeysTiming {
+            evidence_timeout: Duration::from_millis(500),
+            ..KeysTiming::default()
+        },
+    )
+    .await
+}
+
+async fn rig_with_keys(agents: &[(&str, &str, &str)], poll: Duration, keys: KeysTiming) -> Rig {
     let home = tempfile::Builder::new()
         .prefix("acd")
         .tempdir_in("/tmp")
@@ -58,10 +70,7 @@ async fn rig_with_timing(agents: &[(&str, &str, &str)], poll: Duration) -> Rig {
         extra_sockets: vec![],
         scan_interval: Duration::from_millis(100),
         timing,
-        keys: KeysTiming {
-            evidence_timeout: Duration::from_millis(500),
-            ..KeysTiming::default()
-        },
+        keys,
     };
     let adapter = HerdrAdapter::new(cfg);
     let core = Core::new(test_machine(), vec![adapter.clone()]);
@@ -1248,4 +1257,180 @@ async fn a_pane_replaced_during_the_guard_read_gets_no_key() {
         r.fake.keys_sent().is_empty(),
         "the lease must catch a replaced pane before the write"
     );
+}
+
+// ---- Codex cancellation tail (spec §4) ----
+
+const CODEX_CMD: &str = "touch /tmp/ace2e/x-fx-run1.txt";
+
+fn codex_timing(evidence_timeout: Duration) -> KeysTiming {
+    let ms = Duration::from_millis;
+    KeysTiming {
+        poll: ms(50),
+        window: ms(300),
+        prompt_checks: [ms(50), ms(100), ms(150)],
+        evidence_timeout,
+        cancel_reads: [ms(50), ms(100), ms(150), ms(200), ms(250)],
+        ..KeysTiming::default()
+    }
+}
+
+/// A Codex pane showing the run-1 approval dialog. When a key arrives the
+/// screens switch to the given fixtures. `command` is what P3 would
+/// register for the tail check, if anything.
+async fn codex_rig(
+    after_detection: &'static str,
+    after_visible: &'static str,
+    command: Option<&str>,
+    evidence_timeout: Duration,
+) -> (Rig, String) {
+    let r = rig_with_keys(
+        &[("w1:p1", "codex", "working")],
+        Duration::from_secs(3600),
+        codex_timing(evidence_timeout),
+    )
+    .await;
+    let dialog = screen("codex-dialog-run1-detection.txt");
+    r.fake.set_screen("w1:p1", "detection", &dialog);
+    r.fake
+        .set_screen("w1:p1", "visible", &screen("codex-dialog-run1-visible.txt"));
+    r.fake.on_keys(move |f, pane, _keys| {
+        f.set_screen(pane, "detection", &screen(after_detection));
+        f.set_screen(pane, "visible", &screen(after_visible));
+        f.set_status(pane, "working");
+    });
+    let id = agent(&r).id;
+    let mut obs = permission_obs(&id, "k1");
+    obs.answer_path = AnswerPath::Keys;
+    r.core.observe(Observation::RequestSeen(obs));
+    r.fake.set_status("w1:p1", "blocked");
+    let key = CorrelationKey("k1".into());
+    let rid = r.core.request_id_for(&id, &key).unwrap();
+    r.adapter
+        .keys_targets()
+        .set(KeysTarget::from_screen(rid.clone(), id, key, &dialog, allow_deny()).unwrap())
+        .unwrap();
+    if let Some(command) = command {
+        r.adapter
+            .keys_targets()
+            .set_rivals(&rid, vec![], Arc::new(|_: &str| false), command);
+    }
+    (r, rid)
+}
+
+const CANCELLED: (&str, &str) = (
+    "codex-after-inbox-run1-1s-detection.txt",
+    "codex-after-inbox-run1-1s-visible.txt",
+);
+
+#[tokio::test]
+async fn codex_deny_resolves_inbox_from_the_cancellation_tail() {
+    let (r, rid) = codex_rig(
+        CANCELLED.0,
+        CANCELLED.1,
+        Some(CODEX_CMD),
+        Duration::from_secs(30),
+    )
+    .await;
+    r.adapter.set_evidence(Arc::new(Never));
+    let (_, mut rx) = r.core.attach(None);
+    let t0 = std::time::Instant::now();
+    assert!(delivered(&answer(&r, "a1", &rid, "deny").await));
+    assert_eq!(
+        resolution(&mut rx).await,
+        (ResolvedBy::Inbox, Some("deny".into()))
+    );
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "resolved from the tail, not the 30 s evidence timeout: {:?}",
+        t0.elapsed()
+    );
+    assert_eq!(
+        r.fake.keys_sent(),
+        vec![("w1:p1".to_string(), vec!["esc".to_string()])],
+        "one key, never another"
+    );
+    assert!(r.adapter.keys_targets().get(&rid).is_none());
+}
+
+#[tokio::test]
+async fn codex_allow_with_a_cancellation_tail_is_terminal() {
+    let (r, rid) = codex_rig(
+        CANCELLED.0,
+        CANCELLED.1,
+        Some(CODEX_CMD),
+        Duration::from_secs(30),
+    )
+    .await;
+    r.adapter.set_evidence(Arc::new(Never));
+    let (_, mut rx) = r.core.attach(None);
+    let t0 = std::time::Instant::now();
+    assert!(delivered(&answer(&r, "a1", &rid, "allow").await));
+    assert_eq!(resolution(&mut rx).await, (ResolvedBy::Terminal, None));
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+    assert_eq!(
+        r.fake.keys_sent(),
+        vec![("w1:p1".to_string(), vec!["1".to_string()])]
+    );
+}
+
+#[tokio::test]
+async fn codex_close_without_the_tail_stays_uncertain_after_the_evidence_timeout() {
+    let (r, rid) = codex_rig(
+        "codex-idle-detection.txt",
+        "codex-idle-prompt.txt",
+        Some(CODEX_CMD),
+        Duration::from_millis(800),
+    )
+    .await;
+    r.adapter.set_evidence(Arc::new(Never));
+    let (_, mut rx) = r.core.attach(None);
+    let t0 = std::time::Instant::now();
+    assert!(delivered(&answer(&r, "a1", &rid, "deny").await));
+    assert_eq!(resolution(&mut rx).await, (ResolvedBy::Uncertain, None));
+    assert!(
+        t0.elapsed() >= Duration::from_millis(800),
+        "waited out the evidence timeout: {:?}",
+        t0.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn codex_tail_for_another_command_is_not_evidence() {
+    let (r, rid) = codex_rig(
+        CANCELLED.0,
+        CANCELLED.1,
+        Some("touch /tmp/ace2e/x-fx-run2.txt"),
+        Duration::from_millis(800),
+    )
+    .await;
+    r.adapter.set_evidence(Arc::new(Never));
+    let (_, mut rx) = r.core.attach(None);
+    assert!(delivered(&answer(&r, "a1", &rid, "deny").await));
+    assert_eq!(resolution(&mut rx).await, (ResolvedBy::Uncertain, None));
+}
+
+#[tokio::test]
+async fn codex_without_a_tracked_command_never_uses_the_tail() {
+    let (r, rid) = codex_rig(CANCELLED.0, CANCELLED.1, None, Duration::from_millis(800)).await;
+    r.adapter.set_evidence(Arc::new(Never));
+    let (_, mut rx) = r.core.attach(None);
+    assert!(delivered(&answer(&r, "a1", &rid, "deny").await));
+    assert_eq!(resolution(&mut rx).await, (ResolvedBy::Uncertain, None));
+}
+
+#[tokio::test]
+async fn codex_hook_evidence_that_arrives_first_wins_over_the_tail() {
+    let (r, rid) = codex_rig(
+        CANCELLED.0,
+        CANCELLED.1,
+        Some(CODEX_CMD),
+        Duration::from_secs(30),
+    )
+    .await;
+    r.adapter
+        .set_evidence(Arc::new(Fixed(Verdict::Contradicts)));
+    let (_, mut rx) = r.core.attach(None);
+    assert!(delivered(&answer(&r, "a1", &rid, "deny").await));
+    assert_eq!(resolution(&mut rx).await, (ResolvedBy::Terminal, None));
 }

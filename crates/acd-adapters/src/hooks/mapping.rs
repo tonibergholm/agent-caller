@@ -15,7 +15,9 @@ use crate::text::{
 
 pub const DETAIL_CHARS: usize = 4000;
 const DESCRIPTION_CHARS: usize = 400;
-pub const CODEX_KEYS: [(&str, &str); 2] = [("allow", "1"), ("deny", "esc")];
+/// The Codex option that denies: delivered as Esc, which cancels the request.
+pub const CODEX_DENY: &str = "deny";
+pub const CODEX_KEYS: [(&str, &str); 2] = [("allow", "1"), (CODEX_DENY, "esc")];
 
 fn opt(id: &str, label: &str, effect: Effect, description: Option<String>) -> RequestOption {
     RequestOption {
