@@ -72,6 +72,19 @@
   };
   const choose = (choiceId: number, i: number) => quiet(api.voiceChoose(choiceId, i));
 
+  const summary = $derived.by(() => {
+    switch (hud.state) {
+      case "confirm":
+      case "countdown":
+      case "sending":
+        return verb(hud.proposal);
+      case "which_one":
+        return "Which one?";
+      default:
+        return "";
+    }
+  });
+
   function verb(p: ProposalView): string {
     switch (p.action) {
       case "answer":
@@ -84,6 +97,8 @@
   }
 
   function key(e: KeyboardEvent) {
+    // Enter on a focused button activates that button natively (Cancel must not confirm).
+    if (e.key === "Enter" && e.target instanceof HTMLElement && e.target.closest("button")) return;
     if (!wantsKey(hud) || e.isComposing || e.keyCode === 229 || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "Escape") {
       e.preventDefault();
@@ -104,7 +119,8 @@
 <svelte:window onkeydown={key} />
 
 {#if hud.state !== "hidden"}
-  <main class="hud" data-state={hud.state} aria-live="polite">
+  <main class="hud" data-state={hud.state} aria-label="Voice step">
+    <p class="sr" aria-live="polite">{summary}</p>
     <div class="body">
       {#if hud.state === "listening"}
         <p class="status"><span class="mic" aria-hidden="true"></span>Listening…</p>
@@ -116,12 +132,12 @@
         <header class="target">
           <span class="agent">{p.target.agent}</span>
           <span class="machine" class:off-screen={p.target.off_screen}>@ {p.target.machine}</span>
-          <span class="title">{p.target.title}</span>
+          <span class="title" title={p.target.title}>{p.target.title}</span>
         </header>
         <p class="what">{verb(p)}</p>
-        {#if p.question}<pre class="block">{p.question}</pre>{/if}
-        {#if p.rule}<p class="label">Always allow, from now on:</p><pre class="block rule">{p.rule}</pre>{/if}
-        {#if p.text}<pre class="block payload">{p.text}</pre>{/if}
+        {#if p.question}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block" tabindex="0" aria-label="Request">{p.question}</pre>{/if}
+        {#if p.rule}<p class="label">Always allow, from now on:</p><!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block rule" tabindex="0" aria-label="Rule to remember">{p.rule}</pre>{/if}
+        {#if p.text}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block payload" tabindex="0" aria-label="Text to send">{p.text}</pre>{/if}
         {#if hud.state === "sending"}
           <p class="status">{hud.too_late_to_cancel ? "Already sent. It can't be undone." : "Sent. Waiting for the result."}</p>
         {/if}
@@ -135,19 +151,19 @@
                 <kbd>{i + 1}</kbd>
                 <span class="agent">{c.agent}</span>
                 <span class="machine" class:off-screen={c.off_screen}>@ {c.machine}</span>
-                <span class="title">{c.title}</span>
+                <span class="title" title={c.title}>{c.title}</span>
                 {#if c.request}<span class="tag">{c.request}</span>{/if}
               </button>
             </li>
           {/each}
         </ol>
       {:else if hud.state === "done"}
-        <p class="status" data-outcome={hud.outcome.kind}>{outcomeText(hud.outcome)}</p>
+        <p class="status" aria-live="polite" data-outcome={hud.outcome.kind}>{outcomeText(hud.outcome)}</p>
       {:else if hud.state === "error"}
-        <p class="status error">{refusalText[hud.refusal]}</p>
+        <p class="status error" aria-live="polite">{refusalText[hud.refusal]}</p>
         {#if hud.transcript}<p class="said">“{hud.transcript}”</p>{/if}
       {:else if hud.state === "speaking"}
-        <p class="speech">{hud.text}</p>
+        <p class="speech" aria-live="polite">{hud.text}</p>
       {/if}
     </div>
     {#if hud.state === "confirm"}
@@ -159,7 +175,7 @@
     {:else if hud.state === "countdown"}
       <div class="buttons">
         <button class="undo" onclick={cancel}>
-          {#if hud.action_id === null}Starting…{:else}Sending in {(remaining / 1000).toFixed(1)}s{/if} · <kbd>Esc</kbd> to cancel
+          {#if hud.action_id === null}Starting…{:else if action === null}Sending…{:else}<span aria-hidden="true">Sending in {(remaining / 1000).toFixed(1)}s</span>{/if} · <kbd>Esc</kbd> to cancel
         </button>
       </div>
       {#if hud.action_id !== null}
@@ -198,9 +214,18 @@
     min-height: 0;
     overflow-y: auto;
   }
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   .target {
     display: flex;
     gap: 8px;
+    flex-wrap: wrap;
     align-items: baseline;
     min-width: 0;
   }
@@ -216,9 +241,7 @@
   }
   .title {
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
     color: var(--text-muted);
   }
   .what {

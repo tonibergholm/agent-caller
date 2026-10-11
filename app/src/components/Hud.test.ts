@@ -212,10 +212,51 @@ test("voice text never reaches the console", async () => {
   }
 });
 
-test("Esc on a state without an input id sends nothing", async () => {
-  const api = await show({ state: "sending", proposal: proposal(), too_late_to_cancel: false });
+test("Esc on a state without an input id sends nothing, even when a stale id was shown before", async () => {
+  const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 60 });
+  api.hud!({ seq: ++seq, id: null, hud: { state: "sending", proposal: proposal(), too_late_to_cancel: false } });
+  await tick();
   await userEvent.keyboard("{Escape}");
-  expect(api.calls).toEqual([]);
+  expect(others(api.calls)).toEqual([]);
+});
+
+test("Enter on a focused Cancel cancels and never confirms", async () => {
+  const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 61 });
+  screen.getByRole("button", { name: /Cancel/ }).focus();
+  await userEvent.keyboard("{Enter}");
+  expect(others(api.calls)).toEqual([["voiceCancel", 61]]);
+});
+
+test("which-one: Esc and Cancel send the choice id; Enter on a focused candidate picks it", async () => {
+  const api = await show({ state: "which_one", transcript: "x", choice_id: 62, candidates: [target, { ...target, card: "minos/b", title: "Write docs" }] });
+  await userEvent.keyboard("{Escape}");
+  await userEvent.click(screen.getByRole("button", { name: /Cancel/ }));
+  screen.getByRole("button", { name: /Write docs/ }).focus();
+  await userEvent.keyboard("{Enter}");
+  expect(api.calls).toEqual([["voiceCancel", 62], ["voiceCancel", 62], ["voiceChoose", 62, 1]]);
+});
+
+test("a countdown waiting for its ack has no bar; a missing action reads Sending…", async () => {
+  await show({ state: "countdown", proposal: proposal({ level: "countdown" }), proposal_id: 63, action_id: null });
+  expect(document.querySelector(".track")).toBeNull();
+  cleanup();
+  await show({ state: "countdown", proposal: proposal({ level: "countdown" }), proposal_id: 64, action_id: "gone" });
+  expect(screen.getByText(/Sending…/)).toBeTruthy();
+  expect(screen.queryByText(/Sending in/)).toBeNull();
+});
+
+test("the proposal is in the DOM when the acknowledgement fires", async () => {
+  const api = fakeApi();
+  let seen: boolean | null = null;
+  api.voiceShown = async () => {
+    seen = document.querySelector(".hud") !== null && document.body.textContent!.includes("Fix the build");
+  };
+  render(Hud, { api, view: view() });
+  await tick();
+  api.hud!({ seq: ++seq, id: 65, hud: { state: "confirm", proposal: proposal(), proposal_id: 65 } });
+  await tick();
+  await tick();
+  expect(seen).toBe(true);
 });
 
 test("a stale clear is ignored and the current clear hides the state", async () => {
