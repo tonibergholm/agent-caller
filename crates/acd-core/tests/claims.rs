@@ -13,6 +13,8 @@ fn agent(id: &str, can_send: bool) -> AgentObs {
         failed: false,
         last_message: None,
         can_send,
+        role: AgentRole::Main,
+        parent_title: None,
     }
 }
 

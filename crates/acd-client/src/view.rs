@@ -25,6 +25,7 @@ pub struct InboxView {
     pub cards: Vec<CardView>,
     pub hidden_idle: u32,
     pub show_idle: bool,
+    pub show_subagents: bool,
     pub tray: TraySummary,
     pub actions: Vec<ActionView>,
 }
@@ -126,6 +127,7 @@ pub struct ViewInput<'a> {
     pub busy: &'a HashSet<String>,
     pub notices: &'a HashMap<String, Notice>,
     pub show_idle: bool,
+    pub show_subagents: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -270,7 +272,7 @@ pub fn resolution_notice(by: ResolvedBy, reason: Option<ResolveReason>) -> Optio
     }
 }
 
-fn group(agent: &Agent) -> CardGroup {
+pub(crate) fn group(agent: &Agent) -> CardGroup {
     if agent.pending.is_some() || agent.state == AgentState::NeedsYou {
         CardGroup::Request
     } else {
@@ -329,6 +331,10 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
             _ => None,
         };
         for agent in state.session.agents.values() {
+            // A hidden subagent is not counted, shown or notified anywhere.
+            if !input.show_subagents && agent.role == acd_protocol::AgentRole::Subagent {
+                continue;
+            }
             let key = card_key(&entry.key, &agent.id);
             let card_group = group(agent);
             if live {
@@ -414,13 +420,16 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
             .then_with(|| a.machine_name.cmp(&b.machine_name))
             .then_with(|| a.agent.id.cmp(&b.agent.id))
     });
+    // An idle card with a countdown stays on screen, so the countdown and
+    // the Esc that cancels it are never invisible.
+    let hide = |c: &CardView| c.group == CardGroup::Idle && c.action.is_none();
     let hidden_idle = if input.show_idle {
         0
     } else {
-        cards.iter().filter(|c| c.group == CardGroup::Idle).count() as u32
+        cards.iter().filter(|c| hide(c)).count() as u32
     };
     if !input.show_idle {
-        cards.retain(|c| c.group != CardGroup::Idle);
+        cards.retain(|c| !hide(c));
     }
     let color = if needs_you > 0 {
         TrayColor::Amber
@@ -438,6 +447,7 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
         cards,
         hidden_idle,
         show_idle: input.show_idle,
+        show_subagents: input.show_subagents,
         tray: TraySummary { color, needs_you },
         actions,
     }
@@ -523,6 +533,7 @@ mod tests {
             busy: &busy,
             notices: &notices,
             show_idle,
+            show_subagents: false,
         })
     }
 
@@ -582,6 +593,7 @@ mod tests {
             busy: &HashSet::new(),
             notices: &HashMap::new(),
             show_idle: false,
+            show_subagents: false,
         });
         assert_eq!(
             v.actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
@@ -614,6 +626,7 @@ mod tests {
             busy: &HashSet::new(),
             notices: &notices,
             show_idle: false,
+            show_subagents: false,
         });
         assert_eq!(v.cards[0].notice, Some(notice));
         assert_eq!(v.cards[0].action, Some(action));
@@ -804,6 +817,7 @@ mod tests {
             busy: &busy,
             notices: &HashMap::new(),
             show_idle: false,
+            show_subagents: false,
         })
         .cards;
         assert!(cards.iter().all(|c| c.busy));
@@ -848,6 +862,7 @@ mod tests {
             busy: &HashSet::new(),
             notices: &HashMap::new(),
             show_idle: false,
+            show_subagents: false,
         });
         assert_eq!(
             v.machines[0].status,
@@ -1036,5 +1051,47 @@ mod tests {
             machine_entry_views(&[remote], &valid).unwrap()[0].pairing,
             PairingState::Paired
         );
+    }
+
+    #[test]
+    fn subagents_are_left_out_of_cards_counts_and_tray_unless_shown() {
+        let t = "2026-10-08T10:00:00.000Z";
+        let mut sub = with_request(agent("sub", "needs_you", t), t);
+        sub.role = AgentRole::Subagent;
+        sub.parent_title = Some("Parent".into());
+        let mut sub_working = agent("subw", "working", t);
+        sub_working.role = AgentRole::Subagent;
+        let main = agent("main", "working", t);
+        let (e, s) = (entry("m1"), state(true, ALL, vec![sub, sub_working, main]));
+        let build = |show_subagents| {
+            let (busy, notices) = (HashSet::new(), HashMap::new());
+            build_view(&ViewInput {
+                machines: vec![MachineInput {
+                    entry: &e,
+                    state: Some(&s),
+                }],
+                actions: &[],
+                busy: &busy,
+                notices: &notices,
+                show_idle: true,
+                show_subagents,
+            })
+        };
+        let hidden = build(false);
+        assert_eq!(
+            hidden.cards.iter().map(|c| c.agent.id.as_str()).collect::<Vec<_>>(),
+            ["main"]
+        );
+        assert_eq!(hidden.tray.needs_you, 0);
+        assert_eq!(hidden.tray.color, TrayColor::Blue);
+        assert!(!hidden.show_subagents);
+        let shown = build(true);
+        assert_eq!(shown.cards.len(), 3);
+        assert_eq!(shown.tray.needs_you, 1);
+        assert_eq!(shown.tray.color, TrayColor::Amber);
+        assert!(shown.show_subagents);
+        let card = shown.cards.iter().find(|c| c.agent.id == "sub").unwrap();
+        assert_eq!(card.agent.role, AgentRole::Subagent);
+        assert_eq!(card.agent.parent_title.as_deref(), Some("Parent"));
     }
 }

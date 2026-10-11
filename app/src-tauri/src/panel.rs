@@ -15,26 +15,35 @@ use tauri_nspanel::{
 use crate::frame::{self, DEFAULT_SIZE, Frame, MIN_SIZE};
 
 static VISIBLE: AtomicBool = AtomicBool::new(false);
+/// When the display configuration last changed.
+static LAST_SCREEN_CHANGE: Mutex<Option<Instant>> = Mutex::new(None);
 /// The frame `place()` asked for, and until when callbacks that match it are
 /// ours. tao applies `set_size` and `set_position` through
 /// `DispatchQueue::main().exec_async`, so `windowDidResize` and
 /// `windowDidMove` fire after `place()` has returned (and possibly between
 /// the two calls). A "currently placing" flag therefore cannot tell them from
 /// the user dragging; comparing the live frame with the requested one can.
-/// When the display configuration last changed.
-static LAST_SCREEN_CHANGE: Mutex<Option<Instant>> = Mutex::new(None);
 static EXPECTED: Mutex<Option<(Frame, Instant)>> = Mutex::new(None);
 /// Backstop for how long after `place()` its own callbacks can still arrive
 /// (a slow launch can deliver them late). Normally `EXPECTED` is cleared as
 /// soon as a callback shows the full target.
 const PLACE_SETTLE: Duration = Duration::from_secs(5);
-/// The user moved or resized the panel since the last save. Only then is the
-/// frame written, so a frame refitted after a display went away never
-/// replaces the remembered one.
-static USER_CHANGED: AtomicBool = AtomicBool::new(false);
+/// When the user last moved or resized the panel, if that is not saved yet.
+/// Only then is the frame written, so a frame refitted after a display went
+/// away never replaces the remembered one. The time lets a save drop a change
+/// that turns out to sit next to a display change (see `save_now`).
+static USER_CHANGED: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn has_unsaved_change() -> bool {
+    USER_CHANGED.lock().is_ok_and(|c| c.is_some())
+}
 /// Bumped on every move or resize; a save runs only if no newer change arrived.
 static FRAME_GENERATION: AtomicU64 = AtomicU64::new(0);
-const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
+/// The debounced save waits this long after the last change, a little more
+/// than `SCREEN_CHANGE_WINDOW`, so a display change that follows a move within
+/// that window is known by the time `save_now` judges it. Hide and quit save
+/// at once and cannot wait; a display change reported after them is not seen.
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(2_100);
 
 // The macro requires an explicit return type; an alias keeps clippy's
 // `unused_unit` quiet without an allow.
@@ -143,7 +152,7 @@ fn show_on_main_thread(handle: &AppHandle) {
         // that is back returns there. The live frame (possibly moved by macOS)
         // is the fallback, and also wins while a user change is still unsaved.
         if let Some(window) = handle.get_webview_window("panel") {
-            let saved = if USER_CHANGED.load(Ordering::SeqCst) {
+            let saved = if has_unsaved_change() {
                 None
             } else {
                 frame_path(handle).and_then(|p| frame::load(&p))
@@ -306,8 +315,9 @@ fn observe_screen_changes() {
     });
     // SAFETY: the name is the system constant; no queue means the block runs
     // on the posting (main) thread; the block only touches a static Mutex.
-    // The returned observer token is dropped on purpose: the observer lives
-    // for the whole process.
+    // The returned observer token is not kept: the notification center
+    // retains the registration until it is removed, which this app never does,
+    // so dropping the token does not unregister the observer.
     let _observer = unsafe {
         NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
             Some(NSApplicationDidChangeScreenParametersNotification),
@@ -316,12 +326,13 @@ fn observe_screen_changes() {
             &block,
         )
     };
-    std::mem::forget(_observer);
 }
 
 /// Saves the frame shortly after the user stops dragging or resizing.
 fn schedule_save(app: &AppHandle) {
-    USER_CHANGED.store(true, Ordering::SeqCst);
+    if let Ok(mut changed) = USER_CHANGED.lock() {
+        *changed = Some(Instant::now());
+    }
     let generation = FRAME_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -338,11 +349,24 @@ fn schedule_save(app: &AppHandle) {
 
 /// Writes the current frame if the user changed it. Main thread only (it reads the window).
 /// The change stays pending until a write succeeds, so a failure is retried
-/// on the next save.
+/// on the next save. A change within `SCREEN_CHANGE_WINDOW` of a display
+/// change, before or after it, is discarded: macOS refitting windows around
+/// a display change can look like a user move, and the display change may be
+/// reported after the move it caused.
 pub fn save_now(app: &AppHandle) {
     // A pending debounced save is now redundant.
     FRAME_GENERATION.fetch_add(1, Ordering::SeqCst);
-    if !USER_CHANGED.load(Ordering::SeqCst) {
+    let Some(changed_at) = USER_CHANGED.lock().ok().and_then(|c| *c) else {
+        return;
+    };
+    let screen_change = LAST_SCREEN_CHANGE.lock().ok().and_then(|t| *t);
+    if frame::near_screen_change(changed_at, screen_change) {
+        if let Ok(mut changed) = USER_CHANGED.lock() {
+            // Keep a newer change that arrived meanwhile.
+            if *changed == Some(changed_at) {
+                *changed = None;
+            }
+        }
         return;
     }
     let (Some(path), Some(window)) = (frame_path(app), app.get_webview_window("panel")) else {
@@ -352,7 +376,13 @@ pub fn save_now(app: &AppHandle) {
         return;
     };
     match frame::save(&path, &frame) {
-        Ok(()) => USER_CHANGED.store(false, Ordering::SeqCst),
+        Ok(()) => {
+            if let Ok(mut changed) = USER_CHANGED.lock()
+                && *changed == Some(changed_at)
+            {
+                *changed = None;
+            }
+        }
         Err(error) => tracing::warn!(%error, "could not save panel frame"),
     }
 }

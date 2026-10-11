@@ -43,6 +43,20 @@ pub enum AgentKind {
     Unknown,
 }
 
+/// Whether an agent is a thread the user works in or one an agent spawned.
+/// Clients that predate the field treat every agent as `main`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(
+    Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole {
+    Subagent,
+    #[default]
+    #[serde(other)]
+    Main,
+}
+
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -250,4 +264,11 @@ pub struct Agent {
     pub last_message: Option<String>,
     pub pending: Option<Request>,
     pub can_send: bool,
+    /// `subagent` for a thread another agent spawned (T3 lineage). Additive:
+    /// absent means `main`.
+    #[serde(default)]
+    pub role: AgentRole,
+    /// The parent thread's title, for a subagent when known.
+    #[serde(default)]
+    pub parent_title: Option<String>,
 }

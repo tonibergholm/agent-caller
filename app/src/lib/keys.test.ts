@@ -67,6 +67,28 @@ describe("keyboard", () => {
     expect(onKey(v, { selected: "m/b", replyFor: null }, k("e", { meta: true })).effect).toEqual({ kind: "none" });
   });
 
+  test("Enter in an answer field submits that card's answer, whatever the reply state", () => {
+    const st = { selected: "m/a", replyFor: null };
+    const field = { kind: "answer" as const, cardKey: "m/q" };
+    expect(onKey(v, st, k("Enter", { inField: true, field })).effect).toEqual({ kind: "submitAnswer", cardKey: "m/q" });
+    expect(onKey(v, st, k("Enter", { inField: true, field, shift: true })).effect).toEqual({ kind: "none" });
+    expect(onKey(v, st, k("Enter", { inField: true, field, composing: true })).effect).toEqual({ kind: "none" });
+    expect(onKey(v, st, k("Enter", { inField: true, field, keyCode: 229 })).effect).toEqual({ kind: "none" });
+    expect(onKey(v, st, k("t", { inField: true, field })).effect).toEqual({ kind: "none" });
+    // An open reply box elsewhere does not steal an answer field's Enter.
+    const replying = { selected: "m/b", replyFor: "m/b" };
+    expect(onKey(v, replying, k("Enter", { inField: true, field })).effect).toEqual({ kind: "submitAnswer", cardKey: "m/q" });
+  });
+
+  test("T focuses the answer field of a free-text card and does nothing elsewhere", () => {
+    const q = card({ key: "m/q", answerable: true, free_text_answerable: true });
+    const vq = view({ cards: [a, q] });
+    expect(onKey(vq, { selected: "m/q", replyFor: null }, k("t")).effect).toEqual({ kind: "focusAnswer", cardKey: "m/q" });
+    expect(onKey(vq, { selected: "m/q", replyFor: null }, k("T")).effect).toEqual({ kind: "focusAnswer", cardKey: "m/q" });
+    expect(onKey(vq, { selected: "m/a", replyFor: null }, k("t")).effect).toEqual({ kind: "none" });
+    expect(onKey(vq, { selected: "m/q", replyFor: null }, k("t", { meta: true })).effect).toEqual({ kind: "none" });
+  });
+
   test("selection survives reordering and falls back when its card disappears", () => {
     const st = { selected: "m/b", replyFor: null };
     expect(normalize(view({ cards: [b, a] }), st).selected).toBe("m/b");

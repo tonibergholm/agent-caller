@@ -42,6 +42,20 @@ pub fn send_reply(
 }
 
 #[tauri::command]
+pub fn answer_text(
+    state: State<'_, AppState>,
+    card_key: String,
+    request_id: String,
+    revision: u64,
+    text: String,
+) -> Result<String, String> {
+    state
+        .inbox
+        .answer_text(&card_key, &request_id, revision, text)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn cancel_action(state: State<'_, AppState>, action_id: String) -> bool {
     state.inbox.cancel(&action_id)
 }
@@ -60,6 +74,11 @@ pub fn mark_seen(state: State<'_, AppState>, card_key: String) -> Result<(), Str
 #[tauri::command]
 pub fn set_show_idle(state: State<'_, AppState>, on: bool) {
     state.inbox.set_show_idle(on);
+}
+
+#[tauri::command]
+pub fn set_show_subagents(state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    state.inbox.set_show_subagents(on)
 }
 
 #[tauri::command]

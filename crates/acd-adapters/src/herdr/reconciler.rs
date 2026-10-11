@@ -422,6 +422,8 @@ impl Reconciler {
                 failed: a.failed,
                 last_message: a.last_message,
                 can_send: a.can_send,
+                role: acd_protocol::AgentRole::Main,
+                parent_title: None,
             }));
         }
     }

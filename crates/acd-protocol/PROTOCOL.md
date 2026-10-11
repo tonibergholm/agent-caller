@@ -269,6 +269,8 @@ Agent {
   last_message: string | null        // at most 500 characters
   pending: Request | null
   can_send: bool                     // whether a follow-up through agent.send is possible
+  role: "main" | "subagent"          // optional on the wire; absent or unknown means "main"
+  parent_title: string | null        // optional; a subagent's parent thread title when known
 }
 
 Request {
