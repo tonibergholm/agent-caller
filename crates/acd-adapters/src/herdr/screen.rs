@@ -1296,8 +1296,8 @@ mod cancel_tail_tests {
 
     #[test]
     fn scrollback_alone_is_not_enough() {
-        // The block is in scrollback (run 3 of after-esc) but the tail shows
-        // something else: here the screen after run1's block continues.
+        // The fixture's scrollback holds an older block for run 3's command;
+        // its tail is run 1's block, so run 3's command must not match.
         let s = fixture("codex-after-esc-run1-1s-visible.txt");
         assert!(codex_cancel_tail(&s, &cmd(1)));
         assert!(

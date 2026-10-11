@@ -411,8 +411,9 @@ pub struct KeysTiming {
     pub prompt_checks: [Duration; 3],
     /// Longest wait for `Evidence::outcome` (P3's hook correlation window is 30 s).
     pub evidence_timeout: Duration,
-    /// Codex only: screen reads after the dialog closed, measured from the
-    /// close, looking for the cancellation tail (spec §4).
+    /// Codex only: screen reads looking for the cancellation tail (spec §4).
+    /// Offsets are measured from when the confirmation task finishes its
+    /// observation window and starts attributing, not from the close.
     pub cancel_reads: [Duration; 5],
 }
 
@@ -874,7 +875,8 @@ impl Confirm {
         }
     }
 
-    /// Reads `visible` at the `cancel_reads` offsets after the close. A read
+    /// Reads `visible` at the `cancel_reads` offsets, counted from the end of
+    /// the observation window (when this runs). A read
     /// that shows the cancellation tail for `command` is evidence: consistent
     /// with a deny, contradicting an allow. Pends forever otherwise, so the
     /// hook evidence and its timeout decide. Reads only; never a key.

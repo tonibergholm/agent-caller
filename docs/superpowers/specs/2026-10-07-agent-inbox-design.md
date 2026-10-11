@@ -304,7 +304,8 @@ enough. The evidence per answer path:
   - **Codex cancellation tail.** Codex fires no hook after a denied
     request, so a `keys` request on a Codex pane also counts the screen
     as correlated evidence. After the dialog closes, acd reads the screen
-    at 0.25, 0.5, 1, 2 and 4 s (reads only, never a key). The evidence is
+    at 0.25, 0.5, 1, 2 and 4 s after the 3 s observation window ends
+    (reads only, never a key). The evidence is
     exactly this block at the tail, ahead of Codex's composer and footer,
     for the tracked command (one exact row): `✗ You canceled the request
     to run <command>`, optionally `• Failed (exit 1) <command>` and
@@ -312,7 +313,9 @@ enough. The evidence per answer path:
     counts, not scrollback; anything else between the rows, or another or
     wrapped command, is not evidence. For the deny option the tail gives
     `inbox`; for an allow option it contradicts the answer and gives
-    `terminal`. Hook evidence that arrives first wins; with neither, the
+    `terminal`. Screen-tail evidence is exempt from O7 shadowing: a cancel
+    ends the Codex turn, so no older occurrence with the same command can
+    sit below it on screen. Hook evidence that arrives first wins; with neither, the
     rules above apply and the result is `uncertain` after 35 s.
 - **`t3`.** T3 acknowledges acd's command. T3 accepts one answer per
   request, so the acknowledgement is the outcome evidence (§6.5).

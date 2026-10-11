@@ -1267,7 +1267,7 @@ fn codex_timing(evidence_timeout: Duration) -> KeysTiming {
     let ms = Duration::from_millis;
     KeysTiming {
         poll: ms(50),
-        window: ms(300),
+        window: ms(1000),
         prompt_checks: [ms(50), ms(100), ms(150)],
         evidence_timeout,
         cancel_reads: [ms(50), ms(100), ms(150), ms(200), ms(250)],
@@ -1341,7 +1341,7 @@ async fn codex_deny_resolves_inbox_from_the_cancellation_tail() {
         (ResolvedBy::Inbox, Some("deny".into()))
     );
     assert!(
-        t0.elapsed() < Duration::from_secs(2),
+        t0.elapsed() < Duration::from_secs(3),
         "resolved from the tail, not the 30 s evidence timeout: {:?}",
         t0.elapsed()
     );
@@ -1367,7 +1367,7 @@ async fn codex_allow_with_a_cancellation_tail_is_terminal() {
     let t0 = std::time::Instant::now();
     assert!(delivered(&answer(&r, "a1", &rid, "allow").await));
     assert_eq!(resolution(&mut rx).await, (ResolvedBy::Terminal, None));
-    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+    assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
     assert_eq!(
         r.fake.keys_sent(),
         vec![("w1:p1".to_string(), vec!["1".to_string()])]
