@@ -103,7 +103,17 @@
 <svelte:window onkeydown={handle} />
 
 <main class="panel">
-  <!-- The panel is borderless: this strip (and the header's empty space) drags it. -->
+  <!-- The panel is borderless: this strip (and the header's empty space) drags it.
+       It sticks to the top so the handle never scrolls away. A double click must not
+       reach the window's maximize toggle, which a panel refuses. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="top"
+    ondblclick={(e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    }}
+  >
   <div class="grip" data-tauri-drag-region aria-hidden="true"></div>
   <header data-tauri-drag-region>
     {#each view.machines as m (m.key)}
@@ -113,6 +123,7 @@
       >
     {/each}
   </header>
+  </div>
 
   {#if error}
     <div class="error" role="alert">{error}</div>
@@ -158,10 +169,19 @@
     margin: 0;
     height: 100%;
   }
+  .top {
+    position: sticky;
+    top: -8px; /* cancels the panel's padding so the strip sits flush at the top */
+    z-index: 1;
+    margin: -8px -8px 0;
+    padding: 0 8px 4px;
+    background: Canvas;
+    color: CanvasText;
+  }
   .grip {
     flex: none;
     height: 12px;
-    margin: -8px -8px 0;
+    margin: 0 -8px;
     cursor: grab;
     background: linear-gradient(transparent 4px, rgba(128, 128, 128, 0.35) 4px 6px, transparent 6px);
   }

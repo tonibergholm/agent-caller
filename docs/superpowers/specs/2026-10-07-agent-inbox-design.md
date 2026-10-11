@@ -1596,6 +1596,10 @@ react to events, such as notifications.
   2. `done`;
   3. `working`;
   4. `idle`, hidden behind a toggle.
+- Each card's meta line shows the machine, a small badge for where the agent
+  runs (`herdr`, `T3`, `hooks` or `unknown`, from the agent's `source`), then
+  the project and working directory. The badge uses the text colour, so it
+  reads in light and dark mode.
 - Read-only requests show their content and where to answer: "answer in T3"
   for T3 agents, "answer in terminal" for herdr, hook and unknown-source
   agents.
@@ -1603,7 +1607,8 @@ react to events, such as notifications.
   lines); the first question's text is shown separately only when it differs
   from the detail.
 - The panel is user-resizable (drag its edges), with a minimum size, and
-  movable by dragging its header strip. Its position and size are remembered
+  movable by dragging its header strip, which stays at the top while the cards
+  scroll. Its position and size are remembered
   across hide/show and relaunch in `panel-frame.json` in the app config dir.
   Only the user's own moves and resizes are saved (shortly after a drag stops,
   on hide and on quit), so a frame the app refits after a display goes away

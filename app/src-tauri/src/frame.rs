@@ -100,6 +100,19 @@ pub fn screen_at(point: (f64, f64), screens: &[Frame]) -> Option<usize> {
     })
 }
 
+/// Whether a move/resize callback seen at `live` was caused by placing the
+/// panel at `target`. tao applies the size and the position as two separate
+/// queued operations, so the callback can see the target position with the
+/// old size, or the target size with the old position, as well as the full
+/// target. Either half matching (within rounding) counts.
+pub fn is_programmatic(live: &Frame, target: &Frame) -> bool {
+    const EPS: f64 = 1.5;
+    let near = |a: f64, b: f64| (a - b).abs() <= EPS;
+    let same_pos = near(live.x, target.x) && near(live.y, target.y);
+    let same_size = near(live.w, target.w) && near(live.h, target.h);
+    same_pos || same_size
+}
+
 /// A missing, unreadable or malformed file is "nothing saved".
 pub fn load(path: &Path) -> Option<Frame> {
     let raw = fs::read_to_string(path).ok()?;
@@ -217,6 +230,18 @@ mod tests {
         // A screen above the primary has negative y.
         let above = [full[0], f(0.0, -1080.0, 1920.0, 1080.0)];
         assert_eq!(screen_at((100.0, -10.0), &above), Some(1));
+    }
+
+    #[test]
+    fn placement_callbacks_are_told_from_user_drags() {
+        let target = f(100.0, 100.0, 560.0, 720.0);
+        // Fully applied, with rounding.
+        assert!(is_programmatic(&f(100.4, 99.6, 560.0, 720.4), &target));
+        // Size applied, position not yet (and the reverse).
+        assert!(is_programmatic(&f(900.0, 40.0, 560.0, 720.0), &target));
+        assert!(is_programmatic(&f(100.0, 100.0, 440.0, 560.0), &target));
+        // A user drag to another place and size.
+        assert!(!is_programmatic(&f(300.0, 200.0, 600.0, 700.0), &target));
     }
 
     #[test]

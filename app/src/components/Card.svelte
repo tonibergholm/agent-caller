@@ -30,6 +30,9 @@
     return text.trim() === pending?.detail.trim() ? null : text;
   });
   // Where the user answers a read-only request depends on where the agent lives.
+  const sourceLabel = $derived(
+    { herdr: "herdr", t3: "T3", hooks: "hooks", unknown: "unknown" }[card.agent.source],
+  );
   const readonlyLabel = $derived(card.agent.source === "t3" ? "Answer in T3" : "Answer in terminal");
 </script>
 
@@ -45,7 +48,7 @@
     {#if card.busy}<span class="spinner" aria-hidden="true"></span>{/if}
   </div>
   <div class="meta">
-    {card.machine_name}{card.agent.project ? ` / ${card.agent.project}` : ""}{card.agent.cwd
+    {card.machine_name} · <span class="source" data-source={card.agent.source}>{sourceLabel}</span>{card.agent.project ? ` / ${card.agent.project}` : ""}{card.agent.cwd
       ? ` (${card.agent.cwd})`
       : ""}
   </div>
@@ -130,6 +133,12 @@
   .state {
     font-size: 11px;
     opacity: 0.7;
+  }
+  .source {
+    border: 1px solid currentColor;
+    border-radius: 8px;
+    padding: 0 5px;
+    font-size: 10px;
   }
   .keys {
     font-size: 11px;

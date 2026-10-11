@@ -2,7 +2,8 @@
 //! and the reply field work, without activating the app: the frontmost app stays frontmost.
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Size, WebviewUrl, WebviewWindow,
@@ -14,9 +15,15 @@ use tauri_nspanel::{
 use crate::frame::{self, DEFAULT_SIZE, Frame, MIN_SIZE};
 
 static VISIBLE: AtomicBool = AtomicBool::new(false);
-/// Set while we move or size the panel ourselves, so the delegate callbacks
-/// that causes are not mistaken for the user dragging.
-static PLACING: AtomicBool = AtomicBool::new(false);
+/// The frame `place()` asked for, and until when callbacks that match it are
+/// ours. tao applies `set_size` and `set_position` through
+/// `DispatchQueue::main().exec_async`, so `windowDidResize` and
+/// `windowDidMove` fire after `place()` has returned (and possibly between
+/// the two calls). A "currently placing" flag therefore cannot tell them from
+/// the user dragging; comparing the live frame with the requested one can.
+static EXPECTED: Mutex<Option<(Frame, Instant)>> = Mutex::new(None);
+/// How long after `place()` its own callbacks can still arrive.
+const PLACE_SETTLE: Duration = Duration::from_millis(1000);
 /// The user moved or resized the panel since the last save. Only then is the
 /// frame written, so a frame refitted after a display went away never
 /// replaces the remembered one.
@@ -72,9 +79,9 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         false
     });
     let handle = app.clone();
-    events.window_did_resize(move |_| schedule_save(&handle));
+    events.window_did_resize(move |_| on_frame_event(&handle));
     let handle = app.clone();
-    events.window_did_move(move |_| schedule_save(&handle));
+    events.window_did_move(move |_| on_frame_event(&handle));
     panel.set_event_handler(Some(events.as_ref()));
     // Not `panel.to_window()`: that converts the panel back into a plain
     // window and unregisters it, so later lookups fail.
@@ -217,12 +224,6 @@ fn fallback_screen(window: &WebviewWindow, full: &[Frame]) -> usize {
 
 /// Applies the remembered (or current) frame, fitted to the displays that exist now.
 fn place(window: &WebviewWindow, wanted: Option<Frame>) {
-    PLACING.store(true, Ordering::SeqCst);
-    place_inner(window, wanted);
-    PLACING.store(false, Ordering::SeqCst);
-}
-
-fn place_inner(window: &WebviewWindow, wanted: Option<Frame>) {
     let (full, screens) = screen_frames(window);
     let fallback = fallback_screen(window, &full);
     let Some(target) = frame::resolve(wanted, &screens, fallback) else {
@@ -230,6 +231,9 @@ fn place_inner(window: &WebviewWindow, wanted: Option<Frame>) {
     };
     if live_frame(window) == Some(target) {
         return;
+    }
+    if let Ok(mut expected) = EXPECTED.lock() {
+        *expected = Some((target, Instant::now() + PLACE_SETTLE));
     }
     if let Err(error) = window.set_size(LogicalSize::new(target.w, target.h)) {
         tracing::warn!(%error, "could not size inbox panel");
@@ -239,11 +243,23 @@ fn place_inner(window: &WebviewWindow, wanted: Option<Frame>) {
     }
 }
 
+/// Delegate callback for a move or resize (main thread). Ignores the ones
+/// `place()` caused; anything else is the user.
+fn on_frame_event(app: &AppHandle) {
+    let live = app.get_webview_window("panel").and_then(|w| live_frame(&w));
+    if let (Some(live), Ok(mut expected)) = (live, EXPECTED.lock()) {
+        match *expected {
+            Some((target, until)) if Instant::now() < until && frame::is_programmatic(&live, &target) => {
+                return;
+            }
+            _ => *expected = None,
+        }
+    }
+    schedule_save(app);
+}
+
 /// Saves the frame shortly after the user stops dragging or resizing.
 fn schedule_save(app: &AppHandle) {
-    if PLACING.load(Ordering::SeqCst) {
-        return;
-    }
     USER_CHANGED.store(true, Ordering::SeqCst);
     let generation = FRAME_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let handle = app.clone();

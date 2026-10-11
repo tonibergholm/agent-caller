@@ -206,3 +206,18 @@ test("a multi-line detail renders one hanging-indent block per logical line", ()
   expect(rule).toMatch(/text-indent:\s*-2ch/);
   expect(css).toMatch(/\.detail\s*\{[^}]*monospace/);
 });
+
+test.each([
+  ["herdr", "herdr"],
+  ["t3", "T3"],
+  ["hooks", "hooks"],
+  ["unknown", "unknown"],
+] as const)("the %s source is shown as a badge in the meta line", (source, text) => {
+  const c = card({ key: "m/x" });
+  c.agent.source = source;
+  const { container } = render(Card, props(c));
+  const badge = container.querySelector(".meta .source");
+  expect(badge?.textContent).toBe(text);
+  expect(badge?.getAttribute("data-source")).toBe(source);
+  expect(container.querySelector(".meta")?.textContent).toContain("Studio");
+});
