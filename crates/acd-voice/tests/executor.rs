@@ -86,7 +86,7 @@ impl InboxPort for FakePort {
 async fn say(exec: &mut Executor, port: &FakePort, s: &Snapshot, text: &str) -> Reaction {
     let (n, thinking) = match exec.begin(port, s.clone(), VoiceText::new(text), Locale::En) {
         Ok(admitted) => admitted,
-        Err(refused) => return refused,
+        Err(refused) => return *refused,
     };
     assert!(matches!(thinking.hud, Hud::Thinking { .. }));
     let routed = route(s, &VoiceText::new(text), None, &RouteOptions::default()).await;

@@ -160,7 +160,7 @@ impl Controller {
                         Ok((session, n, changes))
                     }
                     Err(refused) => {
-                        self.emit(&mut core.exec, refused);
+                        self.emit(&mut core.exec, *refused);
                         Err("refused")
                     }
                 }

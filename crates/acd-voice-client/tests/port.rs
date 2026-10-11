@@ -92,3 +92,86 @@ async fn a_guard_from_another_connection_is_refused() {
         assert_eq!(port.enqueue(op), Err(EnqueueError::ConnectionChanged));
     }
 }
+
+/// Final review B2: agent text and voice text never show in `Debug`, from
+/// the frozen snapshot through the HUD and the inbox action to the wire.
+#[tokio::test]
+async fn debug_never_shows_content_from_snapshot_to_wire() {
+    use acd_client::actions::{Action, ActionKind, Semantics};
+    use acd_client::view::ActionView;
+    use acd_protocol::ClientMessage;
+    use acd_voice::fast::Locale;
+    use acd_voice::plan::Executor;
+    use acd_voice::router::{RouteOptions, route};
+
+    let mut a = pending_agent();
+    a["title"] = "SECRET-TITLE".into();
+    a["project"] = "SECRET-PROJECT".into();
+    a["pending"]["title"] = "SECRET-REQUEST".into();
+    a["pending"]["detail"] = "SECRET-DETAIL".into();
+    a["pending"]["options"][0]["label"] = "SECRET-YES".into();
+    a["pending"]["options"][2]["label"] = "SECRET-ALWAYS".into();
+    a["pending"]["options"][2]["description"] = "SECRET-RULE".into();
+    let r = inbox_rig(vec![a.clone()]).await;
+    let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
+    let port = AcdPort::new(r.inbox.clone());
+    let mut exec = Executor::new();
+    let said = VoiceText::new("yes always");
+    let (n, thinking) = exec.begin(&port, snap.clone(), said.clone(), Locale::En).unwrap();
+    let routed = route(&snap, &said, None, &RouteOptions::default()).await;
+    let confirm = exec.routed(n, routed).unwrap();
+    let id = confirm.hud.awaiting_display().expect("a confirm step");
+    exec.shown(&port, id);
+    let countdown = exec.confirm(&port, Some(id)).unwrap();
+
+    let req: acd_protocol::Request = serde_json::from_value(a["pending"].clone()).unwrap();
+    let sem = Semantics::of(&req, "always").unwrap();
+    let action = Action {
+        id: "act".into(),
+        card_key: "m1/a1".into(),
+        machine_key: "m1".into(),
+        agent_id: "a1".into(),
+        instance: 1,
+        conn_gen: 1,
+        kind: ActionKind::Answer(sem.clone()),
+        fires_at: std::time::Instant::now(),
+        view: ActionView {
+            id: "act".into(),
+            card_key: "m1/a1".into(),
+            label: sem.option.label.clone(),
+            detail: sem.option.description.clone(),
+            fires_at_ms: 0.0,
+        },
+    };
+    let wire = [
+        ClientMessage::RequestAnswer {
+            id: "c1".into(),
+            request_id: "r1".into(),
+            revision: Some(1),
+            option_id: None,
+            text: Some("SECRET-ANSWER".into()),
+        },
+        ClientMessage::AgentSend { id: "c2".into(), agent_id: "a1".into(), text: "SECRET-SEND".into() },
+        ClientMessage::Hello {
+            protocol: "acd/1".into(),
+            token: "SECRET-TOKEN".into(),
+            client: acd_protocol::ClientInfo { id: "c".into(), name: "n".into(), version: "0".into() },
+            resume: None,
+        },
+    ];
+    let shown = [
+        format!("{snap:?}"),
+        format!("{thinking:?}"),
+        format!("{confirm:?}"),
+        format!("{countdown:?}"),
+        format!("{exec:?}"),
+        format!("{sem:?}"),
+        format!("{action:?}"),
+        format!("{wire:?}"),
+    ];
+    for s in &shown {
+        assert!(!s.contains("SECRET"), "{s}");
+    }
+    assert!(shown[2].contains("Confirm"), "the HUD is the confirm step: {}", shown[2]);
+    assert!(shown[7].contains("request_id: \"r1\""), "ids stay readable: {}", shown[7]);
+}

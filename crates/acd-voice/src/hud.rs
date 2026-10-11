@@ -2,14 +2,16 @@
 //! webview inside a `HudEvent`; `app/src/lib/hud.ts` mirrors these shapes.
 use acd_protocol::{Effect, ErrorCode};
 use serde::Serialize;
+use std::fmt;
 
 use crate::plan::NotSentReason;
 use crate::refusal::Refusal;
 use crate::router::target::Provenance;
 use crate::safety::Level;
-use crate::text::VoiceText;
+use crate::text::{Redacted, VoiceText};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// `Debug` shows the lengths of agent text only (spec §3.7).
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct TargetView {
     pub card: String,
     pub machine: String,
@@ -35,7 +37,8 @@ pub enum ProposalAction {
 }
 
 /// Target, action and full payload (spec §6.1): nothing here is cut.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// `Debug` shows the lengths of agent and voice text only.
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct ProposalView {
     pub action: ProposalAction,
     pub target: TargetView,
@@ -49,6 +52,36 @@ pub struct ProposalView {
     pub text: Option<VoiceText>,
     pub provenance: Option<Provenance>,
     pub level: Level,
+}
+
+impl fmt::Debug for TargetView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TargetView")
+            .field("card", &self.card)
+            .field("machine", &Redacted(&self.machine))
+            .field("agent", &self.agent)
+            .field("title", &Redacted(&self.title))
+            .field("request", &Redacted::opt(&self.request))
+            .field("off_screen", &self.off_screen)
+            .field("disambiguator", &Redacted::opt(&self.disambiguator))
+            .finish()
+    }
+}
+
+impl fmt::Debug for ProposalView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProposalView")
+            .field("action", &self.action)
+            .field("target", &self.target)
+            .field("option", &Redacted::opt(&self.option))
+            .field("effect", &self.effect)
+            .field("rule", &Redacted::opt(&self.rule))
+            .field("question", &Redacted::opt(&self.question))
+            .field("text", &self.text)
+            .field("provenance", &self.provenance)
+            .field("level", &self.level)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

@@ -30,6 +30,22 @@ impl fmt::Debug for VoiceText {
     }
 }
 
+/// Agent or voice text in a `Debug` impl: shows its length only (spec
+/// §3.7), so a derived `Debug` above it cannot print the text.
+pub struct Redacted<'a>(pub &'a str);
+
+impl Redacted<'_> {
+    pub fn opt(s: &Option<String>) -> Option<Redacted<'_>> {
+        s.as_deref().map(Redacted)
+    }
+}
+
+impl fmt::Debug for Redacted<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<{} chars>", self.0.chars().count())
+    }
+}
+
 /// Cuts `s` to at most `max` characters on a character boundary, ending
 /// with "…" when anything was cut.
 pub fn truncate(s: &str, max: usize) -> String {
@@ -73,6 +89,12 @@ mod tests {
         let t = VoiceText::new("approve the deploy to prod");
         assert_eq!(format!("{t:?}"), "VoiceText(26 chars)");
         assert_eq!(t.expose(), "approve the deploy to prod");
+    }
+
+    #[test]
+    fn redacted_shows_only_the_length() {
+        assert_eq!(format!("{:?}", Redacted("SECRET")), "<6 chars>");
+        assert_eq!(format!("{:?}", Redacted::opt(&Some("é".into()))), "Some(<1 chars>)");
     }
 
     #[test]

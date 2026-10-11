@@ -3,6 +3,9 @@
 //! acd-client's view into them.
 use acd_protocol::{AgentKind, AgentRole, AgentState, Effect, RequestKind};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use crate::text::Redacted;
 
 /// Panel state the frontend publishes (spec §4.3).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +46,8 @@ pub enum Group {
     Idle,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `Debug` of the agent-text types below shows lengths only (spec §3.7).
+#[derive(Clone, PartialEq, Eq)]
 pub struct OptionSnap {
     pub id: String,
     pub label: String,
@@ -54,7 +58,7 @@ pub struct OptionSnap {
     pub selectable: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RequestSnap {
     pub id: String,
     pub revision: u64,
@@ -71,7 +75,7 @@ pub struct RequestSnap {
     pub options: Vec<OptionSnap>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CardSnap {
     pub key: String,
     pub machine_key: String,
@@ -92,6 +96,56 @@ pub struct CardSnap {
     /// An idle agent the panel hides ("Show idle" off). Voice can still
     /// send to it when named (D7).
     pub idle_hidden: bool,
+}
+
+impl fmt::Debug for OptionSnap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OptionSnap")
+            .field("id", &self.id)
+            .field("label", &Redacted(&self.label))
+            .field("description", &Redacted::opt(&self.description))
+            .field("effect", &self.effect)
+            .field("selectable", &self.selectable)
+            .finish()
+    }
+}
+
+impl fmt::Debug for RequestSnap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RequestSnap")
+            .field("id", &self.id)
+            .field("revision", &self.revision)
+            .field("kind", &self.kind)
+            .field("title", &Redacted(&self.title))
+            .field("detail", &Redacted(&self.detail))
+            .field("question", &Redacted::opt(&self.question))
+            .field("answerable", &self.answerable)
+            .field("free_text", &self.free_text)
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+impl fmt::Debug for CardSnap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CardSnap")
+            .field("key", &self.key)
+            .field("machine_key", &self.machine_key)
+            .field("machine_name", &Redacted(&self.machine_name))
+            .field("online", &self.online)
+            .field("conn", &self.conn)
+            .field("agent_id", &self.agent_id)
+            .field("kind", &self.kind)
+            .field("title", &Redacted(&self.title))
+            .field("project", &Redacted::opt(&self.project))
+            .field("state", &self.state)
+            .field("role", &self.role)
+            .field("group", &self.group)
+            .field("can_reply", &self.can_reply)
+            .field("pending", &self.pending)
+            .field("idle_hidden", &self.idle_hidden)
+            .finish()
+    }
 }
 
 /// Everything voice reads, frozen when recording starts (spec §4.3).

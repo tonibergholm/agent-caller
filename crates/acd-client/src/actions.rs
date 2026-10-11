@@ -10,7 +10,8 @@ use crate::{
     voice::NotSentReason,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Request text is the agent's (voice spec §3.7): `Debug` shows lengths.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Semantics {
     pub request_id: String,
     pub revision: u64,
@@ -66,6 +67,21 @@ pub enum ActionKind {
     Answer(Semantics),
     AnswerText(TextSemantics),
     Reply { text: String },
+}
+impl fmt::Debug for Semantics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Semantics")
+            .field("request_id", &self.request_id)
+            .field("revision", &self.revision)
+            .field("kind", &self.kind)
+            .field("answer_path", &self.answer_path)
+            .field("title_bytes", &self.title.len())
+            .field("detail_bytes", &self.detail.len())
+            .field("option_id", &self.option.id)
+            .field("option_effect", &self.option.effect)
+            .field("option_ids", &self.option_ids)
+            .finish_non_exhaustive()
+    }
 }
 /// Typed text is the user's (voice spec §3.7): `Debug` shows its length.
 impl fmt::Debug for TextSemantics {

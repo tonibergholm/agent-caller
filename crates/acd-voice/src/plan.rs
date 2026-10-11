@@ -159,7 +159,7 @@ impl Executor {
         snapshot: Snapshot,
         transcript: VoiceText,
         locale: Locale,
-    ) -> Result<(u64, Reaction), Reaction> {
+    ) -> Result<(u64, Reaction), Box<Reaction>> {
         self.prior = Prior::Nothing;
         match std::mem::take(&mut self.state) {
             State::Counting { action_id, .. } if port.cancel(&action_id) => self.prior = Prior::Cancelled,
@@ -172,7 +172,7 @@ impl Executor {
                     Some(Reply::Cancel) => Refusal::AlreadySent,
                     _ => Refusal::StillSending,
                 };
-                return Err(show(Hud::Error { refusal, transcript: None }));
+                return Err(Box::new(show(Hud::Error { refusal, transcript: None })));
             }
             _ => {}
         }
