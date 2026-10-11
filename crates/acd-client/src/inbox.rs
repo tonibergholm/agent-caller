@@ -926,9 +926,10 @@ impl Inbox {
     }
 }
 /// Cancels the countdown of a card the user just chose to hide (subagents,
-/// idle or hook-only agents turned off), so nothing fires unseen and Esc never cancels an
-/// action nobody can see. Not run on rebuild: an agent that turns idle on its
-/// own keeps its card while a countdown runs. No notice: the card is gone.
+/// idle or hook-only agents turned off), so nothing fires unseen and Esc
+/// never cancels an action nobody can see. Not run on rebuild: an agent that
+/// turns idle on its own keeps its card while a countdown runs. No notice:
+/// the card is gone.
 fn drop_hidden_actions(inner: &mut Inner) {
     let (show_subagents, show_idle, show_hook_only) = (
         inner.settings.show_subagents,

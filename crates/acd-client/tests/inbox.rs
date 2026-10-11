@@ -1096,6 +1096,7 @@ fn hook_only_agent() -> Value {
     a["id"] = "a3".into();
     a["title"] = "hooked".into();
     a["source"] = "hooks".into();
+    a["can_send"] = false.into();
     a["pending"]["id"] = "r3".into();
     a["pending"]["agent_id"] = "a3".into();
     a
@@ -1122,9 +1123,10 @@ async fn hook_only_agents_show_with_a_request_and_notify_as_before() {
     .await;
     assert!(!ib.view().borrow().show_hook_only);
     // A request on a hook-only agent shows and notifies.
-    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":hook_only_agent()}))
+    // The daemon sends request.opened before the agent update.
+    c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":3,"request":hook_only_agent()["pending"]}))
         .await;
-    c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":4,"request":hook_only_agent()["pending"]}))
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":4,"agent":hook_only_agent()}))
         .await;
     view_until(&ib, "hook-only request shown", |v| {
         v.cards.iter().any(|c| c.agent.id == "a3" && c.answerable) && v.tray.needs_you == 2
@@ -1159,13 +1161,16 @@ async fn show_hook_only_is_remembered() {
 #[tokio::test]
 async fn a_countdown_keeps_a_hook_only_card_visible_after_its_request_resolves() {
     let (_f, c, ib) = setup().await;
-    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[hook_only_agent()]}))
+    let mut hooked = hook_only_agent();
+    hooked["can_send"] = true.into(); // only so a reply countdown can run
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[hooked]}))
         .await;
     view_until(&ib, "hook-only card", |v| v.cards.iter().any(|c| c.key == "m1/a3")).await;
     ib.reply("m1/a3", "next".into()).unwrap();
     view_until(&ib, "counting", |v| v.actions.len() == 1).await;
     let mut quiet = quiet_hook_only_agent();
     quiet["id"] = "a3".into();
+    quiet["can_send"] = true.into();
     c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":quiet}))
         .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1182,7 +1187,7 @@ async fn turning_hook_only_off_cancels_countdowns_on_quiet_hook_only_cards() {
     let (f, c, ib) = setup().await;
     ib.set_show_hook_only(true).unwrap();
     let mut quiet = quiet_hook_only_agent();
-    quiet["can_send"] = true.into();
+    quiet["can_send"] = true.into(); // only so a reply countdown can run
     c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), quiet]}))
         .await;
     view_until(&ib, "both shown", |v| v.cards.len() == 2).await;
@@ -1197,4 +1202,42 @@ async fn turning_hook_only_off_cancels_countdowns_on_quiet_hook_only_cards() {
         0,
         "the hidden countdown never fired"
     );
+}
+
+#[tokio::test]
+async fn a_pending_hook_only_countdown_survives_turning_the_setting_off() {
+    let (f, c, ib) = setup().await;
+    ib.set_show_hook_only(true).unwrap();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[hook_only_agent()]}))
+        .await;
+    view_until(&ib, "hook-only card", |v| v.cards.iter().any(|c| c.key == "m1/a3")).await;
+    ib.pick("m1/a3", "r3", "allow", 1).unwrap();
+    view_until(&ib, "counting", |v| v.actions.len() == 1).await;
+    ib.set_show_hook_only(false).unwrap();
+    view_until(&ib, "card kept", |v| {
+        v.actions.len() == 1 && v.cards.iter().any(|c| c.key == "m1/a3")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(answers(&f), 1, "the countdown still fired");
+}
+
+#[tokio::test]
+async fn a_hook_only_subagent_request_stays_hidden_and_silent() {
+    let (_f, c, ib) = setup().await;
+    let mut events = ib.events();
+    let mut sub = hook_only_agent();
+    sub["role"] = "subagent".into();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), sub.clone()]}))
+        .await;
+    c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":3,"request":sub["pending"]}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let v = ib.view().borrow().clone();
+    assert_eq!(v.cards.len(), 1);
+    assert_eq!(v.tray.needs_you, 1);
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 }

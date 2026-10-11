@@ -124,9 +124,14 @@ pub struct MachineInput<'a> {
 
 /// A hook-only agent (known through acd's hooks alone: no herdr pane, not
 /// T3) cannot be messaged and has no pane to open, so it earns a card only
-/// while it has a request. Used by the view and by `drop_hidden_actions`.
+/// while it has a request. An agent waiting on the user without a held
+/// request (a prompt passed through to the terminal) stays visible. Used by
+/// the view and by `drop_hidden_actions`.
 pub(crate) fn hook_only_hidden(agent: &Agent, show_hook_only: bool) -> bool {
-    !show_hook_only && agent.source == acd_protocol::Source::Hooks && agent.pending.is_none()
+    !show_hook_only
+        && agent.source == acd_protocol::Source::Hooks
+        && agent.pending.is_none()
+        && agent.state != AgentState::NeedsYou
 }
 
 pub struct ViewInput<'a> {
@@ -1189,5 +1194,47 @@ mod tests {
         });
         assert!(v.cards.is_empty());
         assert_eq!(v.tray.color, TrayColor::Grey);
+    }
+
+    #[test]
+    fn hook_only_corner_cases() {
+        let t = "2026-10-08T00:00:00.000Z";
+        let hooks = |id: &str, state: &str| {
+            let mut a = agent(id, state, t);
+            a.source = acd_protocol::Source::Hooks;
+            a.can_send = false;
+            a
+        };
+        let waiting = hooks("waiting", "needs_you");
+        let idle = hooks("idle", "idle");
+        let mut sub = with_request(hooks("sub", "needs_you"), t);
+        sub.role = AgentRole::Subagent;
+        let (e, s) = (entry("m1"), state(true, ALL, vec![waiting, idle, sub]));
+        let build = |show_hook_only, show_idle| {
+            let (busy, notices) = (HashSet::new(), HashMap::new());
+            build_view(&ViewInput {
+                machines: vec![MachineInput {
+                    entry: &e,
+                    state: Some(&s),
+                }],
+                actions: &[],
+                busy: &busy,
+                notices: &notices,
+                show_idle,
+                show_subagents: false,
+                show_hook_only,
+            })
+        };
+        // Waiting on the user without a held request: visible and counted.
+        let v = build(false, true);
+        assert_eq!(v.cards.iter().map(|c| c.agent.id.as_str()).collect::<Vec<_>>(), ["waiting"]);
+        assert_eq!(v.tray.needs_you, 1);
+        assert_eq!(v.tray.color, TrayColor::Amber);
+        // Subagent hiding wins over a pending hook-only request.
+        assert!(v.cards.iter().all(|c| c.agent.id != "sub"));
+        // Shown hook-only idle agents still fall under the idle setting.
+        let v = build(true, false);
+        assert_eq!(v.hidden_idle, 1);
+        assert_eq!(v.cards.iter().map(|c| c.agent.id.as_str()).collect::<Vec<_>>(), ["waiting"]);
     }
 }
