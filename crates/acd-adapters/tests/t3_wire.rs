@@ -1,5 +1,5 @@
 use acd_adapters::t3::wire::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn fx(name: &str) -> String {
     std::fs::read_to_string(format!(
@@ -979,4 +979,19 @@ fn a_waiting_postturn_thread_without_a_request_is_working() {
         agent_obs(&t, None, &HashSet::new()).state,
         AgentState::Working
     );
+}
+
+#[test]
+fn shell_visibility_fields_default_to_visible() {
+    let now = chrono::Utc::now();
+    let t = ShellThread::decode(&json!({"id": "a"})).unwrap();
+    assert!(t.visible(now));
+    let t = ShellThread::decode(&json!({"id": "a", "lineage": null, "settledAt": null,
+        "snoozedUntil": null, "pendingBackgroundTasks": null, "settledOverride": 7}))
+    .unwrap();
+    assert!(t.visible(now));
+    let t = ShellThread::decode(&json!({"id": "a", "settledAt": "2026-10-01T00:00:00Z",
+        "unsettledAt": "2026-10-02T00:00:00Z"}))
+    .unwrap();
+    assert!(t.visible(now), "an unsettle after the settle wins");
 }

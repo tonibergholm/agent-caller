@@ -382,7 +382,7 @@ impl ThreadState {
     fn is_working(&self) -> bool {
         self.shell
             .as_ref()
-            .is_some_and(|s| map::state(s.status.as_deref(), false).0 == AgentState::Working)
+            .is_some_and(|s| map::shell_state(s, false).0 == AgentState::Working)
     }
 
     fn updated(&self) -> Option<DateTime<Utc>> {
@@ -406,6 +406,9 @@ struct Reconciler {
     shell_synced: bool,
     projects: HashMap<String, Project>,
     threads: HashMap<String, ThreadState>,
+    /// Shell entries of hidden threads (subagent, settled, snoozed): no agent
+    /// and no streams, kept to notice a snooze ending or a thread needing us.
+    hidden_shells: HashMap<String, ShellThread>,
     /// Stream id -> thread id.
     streams: HashMap<String, String>,
     /// Unreadable items since the source was last clear of them.
@@ -440,6 +443,7 @@ impl Reconciler {
             shell_synced: false,
             projects: HashMap::new(),
             threads: HashMap::new(),
+            hidden_shells: HashMap::new(),
             streams: HashMap::new(),
             decode_errors: 0,
             last_decode_error: None,
@@ -605,6 +609,7 @@ impl Reconciler {
             return;
         }
         self.expire_degradations(now);
+        self.reveal_unsnoozed(conn);
         let expired: Vec<String> = self
             .threads
             .iter()
@@ -707,7 +712,7 @@ impl Reconciler {
                     return;
                 }
                 match ShellThread::decode(&thread) {
-                    Ok(t) => self.put_shell(t),
+                    Ok(t) => self.apply_shell(conn, t),
                     Err(_) => self.decode_error("shell item", v, thread["id"].as_str()),
                 }
             }
@@ -769,7 +774,7 @@ impl Reconciler {
             match ShellThread::decode(entry) {
                 Ok(t) => {
                     seen.insert(t.id.clone());
-                    self.put_shell(t);
+                    self.apply_shell(conn, t);
                 }
                 Err(_) => {
                     let id = entry["id"].as_str();
@@ -789,6 +794,7 @@ impl Reconciler {
         for id in vanished {
             self.gone(conn, &id);
         }
+        self.hidden_shells.retain(|id, _| seen.contains(id));
         self.shell_cursor = Some(snapshot.snapshot_sequence);
     }
 
@@ -815,6 +821,35 @@ impl Reconciler {
         self.refresh_status();
     }
 
+    /// Shows a visible thread and treats a hidden one like an archived
+    /// thread: no agent, no discovery stream, no request stream.
+    fn apply_shell(&mut self, conn: &Conn, shell: ShellThread) {
+        if shell.visible(Utc::now()) {
+            self.hidden_shells.remove(&shell.id);
+            self.put_shell(shell);
+        } else {
+            let id = shell.id.clone();
+            self.gone(conn, &id);
+            self.hidden_shells.insert(id, shell);
+        }
+    }
+
+    /// A snooze that ended shows the thread again.
+    fn reveal_unsnoozed(&mut self, conn: &Conn) {
+        let now = Utc::now();
+        let ready: Vec<String> = self
+            .hidden_shells
+            .iter()
+            .filter(|(_, s)| s.visible(now))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ready {
+            if let Some(shell) = self.hidden_shells.remove(&id) {
+                self.apply_shell(conn, shell);
+            }
+        }
+    }
+
     fn put_shell(&mut self, shell: ShellThread) {
         let id = shell.id.clone();
         let t = self
@@ -825,7 +860,7 @@ impl Reconciler {
             // A changed entry retries a null idle thread at once. A working
             // thread's entry changes all the time, so an overflow thread
             // waits for `relearn_after` unless its provider thread changes.
-            let working = map::state(shell.status.as_deref(), false).0 == AgentState::Working;
+            let working = map::shell_state(&shell, false).0 == AgentState::Working;
             let reset = match &t.discovery {
                 Discovery::NotLoaded {
                     provider_thread, ..
@@ -898,6 +933,7 @@ impl Reconciler {
     }
 
     fn gone(&mut self, conn: &Conn, thread_id: &str) {
+        self.hidden_shells.remove(thread_id);
         let Some(t) = self.threads.remove(thread_id) else {
             return;
         };

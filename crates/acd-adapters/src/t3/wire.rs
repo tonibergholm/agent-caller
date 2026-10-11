@@ -1,5 +1,6 @@
 //! T3 wire types (orchestration protocol 2, gate 3). Unknown fields are
 //! ignored; unknown tags and kinds decode as `Other`.
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -313,9 +314,77 @@ pub struct ShellThread {
     pub deleted_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// `lineage.parentThreadId` is set on subagent threads. Kept as raw
+    /// values so an unexpected shape never fails the entry: unknown or
+    /// missing means "visible" (older T3 versions).
+    #[serde(default)]
+    pub lineage: Option<Value>,
+    /// `"settled"` or `"unsettled"` when the user overrode auto-settling.
+    #[serde(default)]
+    pub settled_override: Option<Value>,
+    #[serde(default)]
+    pub settled_at: Option<Value>,
+    #[serde(default)]
+    pub unsettled_at: Option<Value>,
+    #[serde(default)]
+    pub snoozed_until: Option<Value>,
+    /// Non-empty while background work keeps a `completed` thread busy.
+    #[serde(default)]
+    pub pending_background_tasks: Option<Value>,
 }
 
 impl ShellThread {
+    pub fn has_background_tasks(&self) -> bool {
+        match &self.pending_background_tasks {
+            Some(Value::Array(a)) => !a.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn is_subagent(&self) -> bool {
+        self.lineage
+            .as_ref()
+            .and_then(|l| l.get("parentThreadId"))
+            .is_some_and(|p| !p.is_null())
+    }
+
+    fn is_settled(&self) -> bool {
+        let text = |v: &Option<Value>| v.as_ref().and_then(Value::as_str).map(str::to_owned);
+        match text(&self.settled_override).as_deref() {
+            Some("unsettled") => return false,
+            Some("settled") => return true,
+            _ => {}
+        }
+        let Some(settled) = text(&self.settled_at) else {
+            return false;
+        };
+        // An unsettle recorded at or after the settle wins.
+        let time = |s: &str| DateTime::parse_from_rfc3339(s).ok();
+        match (text(&self.unsettled_at), time(&settled)) {
+            (Some(u), Some(s)) => time(&u).is_none_or(|u| u < s),
+            _ => true,
+        }
+    }
+
+    fn is_snoozed(&self, now: DateTime<Utc>) -> bool {
+        self.snoozed_until
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .is_some_and(|until| until > now)
+    }
+
+    /// The thread is waiting on the user.
+    pub fn needs_user(&self) -> bool {
+        self.status.as_deref() == Some("waiting") || self.pending_runtime_request.is_some()
+    }
+
+    /// Whether acd shows this thread (spec 6.5, "Visibility"): a root,
+    /// unsettled, unsnoozed thread, or any thread that needs the user.
+    pub fn visible(&self, now: DateTime<Utc>) -> bool {
+        self.needs_user() || !(self.is_subagent() || self.is_settled() || self.is_snoozed(now))
+    }
+
     pub fn decode(v: &Value) -> Result<ShellThread, serde_json::Error> {
         ShellThread::deserialize(v)
     }

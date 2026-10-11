@@ -588,3 +588,36 @@ async fn a_token_that_is_not_visible_ascii_is_rejected_before_connecting() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_frame_over_the_old_16_mib_cap_keeps_the_connection_and_decodes() {
+    let fake = FakeT3::start().await;
+    let (conn, mut rx) = open(&fake).await;
+    let id = conn
+        .subscribe(SUBSCRIBE_SHELL, json!({"requestCompletionMarker": true}))
+        .unwrap();
+    // Drain the empty initial snapshot and `synchronized`.
+    loop {
+        let values = next_chunk(&mut rx).await;
+        if values.iter().any(|v| v["kind"] == "synchronized") {
+            break;
+        }
+    }
+    let blob = "x".repeat(17 * 1024 * 1024);
+    let frame = json!({"_tag":"Chunk","requestId":id,"values":[{"kind":"big","blob":blob}]});
+    fake.send_raw(&frame.to_string());
+    let values = tokio::time::timeout(Duration::from_secs(20), async {
+        match rx.recv().await.expect("open") {
+            StreamMsg::Chunk { values, .. } => values,
+            StreamMsg::End { .. } => panic!("stream ended"),
+        }
+    })
+    .await
+    .expect("big chunk");
+    assert_eq!(values[0]["kind"], "big");
+    assert_eq!(values[0]["blob"].as_str().unwrap().len(), 17 * 1024 * 1024);
+    // Still connected: a later update arrives on the same connection.
+    fake.put_thread(shell_thread("t1", "running", None));
+    assert_eq!(next_chunk(&mut rx).await[0]["thread"]["status"], "running");
+    assert_eq!(fake.connections(), 1);
+}

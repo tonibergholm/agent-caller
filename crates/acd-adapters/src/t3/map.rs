@@ -57,6 +57,15 @@ pub fn state(status: Option<&str>, needs_you: bool) -> (AgentState, bool) {
     }
 }
 
+/// `state` for a shell entry: a `completed` thread with pending background
+/// tasks is still working in T3.
+pub fn shell_state(t: &ShellThread, needs_you: bool) -> (AgentState, bool) {
+    if !needs_you && t.status.as_deref() == Some("completed") && t.has_background_tasks() {
+        return (AgentState::Working, false);
+    }
+    state(t.status.as_deref(), needs_you)
+}
+
 fn message_text(v: &Value) -> Option<&str> {
     v.as_str().or_else(|| v.get("text").and_then(Value::as_str))
 }
@@ -66,7 +75,7 @@ pub fn agent_obs(t: &ShellThread, project: Option<&Project>, hidden: &HashSet<St
         .pending_runtime_request
         .as_ref()
         .is_some_and(|p| !hidden.contains(&p.id));
-    let (state, failed) = state(t.status.as_deref(), needs_you);
+    let (state, failed) = shell_state(t, needs_you);
     let cwd = t
         .worktree_path
         .clone()

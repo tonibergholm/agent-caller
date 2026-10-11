@@ -34,7 +34,10 @@ use crate::text::redact_log;
 pub const CONTROL_CAPACITY: usize = 1024;
 pub const CALL_CAPACITY: usize = 64;
 const EVENTS_CAPACITY: usize = 256;
-const MAX_MESSAGE: usize = 16 * 1024 * 1024;
+/// Largest WebSocket message and frame accepted. A thread stream starts with
+/// the full thread snapshot, and busy threads exceed 16 MiB (a real one was
+/// 23.7 MB), so a smaller cap dropped the connection on every discovery pass.
+const MAX_MESSAGE: usize = 256 * 1024 * 1024;
 const PONG_FRAME: &str = r#"{"_tag":"Pong"}"#;
 
 const QUEUED: u8 = 0;
