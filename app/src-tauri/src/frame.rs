@@ -114,6 +114,35 @@ pub fn is_full_target(live: &Frame, target: &Frame) -> bool {
     same_pos(live, target) && same_size(live, target)
 }
 
+/// What a move/resize callback means for persistence.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FrameChange {
+    /// Caused by our own `place()`; `done` once the full target landed.
+    Placement { done: bool },
+    /// The user is dragging or resizing (a mouse button is down).
+    User,
+    /// Anything else, such as macOS refitting windows after a display change.
+    System,
+}
+
+/// `expected` is the target of a recent `place()`, if still within its window.
+/// A callback is the user's only when a mouse button is held: macOS moves and
+/// resizes the panel on its own when displays change, with no button down.
+pub fn classify(live: &Frame, expected: Option<&Frame>, mouse_down: bool) -> FrameChange {
+    if let Some(target) = expected
+        && is_programmatic(live, target)
+    {
+        return FrameChange::Placement {
+            done: is_full_target(live, target),
+        };
+    }
+    if mouse_down {
+        FrameChange::User
+    } else {
+        FrameChange::System
+    }
+}
+
 const EPS: f64 = 1.5;
 fn near(a: f64, b: f64) -> bool {
     (a - b).abs() <= EPS
@@ -257,6 +286,24 @@ mod tests {
         assert!(is_programmatic(&f(100.0, 100.0, 440.0, 560.0), &target));
         // A user drag to another place and size.
         assert!(!is_programmatic(&f(300.0, 200.0, 600.0, 700.0), &target));
+    }
+
+    #[test]
+    fn only_a_held_mouse_button_makes_a_change_the_users() {
+        let target = f(100.0, 100.0, 560.0, 720.0);
+        let elsewhere = f(300.0, 200.0, 600.0, 700.0);
+        // Our own placement wins even with a button down.
+        assert_eq!(classify(&target, Some(&target), true), FrameChange::Placement { done: true });
+        assert_eq!(
+            classify(&f(900.0, 40.0, 560.0, 720.0), Some(&target), false),
+            FrameChange::Placement { done: false }
+        );
+        // A drag or live resize: button down, not ours.
+        assert_eq!(classify(&elsewhere, Some(&target), true), FrameChange::User);
+        assert_eq!(classify(&elsewhere, None, true), FrameChange::User);
+        // The system refitting after a display change: no button.
+        assert_eq!(classify(&elsewhere, Some(&target), false), FrameChange::System);
+        assert_eq!(classify(&elsewhere, None, false), FrameChange::System);
     }
 
     #[test]

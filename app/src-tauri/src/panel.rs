@@ -136,8 +136,16 @@ fn show_on_main_thread(handle: &AppHandle) {
     }
     if let Ok(panel) = found {
         // Re-fit the live frame first: a display may have gone away while hidden.
+        // Refit from the remembered frame, so a panel remembered on a display
+        // that is back returns there. The live frame (possibly moved by macOS)
+        // is the fallback, and also wins while a user change is still unsaved.
         if let Some(window) = handle.get_webview_window("panel") {
-            place(&window, live_frame(&window));
+            let saved = if USER_CHANGED.load(Ordering::SeqCst) {
+                None
+            } else {
+                frame_path(handle).and_then(|p| frame::load(&p))
+            };
+            place(&window, saved.or_else(|| live_frame(&window)));
         }
         panel.show_and_make_key();
         VISIBLE.store(true, Ordering::SeqCst);
@@ -248,22 +256,35 @@ fn place(window: &WebviewWindow, wanted: Option<Frame>) {
 /// Delegate callback for a move or resize (main thread). Ignores the ones
 /// `place()` caused; anything else is the user.
 fn on_frame_event(app: &AppHandle) {
-    let live = app.get_webview_window("panel").and_then(|w| live_frame(&w));
-    if let (Some(live), Ok(mut expected)) = (live, EXPECTED.lock()) {
-        match *expected {
-            Some((target, until))
-                if Instant::now() < until && frame::is_programmatic(&live, &target) =>
-            {
-                // Both queued operations have landed: nothing more is ours.
-                if frame::is_full_target(&live, &target) {
-                    *expected = None;
-                }
-                return;
+    let Some(live) = app.get_webview_window("panel").and_then(|w| live_frame(&w)) else {
+        return;
+    };
+    let Ok(mut expected) = EXPECTED.lock() else {
+        return;
+    };
+    let target = (*expected)
+        .filter(|(_, until)| Instant::now() < *until)
+        .map(|(target, _)| target);
+    match frame::classify(&live, target.as_ref(), mouse_button_down()) {
+        frame::FrameChange::Placement { done } => {
+            // Both queued operations have landed: nothing more is ours.
+            if done {
+                *expected = None;
             }
-            _ => *expected = None,
         }
+        frame::FrameChange::User => {
+            *expected = None;
+            drop(expected);
+            schedule_save(app);
+        }
+        // macOS refitting the panel after a display change: not remembered.
+        frame::FrameChange::System => {}
     }
-    schedule_save(app);
+}
+
+/// Whether any mouse button is down right now (a drag or live resize).
+fn mouse_button_down() -> bool {
+    tauri_nspanel::objc2_app_kit::NSEvent::pressedMouseButtons() != 0
 }
 
 /// Saves the frame shortly after the user stops dragging or resizing.
@@ -284,18 +305,22 @@ fn schedule_save(app: &AppHandle) {
 }
 
 /// Writes the current frame if the user changed it. Main thread only (it reads the window).
+/// The change stays pending until a write succeeds, so a failure is retried
+/// on the next save.
 pub fn save_now(app: &AppHandle) {
     // A pending debounced save is now redundant.
     FRAME_GENERATION.fetch_add(1, Ordering::SeqCst);
-    if !USER_CHANGED.swap(false, Ordering::SeqCst) {
+    if !USER_CHANGED.load(Ordering::SeqCst) {
         return;
     }
     let (Some(path), Some(window)) = (frame_path(app), app.get_webview_window("panel")) else {
         return;
     };
-    if let Some(frame) = live_frame(&window)
-        && let Err(error) = frame::save(&path, &frame)
-    {
-        tracing::warn!(%error, "could not save panel frame");
+    let Some(frame) = live_frame(&window) else {
+        return;
+    };
+    match frame::save(&path, &frame) {
+        Ok(()) => USER_CHANGED.store(false, Ordering::SeqCst),
+        Err(error) => tracing::warn!(%error, "could not save panel frame"),
     }
 }
