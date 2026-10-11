@@ -8,7 +8,7 @@ OUT=$E2E_ROOT/fixtures; mkdir -p "$OUT"   # scratch, not the repo: copy what is 
 cx_prompt() { hd pane send-text $P "$1"; sleep 0.3; hd pane send-keys $P Enter; }
 codex_up() {
   hd agent list | jq -e '.result.agents[]|select(.agent=="codex")' >/dev/null && return 0
-  hd pane run $P "clear; cd /private/tmp/ace2e/proj && HOME=$REAL_HOME codex --no-daemon -m gpt-5.6-terra -c model_reasoning_effort=low -a on-request -s read-only" >/dev/null
+  hd pane run $P "clear; cd /private/tmp/ace2e/proj && HOME=$REAL_HOME ACD_CONFIG_DIR=$E2E_ROOT/acd codex --no-daemon -m gpt-5.6-terra -c model_reasoning_effort=low -a on-request -s read-only" >/dev/null
   wait_pane_text $P 'Hooks need review|Ask Codex' 30 || return 1; sleep 3
   if pane_text $P | grep -q 'Hooks need review'; then hd pane send-keys $P esc; wait_pane_text $P 'Ask Codex' 20 || return 1; fi
   sleep 2

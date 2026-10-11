@@ -10,7 +10,7 @@ session, runs no hook).
 Every read from the app-server has a deadline (READ_TIMEOUT seconds, select-based), so a hung server
 cannot wedge the caller.
 """
-import json, os, select, subprocess, sys, time
+import json, os, re, select, shlex, subprocess, sys, time
 
 READ_TIMEOUT = 20
 
@@ -68,9 +68,31 @@ def hooks(cwd):
             p.kill()
 
 
+_SECRET_KEY = r"(?:token|key|secret|bearer|password|passwd|auth|credential)"
+
+
+def redact(cmd):
+    """Mask values that look like credentials before a hook command is printed."""
+    cmd = re.sub(r"(?i)\b(Bearer)\s+\S+", r"\1 <redacted>", cmd)
+    cmd = re.sub(r"(?i)(\b[\w.-]*%s[\w.-]*\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|\S+)" % _SECRET_KEY, r"\1<redacted>", cmd)
+    cmd = re.sub(r"(?i)(--?[\w-]*%s[\w-]*[ =])(\"[^\"]*\"|'[^']*'|\S+)" % _SECRET_KEY, r"\1<redacted>", cmd)
+    return cmd
+
+
 def is_acd(h):
+    """Fail closed: anything that could be an acd hook counts as one.  A missed acd hook would let
+    Codex deliver scratch events to the user's real daemon (a marker-less `acd hook codex X` falls back
+    to $ACD_CONFIG_DIR or ~/.config/acd)."""
     cmd = h.get("command") or ""
-    return " hook codex " in cmd and ("acd-managed" in cmd or "/acd" in cmd)
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        return True
+    if any(os.path.basename(t) == "acd" for t in toks):
+        return True
+    if re.search(r"hook\s+codex", cmd):
+        return True
+    return any(m in cmd for m in ("acd-managed", ".config/acd", "47801", "hook.sock"))
 
 
 def check(hs):
@@ -78,10 +100,12 @@ def check(hs):
     bad = []
     for h in hs:
         ts, en = str(h.get("trustStatus")).lower(), h.get("enabled") is not False
-        who = "%s %s %s" % (h.get("source"), h.get("eventName"), (h.get("command") or "")[:60])
+        who = "%s %s %s" % (h.get("source"), h.get("eventName"), redact(h.get("command") or "")[:60])
         if h.get("source") == "project":
             if ts != "trusted" or not en:
                 bad.append("project hook not trusted/enabled (%s, enabled=%s): %s" % (ts, en, who))
+            if not re.search(r"--config-dir\s+['\"]?(?:/private)?/tmp/ace2e/acd['\"]?(?:\s|$)", h.get("command") or ""):
+                bad.append("project hook lacks --config-dir '/tmp/ace2e/acd': %s" % who)
         elif is_acd(h) and en and ts not in ("untrusted", "modified"):
             # Other hooks (the user's own scripts, plugins) may run; only an acd
             # hook outside the scratch project would reach the user's real acd.
@@ -104,6 +128,7 @@ if __name__ == "__main__":
         for b in bad: print(b, file=sys.stderr)
         sys.exit(1 if bad else 0)
     else:
+        print("# %d hooks, %d classified as acd" % (len(hs), sum(1 for h in hs if is_acd(h))))
         for h in hs:
-            cmd = h.get("command") or ""
-            print("%-18s %-10s %-9s enabled=%s %s" % (h["eventName"], h["source"], h["trustStatus"], h["enabled"], cmd[:70]))
+            cmd = redact(h.get("command") or "")
+            print("%-18s %-10s %-9s enabled=%s %s%s" % (h["eventName"], h["source"], h["trustStatus"], h["enabled"], "[acd] " if is_acd(h) else "", cmd[:70]))

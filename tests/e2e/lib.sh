@@ -15,6 +15,7 @@ if [ -e "$E2E_ROOT" ]; then
 fi
 
 ACD_BIN=${ACD_BIN:-$REPO/target/release/acd}
+case $ACD_BIN in */.local/bin/acd) echo "ACD_BIN=$ACD_BIN is the user's real acd; refusing" >&2; return 1;; esac
 export ACD_CONFIG_DIR=$E2E_ROOT/acd
 SCRATCH_HOME=$E2E_ROOT/home
 REAL_HOME=$HOME
@@ -46,7 +47,10 @@ clean_env() {
 # Every herdr call goes through the scratch session's socket.
 hd() {
   [ -S "$HERDR_SOCK" ] || { echo "scratch herdr socket missing" >&2; return 1; }
-  HERDR_SOCKET_PATH=$HERDR_SOCK herdr "$@"
+  # Strip any herdr context inherited from a pane we may be running inside, and pin the session, so
+  # a call can never reach the user's own herdr.
+  env -u HERDR_SESSION -u HERDR_PANE_ID -u HERDR_CLIENT_SOCKET_PATH -u HERDR_ENV \
+      HOME="$SCRATCH_HOME" HERDR_SOCKET_PATH="$HERDR_SOCK" herdr --session "$HERDR_SESSION" "$@"
 }
 inbox() { python3 "$E2E_DIR/inbox.py" -d "$ACD_CONFIG_DIR" "$@"; }
 acd() { HOME=$SCRATCH_HOME HERDR_SOCKET_PATH=$HERDR_SOCK "$ACD_BIN" "$@"; }
@@ -57,7 +61,14 @@ log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 
 # pid_cmd_matches PID REGEX: true when PID is alive and its command line matches REGEX.  Every kill of
 # a pid read from a pid file goes through this, so a stale file cannot kill an unrelated process.
-pid_cmd_matches() { [ -n "${1:-}" ] && ps -p "$1" -o command= 2>/dev/null | grep -Eq -- "$2"; }
+# A pid whose command line mentions the user's real acd (~/.local/bin/acd, ~/.config/acd) never matches.
+pid_cmd_matches() {
+  local c
+  [ -n "${1:-}" ] || return 1
+  c=$(ps -p "$1" -o command= 2>/dev/null) || return 1
+  case $c in */.local/bin/acd*|*"$REAL_HOME/.config/acd"*|*" $HOME/.config/acd"*) return 1;; esac
+  printf '%s\n' "$c" | grep -Eq -- "$2"
+}
 # kill_pidfile FILE REGEX [group]: TERM, wait, KILL a verified pid; with "group" the whole process group.
 kill_pidfile() {
   local f=$1 re=$2 grp=${3:-} p t=
@@ -73,7 +84,8 @@ kill_pidfile() {
   fi
   rm -f "$f"; return 0
 }
-ACD_RE='acd run( |$)'
+# Exactly the scratch binary: the user's launchd acd (`~/.local/bin/acd run`) must never match.
+ACD_RE="^$(printf '%s' "$ACD_BIN" | sed 's/[][\\.^$*+?(){}|/]/\\&/g') run( |\$)"
 LOGGER_RE='inbox\.py --name logger'
 T3_RE='--base-dir /tmp/ace2e/t3home|--base-dir /private/tmp/ace2e/t3home'
 HERDR_RE="herdr --session $HERDR_SESSION server"
