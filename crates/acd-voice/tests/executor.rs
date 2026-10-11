@@ -84,7 +84,10 @@ impl InboxPort for FakePort {
 }
 
 async fn say(exec: &mut Executor, port: &FakePort, s: &Snapshot, text: &str) -> Reaction {
-    let (n, thinking) = exec.begin(port, s.clone(), VoiceText::new(text));
+    let (n, thinking) = match exec.begin(port, s.clone(), VoiceText::new(text), Locale::En) {
+        Ok(admitted) => admitted,
+        Err(refused) => return refused,
+    };
     assert!(matches!(thinking.hud, Hud::Thinking { .. }));
     let routed = route(s, &VoiceText::new(text), None, &RouteOptions::default()).await;
     exec.routed(n, routed).expect("the current utterance gets a reaction")
@@ -221,7 +224,7 @@ fn a_send_is_guarded_by_the_absence_of_a_request() {
     let s = select(snapshot(vec![w.clone()]), "m/w");
     let port = FakePort::with(&[&w]);
     let mut exec = Executor::new();
-    let (n, _) = exec.begin(&port, s, VoiceText::new("tell it to go on"));
+    let (n, _) = exec.begin(&port, s, VoiceText::new("tell it to go on"), Locale::En).unwrap();
     let send = Routed::Proposal(Proposal {
         step: Step::Send { card: "m/w".into(), text: VoiceText::new("go on") },
         origin: Origin::Model,
@@ -274,7 +277,7 @@ async fn the_trigger_cancels_a_running_countdown_at_once() {
     let port = FakePort::with(&[&a]);
     let mut exec = Executor::new();
     say_shown(&mut exec, &port, &s, "approve").await;
-    let (n, _) = exec.begin(&port, s.clone(), VoiceText::new("cancel"));
+    let (n, _) = exec.begin(&port, s.clone(), VoiceText::new("cancel"), Locale::En).unwrap();
     assert_eq!(port.cancelled(), ["act-0"], "cancelled before any routing");
     let routed = route(&s, &VoiceText::new("cancel"), None, &RouteOptions::default()).await;
     let r = exec.routed(n, routed).unwrap();
@@ -284,6 +287,46 @@ async fn the_trigger_cancels_a_running_countdown_at_once() {
     port.cancel_works.store(false, Ordering::SeqCst);
     let r = say(&mut exec, &port, &s, "cancel").await;
     assert_eq!(r.hud, error(Refusal::AlreadySent));
+}
+
+/// Final review B4: while a fired step waits for its result, a new
+/// utterance is refused and the step keeps its outcome. A typed "cancel"
+/// still says it is too late.
+#[tokio::test]
+async fn a_new_utterance_while_sending_is_refused_and_the_result_still_shows() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    say_shown(&mut exec, &port, &s, "approve").await;
+    assert!(matches!(exec.outcome("act-0", VoiceOutcome::Fired).unwrap().hud, Hud::Sending { .. }));
+    let r = say(&mut exec, &port, &s, "deny").await;
+    assert_eq!(r.hud, error(Refusal::StillSending));
+    let r = say(&mut exec, &port, &s, "cancel").await;
+    assert_eq!(r.hud, error(Refusal::AlreadySent));
+    assert_eq!(port.enqueued().len(), 1, "nothing new was enqueued");
+    let done = exec.outcome("act-0", VoiceOutcome::Rejected { code: ErrorCode::RequestGone }).unwrap();
+    let Hud::Done { proposal: Some(p), outcome: OutcomeView::Rejected { code: ErrorCode::RequestGone } } = done.hud else {
+        panic!("expected the rejection, got {:?}", done.hud)
+    };
+    assert_eq!(p.option.as_deref(), Some("Yes"), "the rejected step is the one that fired");
+}
+
+/// A countdown that fired before its `Fired` arrived cannot be cancelled
+/// by the next utterance; it is tracked like a sending step.
+#[tokio::test]
+async fn a_countdown_too_late_to_cancel_keeps_its_outcome() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    say_shown(&mut exec, &port, &s, "approve").await;
+    port.cancel_works.store(false, Ordering::SeqCst);
+    let r = say(&mut exec, &port, &s, "deny").await;
+    assert_eq!(r.hud, error(Refusal::StillSending));
+    assert_eq!(exec.current_action(), Some("act-0"));
+    let done = exec.outcome("act-0", VoiceOutcome::Uncertain).unwrap();
+    assert!(matches!(done.hud, Hud::Done { outcome: OutcomeView::Uncertain, .. }));
 }
 
 #[tokio::test]
@@ -339,7 +382,7 @@ async fn a_pick_binds_against_the_frozen_snapshot_not_a_newer_one() {
     let newer = snapshot(vec![a.clone(), newer_b]);
     let mut exec = Executor::new();
     say(&mut exec, &port, &s, "approve").await;
-    exec.begin(&port, newer, VoiceText::new("approve"));
+    exec.begin(&port, newer, VoiceText::new("approve"), Locale::En).unwrap();
     assert_eq!(exec.choose(None, 1), None, "the old choice is gone with its snapshot");
 }
 
@@ -375,8 +418,8 @@ async fn a_stale_utterance_is_ignored() {
     let s = select(snapshot(vec![pending("m", "a")]), "m/a");
     let port = FakePort::with(&[]);
     let mut exec = Executor::new();
-    let (first, _) = exec.begin(&port, s.clone(), VoiceText::new("approve"));
-    let (_second, _) = exec.begin(&port, s.clone(), VoiceText::new("deny"));
+    let (first, _) = exec.begin(&port, s.clone(), VoiceText::new("approve"), Locale::En).unwrap();
+    let (_second, _) = exec.begin(&port, s.clone(), VoiceText::new("deny"), Locale::En).unwrap();
     let routed = route(&s, &VoiceText::new("approve"), None, &RouteOptions::default()).await;
     assert_eq!(exec.routed(first, routed), None);
 }
@@ -392,7 +435,7 @@ async fn reset_cancels_and_nothing_from_before_matches_after() {
     exec.reset(&port);
     assert_eq!(port.cancelled(), ["act-0"], "unsent work is cancelled");
     // An utterance still being routed when voice is turned off.
-    let (old_utterance, _) = exec.begin(&port, s.clone(), VoiceText::new("yes always"));
+    let (old_utterance, _) = exec.begin(&port, s.clone(), VoiceText::new("yes always"), Locale::En).unwrap();
     exec.reset(&port);
     let routed = route(&s, &VoiceText::new("yes always"), None, &RouteOptions::default()).await;
     assert_eq!(exec.routed(old_utterance, routed), None, "a response from before the reset");
@@ -465,7 +508,7 @@ async fn enqueue_refusals_are_classified() {
 fn only_did_not_understand_shows_the_transcript() {
     let port = FakePort::with(&[]);
     let mut exec = Executor::new();
-    let (n, _) = exec.begin(&port, snapshot(vec![]), VoiceText::new("frobnicate"));
+    let (n, _) = exec.begin(&port, snapshot(vec![]), VoiceText::new("frobnicate"), Locale::En).unwrap();
     let r = exec.routed(n, Routed::Refused(Refusal::DidNotUnderstand)).unwrap();
     assert_eq!(r.hud, Hud::Error { refusal: Refusal::DidNotUnderstand, transcript: Some(VoiceText::new("frobnicate")) });
 }
@@ -476,7 +519,7 @@ fn debug_output_never_carries_voice_text() {
     let s = select(snapshot(vec![w.clone()]), "m/w");
     let port = FakePort::with(&[&w]);
     let mut exec = Executor::new();
-    let (n, thinking) = exec.begin(&port, s, VoiceText::new("SECRET-T"));
+    let (n, thinking) = exec.begin(&port, s, VoiceText::new("SECRET-T"), Locale::En).unwrap();
     let send = Routed::Proposal(Proposal {
         step: Step::Send { card: "m/w".into(), text: VoiceText::new("SECRET-P") },
         origin: Origin::Model,
@@ -561,7 +604,7 @@ async fn esc_on_the_thinking_hud_names_its_id() {
     let s = select(snapshot(vec![a.clone()]), "m/a");
     let port = FakePort::with(&[&a]);
     let mut exec = Executor::new();
-    let (_, thinking) = exec.begin(&port, s, VoiceText::new("approve"));
+    let (_, thinking) = exec.begin(&port, s, VoiceText::new("approve"), Locale::En).unwrap();
     let id = thinking.hud.input_id().unwrap();
     assert_eq!(exec.cancel(&port, Some(id + 1)), None);
     assert!(exec.cancel(&port, Some(id)).is_some());

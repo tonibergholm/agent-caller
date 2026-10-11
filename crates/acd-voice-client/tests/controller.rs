@@ -131,6 +131,25 @@ async fn a_second_command_cancels_the_running_countdown_at_once() {
     assert!(frames(&r.f, "request.answer").is_empty());
 }
 
+/// Final review B4 through the real inbox: a command typed while the
+/// last step waits for its result is refused; the late rejection shows.
+#[tokio::test]
+async fn a_command_while_sending_is_refused_and_the_late_rejection_shows() {
+    let r = rig(vec![pending_agent()], None, Display::Acks).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.text_input("approve".into(), true).await.unwrap();
+    let sent = frame(&r.f, "request.answer").await;
+    hud_until(&r.sink, "sending", |h| matches!(h, Hud::Sending { .. })).await;
+    r.voice.text_input("deny".into(), true).await.unwrap();
+    assert_eq!(r.sink.last(), Some(Hud::Error { refusal: Refusal::StillSending, transcript: None }));
+    r.c.send(json!({"type":"result","id":sent["id"],"ok":false,"error":{"code":"request_gone","message":"gone"}})).await;
+    hud_until(&r.sink, "rejected", |h| {
+        matches!(h, Hud::Done { outcome: OutcomeView::Rejected { code: ErrorCode::RequestGone }, .. })
+    })
+    .await;
+    assert_eq!(frames(&r.f, "request.answer").len(), 1, "the refused command sent nothing");
+}
+
 #[tokio::test]
 async fn esc_in_the_panel_cancels_the_voice_action_too() {
     let r = rig(vec![pending_agent()], None, Display::Acks).await;

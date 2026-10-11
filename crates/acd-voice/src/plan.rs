@@ -107,7 +107,6 @@ enum Prior {
     #[default]
     Nothing,
     Cancelled,
-    TooLate,
 }
 
 #[derive(Debug, Default)]
@@ -153,18 +152,37 @@ impl Executor {
 
     /// A new utterance (the trigger, or the typed command). A running voice
     /// countdown is cancelled first (spec §4.4); the snapshot freezes.
-    pub fn begin(&mut self, port: &dyn InboxPort, snapshot: Snapshot, transcript: VoiceText) -> (u64, Reaction) {
-        self.prior = match &self.state {
-            State::Counting { action_id, .. } if port.cancel(action_id) => Prior::Cancelled,
-            State::Counting { .. } | State::Sending { .. } => Prior::TooLate,
-            _ => Prior::Nothing,
-        };
+    ///
+    /// `Err` holds the HUD for a refused utterance, which is not routed.
+    pub fn begin(
+        &mut self,
+        port: &dyn InboxPort,
+        snapshot: Snapshot,
+        transcript: VoiceText,
+        locale: Locale,
+    ) -> Result<(u64, Reaction), Reaction> {
+        self.prior = Prior::Nothing;
+        match std::mem::take(&mut self.state) {
+            State::Counting { action_id, .. } if port.cancel(&action_id) => self.prior = Prior::Cancelled,
+            // A fired step waits for its result: refuse the utterance and
+            // keep the step, its snapshot and transcript, so the late result
+            // still shows (final review B4). A "cancel" is too late.
+            State::Counting { proposal, action_id, .. } | State::Sending { proposal, action_id } => {
+                self.state = State::Sending { proposal, action_id };
+                let refusal = match fast::parse_reply(transcript.expose(), locale) {
+                    Some(Reply::Cancel) => Refusal::AlreadySent,
+                    _ => Refusal::StillSending,
+                };
+                return Err(show(Hud::Error { refusal, transcript: None }));
+            }
+            _ => {}
+        }
         self.utterance += 1;
         let id = self.next_proposal();
         self.state = State::Thinking(id);
         self.snapshot = Some(snapshot);
         self.transcript = Some(transcript.clone());
-        (self.utterance, show(Hud::Thinking { transcript, id }))
+        Ok((self.utterance, show(Hud::Thinking { transcript, id })))
     }
 
     /// The router's result for utterance `n`; stale results are dropped.
@@ -382,7 +400,6 @@ impl Executor {
             Step::Cancel => {
                 return match self.prior {
                     Prior::Cancelled => self.done(None, OutcomeView::Cancelled),
-                    Prior::TooLate => self.error(Refusal::AlreadySent),
                     Prior::Nothing => self.error(Refusal::NothingToCancel),
                 };
             }

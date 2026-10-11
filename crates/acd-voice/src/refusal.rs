@@ -50,4 +50,7 @@ pub enum Refusal {
     /// The user hid the agent (subagents, hook-only or idle agents turned
     /// off) after the step was planned; nothing was sent.
     Hidden,
+    /// A fired step still waits for its result; the new utterance is
+    /// refused so that result is still shown (final review B4).
+    StillSending,
 }

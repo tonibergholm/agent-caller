@@ -27,7 +27,8 @@ export type Refusal =
   | "already_sent"
   | "not_permitted"
   | "display_failed"
-  | "hidden";
+  | "hidden"
+  | "still_sending";
 
 export type NotSentReason =
   | "offline"
@@ -111,6 +112,7 @@ export const refusalText: Record<Refusal, string> = {
   not_permitted: "Voice can't do that.",
   display_failed: "The HUD could not show the step. Nothing was sent.",
   hidden: "That agent is hidden now. Nothing was sent.",
+  still_sending: "Still sending the last step.",
 };
 
 const notSentText: Record<NotSentReason, string> = {

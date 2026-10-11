@@ -152,16 +152,26 @@ impl Controller {
             // A HUD that waits for input takes the utterance as its answer (D21).
             if let Some(r) = core.exec.reply(&self.port, &transcript, self.opts.locale) {
                 self.emit(&mut core.exec, r);
-                None
+                Err("reply")
             } else {
-                let (n, thinking) = core.exec.begin(&self.port, snapshot.clone(), transcript.clone());
-                self.emit(&mut core.exec, thinking);
-                Some((session, n, changes))
+                match core.exec.begin(&self.port, snapshot.clone(), transcript.clone(), self.opts.locale) {
+                    Ok((n, thinking)) => {
+                        self.emit(&mut core.exec, thinking);
+                        Ok((session, n, changes))
+                    }
+                    Err(refused) => {
+                        self.emit(&mut core.exec, refused);
+                        Err("refused")
+                    }
+                }
             }
         };
-        let Some((session, n, mut changes)) = admitted else {
-            tracing::info!(target: "acd_voice", chars = transcript.char_len(), route = "reply", "utterance routed");
-            return Ok(());
+        let (session, n, mut changes) = match admitted {
+            Ok(admitted) => admitted,
+            Err(route) => {
+                tracing::info!(target: "acd_voice", chars = transcript.char_len(), route, "utterance routed");
+                return Ok(());
+            }
         };
         let routed = tokio::select! {
             routed = route(&snapshot, &transcript, self.model.as_deref(), &self.opts) => routed,
