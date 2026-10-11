@@ -1176,3 +1176,211 @@ mod tests {
         }
     }
 }
+
+/// Whether the tail of `screen` is exactly Codex's cancellation block for
+/// `command` (spec §4, Codex cancellation tail). Codex draws it after a
+/// denied or cancelled approval and fires no hook:
+///
+/// ```text
+/// ✗ You canceled the request to run <command>
+///
+/// • Failed (exit 1) <command>        (optional)
+///   └ (no output)                    (optional, only after the Failed row)
+///
+/// ■ Conversation interrupted - use /feedback if something went wrong
+///
+/// › <composer text>
+///
+///   <model line>
+///   ? for shortcuts                  (optional)
+/// ```
+///
+/// Only the tail counts: scrollback above the `✗` row is ignored, and the
+/// same lines anywhere else prove nothing. `command` must be one exact row
+/// (M4); a prefix, suffix, wrapped or different command, an extra row
+/// between the block's rows, or a one-row composer replaced by a wrapped
+/// one all give `false`.
+pub fn codex_cancel_tail(screen: &str, command: &str) -> bool {
+    if !crate::hooks::dialogs::single_row(command) {
+        return false;
+    }
+    let mut rows: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    fn pop_blanks(rows: &mut Vec<&str>) {
+        while rows.last().is_some_and(|r| r.trim().is_empty()) {
+            rows.pop();
+        }
+    }
+    pop_blanks(&mut rows);
+    // Composer footer: optional shortcuts row, then the model line.
+    if rows.last().is_some_and(|r| r.trim() == "? for shortcuts") {
+        rows.pop();
+    }
+    match rows.pop() {
+        Some(r) if r.starts_with("  ") && !r.trim().is_empty() => {}
+        _ => return false,
+    }
+    pop_blanks(&mut rows);
+    // The composer itself: one row, whatever draft it holds.
+    match rows.pop() {
+        Some(r) if r.starts_with("› ") => {}
+        _ => return false,
+    }
+    pop_blanks(&mut rows);
+    if rows.pop() != Some("■ Conversation interrupted - use /feedback if something went wrong") {
+        return false;
+    }
+    pop_blanks(&mut rows);
+    let failed = format!("• Failed (exit 1) {command}");
+    if rows.last() == Some(&"  └ (no output)") {
+        rows.pop();
+        if rows.pop() != Some(failed.as_str()) {
+            return false;
+        }
+    } else if rows.last() == Some(&failed.as_str()) {
+        rows.pop();
+    }
+    pop_blanks(&mut rows);
+    rows.pop() == Some(format!("✗ You canceled the request to run {command}").as_str())
+}
+
+#[cfg(test)]
+mod cancel_tail_tests {
+    use super::codex_cancel_tail;
+
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/../../tests/fixtures/herdr/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    fn cmd(run: u8) -> String {
+        format!("touch /tmp/ace2e/x-fx-run{run}.txt")
+    }
+
+    #[test]
+    fn after_a_cancel_the_tail_is_the_block_for_that_command() {
+        for run in 1..=3u8 {
+            for at in ["0.5s", "1s", "2s"] {
+                for src in ["visible", "detection"] {
+                    let s = fixture(&format!("codex-after-inbox-run{run}-{at}-{src}.txt"));
+                    assert!(
+                        codex_cancel_tail(&s, &cmd(run)),
+                        "inbox run{run} {at} {src}"
+                    );
+                    let other = cmd(if run == 1 { 2 } else { 1 });
+                    assert!(!codex_cancel_tail(&s, &other), "other command run{run}");
+                }
+            }
+        }
+        for kind in ["esc", "n"] {
+            for at in ["0.5s", "1s", "2s"] {
+                for src in ["visible", "detection"] {
+                    let s = fixture(&format!("codex-after-{kind}-run1-{at}-{src}.txt"));
+                    assert!(codex_cancel_tail(&s, &cmd(1)), "{kind} {at} {src}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_dialog_before_the_answer_is_not_a_cancel() {
+        for run in 1..=3u8 {
+            for src in ["visible", "detection"] {
+                let s = fixture(&format!("codex-dialog-run{run}-{src}.txt"));
+                assert!(!codex_cancel_tail(&s, &cmd(run)), "dialog run{run} {src}");
+            }
+        }
+    }
+
+    #[test]
+    fn scrollback_alone_is_not_enough() {
+        // The fixture's scrollback holds an older block for run 3's command;
+        // its tail is run 1's block, so run 3's command must not match.
+        let s = fixture("codex-after-esc-run1-1s-visible.txt");
+        assert!(codex_cancel_tail(&s, &cmd(1)));
+        assert!(
+            !codex_cancel_tail(&s, &cmd(3)),
+            "older block, other command"
+        );
+        let moved = format!("{s}\n• Ran something else\n");
+        assert!(!codex_cancel_tail(&moved, &cmd(1)));
+        let working = s.replace(
+            "› Ask Codex to do anything",
+            "• Working (3s)\n\n› Ask Codex to do anything",
+        );
+        assert!(!codex_cancel_tail(&working, &cmd(1)));
+        // The dialog redrawn below an old block.
+        let redrawn = format!("{s}\n{}", fixture("codex-dialog-run1-detection.txt"));
+        assert!(!codex_cancel_tail(&redrawn, &cmd(1)));
+    }
+
+    #[test]
+    fn the_command_must_match_exactly_on_one_row() {
+        let s = fixture("codex-after-inbox-run2-1s-detection.txt");
+        let c = cmd(2);
+        assert!(codex_cancel_tail(&s, &c));
+        for bad in [
+            "touch /tmp/ace2e/x-fx-run2.tx",   // prefix
+            "touch /tmp/ace2e/x-fx-run2.txt.", // suffix
+            "ouch /tmp/ace2e/x-fx-run2.txt",   // suffix of the real one
+            "touch /tmp/ace2e/x-fx-run2.txt ",
+            "",
+            "touch /tmp/ace2e/x-fx-run2.txt\nnext",
+        ] {
+            assert!(!codex_cancel_tail(&s, bad), "{bad:?}");
+        }
+        // A wrapped command in the screen.
+        let wrapped = s.replace(
+            "✗ You canceled the request to run touch /tmp/ace2e/x-fx-run2.txt",
+            "✗ You canceled the request to run touch\n  /tmp/ace2e/x-fx-run2.txt",
+        );
+        assert_ne!(wrapped, s);
+        assert!(!codex_cancel_tail(&wrapped, &c));
+    }
+
+    #[test]
+    fn nothing_may_sit_between_the_block_rows() {
+        let s = fixture("codex-after-inbox-run2-1s-detection.txt");
+        let c = cmd(2);
+        let extra = s.replace(
+            "■ Conversation interrupted",
+            "• extra row\n■ Conversation interrupted",
+        );
+        assert!(!codex_cancel_tail(&extra, &c));
+        let failed_other = s.replace(
+            "• Failed (exit 1) touch /tmp/ace2e/x-fx-run2.txt",
+            "• Failed (exit 1) touch /tmp/ace2e/x-fx-run2.txt2",
+        );
+        assert!(!codex_cancel_tail(&failed_other, &c));
+        let no_interrupt = s.replace(
+            "■ Conversation interrupted - use /feedback if something went wrong",
+            "",
+        );
+        assert!(!codex_cancel_tail(&no_interrupt, &c));
+        // Failed rows are optional.
+        let bare = s
+            .replace("• Failed (exit 1) touch /tmp/ace2e/x-fx-run2.txt\n", "")
+            .replace("  └ (no output)\n", "");
+        assert_ne!(bare, s);
+        assert!(codex_cancel_tail(&bare, &c));
+        // An orphan output row without its Failed row.
+        let orphan = s.replace("• Failed (exit 1) touch /tmp/ace2e/x-fx-run2.txt\n", "");
+        assert!(!codex_cancel_tail(&orphan, &c));
+    }
+
+    #[test]
+    fn a_missing_or_wrapped_composer_is_not_the_tail() {
+        let s = fixture("codex-after-inbox-run2-1s-detection.txt");
+        let c = cmd(2);
+        let no_composer = s.replace("› Ask Codex to do anything", "");
+        assert!(!codex_cancel_tail(&no_composer, &c));
+        let wrapped = s.replace(
+            "› Ask Codex to do anything",
+            "› Ask Codex to do\n  anything",
+        );
+        assert!(!codex_cancel_tail(&wrapped, &c));
+        assert!(!codex_cancel_tail("", &c));
+    }
+}

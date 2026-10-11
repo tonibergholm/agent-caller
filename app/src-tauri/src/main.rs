@@ -12,7 +12,7 @@ use std::sync::Arc;
 use acd_client::{
     Timing,
     inbox::{Inbox, InboxOptions},
-    settings::{DEFAULT_HOTKEY, Settings},
+    settings::{CachedSecrets, DEFAULT_HOTKEY, Settings},
 };
 use tauri::{Emitter, Manager, RunEvent};
 
@@ -60,7 +60,9 @@ fn main() {
             let settings = Settings::load_or_init(&path)?;
             let inbox = Inbox::new(
                 settings,
-                Arc::new(keychain::KeychainSecrets::new(keychain::SERVICE_NAME)),
+                Arc::new(CachedSecrets::new(keychain::KeychainSecrets::new(
+                    keychain::SERVICE_NAME,
+                ))),
                 InboxOptions {
                     timing: Timing::default(),
                     settings_path: Some(path),

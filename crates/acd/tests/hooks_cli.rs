@@ -618,6 +618,20 @@ fn the_shim_fails_open_when_acd_stalls() {
 }
 
 #[test]
+fn a_stalled_acd_adds_at_most_1_s_to_a_lifecycle_hook() {
+    let (_tmp, dir) = shim_dir();
+    let _rx = one_shot(&dir, 200, "", Reply::Stall);
+    let (out, took) = run_shim(
+        &dir,
+        "UserPromptSubmit",
+        b"{\"session_id\":\"s\"}",
+        &[],
+    );
+    assert!(out.status.success() && out.stdout.is_empty());
+    assert!(took < Duration::from_secs(1), "§14.6: {took:?}");
+}
+
+#[test]
 fn the_shim_prints_nothing_for_a_non_2xx_reply() {
     let (_tmp, dir) = shim_dir();
     let _rx = one_shot(&dir, 401, "{\"no\":1}", Reply::Normal);

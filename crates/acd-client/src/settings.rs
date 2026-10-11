@@ -241,6 +241,49 @@ impl SecretStore for MemorySecrets {
     }
 }
 
+/// Reads each key from the inner store once per process. The Keychain can
+/// ask the user for every read, so listings must not go back to it.
+/// Failed reads are not cached: a denied prompt can be retried.
+pub struct CachedSecrets<S> {
+    inner: S,
+    cache: Mutex<HashMap<String, Option<String>>>,
+}
+
+impl<S> CachedSecrets<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<S: SecretStore> SecretStore for CachedSecrets<S> {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        let mut cache = self.cache.lock().unwrap();
+        if let Some(value) = cache.get(key) {
+            return Ok(value.clone());
+        }
+        let value = self.inner.get(key)?;
+        cache.insert(key.into(), value.clone());
+        Ok(value)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        let mut cache = self.cache.lock().unwrap();
+        cache.remove(key);
+        self.inner.set(key, value)?;
+        cache.insert(key.into(), Some(value.into()));
+        Ok(())
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        let mut cache = self.cache.lock().unwrap();
+        cache.remove(key);
+        self.inner.delete(key)?;
+        cache.insert(key.into(), None);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +429,88 @@ mod tests {
         assert_eq!(m.get("k").unwrap().as_deref(), Some("v"));
         m.delete("k").unwrap();
         assert_eq!(m.get("k").unwrap(), None);
+    }
+
+    /// Counts reads and fails the first `fail` of them.
+    struct Counting {
+        inner: MemorySecrets,
+        reads: Mutex<u32>,
+        fail: u32,
+    }
+
+    impl SecretStore for Counting {
+        fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+            let mut reads = self.reads.lock().unwrap();
+            *reads += 1;
+            if *reads <= self.fail {
+                return Err(SecretError("denied".into()));
+            }
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> Result<(), SecretError> {
+            self.inner.delete(key)
+        }
+    }
+
+    fn counting(fail: u32) -> CachedSecrets<Counting> {
+        CachedSecrets::new(Counting {
+            inner: MemorySecrets::default(),
+            reads: Mutex::new(0),
+            fail,
+        })
+    }
+
+    #[test]
+    fn cached_secrets_read_the_inner_store_once_per_key() {
+        let c = counting(0);
+        c.inner.inner.set("k", "v").unwrap();
+        for _ in 0..5 {
+            assert_eq!(c.get("k").unwrap().as_deref(), Some("v"));
+            assert_eq!(c.get("missing").unwrap(), None);
+        }
+        assert_eq!(*c.inner.reads.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn cached_secrets_follow_writes_and_retry_failed_reads() {
+        let c = counting(1);
+        assert!(c.get("k").is_err());
+        assert_eq!(c.get("k").unwrap(), None);
+        c.set("k", "v").unwrap();
+        assert_eq!(c.get("k").unwrap().as_deref(), Some("v"));
+        c.delete("k").unwrap();
+        assert_eq!(c.get("k").unwrap(), None);
+        assert_eq!(c.inner.inner.get("k").unwrap(), None);
+        assert_eq!(*c.inner.reads.lock().unwrap(), 2);
+    }
+
+    /// Every write fails.
+    struct ReadOnly(MemorySecrets);
+
+    impl SecretStore for ReadOnly {
+        fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+            self.0.get(key)
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), SecretError> {
+            Err(SecretError("denied".into()))
+        }
+        fn delete(&self, _: &str) -> Result<(), SecretError> {
+            Err(SecretError("denied".into()))
+        }
+    }
+
+    #[test]
+    fn a_failed_write_drops_the_cached_value() {
+        let c = CachedSecrets::new(ReadOnly(MemorySecrets::default()));
+        c.inner.0.set("k", "old").unwrap();
+        assert_eq!(c.get("k").unwrap().as_deref(), Some("old"));
+        c.inner.0.set("k", "external").unwrap();
+        assert!(c.set("k", "new").is_err());
+        assert_eq!(c.get("k").unwrap().as_deref(), Some("external"));
+        assert!(c.delete("k").is_err());
+        assert_eq!(c.get("k").unwrap().as_deref(), Some("external"));
     }
 }

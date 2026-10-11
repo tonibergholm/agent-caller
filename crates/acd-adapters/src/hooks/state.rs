@@ -2095,6 +2095,7 @@ impl Reconciler {
                             &rid,
                             read.inventory.clone(),
                             shows_command(&ctx.command),
+                            &ctx.command,
                         );
                         if let Some(t) = self.tracks.get_mut(&rid) {
                             t.codex_inventory = read.inventory;
@@ -2217,9 +2218,12 @@ impl Reconciler {
             return;
         };
         if herdr.keys_targets().set(target).is_ok() {
-            herdr
-                .keys_targets()
-                .set_rivals(rid, inventory.clone(), shows_command(&command));
+            herdr.keys_targets().set_rivals(
+                rid,
+                inventory.clone(),
+                shows_command(&command),
+                &command,
+            );
             self.core.observe(Observation::RequestReady {
                 agent_id: t.agent_id.clone(),
                 key: t.key.clone(),

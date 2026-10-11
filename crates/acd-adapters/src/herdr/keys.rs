@@ -23,7 +23,10 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use super::client::{CALL_TIMEOUT, CallError, Herdr, KNOWN_REFUSALS, ScreenRead};
 use super::reconciler::{Hint, PaneMap, PaneRef};
 pub use super::screen::DialogIdentity;
-use super::screen::{Fingerprint, GuardDigest, find_dialog, guard_digest, prompt_line};
+use super::screen::{
+    Fingerprint, GuardDigest, codex_cancel_tail, find_dialog, guard_digest, prompt_line,
+};
+use crate::hooks::mapping::CODEX_DENY;
 
 /// Consecutive reads without the dialog before it counts as closed or gone.
 pub(crate) const ABSENT_READS: u8 = 2;
@@ -190,6 +193,8 @@ pub type ShowsCommand = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 struct Rivals {
     inventory: Vec<(String, u64)>,
     shows: ShowsCommand,
+    /// The tracked command, kept only when it is one exact row (M4).
+    command: Option<String>,
 }
 
 impl TargetsInner {
@@ -263,10 +268,33 @@ impl KeysTargets {
     /// Stores the validated Codex rival inventory beside the immutable lease,
     /// with the matcher for the command: before the key, every rival in the
     /// inventory is read again and must not show it (C7).
-    pub fn set_rivals(&self, request_id: &str, inventory: Vec<(String, u64)>, shows: ShowsCommand) {
+    ///
+    /// `command` is the tracked command. If it is one exact row, the engine
+    /// may recognise Codex's cancellation tail for it after a keys answer.
+    pub fn set_rivals(
+        &self,
+        request_id: &str,
+        inventory: Vec<(String, u64)>,
+        shows: ShowsCommand,
+        command: &str,
+    ) {
+        let command = crate::hooks::dialogs::single_row(command).then(|| command.to_owned());
+        self.lock().rivals.insert(
+            request_id.to_owned(),
+            Rivals {
+                inventory,
+                shows,
+                command,
+            },
+        );
+    }
+
+    /// The exact single-row command a Codex target answers, if known.
+    fn command_of(&self, request_id: &str) -> Option<String> {
         self.lock()
             .rivals
-            .insert(request_id.to_owned(), Rivals { inventory, shows });
+            .get(request_id)
+            .and_then(|r| r.command.clone())
     }
 
     pub fn rivals(&self, request_id: &str) -> Option<Vec<(String, u64)>> {
@@ -383,6 +411,10 @@ pub struct KeysTiming {
     pub prompt_checks: [Duration; 3],
     /// Longest wait for `Evidence::outcome` (P3's hook correlation window is 30 s).
     pub evidence_timeout: Duration,
+    /// Codex only: screen reads looking for the cancellation tail (spec §4).
+    /// Offsets are measured from when the confirmation task finishes its
+    /// observation window and starts attributing, not from the close.
+    pub cancel_reads: [Duration; 5],
 }
 
 impl Default for KeysTiming {
@@ -397,6 +429,13 @@ impl Default for KeysTiming {
                 Duration::from_secs(3),
             ],
             evidence_timeout: Duration::from_secs(35),
+            cancel_reads: [
+                Duration::from_millis(250),
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+            ],
         }
     }
 }
@@ -836,6 +875,35 @@ impl Confirm {
         }
     }
 
+    /// Reads `visible` at the `cancel_reads` offsets, counted from the end of
+    /// the observation window (when this runs). A read
+    /// that shows the cancellation tail for `command` is evidence: consistent
+    /// with a deny, contradicting an allow. Pends forever otherwise, so the
+    /// hook evidence and its timeout decide. Reads only; never a key.
+    async fn cancel_tail(&self, command: &str) -> Verdict {
+        let closed_at = Instant::now();
+        for offset in self.timing.cancel_reads {
+            let at = closed_at + offset;
+            sleep_until(at).await;
+            let read = self
+                .herdr
+                .read_screen(&self.pane_id, "visible", None, at + PROMPT_CHECK_READ)
+                .await;
+            // A failed or truncated read shows nothing.
+            if let Ok(r) = read
+                && !r.truncated
+                && codex_cancel_tail(&r.text, command)
+            {
+                return if self.option_id == CODEX_DENY {
+                    Verdict::Consistent
+                } else {
+                    Verdict::Contradicts
+                };
+            }
+        }
+        std::future::pending().await
+    }
+
     /// herdr accepted the key: attribute the outcome and publish it.
     async fn report(self, seen: Observed) {
         let (by, reason) = if seen.stray {
@@ -846,6 +914,20 @@ impl Confirm {
             let outcome = self
                 .evidence
                 .outcome(&self.target, &self.option_id, self.t_send);
+            // Codex fires no hook after a cancel: its cancellation tail is
+            // correlated evidence too. Hook evidence that arrives first wins.
+            let command = (self.kind == AgentKind::Codex)
+                .then(|| self.targets.command_of(&self.target.request_id))
+                .flatten();
+            let outcome = async {
+                let Some(command) = command else {
+                    return outcome.await;
+                };
+                tokio::select! {
+                    v = outcome => v,
+                    v = self.cancel_tail(&command) => v,
+                }
+            };
             let by = match timeout(self.timing.evidence_timeout, outcome).await {
                 Ok(Verdict::Consistent) => ResolvedBy::Inbox,
                 Ok(Verdict::Contradicts) => ResolvedBy::Terminal,
