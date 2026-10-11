@@ -4,4 +4,8 @@ import type { Agent } from "./Agent";
 import type { CardGroup } from "./CardGroup";
 import type { Notice } from "./Notice";
 
-export type CardView = { key: string, machine_key: string, machine_name: string, agent: Agent, group: CardGroup, live: boolean, offline_since_ms: number | null, answerable: boolean, selectable_options: Array<string>, can_reply: boolean, can_mark_seen: boolean, busy: boolean, notice: Notice | null, action: ActionView | null, };
+export type CardView = { key: string, machine_key: string, machine_name: string, agent: Agent, group: CardGroup, live: boolean, offline_since_ms: number | null, answerable: boolean, 
+/**
+ * Answerable, and the request also takes a typed answer.
+ */
+free_text_answerable: boolean, selectable_options: Array<string>, can_reply: boolean, can_mark_seen: boolean, busy: boolean, notice: Notice | null, action: ActionView | null, };

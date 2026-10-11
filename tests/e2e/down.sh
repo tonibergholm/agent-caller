@@ -18,6 +18,7 @@ kill_pidfile "$E2E_ROOT/herdr.pid" "$HERDR_RE"
 # 2. Other scratch processes.
 stop_logger
 stop_acd
+kill_pidfile "$E2E_ROOT/t3tap.pid" "t3tap\\.py --listen"
 kill_pidfile "$E2E_ROOT/t3.pid" "$T3_RE" group
 sleep 1
 

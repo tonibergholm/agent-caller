@@ -1,0 +1,15 @@
+{
+  "_tag": "Request",
+  "headers": [],
+  "id": "8",
+  "payload": {
+    "answers": {
+      "Pick a color": "Green10210"
+    },
+    "commandId": "22504095-a6ee-4b49-97fd-7238087252ec",
+    "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253A2ce05c03-ddee-48bc-aa31-4aa87ab2cbdf%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01KQa6ahYc86FY2wokMNBovV:9ee65bbd-a66a-4afe-929e-d4111bc4dd0c",
+    "threadId": "2ce05c03-ddee-48bc-aa31-4aa87ab2cbdf",
+    "type": "runtime-request.respond"
+  },
+  "tag": "orchestration.dispatchCommand"
+}

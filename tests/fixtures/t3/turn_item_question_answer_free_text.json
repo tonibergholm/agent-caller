@@ -1,0 +1,50 @@
+{
+  "id": "turn-item:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253A489811d4-1ef1-407d-98ea-88eaa0e89ab0%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01JHyQo2LChLB7KE4CasTyu9%3A4b273c22-e757-485c-bec5-47ea0e172599",
+  "threadId": "489811d4-1ef1-407d-98ea-88eaa0e89ab0",
+  "runId": "run:thread:489811d4-1ef1-407d-98ea-88eaa0e89ab0:ordinal:1",
+  "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253A489811d4-1ef1-407d-98ea-88eaa0e89ab0%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01JHyQo2LChLB7KE4CasTyu9%3A4b273c22-e757-485c-bec5-47ea0e172599",
+  "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3A489811d4-1ef1-407d-98ea-88eaa0e89ab0%3Aordinal%3A1",
+  "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253A489811d4-1ef1-407d-98ea-88eaa0e89ab0%253Aordinal%253A1%3Aattempt%3A1",
+  "nativeItemRef": {
+    "driver": "claudeAgent",
+    "nativeId": "toolu_01JHyQo2LChLB7KE4CasTyu9",
+    "strength": "strong"
+  },
+  "parentItemId": null,
+  "ordinal": 1000003,
+  "status": "completed",
+  "title": null,
+  "startedAt": "2026-10-11T14:10:11.112Z",
+  "completedAt": "2026-10-11T14:10:11.472Z",
+  "updatedAt": "2026-10-11T14:10:11.472Z",
+  "type": "user_input_request",
+  "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253A489811d4-1ef1-407d-98ea-88eaa0e89ab0%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01JHyQo2LChLB7KE4CasTyu9:4b273c22-e757-485c-bec5-47ea0e172599",
+  "questions": [
+    {
+      "id": "What should the new service be called?",
+      "header": "Service name",
+      "question": "What should the new service be called?",
+      "options": [
+        {
+          "label": "Example: alpha",
+          "description": "Example name: alpha"
+        },
+        {
+          "label": "Example: beta",
+          "description": "Example name: beta"
+        }
+      ],
+      "multiSelect": false
+    }
+  ],
+  "questionAnswer": {
+    "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253A489811d4-1ef1-407d-98ea-88eaa0e89ab0%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01JHyQo2LChLB7KE4CasTyu9:4b273c22-e757-485c-bec5-47ea0e172599",
+    "questionTextById": {
+      "What should the new service be called?": "What should the new service be called?"
+    },
+    "answers": {
+      "What should the new service be called?": "zq28334 café — done"
+    },
+    "attachmentsByQuestionId": {}
+  }
+}

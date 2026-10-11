@@ -1,0 +1,15 @@
+{
+  "_tag": "Request",
+  "headers": [],
+  "id": "6",
+  "payload": {
+    "answers": {
+      "What should the new service be called?": "zq28334 café — done"
+    },
+    "commandId": "e5ef1377-974b-44b1-b0ba-d1ac46907305",
+    "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253A489811d4-1ef1-407d-98ea-88eaa0e89ab0%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01JHyQo2LChLB7KE4CasTyu9:4b273c22-e757-485c-bec5-47ea0e172599",
+    "threadId": "489811d4-1ef1-407d-98ea-88eaa0e89ab0",
+    "type": "runtime-request.respond"
+  },
+  "tag": "orchestration.dispatchCommand"
+}

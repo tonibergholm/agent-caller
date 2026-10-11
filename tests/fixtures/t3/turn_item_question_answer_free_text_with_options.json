@@ -1,0 +1,50 @@
+{
+  "id": "turn-item:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253A2ce05c03-ddee-48bc-aa31-4aa87ab2cbdf%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01KQa6ahYc86FY2wokMNBovV%3A9ee65bbd-a66a-4afe-929e-d4111bc4dd0c",
+  "threadId": "2ce05c03-ddee-48bc-aa31-4aa87ab2cbdf",
+  "runId": "run:thread:2ce05c03-ddee-48bc-aa31-4aa87ab2cbdf:ordinal:1",
+  "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253A2ce05c03-ddee-48bc-aa31-4aa87ab2cbdf%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01KQa6ahYc86FY2wokMNBovV%3A9ee65bbd-a66a-4afe-929e-d4111bc4dd0c",
+  "providerThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3A2ce05c03-ddee-48bc-aa31-4aa87ab2cbdf%3Aordinal%3A1",
+  "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253A2ce05c03-ddee-48bc-aa31-4aa87ab2cbdf%253Aordinal%253A1%3Aattempt%3A1",
+  "nativeItemRef": {
+    "driver": "claudeAgent",
+    "nativeId": "toolu_01KQa6ahYc86FY2wokMNBovV",
+    "strength": "strong"
+  },
+  "parentItemId": null,
+  "ordinal": 1000003,
+  "status": "completed",
+  "title": null,
+  "startedAt": "2026-10-11T14:10:17.393Z",
+  "completedAt": "2026-10-11T14:10:18.069Z",
+  "updatedAt": "2026-10-11T14:10:18.069Z",
+  "type": "user_input_request",
+  "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253A2ce05c03-ddee-48bc-aa31-4aa87ab2cbdf%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01KQa6ahYc86FY2wokMNBovV:9ee65bbd-a66a-4afe-929e-d4111bc4dd0c",
+  "questions": [
+    {
+      "id": "Pick a color",
+      "header": "Color",
+      "question": "Pick a color",
+      "options": [
+        {
+          "label": "Red",
+          "description": "Red"
+        },
+        {
+          "label": "Blue",
+          "description": "Blue"
+        }
+      ],
+      "multiSelect": false
+    }
+  ],
+  "questionAnswer": {
+    "requestId": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253A2ce05c03-ddee-48bc-aa31-4aa87ab2cbdf%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01KQa6ahYc86FY2wokMNBovV:9ee65bbd-a66a-4afe-929e-d4111bc4dd0c",
+    "questionTextById": {
+      "Pick a color": "Pick a color"
+    },
+    "answers": {
+      "Pick a color": "Green10210"
+    },
+    "attachmentsByQuestionId": {}
+  }
+}

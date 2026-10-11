@@ -1,6 +1,6 @@
 use crate::{
     Timing,
-    actions::{Action, ActionKind, Actions, Semantics, check},
+    actions::{Action, ActionKind, Actions, Semantics, TextSemantics, check},
     commands::Command,
     conn::{self, MachineHandle, MachineState, now_ms},
     endpoint::Endpoint,
@@ -23,6 +23,9 @@ use std::{
 use std::{net::IpAddr, time::Instant};
 use tokio::sync::{Notify, broadcast, watch};
 
+/// Longest typed answer, matching the T3 adapter's prompt cap.
+pub const ANSWER_TEXT_MAX_BYTES: usize = 16 * 1024;
+
 #[derive(Clone)]
 pub struct InboxOptions {
     pub timing: Timing,
@@ -44,6 +47,8 @@ pub enum PickError {
     AlreadyCounting,
     #[error("the reply is empty or longer than 64 KiB")]
     BadText,
+    #[error("the answer is empty, too long, or has control, bidi or separator characters")]
+    BadAnswerText,
     #[error("replies are not possible for this agent right now")]
     CannotReply,
 }
@@ -515,6 +520,11 @@ impl Inbox {
                     revision: s.revision,
                     option_id: s.option.id,
                 },
+                ActionKind::AnswerText(s) => Command::AnswerText {
+                    request_id: s.request_id,
+                    revision: s.revision,
+                    text: s.text,
+                },
                 ActionKind::Reply { text } => Command::Send {
                     agent_id: action.agent_id.clone(),
                     text,
@@ -721,6 +731,70 @@ impl Inbox {
         };
         let _ = entry;
         inner.actions.add(a)?;
+        drop(inner);
+        self.wake();
+        Ok(id)
+    }
+    /// A typed answer to a free-text request, with the same undo countdown as
+    /// `pick`. The text is trimmed; blank, oversize (16 KiB) or control-char
+    /// text is `BadAnswerText`.
+    pub fn answer_text(
+        self: &Arc<Self>,
+        card_key: &str,
+        request_id: &str,
+        revision: u64,
+        text: String,
+    ) -> Result<String, PickError> {
+        let text = text.replace("\r\n", "\n").trim().to_owned();
+        if text.is_empty()
+            || text.len() > ANSWER_TEXT_MAX_BYTES
+            || acd_protocol::text::has_forbidden_chars(&text)
+        {
+            return Err(PickError::BadAnswerText);
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let (machine_key, handle, _) = find_card(&inner, card_key)?;
+        let state = handle.state().borrow().clone();
+        if state.status != conn::MachineStatus::Online || !state.session.has("answer") {
+            return Err(PickError::NotAnswerable);
+        }
+        let agent_id = card_key
+            .split_once('/')
+            .map(|(_, id)| id)
+            .ok_or(PickError::UnknownCard)?;
+        let agent = state
+            .session
+            .agents
+            .get(agent_id)
+            .ok_or(PickError::StaleRequest)?;
+        let req = agent.pending.as_ref().ok_or(PickError::StaleRequest)?;
+        if req.id != request_id || req.revision != revision {
+            return Err(PickError::StaleRequest);
+        }
+        if !req.is_answerable() || !req.free_text || req.status != acd_protocol::RequestStatus::Open
+        {
+            return Err(PickError::NotAnswerable);
+        }
+        let now = Instant::now();
+        let id = uuid::Uuid::new_v4().to_string();
+        let detail: String = text.chars().take(80).collect();
+        inner.actions.add(Action {
+            id: id.clone(),
+            card_key: card_key.into(),
+            machine_key,
+            agent_id: agent.id.clone(),
+            instance: state.instance,
+            conn_gen: state.conn_gen,
+            kind: ActionKind::AnswerText(TextSemantics::of(req, &text)),
+            fires_at: now + self.opts.timing.undo,
+            view: ActionView {
+                id: id.clone(),
+                card_key: card_key.into(),
+                label: "Answer".into(),
+                detail: Some(detail),
+                fires_at_ms: now_ms() + self.opts.timing.undo.as_secs_f64() * 1000.,
+            },
+        })?;
         drop(inner);
         self.wake();
         Ok(id)
