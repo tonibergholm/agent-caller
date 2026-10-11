@@ -1,0 +1,23 @@
+[package]
+name = "acd-voice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Test builders and FakeIntentModel for this crate's tests and acd-voice-client's.
+testing = []
+
+[dependencies]
+acd-protocol.workspace = true
+async-trait.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+acd-voice = { path = ".", features = ["testing"] }
+jsonschema.workspace = true
+tokio.workspace = true
