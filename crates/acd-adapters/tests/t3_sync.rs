@@ -1614,9 +1614,13 @@ fn waiting_subagent(id: &str) -> serde_json::Value {
 }
 
 async fn rig_hidden_request() -> (Rig, Request) {
+    rig_hidden_request_with(None).await
+}
+
+async fn rig_hidden_request_with(adapter: Option<Arc<FakeAdapter>>) -> (Rig, Request) {
     let fake = FakeT3::start().await;
     fake.put_thread(subagent("sub", "idle"));
-    let r = rig(fake).await;
+    let r = rig_with(fake, adapter, fast_timing()).await;
     until("ok", || (t3_state(&r) == SourceState::Ok).then_some(())).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(agent(&r, "sub").is_none());
@@ -1664,6 +1668,76 @@ async fn hidden_thread_answered_in_the_inbox_resolves_inbox_not_uncertain() {
     });
     r.shared.mailbox.answered("sub", "rq-1");
     assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Inbox);
+    until("hidden again", || agent(&r, "sub").is_none().then_some(())).await;
+}
+
+#[tokio::test]
+async fn hidden_thread_answered_while_the_resolution_precedes_the_ack_resolves_inbox() {
+    let gated = FakeAdapter::gated();
+    let (r, req) = rig_hidden_request_with(Some(gated.clone())).await;
+    let (_, mut rx) = r.core.attach(None);
+    let core = r.core.clone();
+    let id = req.id.clone();
+    let claim = tokio::spawn(async move {
+        core.handle(
+            "c",
+            ClientMessage::RequestAnswer {
+                id: "x1".into(),
+                request_id: id,
+                revision: None,
+                option_id: Some("accept".into()),
+                text: None,
+            },
+        )
+        .await
+    });
+    until("answering", || {
+        (r.core.request(&req.id)?.status == RequestStatus::Answering).then_some(())
+    })
+    .await;
+    // T3's resolution, then the idle shell, both before the command's ack.
+    r.fake.push_thread_event(
+        "sub",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "resolved", "decision": "accept"}),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    r.fake.put_thread(subagent("sub", "idle"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        agent(&r, "sub").is_some(),
+        "kept while the claim is in flight"
+    );
+    // The command's ack: what the T3 adapter does after a delivered answer.
+    gated.open_gate();
+    claim.await.unwrap();
+    r.core.observe(Observation::RequestEndedById {
+        request_id: req.id.clone(),
+        by: ResolvedBy::Inbox,
+    });
+    r.shared.mailbox.answered("sub", "rq-1");
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Inbox);
+    until("hidden again", || agent(&r, "sub").is_none().then_some(())).await;
+}
+
+#[tokio::test]
+async fn a_fresh_snapshot_without_the_open_request_ends_it_lost() {
+    let (r, req) = rig_hidden_request().await;
+    let (_, mut rx) = r.core.attach(None);
+    r.fake.put_thread(subagent("sub", "idle"));
+    // Advance the thread stream's cursor to the head, so a reconnect gets a
+    // fresh snapshot instead of a replay.
+    r.fake.push_thread_event(
+        "sub",
+        "runtime-request.updated",
+        json!({"id": "rq-1", "kind": "command", "status": "pending"}),
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(agent(&r, "sub").is_some());
+    r.fake
+        .set_projection("sub", approval_projection("sub", "rq-other", None));
+    r.fake.drop_connections();
+    assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Lost);
     until("hidden again", || agent(&r, "sub").is_none().then_some(())).await;
 }
 

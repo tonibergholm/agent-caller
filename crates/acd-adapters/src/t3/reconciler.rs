@@ -842,10 +842,16 @@ impl Reconciler {
     /// (`hide_settled_requests` hides it then), so the request resolves with
     /// its real outcome instead of being lost with the agent.
     fn apply_shell(&mut self, conn: &Conn, shell: ShellThread) {
+        // An answer in flight keeps the agent too: it is pending in the core
+        // until T3 acks the command.
         let keep = self
             .threads
             .get(&shell.id)
-            .is_some_and(|t| t.open.is_some());
+            .is_some_and(|t| t.open.is_some())
+            || self
+                .core
+                .agent(&map::agent_id(&shell.id))
+                .is_some_and(|a| a.pending.is_some());
         if keep || shell.visible(Utc::now()) {
             let id = shell.id.clone();
             self.hidden_shells.remove(&id);
@@ -854,6 +860,10 @@ impl Reconciler {
                 if let Some(t) = self.threads.get_mut(&id)
                     && t.owner.is_none()
                 {
+                    // Known, so the reveal does not pull a snapshot again.
+                    t.discovery = Discovery::Known {
+                        provider_thread: owner.0.clone(),
+                    };
                     t.owner = Some(owner);
                 }
                 self.publish_owner(&id);
@@ -1117,6 +1127,7 @@ impl Reconciler {
         };
         let mut skipped = 0;
         let mut finish_discovery = false;
+        let mut synchronized = false;
         match item {
             // A snapshot acd cannot read leaves nothing to keep the stream
             // for: stall and retry with a fresh one after `relearn_after`.
@@ -1150,6 +1161,7 @@ impl Reconciler {
             }
             Ok(ThreadItem::Synchronized {}) => {
                 t.sync_deadline = None;
+                synchronized = true;
                 finish_discovery = t.class == Some(Class::Discovery);
             }
             Ok(ThreadItem::Other) => {
@@ -1162,8 +1174,41 @@ impl Reconciler {
         }
         self.publish_owner(thread_id);
         self.reconcile_requests(thread_id);
+        if synchronized {
+            // A fresh snapshot that does not list the request means T3 no
+            // longer has it: end it, or the thread would be kept forever.
+            let missing = self.threads.get(thread_id).and_then(|t| {
+                let open = t.open.clone()?;
+                t.detail
+                    .as_ref()
+                    .filter(|d| d.request_status(&open).is_none())
+                    .map(|_| open)
+            });
+            if let Some(open) = missing {
+                self.end_open(thread_id, open, ResolvedBy::Lost);
+            }
+        }
         if finish_discovery {
             self.finish_discovery(conn, thread_id);
+        }
+    }
+
+    /// Ends the request acd surfaced for the thread and forgets it.
+    fn end_open(&mut self, thread_id: &str, open: String, by: ResolvedBy) {
+        let agent_id = map::agent_id(thread_id);
+        if let Some(t) = self.threads.get_mut(thread_id) {
+            t.open = None;
+            t.ended.insert(open.clone());
+        }
+        self.shared.targets.remove(&open);
+        if let Some(rid) = self.core.request_id_for(&agent_id, &CorrelationKey(open)) {
+            // Queue independently of the current status: a claim can win
+            // between the detail observation and RequestEndedIfOpen.
+            self.pending_ends.enqueue(rid.clone(), by);
+            self.core.observe(Observation::RequestEndedIfOpen {
+                request_id: rid,
+                by,
+            });
         }
     }
 
@@ -1198,20 +1243,7 @@ impl Reconciler {
             } else {
                 ResolvedBy::Lost
             };
-            if let Some(t) = self.threads.get_mut(thread_id) {
-                t.open = None;
-                t.ended.insert(open.clone());
-            }
-            self.shared.targets.remove(&open);
-            if let Some(rid) = self.core.request_id_for(&agent_id, &CorrelationKey(open)) {
-                // Queue independently of the current status: a claim can win
-                // between the detail observation and RequestEndedIfOpen.
-                self.pending_ends.enqueue(rid.clone(), by);
-                self.core.observe(Observation::RequestEndedIfOpen {
-                    request_id: rid.clone(),
-                    by,
-                });
-            }
+            self.end_open(thread_id, open, by);
         }
 
         let ended = self

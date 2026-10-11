@@ -1203,12 +1203,16 @@ a `pendingRuntimeRequest` for it (a bare `waiting` status does not reveal
 it). Its streams then open as for any visible thread. While acd holds an
 open request for the thread, the agent stays until that request has ended,
 so the request resolves with its real outcome (`terminal` or `inbox`) and
-is not lost with the agent; then the thread is hidden again. acd keeps the
+is not lost with the agent. An answer still in flight keeps it too, and a
+fresh thread snapshot that no longer lists the request ends it `lost`; then the thread is hidden again. acd keeps the
 shell entries of hidden threads, so a snooze that ends shows the thread on
 the next tick. A hidden thread keeps the session claim acd learned while it
 was visible, so the Codex hooks adapter still treats its session as
-T3-owned; a thread that was never visible has no claim, because the shell
-does not carry the session id (only a thread stream does). Missing or
+T3-owned, and a settled T3 thread resumed in a herdr pane stays T3-owned. A
+thread that was never visible has no claim, because the shell does not carry
+the session id (only a thread stream does). Its Codex hook events can reach
+acd but create no agent without a herdr pane binding; a same-directory herdr
+Codex pane binds only when its screen shows the same dialog. Missing or
 unreadable fields count as visible, so older T3 versions keep working.
 
 A shell `status` of `completed` with a non-empty `pendingBackgroundTasks`
