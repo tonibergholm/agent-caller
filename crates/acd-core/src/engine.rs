@@ -80,6 +80,7 @@ impl Core {
         let published = match &obs {
             Observation::AgentUpsert(a) => Some(&a.id),
             Observation::RequestSeen(r) => Some(&r.agent_id),
+            Observation::AgentMigrated { to, .. } => Some(to),
             _ => None,
         };
         if let Some(id) = published.filter(|id| id.len() > MAX_ID_BYTES) {

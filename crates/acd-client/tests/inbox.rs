@@ -905,7 +905,13 @@ async fn typed_answer_needs_a_free_text_request_and_goes_through_the_undo() {
         v.cards.iter().any(|c| c.free_text_answerable)
     })
     .await;
-    for bad in ["  \n ", "a\u{1b}b", &"x".repeat(16 * 1024 + 1)] {
+    for bad in [
+        "  \n ",
+        "a\u{1b}b",
+        "a\u{202E}b",
+        "a\u{2028}b",
+        &"x".repeat(16 * 1024 + 1),
+    ] {
         assert_eq!(
             ib.answer_text("m1/a1", ANSWER_REQ, 1, bad.into()),
             Err(PickError::BadAnswerText)
@@ -915,7 +921,7 @@ async fn typed_answer_needs_a_free_text_request_and_goes_through_the_undo() {
         ib.answer_text("m1/a1", ANSWER_REQ, 9, "purple".into()),
         Err(PickError::StaleRequest)
     );
-    ib.answer_text("m1/a1", ANSWER_REQ, 1, "  purple\nplease ".into())
+    ib.answer_text("m1/a1", ANSWER_REQ, 1, "  purple\r\nplease ".into())
         .unwrap();
     view_until(&ib, "countdown", |v| !v.actions.is_empty()).await;
     let action = ib.view().borrow().actions[0].clone();
@@ -952,4 +958,23 @@ async fn typed_answer_countdown_cancels_when_free_text_is_withdrawn() {
     .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(answers(&f), 0);
+}
+#[tokio::test]
+async fn typed_answer_countdown_cancels_when_the_revision_bumps() {
+    let (f, c, ib) = setup().await;
+    let mut agent = pending_agent();
+    agent["pending"]["free_text"] = Value::Bool(true);
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":agent.clone()}))
+        .await;
+    view_until(&ib, "free text card", |v| {
+        v.cards.iter().any(|c| c.free_text_answerable)
+    })
+    .await;
+    ib.answer_text("m1/a1", ANSWER_REQ, 1, "purple".into())
+        .unwrap();
+    agent["pending"]["revision"] = serde_json::json!(2);
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":agent}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(answers(&f), 0, "a changed revision must not send");
 }

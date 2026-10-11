@@ -188,13 +188,16 @@ A request is **answerable** when all three conditions hold:
 
 Anything else is shown read-only, with the label "answer in terminal".
 
-**Free text.** `Request.free_text` is true only for a `t3` question that
-takes a typed answer; the answerable rule above is unchanged. Such a
-question may have no options, and then the typed answer is the only way to
-answer it. `request.answer` carries exactly one of `option_id` and `text`,
-and core rejects `text` with `bad_request` unless `free_text` is true. Free
-text is deferred on the `keys` and `hook` paths (§6.2, §11.1) and supported
-on `t3` (§6.5).
+**Free text.** `Request.free_text` is true only for an answerable `t3`
+question that takes a typed answer; the answerable rule above is unchanged.
+`request.answer` carries exactly one of `option_id` and `text`, and core
+rejects `text` with `bad_request` unless `free_text` is true, or if it is
+blank or holds control, bidi or separator characters (so a client sees the
+refusal before any countdown ends). A text answer resolves the request by
+`inbox` with `option_id` null. Free text is deferred on the `keys` and `hook`
+paths (§6.2, §11.1) and supported on `t3` (§6.5). A `t3` question with no
+options is read-only for now, with `free_text` false. It becomes answerable
+by text alone once clients render a text input (panel redesign).
 
 **Agent id bound.** Every published agent id is at most `MAX_ID_BYTES` (128)
 bytes, because the engine rejects any command id over that. An adapter builds
@@ -346,7 +349,8 @@ enough. The evidence per answer path:
 - **`lost`.** The source can no longer observe the request. Examples: the
   hold expires on a hooks-only agent; the agent is removed.
 
-**Attribution.** `by: "inbox"` (with the claimed `option_id`) means that
+**Attribution.** `by: "inbox"` (with the claimed `option_id`, or null for a
+typed answer) means that
 acd delivered the client's answer **and** the observed outcome is
 consistent with it. Agents do not report which decider was used, so
 another hook or the user making the same choice at the same time is
@@ -1330,19 +1334,24 @@ an answer. Otherwise:
   `answers: {<question id>: option.value ?? option.label}`.
 - **Typed answers.** T3's own client sends `answers[question id] = <typed
   string>`, and the server does not check answers against the options. A
-  question carries `allowCustomAnswer`: ACP and OpenCode set it to `false`,
-  Claude leaves it absent, and absent counts as allowed. For exactly one
-  single-select question, acd sets `free_text = allowCustomAnswer != false`:
-  - options and free text: the options stay, and a typed answer is also
-    accepted;
-  - no options and free text: the request is answerable by text only;
-  - no options and `allowCustomAnswer: false`: read-only, as before.
-  A multi-select or multi-question request stays read-only. The adapter
-  trims outer whitespace (inner newlines stay), and rejects empty text,
-  control characters other than `\n` and `\t`, bidi and separator
-  characters, and text over 16 KiB, with nothing sent. The text is never
-  logged. Codex message-mode questions fit the same shape: one string per
-  question id.
+  question carries an optional `allowCustomAnswer` (T3 server schema; its
+  web client treats `false` as no custom answer and absent as allowed; the ACP
+  permission mapping sets `false`). For exactly one single-select question
+  with options, acd sets `free_text` conservatively:
+  - `allowCustomAnswer: false`: false;
+  - `allowCustomAnswer: true`: true, for any provider;
+  - absent: true only for a Claude provider (`providerInstanceId` starting
+    with `claude`), the one checked live (2026-10-11). Codex and others stay
+    option-only until verified. Whether a Codex message-mode question takes
+    the same `answers` shape is unverified.
+  A question with no options stays read-only for now, whatever the flags (the
+  app has no text input yet); it becomes answerable by text once clients
+  render one. Claude's own tool requires at least two options, so such a
+  question does not occur with Claude. A multi-select or multi-question
+  request stays read-only. The adapter normalises CRLF to LF, trims outer
+  whitespace (inner newlines stay), and rejects empty text, control characters
+  other than `\n` and `\t`, bidi and separator characters, and text over
+  16 KiB, with nothing sent. The text is never logged.
 - T3 accepts one answer per request. A second respond fails with
   "Runtime request … is resolved." (or "is cancelled.", "was not found.").
   Only a failure with that single cause counts; a failure with several
@@ -1948,8 +1957,9 @@ result in the PR description):
 2. **Codex approval.** A Codex approval in herdr becomes answerable within
    3 s of appearing. Yes and No both act as chosen.
 3. **T3.** A T3 approval, a T3 single-select question and a T3 free-text
-   question (typed answer, with or without options) can each be answered
-   from the panel.
+   answer to a question with options can each be answered from the panel.
+   (A question with no options waits for the text input in the panel
+   redesign.)
 4. **Answered elsewhere.**
    - Answering any of the above in the terminal or in T3 first resolves the
      card on every client within 2 s.
@@ -2153,3 +2163,5 @@ personal use (R7).
 **P7, 2026-10-11: agent ids are bounded to 128 bytes.** The Mac app showed "Could not send: id longer than 128 bytes" when replying to a T3 subagent, whose thread id (and so `t3:<thread_id>`) is over 300 bytes. Agent ids now fall back to a hashed form when they would exceed the limit (§5, "Agent id bound"); short ids are unchanged. The same helper covers herdr pane ids and hooks session ids (`claude:<session_id>` could reach 135 bytes). Core drops over-long agent ids with an error log.
 
 **P7, 2026-10-11: free-text answers on T3.** A T3 question with no options (Claude `AskUserQuestion` without choices) was read-only, although T3 itself takes a typed string as `answers[question id]`. acd now publishes a single single-select T3 question as free-text answerable unless T3 says `allowCustomAnswer: false` (§5, §6.5). The daemon and client crates carry the typed answer (`Command::AnswerText`, `Inbox::answer_text`, `CardView.free_text_answerable`); the app UI follows separately. Free text on the `keys` and hook paths stays deferred (§11.1).
+
+**P7 review, 2026-10-11: free text narrowed.** A T3 question with no options stays read-only until the panel renders a text input (§5, §6.5). The default for an absent `allowCustomAnswer` is Claude-only; other providers need an explicit `true`. Core and the client share one check for typed text (blank, control, bidi and separator characters), so a bad answer fails before the undo countdown. A text answer resolves by `inbox` with `option_id` null.

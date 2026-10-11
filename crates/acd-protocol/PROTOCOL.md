@@ -135,7 +135,7 @@ agent.updated    {epoch, seq, agent}
 agent.removed    {epoch, seq, agent_id}
 request.opened   {epoch, seq, request}
 request.resolved {epoch, seq, request_id, agent_id,
-                  by: "inbox"|"terminal"|"agent"|"superseded"|"uncertain"|"lost", option_id?, reason?}
+                  by: "inbox"|"terminal"|"agent"|"superseded"|"uncertain"|"lost", option_id?, reason?}   // option_id is absent/null for a text answer
 machine.updated  {epoch, seq, machine}
 result           {id, ok: true, outcome?} | {id, ok: false, error: {code, message}}
 pong             {id}

@@ -47,7 +47,7 @@ pub enum PickError {
     AlreadyCounting,
     #[error("the reply is empty or longer than 64 KiB")]
     BadText,
-    #[error("the answer is empty, too long, or has control characters")]
+    #[error("the answer is empty, too long, or has control, bidi or separator characters")]
     BadAnswerText,
     #[error("replies are not possible for this agent right now")]
     CannotReply,
@@ -745,12 +745,10 @@ impl Inbox {
         revision: u64,
         text: String,
     ) -> Result<String, PickError> {
-        let text = text.trim().to_owned();
+        let text = text.replace("\r\n", "\n").trim().to_owned();
         if text.is_empty()
             || text.len() > ANSWER_TEXT_MAX_BYTES
-            || text
-                .chars()
-                .any(|c| c.is_control() && c != '\n' && c != '\t')
+            || acd_protocol::text::has_forbidden_chars(&text)
         {
             return Err(PickError::BadAnswerText);
         }

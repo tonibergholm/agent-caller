@@ -1,5 +1,6 @@
 //! Text rules shared by adapters (spec §5 limits, §6.4 follow-ups).
 
+use acd_protocol::text::{is_forbidden_control, is_forbidden_format};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -8,12 +9,6 @@ pub const LAST_MESSAGE_CHARS: usize = 500;
 pub const PROMPT_MAX_BYTES: usize = 16 * 1024;
 pub const TITLE_CHARS: usize = 200;
 
-/// Bidi controls and line/paragraph separators. Other format characters
-/// (ZWJ, ZWNJ, variation selectors) appear in ordinary emoji and are allowed.
-fn is_forbidden_format(c: char) -> bool {
-    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}')
-}
-
 pub fn check_prompt_text(text: &str) -> Result<(), &'static str> {
     if text.len() > PROMPT_MAX_BYTES {
         return Err("text longer than 16 KiB");
@@ -21,10 +16,7 @@ pub fn check_prompt_text(text: &str) -> Result<(), &'static str> {
     if text.trim().is_empty() {
         return Err("text is empty");
     }
-    if text
-        .chars()
-        .any(|c| c.is_control() && c != '\n' && c != '\t')
-    {
+    if text.chars().any(is_forbidden_control) {
         return Err("text contains control characters");
     }
     if text.chars().any(is_forbidden_format) {

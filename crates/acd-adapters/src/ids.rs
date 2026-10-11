@@ -1,9 +1,7 @@
 //! Bounded agent ids (spec §5). The acd/1 engine rejects any id over 128
 //! bytes, so an adapter must never publish one a client cannot send back.
+use acd_core::MAX_ID_BYTES;
 use sha2::{Digest, Sha256};
-
-/// Longest id acd/1 accepts; mirrors `acd_core::MAX_ID_BYTES`.
-pub const MAX_ID_BYTES: usize = 128;
 
 /// Marks a hashed id body. A raw body that starts with it is hashed too, so a
 /// raw id can never collide with a hashed one.

@@ -522,6 +522,10 @@ async fn an_agent_id_over_the_command_limit_is_never_published() {
     let long = "x".repeat(MAX_ID_BYTES + 1);
     core.observe(Observation::AgentUpsert(agent_obs(&long)));
     core.observe(Observation::RequestSeen(permission_obs(&long, "k")));
+    core.observe(Observation::AgentMigrated {
+        from: "gone".into(),
+        to: long.clone(),
+    });
     assert!(core.agent(&long).is_none());
     let ok = "y".repeat(MAX_ID_BYTES);
     core.observe(Observation::AgentUpsert(agent_obs(&ok)));

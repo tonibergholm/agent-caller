@@ -696,7 +696,7 @@ async fn answer_text(r: &Rig, req: &Request, text: &str, command_id: &str) -> Co
 }
 
 #[tokio::test]
-async fn free_text_answers_a_question_without_options() {
+async fn typed_answer_to_a_question_with_options_is_trimmed_delivered_and_never_logged() {
     use std::sync::Mutex as StdMutex;
     #[derive(Clone, Default)]
     struct Buffer(Arc<StdMutex<Vec<u8>>>);
@@ -719,8 +719,8 @@ async fn free_text_answers_a_question_without_options() {
             .finish(),
     );
 
-    let (r, req) = with_pending(question_with(true, None), "user_input").await;
-    assert!(req.free_text && req.options.is_empty());
+    let (r, req) = with_pending(question_with(false, None), "user_input").await;
+    assert!(req.free_text && req.options.len() == 2);
     assert_eq!(req.answer_path, AnswerPath::T3);
     let (_, mut rx) = r.core.attach(None);
     let secret = "SECRET-free-text-7731";
@@ -749,7 +749,7 @@ async fn free_text_answers_a_question_without_options() {
 }
 
 #[tokio::test]
-async fn free_text_and_options_both_work_on_a_question_with_options() {
+async fn typed_and_option_answers_both_work_on_a_question_with_options() {
     let (r, req) = with_pending(question_with(false, None), "user_input").await;
     assert!(req.free_text && req.options.len() == 2);
     let res = answer_text(&r, &req, "purple", "x1").await;
@@ -792,8 +792,55 @@ async fn free_text_is_refused_when_t3_forbids_custom_answers() {
 }
 
 #[tokio::test]
+async fn zero_option_questions_stay_read_only_until_clients_render_a_text_input() {
+    // TODO(panel redesign): flips to answerable with the text input.
+    let (fake, req) = {
+        let fake = FakeT3::start().await;
+        fake.put_thread(shell_thread("a", "running", Some(("rq-1", "user_input"))));
+        fake.set_projection("a", question_with(true, None));
+        let r = rig(fake).await;
+        let req = until("pending", || r.core.agent("t3:a")?.pending).await;
+        (r, req)
+    };
+    assert_eq!(req.answer_path, AnswerPath::None);
+    assert!(!req.free_text && req.options.is_empty());
+    let res = answer_text(&fake, &req, "purple", "x1").await;
+    assert_eq!(res.error_code(), Some(ErrorCode::NotAnswerable), "{res:?}");
+    assert!(fake.fake.dispatched().is_empty());
+}
+
+async fn with_pending_provider(provider: &str, projection: serde_json::Value) -> (Rig, Request) {
+    let fake = FakeT3::start().await;
+    let mut shell = shell_thread("a", "running", Some(("rq-1", "user_input")));
+    shell["providerInstanceId"] = json!(provider);
+    fake.put_thread(shell);
+    fake.set_projection("a", projection);
+    let r = rig(fake).await;
+    let req = until("pending", || r.core.agent("t3:a")?.pending).await;
+    (r, req)
+}
+
+#[tokio::test]
+async fn only_claude_takes_typed_answers_by_default() {
+    let (r, req) = with_pending_provider("codex", question_with(false, None)).await;
+    assert!(!req.free_text && req.answer_path == AnswerPath::T3);
+    let res = answer_text(&r, &req, "purple", "x1").await;
+    assert_eq!(res.error_code(), Some(ErrorCode::BadRequest), "{res:?}");
+    assert!(r.fake.dispatched().is_empty());
+    assert_eq!(
+        answer_with_id(&r, &req, "o2", "x2").await.outcome,
+        Some(Outcome::Delivered)
+    );
+
+    let (r, req) = with_pending_provider("codex", question_with(false, Some(true))).await;
+    assert!(req.free_text);
+    let res = answer_text(&r, &req, "purple", "x1").await;
+    assert_eq!(res.outcome, Some(Outcome::Delivered), "{res:?}");
+}
+
+#[tokio::test]
 async fn free_text_is_validated_before_anything_is_sent() {
-    let (r, req) = with_pending(question_with(true, None), "user_input").await;
+    let (r, req) = with_pending(question_with(false, None), "user_input").await;
     for (i, bad) in [
         "   ",
         "a\u{1b}[31m",

@@ -29,6 +29,9 @@ fn every_fixture_frame_decodes() {
         if name.starts_with("http_")
             || name.starts_with("cmd_request")
             || name.starts_with("rpc_request")
+            // Bare captures (a turn item, a runtime request), not frames.
+            || name.starts_with("turn_item_")
+            || name.starts_with("thread_runtime_request_resolved_")
             || name == "rpc_ack.json"
             || name == "rpc_interrupt.json"
         {
@@ -524,7 +527,7 @@ fn claude_approval_joins_the_command() {
     );
     let id = pending_id(&p);
     let view = d.pending_view(&id).unwrap();
-    let (obs, target) = request_obs("t3:x", "x", &view);
+    let (obs, target) = request_obs("t3:x", "x", None, &view);
     assert_eq!(obs.key, CorrelationKey(id.clone()));
     assert!(!obs.reusable_key && obs.ready);
     assert_eq!(
@@ -556,7 +559,7 @@ fn claude_approval_joins_the_command() {
 fn codex_approval_detail_is_the_command_once() {
     let p = projection("thread_chunk_snapshot_waiting_approval_codex.json");
     let (d, _) = ThreadDetail::from_projection(&p);
-    let (obs, target) = request_obs("t3:y", "y", &d.pending_view(&pending_id(&p)).unwrap());
+    let (obs, target) = request_obs("t3:y", "y", None, &d.pending_view(&pending_id(&p)).unwrap());
     assert_eq!(obs.answer_path, AnswerPath::T3);
     assert_eq!(target.answer, TargetAnswer::Decision);
     assert!(!obs.detail.is_empty());
@@ -572,7 +575,12 @@ fn codex_approval_detail_is_the_command_once() {
 fn claude_question_keeps_its_structure() {
     let p = projection("thread_chunk_snapshot_waiting_question_claude.json");
     let (d, _) = ThreadDetail::from_projection(&p);
-    let (obs, target) = request_obs("t3:x", "x", &d.pending_view(&pending_id(&p)).unwrap());
+    let (obs, target) = request_obs(
+        "t3:x",
+        "x",
+        Some("claudeAgent"),
+        &d.pending_view(&pending_id(&p)).unwrap(),
+    );
     assert_eq!(obs.kind, RequestKind::Question);
     let q = &obs.questions.as_ref().unwrap()[0];
     assert_eq!(
@@ -616,11 +624,11 @@ fn unknown_or_unmatched_requests_are_read_only() {
         panic!()
     };
     *request_kind = Some("file_change".into());
-    let (obs, target) = request_obs("t3:x", "x", &view);
+    let (obs, target) = request_obs("t3:x", "x", None, &view);
     assert_eq!(obs.answer_path, AnswerPath::None);
     assert_eq!(target.answer, TargetAnswer::ReadOnly);
     view.item = None;
-    let (obs, _) = request_obs("t3:x", "x", &view);
+    let (obs, _) = request_obs("t3:x", "x", None, &view);
     assert_eq!(obs.answer_path, AnswerPath::None);
     assert!(obs.detail.contains("T3"));
     // A resolved request has no pending view.
@@ -718,7 +726,7 @@ fn prune_keeps_only_live_state() {
     assert_eq!(requests, 1);
     assert_eq!(items, 2, "the approval and its command");
     // The live approval still joins its command after pruning.
-    let (obs, _) = request_obs("t3:x", "x", &d.pending_view(&id).unwrap());
+    let (obs, _) = request_obs("t3:x", "x", None, &d.pending_view(&id).unwrap());
     assert!(obs.detail.starts_with("touch /tmp/acp4/proj/x.txt"));
 }
 
@@ -739,7 +747,7 @@ fn a_live_approvals_command_survives_the_cap() {
         d.apply(&event).unwrap();
         d.prune(&[&id]);
     }
-    let (obs, _) = request_obs("t3:x", "x", &d.pending_view(&id).unwrap());
+    let (obs, _) = request_obs("t3:x", "x", None, &d.pending_view(&id).unwrap());
     assert_eq!(
         obs.detail,
         "touch /tmp/acp4/proj/x.txt\nCreate empty file x.txt"
@@ -818,7 +826,7 @@ fn respond_payloads_match_the_recordings() {
 }
 
 fn request_for_target(d: &ThreadDetail, p: &Value) -> (acd_core::RequestObs, Target) {
-    request_obs("t3:x", "x", &d.pending_view(&pending_id(p)).unwrap())
+    request_obs("t3:x", "x", None, &d.pending_view(&pending_id(p)).unwrap())
 }
 
 #[test]
@@ -858,7 +866,7 @@ fn approval_without_its_command_is_read_only() {
     let (d, _) = ThreadDetail::from_projection(&without_commands(&p));
     let view = d.pending_view(&id).unwrap();
     assert!(view.command.is_none());
-    let (obs, target) = request_obs("t3:x", "x", &view);
+    let (obs, target) = request_obs("t3:x", "x", None, &view);
     assert_eq!(obs.answer_path, AnswerPath::None);
     assert!(obs.options.is_empty());
     assert_eq!(target.answer, TargetAnswer::ReadOnly);
@@ -876,7 +884,7 @@ fn approval_without_its_command_is_read_only() {
     assert_ne!(obs.detail, "Create empty file x.txt");
     // With the command item it is answerable and leads with the command.
     let (d, _) = ThreadDetail::from_projection(&p);
-    let (obs, target) = request_obs("t3:x", "x", &d.pending_view(&id).unwrap());
+    let (obs, target) = request_obs("t3:x", "x", None, &d.pending_view(&id).unwrap());
     assert_eq!(obs.answer_path, AnswerPath::T3);
     assert_eq!(target.answer, TargetAnswer::Decision);
     assert!(obs.detail.starts_with("touch /tmp/acp4/proj/x.txt"));
@@ -885,7 +893,7 @@ fn approval_without_its_command_is_read_only() {
     let mut view = d.pending_view(&id).unwrap();
     view.command = Some("  ".into());
     assert_eq!(
-        request_obs("t3:x", "x", &view).0.answer_path,
+        request_obs("t3:x", "x", None, &view).0.answer_path,
         AnswerPath::None
     );
 }
@@ -905,7 +913,8 @@ fn only_one_single_select_question_is_answerable() {
         panic!()
     };
     questions.push(one.clone());
-    let (obs, target) = request_obs("t3:x", "x", &two);
+    let (obs, target) = request_obs("t3:x", "x", Some("claudeAgent"), &two);
+    assert!(!obs.free_text);
     assert_eq!(obs.answer_path, AnswerPath::None);
     assert_eq!(target.answer, TargetAnswer::ReadOnly);
     assert_eq!(obs.questions.as_ref().unwrap().len(), 2);
@@ -915,7 +924,8 @@ fn only_one_single_select_question_is_answerable() {
         panic!()
     };
     questions[0].multi_select = true;
-    let (obs, target) = request_obs("t3:x", "x", &multi);
+    let (obs, target) = request_obs("t3:x", "x", Some("claudeAgent"), &multi);
+    assert!(!obs.free_text);
     assert_eq!(obs.answer_path, AnswerPath::None);
     assert_eq!(target.answer, TargetAnswer::ReadOnly);
     assert!(obs.questions.as_ref().unwrap()[0].multi_select);
@@ -1017,4 +1027,64 @@ fn shell_visibility_fields_default_to_visible() {
     let mut req = hidden;
     req["pendingRuntimeRequest"] = json!({"id": "r", "kind": "command"});
     assert!(t(req).visible(now));
+}
+
+/// The live free-text captures (2026-10-11): the turn item parses, the payload
+/// acd builds for the recorded answer equals the recorded command, and T3's
+/// recorded exit is a delivery.
+fn free_text_capture(item: &str, command: &str, request_fixture_answer: &str) {
+    use acd_adapters::t3::map;
+    use acd_core::Answer;
+    let item: Value = serde_json::from_str(&fx(item)).unwrap();
+    let recorded: Value = serde_json::from_str(&fx(command)).unwrap();
+    let payload = &recorded["payload"];
+    let TurnItem::UserInputRequest { request_id, .. } = turn_item(&item).unwrap() else {
+        panic!("not a user_input_request")
+    };
+    assert_eq!(payload["requestId"], request_id.as_str());
+    let view = acd_adapters::t3::detail::PendingView {
+        request: RuntimeRequest {
+            id: request_id,
+            kind: "user_input".into(),
+            status: "pending".into(),
+        },
+        item: Some(turn_item(&item).unwrap()),
+        command: None,
+    };
+    let (obs, target) = map::request_obs("t3:x", "x", Some("claudeAgent"), &view);
+    assert!(obs.free_text, "Claude takes typed answers");
+    let mut mine = map::respond_payload(
+        "cmd-1",
+        &target,
+        &serde_json::from_value(json!({"id":"r","revision":1,"agent_id":"t3:x","kind":"question","status":"open","answer_path":"t3","title":"q","detail":"d","options":[],"questions":null,"free_text":true,"raw_screen":null,"opened_at":"2026-10-11T00:00:00Z"})).unwrap(),
+        &Answer::Text(request_fixture_answer.into()),
+    )
+    .unwrap();
+    mine["commandId"] = payload["commandId"].clone();
+    mine["threadId"] = payload["threadId"].clone();
+    assert_eq!(&mine, payload);
+}
+
+#[test]
+fn recorded_free_text_answers_round_trip() {
+    use acd_adapters::t3::outcome::{self, Outcome};
+    free_text_capture(
+        "turn_item_question_answer_free_text.json",
+        "cmd_request_respond_answers_free_text.json",
+        "zq28334 café — done",
+    );
+    free_text_capture(
+        "turn_item_question_answer_free_text_with_options.json",
+        "cmd_request_respond_answers_free_text_with_options.json",
+        "Green10210",
+    );
+    let ServerFrame::Exit { exit, .. } = one("cmd_exit_respond_answers_free_text_success.json")
+    else {
+        panic!("not an exit")
+    };
+    assert!(matches!(exit, ExitValue::Success { .. }));
+    assert!(matches!(
+        outcome::classify(&Ok(json!({})), None),
+        Outcome::Delivered
+    ));
 }
