@@ -67,3 +67,32 @@ wait_pane_text() { # pane regex timeout
   local end=$(( $(date +%s) + ${3:-30} ))
   while [ "$(date +%s)" -lt $end ]; do pane_text "$1" | grep -Eq "$2" && return 0; sleep 0.5; done; return 1
 }
+
+start_logger() {
+  python3 "$E2E_DIR/inbox.py" --name logger log --out "$INBOX_LOG" >/dev/null 2>>"$E2E_ROOT/logger.err" </dev/null &
+  echo $! >"$E2E_ROOT/logger.pid"
+}
+epoch_now() { python3 -c 'import time;print(time.time())'; }
+# hookpost: a synthetic Claude http hook (see hookpost.py); clearly not a live Claude.
+hp() { python3 "$E2E_DIR/hookpost.py" --settings "$CLAUDE_CFG/settings.json" --port "$HOOK_PORT" "$@"; }
+# jq over the inbox log: jl '<filter>' prints matching server messages as compact lines.
+jl() { jq -c "select(.dir==\"in\" and .who==\"logger\") | $1" "$INBOX_LOG"; }
+# The user's own acd, read-only status.  ACD_CONFIG_DIR is exported for the scratch daemon, so unset it.
+real_acd_status() { env -u ACD_CONFIG_DIR "$HOME/.local/bin/acd" status 2>&1 | cut -c1-200; }
+pass() { echo "PASS  $*" | tee -a "$RESULTS/$SCEN.txt"; }
+fail() { echo "FAIL  $*" | tee -a "$RESULTS/$SCEN.txt"; FAILED=1; }
+note() { echo "      $*" | tee -a "$RESULTS/$SCEN.txt"; }
+
+# Claude cannot be isolated from the user's hooks by --setting-sources (it still loads ~/.claude/settings.json,
+# whose http hooks point at the user's acd on 47801), nor by allowedHttpHookUrls (2.1.296).  So the Claude
+# process runs under sandbox-exec with an outbound-connect deny for the user's acd hook and client ports.
+# (Not used for Codex: its own seatbelt cannot nest.  Codex is isolated by hook trust instead.)
+DENY_SB=$E2E_ROOT/deny-real-acd.sb
+write_deny_profile() {
+  printf '(version 1)\n(allow default)\n(deny network-outbound (remote tcp "*:47801"))\n(deny network-outbound (remote tcp "*:47800"))\n' >"$DENY_SB"
+}
+claude_launch() { # pane [extra claude args...]
+  local pane=$1; shift
+  write_deny_profile
+  hd pane run "$pane" "clear; cd /private/tmp/ace2e/proj && HOME=$REAL_HOME sandbox-exec -f $DENY_SB claude --model haiku --permission-mode default --settings $CLAUDE_CFG/settings.json $*" >/dev/null
+}

@@ -6,7 +6,7 @@ hello with <config_dir>/client.token, and offers a few modes.  The token is
 read from the file and never printed or logged.
 
   inbox.py [-d DIR] log [--out FILE] [--duration S]
-  inbox.py [-d DIR] list
+  inbox.py [-d DIR] list | agents
   inbox.py [-d DIR] wait-open [--agent ID] [--timeout S] [--ready]
   inbox.py [-d DIR] answer REQUEST_ID (OPTION_ID | --text TEXT) [--id UUID]
   inbox.py [-d DIR] race REQUEST_ID OPTION_A OPTION_B
@@ -215,6 +215,7 @@ def main():
     sub = ap.add_subparsers(dest="mode", required=True)
     p = sub.add_parser("log"); p.add_argument("--out"); p.add_argument("--duration", type=float)
     sub.add_parser("list")
+    sub.add_parser("agents", help="print the snapshot's agents as one JSON array")
     p = sub.add_parser("wait-open"); p.add_argument("--agent"); p.add_argument("--timeout", type=float, default=30)
     p.add_argument("--ready", action="store_true", help="only a request whose answer_path is hook/keys/t3")
     p = sub.add_parser("answer"); p.add_argument("request_id"); p.add_argument("option_id", nargs="?")
@@ -259,6 +260,12 @@ def main():
         print("epoch %s seq %s" % (mir.epoch, mir.seq))
         for a in mir.agents.values():
             print(summary(a))
+        return
+
+    if args.mode == "agents":
+        c = Conn(args.dir, name=args.name)
+        mir, w = handshake(c)
+        print(json.dumps(list(mir.agents.values())))
         return
 
     if args.mode == "answer":

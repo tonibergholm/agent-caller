@@ -48,8 +48,7 @@ fi
 CLAUDE_CONFIG_DIR=$CLAUDE_CFG acd hooks install claude >"$E2E_ROOT/hooks-install-claude.txt" 2>&1 || { cat "$E2E_ROOT/hooks-install-claude.txt"; exit 1; }
 
 start_acd
-python3 "$E2E_DIR/inbox.py" --name logger log --out "$INBOX_LOG" >/dev/null 2>"$E2E_ROOT/logger.err" &
-echo $! >"$E2E_ROOT/logger.pid"
+start_logger
 sleep 1
 log "acd up (pid $(acd_pid)), client port $CLIENT_PORT, hook port $HOOK_PORT"
 acd status || true
