@@ -5,4 +5,5 @@ pub mod refusal;
 pub mod router;
 pub mod safety;
 pub mod snapshot;
+pub mod speech;
 pub mod text;
