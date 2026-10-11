@@ -589,15 +589,20 @@ fn claude_question_keeps_its_structure() {
             ("o2", "blue", Effect::Choose)
         ]
     );
-    assert!(!obs.free_text);
+    assert!(
+        obs.free_text,
+        "T3 allows a typed answer unless it says otherwise"
+    );
     let TargetAnswer::Question {
         question_id,
         choices,
+        free_text,
     } = &target.answer
     else {
         panic!()
     };
     assert_eq!(question_id, "Which color do you prefer?");
+    assert!(free_text);
     assert_eq!(choices[1].value, "blue");
 }
 

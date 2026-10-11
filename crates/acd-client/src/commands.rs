@@ -10,6 +10,12 @@ pub enum Command {
         revision: u64,
         option_id: String,
     },
+    /// A typed answer (`request.answer` with `text`).
+    AnswerText {
+        request_id: String,
+        revision: u64,
+        text: String,
+    },
     Send {
         agent_id: String,
         text: String,
@@ -22,7 +28,7 @@ pub enum Command {
 impl Command {
     pub fn capability(&self) -> &'static str {
         match self {
-            Self::Answer { .. } => "answer",
+            Self::Answer { .. } | Self::AnswerText { .. } => "answer",
             Self::Send { .. } => "send",
             Self::MarkSeen { .. } => "mark_seen",
         }
@@ -276,6 +282,17 @@ fn message(cmd: &Command, id: String) -> ClientMessage {
             revision: Some(*revision),
             option_id: Some(option_id.clone()),
             text: None,
+        },
+        Command::AnswerText {
+            request_id,
+            revision,
+            text,
+        } => ClientMessage::RequestAnswer {
+            id,
+            request_id: request_id.clone(),
+            revision: Some(*revision),
+            option_id: None,
+            text: Some(text.clone()),
         },
         Command::Send { agent_id, text } => ClientMessage::AgentSend {
             id,

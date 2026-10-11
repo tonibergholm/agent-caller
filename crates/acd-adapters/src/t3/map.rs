@@ -114,6 +114,8 @@ pub enum TargetAnswer {
     Question {
         question_id: String,
         choices: Vec<Choice>,
+        /// A typed answer is accepted (`answers[question_id] = text`).
+        free_text: bool,
     },
     ReadOnly,
 }
@@ -221,8 +223,10 @@ pub fn request_obs(agent_id: &str, thread_id: &str, view: &PendingView) -> (Requ
             obs.kind = RequestKind::Question;
             obs.title = qs[0].header.clone().unwrap_or_else(|| "Question".into());
             obs.detail = qs[0].text.clone();
-            // Only a single single-select question can be answered.
-            if questions.len() == 1 && !q0.multi_select && !q0.options.is_empty() {
+            // Only a single single-select question can be answered. Free text
+            // is allowed unless T3 says the provider takes listed options only.
+            let free_text = q0.allow_custom_answer != Some(false);
+            if questions.len() == 1 && !q0.multi_select && (!q0.options.is_empty() || free_text) {
                 answer = TargetAnswer::Question {
                     question_id: q0.id.clone(),
                     choices: q0
@@ -235,7 +239,9 @@ pub fn request_obs(agent_id: &str, thread_id: &str, view: &PendingView) -> (Requ
                             value: o.value.clone().unwrap_or_else(|| o.label.clone()),
                         })
                         .collect(),
+                    free_text,
                 };
+                obs.free_text = free_text;
                 obs.options = qs[0].options.clone();
                 obs.answer_path = AnswerPath::T3;
             }
@@ -260,13 +266,27 @@ pub fn respond_payload(
     request: &Request,
     answer: &Answer,
 ) -> Result<Value, &'static str> {
-    let Answer::Option(option_id) = answer else {
-        return Err("T3 requests take an option, not text");
-    };
     let mut p = json!({
         "type": "runtime-request.respond", "commandId": command_id,
         "threadId": target.thread_id, "requestId": target.t3_request_id,
     });
+    if let Answer::Text(text) = answer {
+        let TargetAnswer::Question {
+            question_id,
+            free_text: true,
+            ..
+        } = &target.answer
+        else {
+            return Err("this T3 request takes no typed answer");
+        };
+        let text = text.trim();
+        crate::text::check_prompt_text(text)?;
+        p["answers"] = json!({ question_id.clone(): text });
+        return Ok(p);
+    }
+    let Answer::Option(option_id) = answer else {
+        unreachable!("text handled above")
+    };
     match &target.answer {
         TargetAnswer::Decision => {
             if !DECISIONS.contains(&option_id.as_str()) {
@@ -277,6 +297,7 @@ pub fn respond_payload(
         TargetAnswer::Question {
             question_id,
             choices,
+            ..
         } => {
             let shown = request
                 .options
@@ -308,8 +329,7 @@ mod tests {
     use super::*;
     use crate::t3::{detail::ThreadDetail, fake::question_projection};
 
-    #[test]
-    fn single_select_question_without_options_is_read_only() {
+    fn zero_option_view(allow: Option<bool>) -> PendingView {
         let mut projection = question_projection("thread", "request");
         let questions = projection["turnItems"]
             .as_array_mut()
@@ -318,10 +338,32 @@ mod tests {
             .find(|item| item["type"] == "user_input_request")
             .unwrap();
         questions["questions"][0]["options"] = json!([]);
+        if let Some(a) = allow {
+            questions["questions"][0]["allowCustomAnswer"] = json!(a);
+        }
         let (detail, _) = ThreadDetail::from_projection(&projection);
-        let view = detail.pending_view("request").unwrap();
-        let (obs, target) = request_obs("t3:thread", "thread", &view);
+        detail.pending_view("request").unwrap()
+    }
+
+    #[test]
+    fn single_select_question_without_options_takes_free_text() {
+        let (obs, target) = request_obs("t3:thread", "thread", &zero_option_view(None));
+        assert_eq!(obs.answer_path, AnswerPath::T3);
+        assert!(obs.free_text && obs.options.is_empty());
+        assert!(matches!(
+            target.answer,
+            TargetAnswer::Question {
+                free_text: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn question_without_options_that_forbids_custom_answers_is_read_only() {
+        let (obs, target) = request_obs("t3:thread", "thread", &zero_option_view(Some(false)));
         assert_eq!(obs.answer_path, AnswerPath::None);
+        assert!(!obs.free_text);
         assert!(matches!(target.answer, TargetAnswer::ReadOnly));
     }
 }

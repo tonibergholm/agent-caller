@@ -282,7 +282,7 @@ Request {
   detail: string
   options: RequestOption[]           // permission options; for a question, the options of questions[0]
   questions: Question[] | null       // kind=question: the full original structure
-  free_text: bool                    // whether a typed answer is accepted (questions only)
+  free_text: bool                    // whether a typed answer is accepted (questions only; v1: T3 only)
   raw_screen: string | null          // blocked_unparsed only; at most 40 lines
   opened_at: timestamp
 }

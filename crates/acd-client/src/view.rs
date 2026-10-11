@@ -51,6 +51,8 @@ pub struct CardView {
     pub live: bool,
     pub offline_since_ms: Option<f64>,
     pub answerable: bool,
+    /// Answerable, and the request also takes a typed answer.
+    pub free_text_answerable: bool,
     pub selectable_options: Vec<String>,
     pub can_reply: bool,
     pub can_mark_seen: bool,
@@ -340,6 +342,8 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
                     .pending
                     .as_ref()
                     .is_some_and(|p| p.is_answerable() && p.status == RequestStatus::Open);
+            let free_text_answerable =
+                answerable && agent.pending.as_ref().is_some_and(|p| p.free_text);
             let selectable_options = if answerable {
                 agent
                     .pending
@@ -362,6 +366,7 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
                 live,
                 offline_since_ms,
                 answerable,
+                free_text_answerable,
                 selectable_options,
                 can_reply: live && state.session.has("send") && agent.can_send,
                 can_mark_seen: live

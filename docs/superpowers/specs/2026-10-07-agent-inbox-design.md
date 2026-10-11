@@ -188,6 +188,14 @@ A request is **answerable** when all three conditions hold:
 
 Anything else is shown read-only, with the label "answer in terminal".
 
+**Free text.** `Request.free_text` is true only for a `t3` question that
+takes a typed answer; the answerable rule above is unchanged. Such a
+question may have no options, and then the typed answer is the only way to
+answer it. `request.answer` carries exactly one of `option_id` and `text`,
+and core rejects `text` with `bad_request` unless `free_text` is true. Free
+text is deferred on the `keys` and `hook` paths (§6.2, §11.1) and supported
+on `t3` (§6.5).
+
 **Agent id bound.** Every published agent id is at most `MAX_ID_BYTES` (128)
 bytes, because the engine rejects any command id over that. An adapter builds
 `<prefix><source id>` when it fits. Otherwise it uses
@@ -1320,6 +1328,21 @@ an answer. Otherwise:
 - `runtime-request.respond` with `decision` (one of `accept`,
   `acceptForSession`, `acceptAlways`, `decline`, `cancel`), or with
   `answers: {<question id>: option.value ?? option.label}`.
+- **Typed answers.** T3's own client sends `answers[question id] = <typed
+  string>`, and the server does not check answers against the options. A
+  question carries `allowCustomAnswer`: ACP and OpenCode set it to `false`,
+  Claude leaves it absent, and absent counts as allowed. For exactly one
+  single-select question, acd sets `free_text = allowCustomAnswer != false`:
+  - options and free text: the options stay, and a typed answer is also
+    accepted;
+  - no options and free text: the request is answerable by text only;
+  - no options and `allowCustomAnswer: false`: read-only, as before.
+  A multi-select or multi-question request stays read-only. The adapter
+  trims outer whitespace (inner newlines stay), and rejects empty text,
+  control characters other than `\n` and `\t`, bidi and separator
+  characters, and text over 16 KiB, with nothing sent. The text is never
+  logged. Codex message-mode questions fit the same shape: one string per
+  question id.
 - T3 accepts one answer per request. A second respond fails with
   "Runtime request … is resolved." (or "is cancelled.", "was not found.").
   Only a failure with that single cause counts; a failure with several
@@ -1759,7 +1782,7 @@ The gates below were open; each blocked the plan named beside it until it
 had been checked and the spec updated.
 
 1. **Deferred past v1:** free text in Claude `AskUserQuestion` on the
-   `keys` path.
+   `keys` path and on the hook paths. Free text is supported on `t3` (§6.5).
 2. **Claude `http` hooks, live: resolved 2026-10-09**
    (`docs/research/2026-10-09-p3-gates-claude.md`, fixtures in
    `tests/fixtures/hooks/claude/`; Claude Code 2.1.295). Folded into §6.1
@@ -1924,8 +1947,9 @@ result in the PR description):
    Choosing "Yes" unblocks the agent, and the dialog closes.
 2. **Codex approval.** A Codex approval in herdr becomes answerable within
    3 s of appearing. Yes and No both act as chosen.
-3. **T3.** A T3 approval and a T3 single-select question can each be
-   answered from the panel.
+3. **T3.** A T3 approval, a T3 single-select question and a T3 free-text
+   question (typed answer, with or without options) can each be answered
+   from the panel.
 4. **Answered elsewhere.**
    - Answering any of the above in the terminal or in T3 first resolves the
      card on every client within 2 s.
@@ -2127,3 +2151,5 @@ personal use (R7).
 **P6, 2026-10-11: Codex deny resolves from the cancellation tail.** Codex fires no `PostToolUse` or `Stop` hook after a cancel, so an inbox "No" waited the full 35 s evidence window and resolved `uncertain` while `agent.send` returned `agent_busy`. The e2e run found it. The screen's cancellation tail for the tracked command is now correlated evidence for Codex `keys` requests (§4).
 
 **P7, 2026-10-11: agent ids are bounded to 128 bytes.** The Mac app showed "Could not send: id longer than 128 bytes" when replying to a T3 subagent, whose thread id (and so `t3:<thread_id>`) is over 300 bytes. Agent ids now fall back to a hashed form when they would exceed the limit (§5, "Agent id bound"); short ids are unchanged. The same helper covers herdr pane ids and hooks session ids (`claude:<session_id>` could reach 135 bytes). Core drops over-long agent ids with an error log.
+
+**P7, 2026-10-11: free-text answers on T3.** A T3 question with no options (Claude `AskUserQuestion` without choices) was read-only, although T3 itself takes a typed string as `answers[question id]`. acd now publishes a single single-select T3 question as free-text answerable unless T3 says `allowCustomAnswer: false` (§5, §6.5). The daemon and client crates carry the typed answer (`Command::AnswerText`, `Inbox::answer_text`, `CardView.free_text_answerable`); the app UI follows separately. Free text on the `keys` and hook paths stays deferred (§11.1).
