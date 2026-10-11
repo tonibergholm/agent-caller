@@ -88,7 +88,10 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let events = InboxPanelEvents::new();
     let handle = app.clone();
     events.window_did_resign_key(move |_| {
-        hide(&handle);
+        // The voice HUD took key for input on purpose: stay open (D17).
+        if !crate::voice::hud::holds_key() {
+            hide(&handle);
+        }
         false
     });
     observe_screen_changes();
@@ -212,7 +215,7 @@ fn logical_frame(pos: tauri::PhysicalPosition<i32>, size: tauri::PhysicalSize<u3
 
 /// Every display in logical points, as (full frame, usable area with menu
 /// bar and Dock excluded), in the same order.
-fn screen_frames(window: &WebviewWindow) -> (Vec<Frame>, Vec<Frame>) {
+pub(crate) fn screen_frames(window: &WebviewWindow) -> (Vec<Frame>, Vec<Frame>) {
     window
         .available_monitors()
         .unwrap_or_default()
@@ -229,7 +232,7 @@ fn screen_frames(window: &WebviewWindow) -> (Vec<Frame>, Vec<Frame>) {
 }
 
 /// Index (into `full`) of the screen under the cursor, else the primary, else 0.
-fn fallback_screen(window: &WebviewWindow, full: &[Frame]) -> usize {
+pub(crate) fn fallback_screen(window: &WebviewWindow, full: &[Frame]) -> usize {
     let primary = window.primary_monitor().ok().flatten();
     let primary_index = primary.as_ref().and_then(|p| {
         let f = logical_frame(*p.position(), *p.size(), p.scale_factor());

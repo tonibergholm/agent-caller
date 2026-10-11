@@ -1,24 +1,252 @@
-//! The voice HUD's state, published to the HUD webview (spec §4.4).
-use acd_voice::hud::{Hud, HudEvent};
-use tauri::{AppHandle, Emitter};
+//! The voice HUD (voice spec §4.4): a second non-activating panel, top
+//! centre of the active screen, 18% from the top. It takes key focus only
+//! while it waits for input (confirm, which-one, countdown); see D17.
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
-/// Broadcast like `inbox://view`; only the HUD webview listens. False if
-/// the event could not be sent: a step waiting for display then fails
-/// closed (D22).
+use acd_voice::hud::{Hud, HudEvent};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Size, WebviewUrl, WebviewWindow};
+use tauri_nspanel::{CollectionBehavior, ManagerExt, PanelBuilder, PanelHandle, PanelLevel, StyleMask, tauri_panel};
+
+use crate::frame::Frame;
+
+pub const LABEL: &str = "hud";
+pub const SIZE: (f64, f64) = (560.0, 260.0);
+/// Spec §4.4: the HUD fades 1.5 s after the step fires or speech ends.
+pub const FADE_AFTER: Duration = Duration::from_millis(1500);
+
+/// Intentional key handoff (D17): set only when `apply` makes the HUD key
+/// for input; cleared by `release_key`, or when the HUD resigns key on its
+/// own because the user clicked elsewhere.
+static HANDOFF: AtomicBool = AtomicBool::new(false);
+/// The inbox panel was open when the handoff began; it gets key back.
+static INBOX_WAS_OPEN: AtomicBool = AtomicBool::new(false);
+/// The last state shown; a fade runs only if nothing newer arrived.
+static LAST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+tauri_panel! {
+    panel!(HudPanel {
+        config: {
+            can_become_key_window: true,
+            can_become_main_window: false,
+            is_floating_panel: true
+        }
+    })
+    panel_event!(HudPanelEvents {
+        window_did_resign_key(notification: &NSNotification) -> bool
+    })
+}
+
+/// Main thread only; call once from `setup`, after `panel::create`.
+pub fn create(app: &AppHandle) -> tauri::Result<()> {
+    let panel = PanelBuilder::<_, HudPanel>::new(app, LABEL)
+        .url(WebviewUrl::App("index.html".into()))
+        .title("Voice")
+        .size(Size::Logical(LogicalSize::new(SIZE.0, SIZE.1)))
+        .resizable(false)
+        // Above the inbox panel, which is Floating.
+        .level(PanelLevel::ModalPanel)
+        .with_window(|w| w.decorations(false))
+        .add_style_mask(StyleMask::empty().nonactivating_panel())
+        .collection_behavior(
+            CollectionBehavior::new()
+                .can_join_all_spaces()
+                .full_screen_auxiliary(),
+        )
+        .hides_on_deactivate(false)
+        .corner_radius(8.0)
+        .build()?;
+    let events = HudPanelEvents::new();
+    events.window_did_resign_key(|_| {
+        // Our own release clears HANDOFF first, so this fires with it set
+        // only when the user moved focus elsewhere: end the handoff and do
+        // not pull the inbox panel back to key later.
+        if HANDOFF.swap(false, Ordering::SeqCst) {
+            INBOX_WAS_OPEN.store(false, Ordering::SeqCst);
+        }
+        false
+    });
+    panel.set_event_handler(Some(events.as_ref()));
+    panel.hide();
+    Ok(())
+}
+
+/// Whether the HUD holds key on purpose; the inbox panel then must not
+/// hide on resigning key.
+pub fn holds_key() -> bool {
+    HANDOFF.load(Ordering::SeqCst)
+}
+
+/// Shows state `seq` (D22). One main-thread closure presents the panel,
+/// checks that it is on screen, and only then emits the state, so the
+/// webview can never render, and acknowledge, a step whose panel failed
+/// to appear. A failure inside the closure emits nothing; the step then
+/// fails closed on the controller's display timeout. False if the closure
+/// could not be dispatched at all. Any thread; never blocks.
 pub fn present(app: &AppHandle, seq: u64, hud: &Hud) -> bool {
-    // `HudEvent` is not `Clone`, which `emit` requires, so emit its JSON.
-    let payload = match serde_json::to_value(HudEvent::new(seq, hud)) {
-        Ok(payload) => payload,
-        Err(_) => {
-            tracing::error!("could not serialize the HUD state");
+    LAST_SEQ.store(seq, Ordering::SeqCst);
+    let (hidden, wants_key) = (matches!(hud, Hud::Hidden), hud.wants_key());
+    let event = match serde_json::to_value(HudEvent::new(seq, hud)) {
+        Ok(v) => v,
+        Err(error) => {
+            tracing::error!(%error, "could not serialize the HUD state");
             return false;
         }
     };
-    match app.emit("voice://hud", payload) {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::error!(%error, "could not emit the HUD state");
-            false
+    let handle = app.clone();
+    let dispatched = app.run_on_main_thread(move || {
+        let presented = apply(&handle, hidden, wants_key);
+        if !should_emit(hidden, presented) {
+            tracing::error!("the HUD panel is not on screen; the step is not shown");
+            return;
         }
+        // Broadcast like `inbox://view`; only the HUD webview listens.
+        if let Err(error) = handle.emit("voice://hud", event) {
+            tracing::error!(%error, "could not emit the HUD state");
+        }
+    });
+    if let Err(error) = dispatched {
+        tracing::error!(%error, "could not dispatch the HUD update");
+        return false;
+    }
+    if hud.fades() {
+        let handle = app.clone();
+        let after = fade_delay(hud);
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(after).await;
+            if LAST_SEQ.load(Ordering::SeqCst) != seq {
+                return;
+            }
+            let inner = handle.clone();
+            if let Err(error) = handle.run_on_main_thread(move || {
+                apply(&inner, true, false);
+            }) {
+                tracing::error!(%error, "could not dispatch the HUD fade");
+            }
+            if let Err(error) = handle.emit("voice://hud-clear", seq) {
+                tracing::error!(%error, "could not emit the HUD fade");
+            }
+        });
+    }
+    true
+}
+
+/// D18: spoken text stays 1.5 s plus 50 ms per character, within 3–15 s.
+pub fn fade_delay(hud: &Hud) -> Duration {
+    match hud {
+        Hud::Speaking { text } => Duration::from_millis(1500 + 50 * text.char_len() as u64)
+            .clamp(Duration::from_secs(3), Duration::from_secs(15)),
+        _ => FADE_AFTER,
+    }
+}
+
+/// Only the HUD webview may drive the executor (confirm, choose, cancel,
+/// shown); a call from any other window is ignored.
+pub fn is_hud(label: &str) -> bool {
+    label == LABEL
+}
+
+/// Top centre of `screen`, 18% from its top (design doc, floating overlays).
+pub fn place_on(screen: Frame, size: (f64, f64)) -> Frame {
+    Frame {
+        x: screen.x + (screen.w - size.0) / 2.0,
+        y: screen.y + screen.h * 0.18,
+        w: size.0,
+        h: size.1,
+    }
+}
+
+/// A state is emitted only once its panel is on screen; hiding needs no
+/// panel.
+fn should_emit(hidden: bool, presented: bool) -> bool {
+    hidden || presented
+}
+
+/// Main thread. True when the panel ended up as asked: hidden, or on
+/// screen.
+fn apply(app: &AppHandle, hidden: bool, wants_key: bool) -> bool {
+    let Ok(panel) = app.get_webview_panel(LABEL) else {
+        return false;
+    };
+    if hidden {
+        release_key(app, &panel);
+        panel.hide();
+        return true;
+    }
+    if let Some(window) = app.get_webview_window(LABEL) {
+        position(&window);
+    }
+    if wants_key {
+        if !HANDOFF.swap(true, Ordering::SeqCst) {
+            INBOX_WAS_OPEN.store(crate::panel::is_visible(), Ordering::SeqCst);
+            panel.show_and_make_key();
+        }
+    } else {
+        release_key(app, &panel);
+        panel.order_front_regardless();
+    }
+    panel.is_visible()
+}
+
+/// Ends the handoff: key goes back to the inbox panel if it was open,
+/// else to whatever macOS picks for the frontmost app.
+fn release_key(app: &AppHandle, hud: &PanelHandle<tauri::Wry>) {
+    if !HANDOFF.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    hud.resign_key_window();
+    if INBOX_WAS_OPEN.swap(false, Ordering::SeqCst)
+        && crate::panel::is_visible()
+        && let Ok(inbox) = app.get_webview_panel("panel")
+    {
+        inbox.make_key_window();
+    }
+}
+
+/// On the screen under the cursor, else the primary.
+fn position(window: &WebviewWindow) {
+    let (full, _) = crate::panel::screen_frames(window);
+    let Some(screen) = full.get(crate::panel::fallback_screen(window, &full)).copied() else {
+        return;
+    };
+    let f = place_on(screen, SIZE);
+    if let Err(error) = window.set_position(LogicalPosition::new(f.x, f.y)) {
+        tracing::warn!(%error, "could not position the HUD");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acd_voice::hud::OutcomeView;
+    use acd_voice::text::VoiceText;
+
+    #[test]
+    fn a_state_is_emitted_only_after_its_panel_is_on_screen() {
+        assert!(should_emit(false, true));
+        assert!(!should_emit(false, false), "a panel that failed to appear: emit nothing, fail closed");
+        assert!(should_emit(true, false), "hiding needs no panel");
+    }
+
+    #[test]
+    fn only_the_hud_window_may_drive_the_executor() {
+        assert!(is_hud("hud"));
+        assert!(!is_hud("panel"));
+        assert!(!is_hud("settings"));
+        assert!(!is_hud(""));
+    }
+
+    #[test]
+    fn the_hud_sits_top_centre_18_percent_down() {
+        let f = place_on(Frame { x: 100.0, y: 0.0, w: 1600.0, h: 1000.0 }, (560.0, 260.0));
+        assert_eq!(f, Frame { x: 620.0, y: 180.0, w: 560.0, h: 260.0 });
+    }
+
+    #[test]
+    fn steps_fade_after_1_5_s_and_spoken_text_stays_long_enough_to_read() {
+        assert_eq!(fade_delay(&Hud::Done { proposal: None, outcome: OutcomeView::Selected }), FADE_AFTER);
+        assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("short") }), Duration::from_secs(3));
+        assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("x".repeat(100)) }), Duration::from_millis(6500));
+        assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("x".repeat(1000)) }), Duration::from_secs(15));
     }
 }

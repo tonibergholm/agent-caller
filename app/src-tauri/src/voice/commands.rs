@@ -1,7 +1,8 @@
 use acd_voice::snapshot::Presentation;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
 use super::VoiceState;
+use super::hud;
 use super::settings::VoiceSettings;
 
 #[tauri::command]
@@ -44,19 +45,29 @@ pub async fn voice_text_input(voice: State<'_, VoiceState>, text: String) -> Res
         .map_err(|e| e.to_string())
 }
 
+/// The four HUD commands below ignore calls from any window but the HUD.
 /// The HUD rendered proposal `proposal_id` (D22).
 #[tauri::command]
-pub fn voice_shown(voice: State<'_, VoiceState>, proposal_id: u64) {
+pub fn voice_shown(window: WebviewWindow, voice: State<'_, VoiceState>, proposal_id: u64) {
+    if !hud::is_hud(window.label()) {
+        return;
+    }
     voice.controller.shown(proposal_id);
 }
 
 #[tauri::command]
-pub fn voice_confirm(voice: State<'_, VoiceState>, proposal_id: u64) {
+pub fn voice_confirm(window: WebviewWindow, voice: State<'_, VoiceState>, proposal_id: u64) {
+    if !hud::is_hud(window.label()) {
+        return;
+    }
     voice.controller.confirm(proposal_id);
 }
 
 #[tauri::command]
-pub fn voice_choose(voice: State<'_, VoiceState>, choice_id: u64, index: usize) {
+pub fn voice_choose(window: WebviewWindow, voice: State<'_, VoiceState>, choice_id: u64, index: usize) {
+    if !hud::is_hud(window.label()) {
+        return;
+    }
     voice.controller.choose(choice_id, index);
 }
 
@@ -65,7 +76,10 @@ pub fn voice_choose(voice: State<'_, VoiceState>, choice_id: u64, index: usize) 
 /// Speaking) has nothing to cancel, so the frontend sends nothing; a missing
 /// id is ignored here too and is never turned into a cancel-whatever-is-current.
 #[tauri::command]
-pub fn voice_cancel(voice: State<'_, VoiceState>, id: Option<u64>) {
+pub fn voice_cancel(window: WebviewWindow, voice: State<'_, VoiceState>, id: Option<u64>) {
+    if !hud::is_hud(window.label()) {
+        return;
+    }
     if let Some(id) = id {
         voice.controller.cancel(Some(id));
     }

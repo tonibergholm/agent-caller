@@ -102,6 +102,7 @@ fn main() {
             });
             tray::build(app.handle())?;
             panel::create(app.handle())?;
+            voice::hud::create(app.handle())?;
 
             let saved_hotkey = inbox.settings().hotkey;
             if let Err(error) = hotkey::apply(app.handle(), &saved_hotkey) {

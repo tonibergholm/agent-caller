@@ -45,3 +45,11 @@ test("the empty-state hint shows the stored hotkey", async () => {
   render(App, { api, label: "panel" });
   expect(await screen.findByText(/Command\+Shift\+K/)).toBeTruthy();
 });
+
+test("the hud label never renders the panel", async () => {
+  const api = fakeApi();
+  api.getView = async () => view({ cards: [card({ key: "m/a" })] });
+  render(App, { api, label: "hud" });
+  await new Promise((r) => setTimeout(r, 20));
+  expect(screen.queryByText("Fix the build")).toBeNull();
+});

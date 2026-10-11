@@ -41,6 +41,8 @@
 
 {#if resolvedLabel === "settings"}
   <Settings {api} />
+{:else if resolvedLabel === "hud"}
+  <!-- The voice HUD (Task 15). Never the panel: a second panel would publish its own presentation. -->
 {:else if v}
   <Panel view={v} {api} {hotkey} />
 {:else if loadError}
