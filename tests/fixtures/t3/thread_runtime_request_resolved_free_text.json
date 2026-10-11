@@ -1,0 +1,21 @@
+{
+  "id": "runtime-request:provider:claudeAgent:provider-turn:provider-turn%3Aprovider%3AclaudeAgent%3Anative-turn%3Aturn%253Arun-attempt%253Arun%253Arun%25253Athread%25253A489811d4-1ef1-407d-98ea-88eaa0e89ab0%25253Aordinal%25253A1%253Aattempt%253A1:native-request:toolu_01JHyQo2LChLB7KE4CasTyu9:4b273c22-e757-485c-bec5-47ea0e172599",
+  "nodeId": "node:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Aprovider-turn%3Aprovider-turn%253Aprovider%253AclaudeAgent%253Anative-turn%253Aturn%25253Arun-attempt%25253Arun%25253Arun%2525253Athread%2525253A489811d4-1ef1-407d-98ea-88eaa0e89ab0%2525253Aordinal%2525253A1%25253Aattempt%25253A1%3Anative-request%3Atoolu_01JHyQo2LChLB7KE4CasTyu9%3A4b273c22-e757-485c-bec5-47ea0e172599",
+  "providerTurnId": "provider-turn:provider:claudeAgent:native-turn:turn%3Arun-attempt%3Arun%3Arun%253Athread%253A489811d4-1ef1-407d-98ea-88eaa0e89ab0%253Aordinal%253A1%3Aattempt%3A1",
+  "nativeRequestRef": {
+    "driver": "claudeAgent",
+    "nativeId": "toolu_01JHyQo2LChLB7KE4CasTyu9",
+    "strength": "strong"
+  },
+  "kind": "user_input",
+  "status": "resolved",
+  "responseCapability": {
+    "type": "live",
+    "providerSessionId": "provider-session:provider-instance:claudeAgent:thread:489811d4-1ef1-407d-98ea-88eaa0e89ab0:22634f8c-430a-491d-a33c-817d508288a2"
+  },
+  "createdAt": "2026-10-11T14:10:11.112Z",
+  "resolvedAt": "2026-10-11T14:10:11.472Z",
+  "answers": {
+    "What should the new service be called?": "zq28334 café — done"
+  }
+}

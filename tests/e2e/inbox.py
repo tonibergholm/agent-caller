@@ -220,6 +220,8 @@ def main():
     p.add_argument("--ready", action="store_true", help="only a request whose answer_path is hook/keys/t3")
     p = sub.add_parser("answer"); p.add_argument("request_id"); p.add_argument("option_id", nargs="?")
     p.add_argument("--text"); p.add_argument("--id"); p.add_argument("--client-id")
+    p = sub.add_parser("answer-text", help="request.answer with `text` and no option_id")
+    p.add_argument("request_id"); p.add_argument("text"); p.add_argument("--id"); p.add_argument("--client-id")
     p = sub.add_parser("race"); p.add_argument("request_id"); p.add_argument("a"); p.add_argument("b")
     p = sub.add_parser("send"); p.add_argument("agent_id"); p.add_argument("text")
     p.add_argument("--id"); p.add_argument("--repeat", type=int, default=1); p.add_argument("--client-id")
@@ -268,12 +270,14 @@ def main():
         print(json.dumps(list(mir.agents.values())))
         return
 
+    if args.mode == "answer-text":
+        args.mode, args.option_id = "answer", None
     if args.mode == "answer":
         c = Conn(args.dir, name=args.name, client_id=args.client_id)
         mir, _ = handshake(c)
         cid = args.id or str(uuid.uuid4())
         msg = {"type": "request.answer", "id": cid, "request_id": args.request_id}
-        if args.text is not None: msg["text"] = args.text
+        if getattr(args, "text", None) is not None: msg["text"] = args.text
         else: msg["option_id"] = args.option_id
         t0 = time.time(); c.send_raw(msg)
         res = wait_result(c, mir, cid)
