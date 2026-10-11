@@ -4,4 +4,4 @@ import type { CardView } from "./CardView";
 import type { MachineView } from "./MachineView";
 import type { TraySummary } from "./TraySummary";
 
-export type InboxView = { machines: Array<MachineView>, cards: Array<CardView>, hidden_idle: number, show_idle: boolean, show_subagents: boolean, tray: TraySummary, actions: Array<ActionView>, };
+export type InboxView = { machines: Array<MachineView>, cards: Array<CardView>, hidden_idle: number, show_idle: boolean, show_subagents: boolean, show_hook_only: boolean, tray: TraySummary, actions: Array<ActionView>, };

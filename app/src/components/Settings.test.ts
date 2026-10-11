@@ -265,3 +265,26 @@ test("the subagent toggle reflects the daemon's view and reverts when saving fai
   expect((await screen.findByRole("alert")).textContent).toContain("disk full");
   expect(box.checked).toBe(true);
 });
+
+test("Show hook-only agents is off by default and persisted through the api", async () => {
+  const api = fakeApi();
+  render(Settings, { api });
+  const box = (await screen.findByRole("checkbox", { name: /show hook-only agents/i })) as HTMLInputElement;
+  expect(box.checked).toBe(false);
+  await userEvent.click(box);
+  expect(api.calls).toContainEqual(["setShowHookOnly", true]);
+});
+
+test("the hook-only toggle reflects the daemon's view and reverts when saving fails", async () => {
+  const api = fakeApi();
+  api.getView = async () => view({ show_hook_only: true });
+  api.setShowHookOnly = async () => {
+    throw "disk full";
+  };
+  render(Settings, { api });
+  const box = (await screen.findByRole("checkbox", { name: /show hook-only agents/i })) as HTMLInputElement;
+  await vi.waitFor(() => expect(box.checked).toBe(true));
+  await userEvent.click(box);
+  expect((await screen.findByRole("alert")).textContent).toContain("disk full");
+  expect(box.checked).toBe(true);
+});

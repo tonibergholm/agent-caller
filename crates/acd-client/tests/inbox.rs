@@ -24,6 +24,7 @@ async fn setup() -> (FakeServer, FakeConn, Arc<Inbox>) {
         hotkey: DEFAULT_HOTKEY.into(),
         show_idle: false,
         show_subagents: false,
+        show_hook_only: false,
         machines: vec![MachineEntry {
             key: "m1".into(),
             name: "Box".into(),
@@ -434,6 +435,7 @@ async fn duplicate_machine_is_hidden() {
         hotkey: DEFAULT_HOTKEY.into(),
         show_idle: false,
         show_subagents: false,
+        show_hook_only: false,
         machines: vec![],
     };
     for (key, name) in [("m1", "One"), ("m2", "Two")] {
@@ -1087,4 +1089,112 @@ async fn a_reply_countdown_survives_the_agent_turning_idle_with_idle_hidden() {
         .count();
     assert_eq!(sent, 1, "the reply was still delivered");
     view_until(&ib, "hidden once done", |v| v.cards.is_empty() && v.hidden_idle == 1).await;
+}
+
+fn hook_only_agent() -> Value {
+    let mut a = pending_agent();
+    a["id"] = "a3".into();
+    a["title"] = "hooked".into();
+    a["source"] = "hooks".into();
+    a["pending"]["id"] = "r3".into();
+    a["pending"]["agent_id"] = "a3".into();
+    a
+}
+
+fn quiet_hook_only_agent() -> Value {
+    let mut a = hook_only_agent();
+    a["state"] = "working".into();
+    a["pending"] = Value::Null;
+    a
+}
+
+#[tokio::test]
+async fn hook_only_agents_show_with_a_request_and_notify_as_before() {
+    let (_f, c, ib) = setup().await;
+    let mut events = ib.events();
+    let mut quiet = quiet_hook_only_agent();
+    quiet["id"] = "a4".into();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), quiet, quiet_hook_only_agent()]}))
+        .await;
+    view_until(&ib, "quiet hook-only hidden", |v| {
+        v.cards.len() == 1 && v.cards[0].agent.id == "a1" && v.tray.needs_you == 1
+    })
+    .await;
+    assert!(!ib.view().borrow().show_hook_only);
+    // A request on a hook-only agent shows and notifies.
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":hook_only_agent()}))
+        .await;
+    c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":4,"request":hook_only_agent()["pending"]}))
+        .await;
+    view_until(&ib, "hook-only request shown", |v| {
+        v.cards.iter().any(|c| c.agent.id == "a3" && c.answerable) && v.tray.needs_you == 2
+    })
+    .await;
+    let mut notified = false;
+    while let Ok(e) = events.try_recv() {
+        notified |= matches!(e, InboxEvent::RequestOpened { ref request_id, .. } if request_id == "r3");
+    }
+    assert!(notified, "the hook-only request notified");
+    // Once it resolves the card goes away again.
+    let mut quiet_again = quiet_hook_only_agent();
+    quiet_again["id"] = "a3".into();
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":5,"agent":quiet_again}))
+        .await;
+    view_until(&ib, "hidden again", |v| v.cards.len() == 1 && v.tray.needs_you == 1).await;
+    ib.set_show_hook_only(true).unwrap();
+    view_until(&ib, "all shown", |v| v.show_hook_only && v.cards.len() == 3).await;
+}
+
+#[tokio::test]
+async fn show_hook_only_is_remembered() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("settings.json");
+    let ib = empty_inbox(Arc::new(MemorySecrets::default()), Some(path.clone()));
+    assert!(!Settings::load_or_init(&path).unwrap().show_hook_only);
+    ib.set_show_hook_only(true).unwrap();
+    assert!(Settings::load_or_init(&path).unwrap().show_hook_only);
+    assert!(ib.settings().show_hook_only);
+}
+
+#[tokio::test]
+async fn a_countdown_keeps_a_hook_only_card_visible_after_its_request_resolves() {
+    let (_f, c, ib) = setup().await;
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[hook_only_agent()]}))
+        .await;
+    view_until(&ib, "hook-only card", |v| v.cards.iter().any(|c| c.key == "m1/a3")).await;
+    ib.reply("m1/a3", "next".into()).unwrap();
+    view_until(&ib, "counting", |v| v.actions.len() == 1).await;
+    let mut quiet = quiet_hook_only_agent();
+    quiet["id"] = "a3".into();
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":quiet}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let v = ib.view().borrow().clone();
+    assert_eq!(v.actions.len(), 1, "the countdown is still running");
+    assert!(
+        v.cards.iter().any(|c| c.key == "m1/a3" && c.action.is_some()),
+        "the card stays while the countdown runs"
+    );
+}
+
+#[tokio::test]
+async fn turning_hook_only_off_cancels_countdowns_on_quiet_hook_only_cards() {
+    let (f, c, ib) = setup().await;
+    ib.set_show_hook_only(true).unwrap();
+    let mut quiet = quiet_hook_only_agent();
+    quiet["can_send"] = true.into();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), quiet]}))
+        .await;
+    view_until(&ib, "both shown", |v| v.cards.len() == 2).await;
+    ib.reply("m1/a3", "next".into()).unwrap();
+    view_until(&ib, "counting", |v| v.actions.len() == 1).await;
+    ib.set_show_hook_only(false).unwrap();
+    assert!(!ib.escape(), "no hidden action is left for Esc");
+    view_until(&ib, "no actions", |v| v.actions.is_empty() && v.cards.len() == 1).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        f.received().iter().filter(|v| v["type"] == "agent.send").count(),
+        0,
+        "the hidden countdown never fired"
+    );
 }

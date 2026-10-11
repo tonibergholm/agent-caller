@@ -41,6 +41,10 @@ pub struct Settings {
     /// default: they usually cannot be answered here.
     #[serde(default)]
     pub show_subagents: bool,
+    /// Show agents known only through hooks (no herdr pane, not T3). They
+    /// cannot be messaged, so they show only while a request needs the user.
+    #[serde(default)]
+    pub show_hook_only: bool,
     #[serde(default)]
     pub machines: Vec<MachineEntry>,
 }
@@ -154,6 +158,7 @@ impl Settings {
             hotkey: DEFAULT_HOTKEY.into(),
             show_idle: false,
             show_subagents: false,
+            show_hook_only: false,
             machines: vec![MachineEntry {
                 key: LOCAL_KEY.into(),
                 name: "This Mac".into(),
