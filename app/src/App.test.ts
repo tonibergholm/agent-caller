@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/svelte";
+import { cleanup, render, screen, waitFor } from "@testing-library/svelte";
 import { afterEach, expect, test } from "vitest";
 import App from "./App.svelte";
 import { card, fakeApi, view } from "./lib/fixtures";
@@ -52,4 +52,12 @@ test("the hud label never renders the panel", async () => {
   render(App, { api, label: "hud" });
   await new Promise((r) => setTimeout(r, 20));
   expect(screen.queryByText("Fix the build")).toBeNull();
+});
+
+test("the panel shows the typed command field only while voice and its debug input are on", async () => {
+  const api = fakeApi({ voice: { enabled: true, debug_input: true } });
+  render(App, { api, label: "panel" });
+  expect(await screen.findByRole("textbox", { name: "Voice command" })).toBeTruthy();
+  api.voiceSettings!({ enabled: false, debug_input: true });
+  await waitFor(() => expect(screen.queryByRole("textbox", { name: "Voice command" })).toBeNull());
 });

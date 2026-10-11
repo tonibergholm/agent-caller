@@ -4,6 +4,7 @@
   import type { MachineStatus } from "../lib/bindings/MachineStatus";
   import type { Api } from "../lib/ipc";
   import { statusText } from "../lib/format";
+  import { VOICE_OFF, type VoiceSettings } from "../lib/voice";
 
   let { api }: { api: Api } = $props();
 
@@ -12,6 +13,7 @@
   let showIdle = $state(false);
   let showSubagents = $state(false);
   let hotkey = $state("");
+  let voice = $state<VoiceSettings>(VOICE_OFF);
   let names = $state<Record<string, string>>({});
   let error = $state<string | null>(null);
   let added = $state<string | null>(null);
@@ -64,6 +66,10 @@
       const stored = await api.getHotkey();
       if (!hotkeyEdited) hotkey = stored;
     }, "Could not read the hotkey");
+    api.getVoiceSettings().then(
+      (s) => (voice = s),
+      (e) => (error ??= `Could not read the voice settings: ${message(e)}`),
+    );
     void (async () => {
       try {
         const un = await api.onView(applyView);
@@ -82,6 +88,16 @@
 
   const endpointText = (m: MachineEntryView) =>
     m.endpoint.kind === "local" ? "This Mac (acd.sock)" : `${m.endpoint.host}:${m.endpoint.port}`;
+
+  const setVoice = (box: HTMLInputElement, field: keyof VoiceSettings) =>
+    act(async () => {
+      try {
+        voice = await api.setVoiceSettings({ ...voice, [field]: box.checked });
+      } catch (e) {
+        box.checked = voice[field];
+        throw e;
+      }
+    }, "Could not change the voice settings");
 
   const importPairing = () =>
     act(async () => {
@@ -213,6 +229,23 @@
       Show subagent threads
     </label>
     <p class="note">Threads another agent started usually cannot be answered here. They are hidden, with their requests, counts and notifications, unless this is on.</p>
+  </section>
+
+  <section aria-label="Voice">
+    <label>
+      <input type="checkbox" checked={voice.enabled} onchange={(e) => setVoice(e.currentTarget, "enabled")} />
+      Voice control
+    </label>
+    <label>
+      <input
+        type="checkbox"
+        checked={voice.debug_input}
+        disabled={!voice.enabled}
+        onchange={(e) => setVoice(e.currentTarget, "debug_input")}
+      />
+      Show the typed command field
+    </label>
+    <p class="note">There is no microphone yet. Commands are typed into a field in the inbox panel and handled as if spoken. Nothing you type is logged or saved.</p>
   </section>
 </main>
 

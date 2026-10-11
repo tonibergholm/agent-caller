@@ -4,6 +4,7 @@
   import Panel from "./components/Panel.svelte";
   import Settings from "./components/Settings.svelte";
   import type { InboxView } from "./lib/bindings/InboxView";
+  import type { VoiceSettings } from "./lib/voice";
   import { tauriApi, type Api } from "./lib/ipc";
 
   const windowLabel = () => getCurrentWindow().label;
@@ -15,10 +16,13 @@
 
   let v = $state<InboxView | null>(null);
   let hotkey = $state<string | undefined>(undefined);
+  let voiceInput = $state(false);
+  const applyVoice = (s: VoiceSettings) => (voiceInput = s.enabled && s.debug_input);
   let loadError = $state<string | null>(null);
 
   onMount(() => {
     let off: (() => void) | undefined;
+    let offVoice: (() => void) | undefined;
     let closed = false;
     void (async () => {
       try {
@@ -32,9 +36,12 @@
       }
     })();
     api.getHotkey().then((h) => (hotkey = h), () => {});
+    api.onVoiceSettings(applyVoice).then((un) => (closed ? un() : (offVoice = un)), () => {});
+    api.getVoiceSettings().then(applyVoice, () => {});
     return () => {
       closed = true;
       off?.();
+      offVoice?.();
     };
   });
 </script>
@@ -44,7 +51,7 @@
 {:else if resolvedLabel === "hud"}
   <!-- The voice HUD (Task 15). Never the panel: a second panel would publish its own presentation. -->
 {:else if v}
-  <Panel view={v} {api} {hotkey} />
+  <Panel view={v} {api} {hotkey} {voiceInput} />
 {:else if loadError}
   <main role="alert">{loadError}</main>
 {/if}

@@ -1,8 +1,10 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
+import { tick } from "svelte";
 import { afterEach, expect, test } from "vitest";
 import Panel from "./Panel.svelte";
 import { card, view, fakeApi } from "../lib/fixtures";
+import type { MachineView } from "../lib/bindings/MachineView";
 import type { InboxView } from "../lib/bindings/InboxView";
 import { MAX_ANSWER_BYTES, MAX_REPLY_BYTES } from "../lib/limits";
 
@@ -614,4 +616,74 @@ test("a card with a countdown stays on screen when Done is collapsed or the filt
   await userEvent.click(screen.getByRole("button", { name: /^local/ }));
   expect(screen.getByText("Done box/d")).toBeTruthy();
   expect(container.querySelector("button.undo")).not.toBeNull();
+});
+
+const online = (key: string): MachineView => ({
+  key,
+  name: key,
+  machine_id: key,
+  status: { kind: "online" },
+  is_local: false,
+  duplicate_of: null,
+});
+
+test("the panel publishes what voice may target, in display order", async () => {
+  const api = fakeApi();
+  const cards = [card({ key: "m/a" }), card({ key: "m/d", group: "done" }), card({ key: "m/w", group: "working" })];
+  render(Panel, { view: view({ cards }), api });
+  await tick();
+  const first = api.presentations.at(-1)!;
+  expect(first).toMatchObject({ selected: "m/a", visible: ["m/a", "m/w"], machine_filter: null, done_collapsed: true });
+  await userEvent.click(screen.getByRole("button", { name: /Done/ }));
+  const opened = api.presentations.at(-1)!;
+  expect(opened.visible).toEqual(["m/a", "m/w", "m/d"]);
+  expect(opened.done_collapsed).toBe(false);
+  expect(opened.epoch).toBe(first.epoch);
+  expect(opened.version).toBeGreaterThan(first.version);
+});
+
+test("the machine filter is published", async () => {
+  const api = fakeApi();
+  const v = view({ machines: [online("local"), online("box")], cards: [card({ key: "local/a" }), card({ key: "box/b" })] });
+  render(Panel, { view: v, api });
+  await userEvent.click(screen.getByRole("button", { name: /^box/ }));
+  expect(api.presentations.at(-1)).toMatchObject({ machine_filter: "box", visible: ["box/b"] });
+});
+
+test("a voice selection selects the card and clears a filter that hides it", async () => {
+  const api = fakeApi();
+  const v = view({ machines: [online("local"), online("box")], cards: [card({ key: "local/a" }), card({ key: "box/b" })] });
+  render(Panel, { view: v, api });
+  await userEvent.click(screen.getByRole("button", { name: /^box/ }));
+  await tick();
+  api.voiceSelect!("local/a");
+  await tick();
+  expect(api.presentations.at(-1)).toMatchObject({ selected: "local/a", machine_filter: null });
+});
+
+test("the typed command field is hidden unless asked for", () => {
+  render(Panel, { view: view({ cards: [card()] }), api: fakeApi() });
+  expect(screen.queryByRole("textbox", { name: "Voice command" })).toBeNull();
+});
+
+test("Enter in the typed command field sends it to voice; its letters are not shortcuts", async () => {
+  const api = fakeApi();
+  const cards = [card({ key: "m/a", answerable: true, selectable_options: ["allow"] }), card({ key: "m/b" })];
+  render(Panel, { view: view({ cards }), api, voiceInput: true });
+  const field = screen.getByRole("textbox", { name: "Voice command" }) as HTMLTextAreaElement;
+  await userEvent.click(field);
+  await userEvent.keyboard("j1 approve{Enter}");
+  expect(api.calls).toEqual([["voiceTextInput", "j1 approve"]]);
+  expect(field.value).toBe("");
+  expect(api.presentations.at(-1)?.selected).toBe("m/a");
+});
+
+test("Esc in the typed command field leaves the field before it closes the panel", async () => {
+  const api = fakeApi();
+  render(Panel, { view: view({ cards: [card()] }), api, voiceInput: true });
+  await userEvent.click(screen.getByRole("textbox", { name: "Voice command" }));
+  await userEvent.keyboard("{Escape}");
+  expect(api.calls).toEqual([["escape"]]);
+  await userEvent.keyboard("{Escape}");
+  expect(api.calls).toEqual([["escape"], ["escape"], ["hide"]]);
 });

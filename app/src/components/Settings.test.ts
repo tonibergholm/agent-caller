@@ -265,3 +265,29 @@ test("the subagent toggle reflects the daemon's view and reverts when saving fai
   expect((await screen.findByRole("alert")).textContent).toContain("disk full");
   expect(box.checked).toBe(true);
 });
+
+test("the Voice section turns voice and the typed command field on", async () => {
+  const api = fakeApi();
+  render(Settings, { api });
+  const voice = (await screen.findByRole("checkbox", { name: "Voice control" })) as HTMLInputElement;
+  const typed = screen.getByRole("checkbox", { name: "Show the typed command field" }) as HTMLInputElement;
+  expect(voice.checked).toBe(false);
+  expect(typed.disabled).toBe(true);
+  await userEvent.click(voice);
+  expect(api.calls).toContainEqual(["setVoiceSettings", { enabled: true, debug_input: false }]);
+  expect(typed.disabled).toBe(false);
+  await userEvent.click(typed);
+  expect(api.calls).toContainEqual(["setVoiceSettings", { enabled: true, debug_input: true }]);
+});
+
+test("a failed voice change puts the box back and says why", async () => {
+  const api = fakeApi();
+  api.setVoiceSettings = async () => {
+    throw new Error("disk full");
+  };
+  render(Settings, { api });
+  const voice = (await screen.findByRole("checkbox", { name: "Voice control" })) as HTMLInputElement;
+  await userEvent.click(voice);
+  expect(voice.checked).toBe(false);
+  expect((await screen.findByRole("alert")).textContent).toContain("disk full");
+});

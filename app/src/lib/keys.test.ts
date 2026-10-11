@@ -95,4 +95,13 @@ describe("keyboard", () => {
     expect(normalize(view({ cards: [a] }), st).selected).toBe("m/a");
     expect(normalize(view({ cards: [] }), st).selected).toBe(null);
   });
+
+  test("Enter in the voice command field submits it; its letters are not shortcuts", () => {
+    const st = { selected: "m/a", replyFor: "m/b" };
+    const voice = { inField: true, field: { kind: "voice" as const, cardKey: null } };
+    expect(onKey(v, st, k("Enter", voice)).effect).toEqual({ kind: "submitVoice" });
+    expect(onKey(v, st, k("Enter", { ...voice, shift: true })).effect).toEqual({ kind: "none" });
+    expect(onKey(v, st, k("j", voice))).toEqual({ state: st, effect: { kind: "none" } });
+    expect(onKey(v, st, k("1", voice)).effect).toEqual({ kind: "none" });
+  });
 });
