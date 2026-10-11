@@ -182,8 +182,8 @@ The plan takes the highest level of its steps.
 
 | Level | When | User action |
 |---|---|---|
-| Countdown | fast path on the selected or only pending card; `cancel` | none; 2 s countdown, Esc or "cancel" stops it |
-| None | `read`, `summarize`, `select` | none (they change nothing) |
+| Countdown | fast-path `answer` on the selected or only pending card | none; 2 s countdown, Esc or "cancel" stops it |
+| None | `cancel`, `read`, `summarize`, `select` | none (`cancel` acts at once; the others change nothing) |
 | Confirm, then countdown | "yes always" options; a target the model inferred (not named, not selected, not the only pending card); `send` or `answer_text` longer than 120 characters; plans with more than one step | say "confirm" or press Enter |
 | Refused | read-only request, offline machine, hidden card, plan changed since shown | HUD shows why |
 
