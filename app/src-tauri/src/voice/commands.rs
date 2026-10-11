@@ -50,6 +50,7 @@ pub async fn voice_text_input(voice: State<'_, VoiceState>, text: String) -> Res
 #[tauri::command]
 pub fn voice_shown(window: WebviewWindow, voice: State<'_, VoiceState>, proposal_id: u64) {
     if !hud::is_hud(window.label()) {
+        tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
     }
     voice.controller.shown(proposal_id);
@@ -58,6 +59,7 @@ pub fn voice_shown(window: WebviewWindow, voice: State<'_, VoiceState>, proposal
 #[tauri::command]
 pub fn voice_confirm(window: WebviewWindow, voice: State<'_, VoiceState>, proposal_id: u64) {
     if !hud::is_hud(window.label()) {
+        tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
     }
     voice.controller.confirm(proposal_id);
@@ -66,6 +68,7 @@ pub fn voice_confirm(window: WebviewWindow, voice: State<'_, VoiceState>, propos
 #[tauri::command]
 pub fn voice_choose(window: WebviewWindow, voice: State<'_, VoiceState>, choice_id: u64, index: usize) {
     if !hud::is_hud(window.label()) {
+        tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
     }
     voice.controller.choose(choice_id, index);
@@ -78,6 +81,7 @@ pub fn voice_choose(window: WebviewWindow, voice: State<'_, VoiceState>, choice_
 #[tauri::command]
 pub fn voice_cancel(window: WebviewWindow, voice: State<'_, VoiceState>, id: Option<u64>) {
     if !hud::is_hud(window.label()) {
+        tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
     }
     if let Some(id) = id {

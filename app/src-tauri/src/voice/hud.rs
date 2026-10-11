@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use acd_voice::hud::{Hud, HudEvent};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Size, WebviewUrl, WebviewWindow};
-use tauri_nspanel::{CollectionBehavior, ManagerExt, PanelBuilder, PanelHandle, PanelLevel, StyleMask, tauri_panel};
+use tauri_nspanel::{CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask, tauri_panel};
 
 use crate::frame::Frame;
 
@@ -57,12 +57,26 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         .corner_radius(8.0)
         .build()?;
     let events = HudPanelEvents::new();
-    events.window_did_resign_key(|_| {
+    let handle = app.clone();
+    events.window_did_resign_key(move |_| {
         // Our own release clears HANDOFF first, so this fires with it set
         // only when the user moved focus elsewhere: end the handoff and do
         // not pull the inbox panel back to key later.
         if HANDOFF.swap(false, Ordering::SeqCst) {
-            INBOX_WAS_OPEN.store(false, Ordering::SeqCst);
+            let inbox_was_open = INBOX_WAS_OPEN.swap(false, Ordering::SeqCst);
+            if inbox_was_open {
+                // The old click-away behaviour: the inbox closes unless the
+                // click landed on it. Checked after key has settled.
+                let inner = handle.clone();
+                let _ = handle.run_on_main_thread(move || {
+                    let inbox_is_key = inner
+                        .get_webview_panel("panel")
+                        .is_ok_and(|p| p.as_panel().isKeyWindow());
+                    if !inbox_is_key {
+                        crate::panel::hide(&inner);
+                    }
+                });
+            }
         }
         false
     });
@@ -114,17 +128,19 @@ pub fn present(app: &AppHandle, seq: u64, hud: &Hud) -> bool {
         let after = fade_delay(hud);
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(after).await;
-            if LAST_SEQ.load(Ordering::SeqCst) != seq {
-                return;
-            }
             let inner = handle.clone();
+            // The check runs on the main thread, in order with `present`'s
+            // closures, so a newer state cannot be hidden by a late fade.
             if let Err(error) = handle.run_on_main_thread(move || {
+                if !fade_applies(LAST_SEQ.load(Ordering::SeqCst), seq) {
+                    return;
+                }
                 apply(&inner, true, false);
+                if let Err(error) = inner.emit("voice://hud-clear", seq) {
+                    tracing::error!(%error, "could not emit the HUD fade");
+                }
             }) {
                 tracing::error!(%error, "could not dispatch the HUD fade");
-            }
-            if let Err(error) = handle.emit("voice://hud-clear", seq) {
-                tracing::error!(%error, "could not emit the HUD fade");
             }
         });
     }
@@ -156,6 +172,11 @@ pub fn place_on(screen: Frame, size: (f64, f64)) -> Frame {
     }
 }
 
+/// A fade hides the HUD only if no newer state arrived since it was set.
+fn fade_applies(last: u64, seq: u64) -> bool {
+    last == seq
+}
+
 /// A state is emitted only once its panel is on screen; hiding needs no
 /// panel.
 fn should_emit(hidden: bool, presented: bool) -> bool {
@@ -169,11 +190,14 @@ fn apply(app: &AppHandle, hidden: bool, wants_key: bool) -> bool {
         return false;
     };
     if hidden {
-        release_key(app, &panel);
+        release_key(app);
         panel.hide();
         return true;
     }
-    if let Some(window) = app.get_webview_window(LABEL) {
+    // Placed once per appearance, so it does not jump screens mid-interaction.
+    if !panel.is_visible()
+        && let Some(window) = app.get_webview_window(LABEL)
+    {
         position(&window);
     }
     if wants_key {
@@ -182,7 +206,7 @@ fn apply(app: &AppHandle, hidden: bool, wants_key: bool) -> bool {
             panel.show_and_make_key();
         }
     } else {
-        release_key(app, &panel);
+        release_key(app);
         panel.order_front_regardless();
     }
     panel.is_visible()
@@ -190,11 +214,10 @@ fn apply(app: &AppHandle, hidden: bool, wants_key: bool) -> bool {
 
 /// Ends the handoff: key goes back to the inbox panel if it was open,
 /// else to whatever macOS picks for the frontmost app.
-fn release_key(app: &AppHandle, hud: &PanelHandle<tauri::Wry>) {
+fn release_key(app: &AppHandle) {
     if !HANDOFF.swap(false, Ordering::SeqCst) {
         return;
     }
-    hud.resign_key_window();
     if INBOX_WAS_OPEN.swap(false, Ordering::SeqCst)
         && crate::panel::is_visible()
         && let Ok(inbox) = app.get_webview_panel("panel")
@@ -226,6 +249,12 @@ mod tests {
         assert!(should_emit(false, true));
         assert!(!should_emit(false, false), "a panel that failed to appear: emit nothing, fail closed");
         assert!(should_emit(true, false), "hiding needs no panel");
+    }
+
+    #[test]
+    fn a_late_fade_never_hides_a_newer_state() {
+        assert!(fade_applies(7, 7));
+        assert!(!fade_applies(8, 7));
     }
 
     #[test]
