@@ -186,7 +186,8 @@ Rust resolves the target and records how it was found (provenance):
 
 Visibility: subagent cards while subagents are hidden are never targets.
 A card hidden only by the machine filter can be targeted only when named;
-such a step always needs confirmation and the HUD shows its machine. A
+such a mutation always needs confirmation and the HUD shows its machine.
+A read or select on it needs none (§6.1). A
 card in a collapsed Done section, and an idle agent hidden by the idle
 setting, can be the target of `send` only, and only when named; the step
 always needs confirmation and the HUD shows the full target and payload.

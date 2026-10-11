@@ -2,5 +2,6 @@
 //! logging code: every voice decision is plain Rust that Linux CI tests.
 pub mod fast;
 pub mod refusal;
+pub mod router;
 pub mod snapshot;
 pub mod text;
