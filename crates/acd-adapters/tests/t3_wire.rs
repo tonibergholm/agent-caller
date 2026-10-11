@@ -1,5 +1,5 @@
 use acd_adapters::t3::wire::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn fx(name: &str) -> String {
     std::fs::read_to_string(format!(
@@ -979,4 +979,37 @@ fn a_waiting_postturn_thread_without_a_request_is_working() {
         agent_obs(&t, None, &HashSet::new()).state,
         AgentState::Working
     );
+}
+
+#[test]
+fn shell_visibility_fields_default_to_visible() {
+    let now = chrono::Utc::now();
+    let t = |v: Value| ShellThread::decode(&v).unwrap();
+    assert!(t(json!({"id": "a"})).visible(now));
+    assert!(
+        t(
+            json!({"id": "a", "lineage": null, "settledAt": null, "snoozedUntil": null,
+            "pendingBackgroundTasks": null, "settledOverride": 7})
+        )
+        .visible(now)
+    );
+    let lineage = |rel: Value| json!({"id": "a", "lineage": {"parentThreadId": "p", "relationshipToParent": rel}});
+    assert!(!t(lineage(json!("subagent"))).visible(now));
+    for rel in [json!("fork"), json!(null), json!("other"), json!(3)] {
+        assert!(t(lineage(rel)).visible(now));
+    }
+    assert!(!t(json!({"id": "a", "settledOverride": "settled"})).visible(now));
+    for o in [json!("active"), json!(null)] {
+        assert!(
+            t(json!({"id": "a", "settledOverride": o, "settledAt": "2026-10-01T00:00:00Z"}))
+                .visible(now)
+        );
+    }
+    let hidden = json!({"id": "a", "settledOverride": "settled"});
+    let mut waiting = hidden.clone();
+    waiting["status"] = json!("waiting");
+    assert!(!t(waiting).visible(now), "bare waiting does not reveal");
+    let mut req = hidden;
+    req["pendingRuntimeRequest"] = json!({"id": "r", "kind": "command"});
+    assert!(t(req).visible(now));
 }

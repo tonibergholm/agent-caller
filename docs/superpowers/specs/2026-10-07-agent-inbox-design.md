@@ -356,7 +356,7 @@ the terminal first, resolves `by: "terminal"`. acd never relabels it as
     sends `agent.mark_seen`.
 - An agent is removed when:
   - its pane closes;
-  - its T3 thread is archived or deleted;
+  - its T3 thread is archived or deleted, or is hidden (§6.5, "Visibility");
   - for a hooks-only agent, 10 minutes after `SessionEnd`, or after 24 hours
     with no event.
 
@@ -1196,6 +1196,43 @@ Evidence: gate 3, a live check on T3 `v0.0.46-nightly.20261008.2801`
   tags, bad literals) or `Interrupt`.
 - `Ping` gets `Pong`. The server never pings, so acd does. A server
   shutdown closes sockets with code 1001.
+- acd accepts messages and frames up to 256 MiB (and logs at info any
+  message over 16 MiB, size only). A thread stream starts with
+  the full thread snapshot, and a busy thread exceeds 16 MiB (one real
+  snapshot was 23.7 MB), so a lower cap dropped the connection on every
+  discovery pass.
+
+**Visibility.** The shell lists every thread, including subagent threads
+and ones the user has put away. acd shows a thread only when all hold:
+
+- `lineage.relationshipToParent` is not `"subagent"`. Forks also set
+  `parentThreadId`, but they are threads the user works in and stay
+  visible;
+- it is not settled: `settledOverride` is not `"settled"` (T3 writes `null`,
+  `"settled"` or `"active"`; unsettling or pinning writes `"active"`). acd
+  ignores `settledAt`;
+- it is not snoozed: `snoozedUntil` is null, absent or in the past.
+
+A hidden thread is treated like an archived one: no agent, no discovery
+stream, no request stream. It becomes visible anyway while the shell lists
+a `pendingRuntimeRequest` for it (a bare `waiting` status does not reveal
+it). Its streams then open as for any visible thread. While acd holds an
+open request for the thread, the agent stays until that request has ended,
+so the request resolves with its real outcome (`terminal` or `inbox`) and
+is not lost with the agent. An answer still in flight keeps it too, and a
+fresh thread snapshot that no longer lists the request ends it `lost`; then the thread is hidden again. acd keeps the
+shell entries of hidden threads, so a snooze that ends shows the thread on
+the next tick. A hidden thread keeps the session claim acd learned while it
+was visible, so the Codex hooks adapter still treats its session as
+T3-owned, and a settled T3 thread resumed in a herdr pane stays T3-owned. A
+thread that was never visible has no claim, because the shell does not carry
+the session id (only a thread stream does). Its Codex hook events can reach
+acd but create no agent without a herdr pane binding; a same-directory herdr
+Codex pane binds only when its screen shows the same dialog. Missing or
+unreadable fields count as visible, so older T3 versions keep working.
+
+A shell `status` of `completed` with a non-empty `pendingBackgroundTasks`
+maps to `working`: T3 still shows that thread as busy.
 
 **Contract.**
 
@@ -1905,6 +1942,8 @@ result in the PR description):
     with its state. When it is blocked, its raw screen is shown read-only.
 
 ## 15. Review log
+
+**P6: T3 thread visibility and frame size, 2026-10-11.** A busy thread's snapshot (23.7 MB) exceeded the 16 MiB WebSocket cap and flapped the T3 connection, and subagent, settled and snoozed threads flooded the inbox with 290 agents. §6.5 now raises the cap to 256 MiB, adds the visibility rule and maps `completed` with pending background tasks to `working`; §5 "Agent rules" removes hidden threads.
 
 **P5 Task 18, 2026-10-08.** Records the decided Mac app details in §8, adds the P5 production-bundle checklist to §13, and adds TLS-backed end-to-end Inbox/Core tests (docs/superpowers/plans/2026-10-08-p5-mac-app.md).
 

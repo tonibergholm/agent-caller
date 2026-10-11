@@ -1,5 +1,6 @@
 //! T3 wire types (orchestration protocol 2, gate 3). Unknown fields are
 //! ignored; unknown tags and kinds decode as `Other`.
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -313,9 +314,63 @@ pub struct ShellThread {
     pub deleted_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// `lineage.parentThreadId` is set on subagent threads. Kept as raw
+    /// values so an unexpected shape never fails the entry: unknown or
+    /// missing means "visible" (older T3 versions).
+    #[serde(default)]
+    pub lineage: Option<Value>,
+    /// `null`, `"settled"` or `"active"` (T3 writes `"active"` when the user
+    /// unsettles or pins a thread).
+    #[serde(default)]
+    pub settled_override: Option<Value>,
+    #[serde(default)]
+    pub snoozed_until: Option<Value>,
+    /// Non-empty while background work keeps a `completed` thread busy.
+    #[serde(default)]
+    pub pending_background_tasks: Option<Value>,
 }
 
 impl ShellThread {
+    pub fn has_background_tasks(&self) -> bool {
+        match &self.pending_background_tasks {
+            Some(Value::Array(a)) => !a.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Only `relationshipToParent: "subagent"` hides a thread. A fork also
+    /// has a `parentThreadId` but is a thread the user works in.
+    fn is_subagent(&self) -> bool {
+        self.lineage
+            .as_ref()
+            .and_then(|l| l.get("relationshipToParent"))
+            .and_then(Value::as_str)
+            == Some("subagent")
+    }
+
+    fn is_settled(&self) -> bool {
+        self.settled_override.as_ref().and_then(Value::as_str) == Some("settled")
+    }
+
+    fn is_snoozed(&self, now: DateTime<Utc>) -> bool {
+        self.snoozed_until
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .is_some_and(|until| until > now)
+    }
+
+    /// The thread has an open request for the user.
+    pub fn needs_user(&self) -> bool {
+        self.pending_runtime_request.is_some()
+    }
+
+    /// Whether acd shows this thread (spec 6.5, "Visibility"): a root,
+    /// unsettled, unsnoozed thread, or any thread that needs the user.
+    pub fn visible(&self, now: DateTime<Utc>) -> bool {
+        self.needs_user() || !(self.is_subagent() || self.is_settled() || self.is_snoozed(now))
+    }
+
     pub fn decode(v: &Value) -> Result<ShellThread, serde_json::Error> {
         ShellThread::deserialize(v)
     }

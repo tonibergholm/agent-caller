@@ -382,7 +382,7 @@ impl ThreadState {
     fn is_working(&self) -> bool {
         self.shell
             .as_ref()
-            .is_some_and(|s| map::state(s.status.as_deref(), false).0 == AgentState::Working)
+            .is_some_and(|s| map::shell_state(s, false).0 == AgentState::Working)
     }
 
     fn updated(&self) -> Option<DateTime<Utc>> {
@@ -406,6 +406,13 @@ struct Reconciler {
     shell_synced: bool,
     projects: HashMap<String, Project>,
     threads: HashMap<String, ThreadState>,
+    /// Shell entries of hidden threads (subagent, settled, snoozed): no agent
+    /// and no streams, kept to notice a snooze ending or a thread needing us.
+    hidden_shells: HashMap<String, ShellThread>,
+    /// Session claims kept for threads that became hidden after acd learned
+    /// their (provider thread, session id): the Codex hooks adapter still
+    /// sees them as T3-owned and creates no duplicate agent.
+    hidden_owners: HashMap<String, (String, String)>,
     /// Stream id -> thread id.
     streams: HashMap<String, String>,
     /// Unreadable items since the source was last clear of them.
@@ -440,6 +447,8 @@ impl Reconciler {
             shell_synced: false,
             projects: HashMap::new(),
             threads: HashMap::new(),
+            hidden_shells: HashMap::new(),
+            hidden_owners: HashMap::new(),
             streams: HashMap::new(),
             decode_errors: 0,
             last_decode_error: None,
@@ -605,6 +614,8 @@ impl Reconciler {
             return;
         }
         self.expire_degradations(now);
+        self.reveal_unsnoozed(conn);
+        self.hide_settled_requests(conn);
         let expired: Vec<String> = self
             .threads
             .iter()
@@ -707,7 +718,7 @@ impl Reconciler {
                     return;
                 }
                 match ShellThread::decode(&thread) {
-                    Ok(t) => self.put_shell(t),
+                    Ok(t) => self.apply_shell(conn, t),
                     Err(_) => self.decode_error("shell item", v, thread["id"].as_str()),
                 }
             }
@@ -769,7 +780,7 @@ impl Reconciler {
             match ShellThread::decode(entry) {
                 Ok(t) => {
                     seen.insert(t.id.clone());
-                    self.put_shell(t);
+                    self.apply_shell(conn, t);
                 }
                 Err(_) => {
                     let id = entry["id"].as_str();
@@ -787,6 +798,16 @@ impl Reconciler {
             .cloned()
             .collect();
         for id in vanished {
+            self.gone(conn, &id);
+        }
+        self.hidden_shells.retain(|id, _| seen.contains(id));
+        let stale: Vec<String> = self
+            .hidden_owners
+            .keys()
+            .filter(|id| !seen.contains(*id))
+            .cloned()
+            .collect();
+        for id in stale {
             self.gone(conn, &id);
         }
         self.shell_cursor = Some(snapshot.snapshot_sequence);
@@ -815,6 +836,99 @@ impl Reconciler {
         self.refresh_status();
     }
 
+    /// Shows a visible thread and treats a hidden one like an archived
+    /// thread: no agent, no discovery stream, no request stream. A thread
+    /// with an open request stays until that request has ended
+    /// (`hide_settled_requests` hides it then), so the request resolves with
+    /// its real outcome instead of being lost with the agent.
+    fn apply_shell(&mut self, conn: &Conn, shell: ShellThread) {
+        // An answer in flight keeps the agent too: it is pending in the core
+        // until T3 acks the command.
+        let keep = self
+            .threads
+            .get(&shell.id)
+            .is_some_and(|t| t.open.is_some())
+            || self
+                .core
+                .agent(&map::agent_id(&shell.id))
+                .is_some_and(|a| a.pending.is_some());
+        if keep || shell.visible(Utc::now()) {
+            let id = shell.id.clone();
+            self.hidden_shells.remove(&id);
+            self.put_shell(shell);
+            if let Some(owner) = self.hidden_owners.remove(&id) {
+                if let Some(t) = self.threads.get_mut(&id)
+                    && t.owner.is_none()
+                {
+                    // Known, so the reveal does not pull a snapshot again.
+                    t.discovery = Discovery::Known {
+                        provider_thread: owner.0.clone(),
+                    };
+                    t.owner = Some(owner);
+                }
+                self.publish_owner(&id);
+            }
+            return;
+        }
+        let id = shell.id.clone();
+        // The claim outlives the agent, unless the provider thread changed.
+        let owner = self
+            .threads
+            .get(&id)
+            .and_then(|t| t.owner.clone())
+            .or_else(|| self.hidden_owners.get(&id).cloned())
+            .filter(|(pt, _)| shell.active_provider_thread_id.as_deref() == Some(pt.as_str()));
+        match owner {
+            Some(owner) => {
+                self.retire(conn, &id, true);
+                self.hidden_owners.insert(id.clone(), owner);
+            }
+            None => {
+                self.hidden_owners.remove(&id);
+                self.retire(conn, &id, false);
+            }
+        }
+        self.hidden_shells.insert(id, shell);
+    }
+
+    /// Hides threads that were kept for an open request once the request
+    /// has ended in the core.
+    fn hide_settled_requests(&mut self, conn: &Conn) {
+        let now = Utc::now();
+        let ready: Vec<ShellThread> = self
+            .threads
+            .iter()
+            .filter(|(id, t)| {
+                t.open.is_none()
+                    && t.shell.as_ref().is_some_and(|s| !s.visible(now))
+                    && self
+                        .core
+                        .agent(&map::agent_id(id))
+                        .is_none_or(|a| a.pending.is_none())
+            })
+            .filter_map(|(_, t)| t.shell.clone())
+            .collect();
+        for shell in ready {
+            self.apply_shell(conn, shell);
+        }
+    }
+
+    /// A snooze that ended shows the thread again.
+    fn reveal_unsnoozed(&mut self, conn: &Conn) {
+        let now = Utc::now();
+        let ready: Vec<String> = self
+            .hidden_shells
+            .iter()
+            .filter(|(_, s)| s.visible(now))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ready {
+            if let Some(shell) = self.hidden_shells.remove(&id) {
+                self.apply_shell(conn, shell);
+            }
+        }
+    }
+
     fn put_shell(&mut self, shell: ShellThread) {
         let id = shell.id.clone();
         let t = self
@@ -825,7 +939,7 @@ impl Reconciler {
             // A changed entry retries a null idle thread at once. A working
             // thread's entry changes all the time, so an overflow thread
             // waits for `relearn_after` unless its provider thread changes.
-            let working = map::state(shell.status.as_deref(), false).0 == AgentState::Working;
+            let working = map::shell_state(&shell, false).0 == AgentState::Working;
             let reset = match &t.discovery {
                 Discovery::NotLoaded {
                     provider_thread, ..
@@ -898,7 +1012,19 @@ impl Reconciler {
     }
 
     fn gone(&mut self, conn: &Conn, thread_id: &str) {
+        self.hidden_shells.remove(thread_id);
+        self.hidden_owners.remove(thread_id);
+        self.retire(conn, thread_id, false);
+    }
+
+    /// Removes the thread's agent and streams. `keep_claim` leaves its
+    /// session claim in place (a hidden thread, see `hidden_owners`).
+    fn retire(&mut self, conn: &Conn, thread_id: &str, keep_claim: bool) {
+        let agent_id = map::agent_id(thread_id);
         let Some(t) = self.threads.remove(thread_id) else {
+            if !keep_claim {
+                self.shared.sessions.remove_agent(&agent_id);
+            }
             return;
         };
         self.shared.targets.retain_thread(thread_id, None);
@@ -906,13 +1032,14 @@ impl Reconciler {
             conn.interrupt(&s);
             self.streams.remove(&s);
         }
-        let agent_id = map::agent_id(thread_id);
         self.shared
             .threads
             .write()
             .expect("threads")
             .remove(&agent_id);
-        self.shared.sessions.remove_agent(&agent_id);
+        if !keep_claim {
+            self.shared.sessions.remove_agent(&agent_id);
+        }
         self.core.observe(Observation::AgentGone { agent_id });
     }
 
@@ -1000,6 +1127,7 @@ impl Reconciler {
         };
         let mut skipped = 0;
         let mut finish_discovery = false;
+        let mut synchronized = false;
         match item {
             // A snapshot acd cannot read leaves nothing to keep the stream
             // for: stall and retry with a fresh one after `relearn_after`.
@@ -1033,6 +1161,7 @@ impl Reconciler {
             }
             Ok(ThreadItem::Synchronized {}) => {
                 t.sync_deadline = None;
+                synchronized = true;
                 finish_discovery = t.class == Some(Class::Discovery);
             }
             Ok(ThreadItem::Other) => {
@@ -1045,8 +1174,41 @@ impl Reconciler {
         }
         self.publish_owner(thread_id);
         self.reconcile_requests(thread_id);
+        if synchronized {
+            // A fresh snapshot that does not list the request means T3 no
+            // longer has it: end it, or the thread would be kept forever.
+            let missing = self.threads.get(thread_id).and_then(|t| {
+                let open = t.open.clone()?;
+                t.detail
+                    .as_ref()
+                    .filter(|d| d.request_status(&open).is_none())
+                    .map(|_| open)
+            });
+            if let Some(open) = missing {
+                self.end_open(thread_id, open, ResolvedBy::Lost);
+            }
+        }
         if finish_discovery {
             self.finish_discovery(conn, thread_id);
+        }
+    }
+
+    /// Ends the request acd surfaced for the thread and forgets it.
+    fn end_open(&mut self, thread_id: &str, open: String, by: ResolvedBy) {
+        let agent_id = map::agent_id(thread_id);
+        if let Some(t) = self.threads.get_mut(thread_id) {
+            t.open = None;
+            t.ended.insert(open.clone());
+        }
+        self.shared.targets.remove(&open);
+        if let Some(rid) = self.core.request_id_for(&agent_id, &CorrelationKey(open)) {
+            // Queue independently of the current status: a claim can win
+            // between the detail observation and RequestEndedIfOpen.
+            self.pending_ends.enqueue(rid.clone(), by);
+            self.core.observe(Observation::RequestEndedIfOpen {
+                request_id: rid,
+                by,
+            });
         }
     }
 
@@ -1081,20 +1243,7 @@ impl Reconciler {
             } else {
                 ResolvedBy::Lost
             };
-            if let Some(t) = self.threads.get_mut(thread_id) {
-                t.open = None;
-                t.ended.insert(open.clone());
-            }
-            self.shared.targets.remove(&open);
-            if let Some(rid) = self.core.request_id_for(&agent_id, &CorrelationKey(open)) {
-                // Queue independently of the current status: a claim can win
-                // between the detail observation and RequestEndedIfOpen.
-                self.pending_ends.enqueue(rid.clone(), by);
-                self.core.observe(Observation::RequestEndedIfOpen {
-                    request_id: rid.clone(),
-                    by,
-                });
-            }
+            self.end_open(thread_id, open, by);
         }
 
         let ended = self
