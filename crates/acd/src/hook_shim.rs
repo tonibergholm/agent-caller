@@ -28,12 +28,13 @@ pub fn main(args: &[OsString]) -> i32 {
     0
 }
 
-/// Inside Codex's own timeouts (§6.3: 1 s for PermissionRequest, 2 s else).
+/// Inside Codex's own timeouts (§6.3: 1 s for PermissionRequest, 2 s else)
+/// and §14.6: a stalled acd adds at most 1 s to each lifecycle hook.
 fn budget(event: &str) -> Duration {
     if event == "PermissionRequest" {
         Duration::from_millis(800)
     } else {
-        Duration::from_millis(1500)
+        Duration::from_millis(900)
     }
 }
 
