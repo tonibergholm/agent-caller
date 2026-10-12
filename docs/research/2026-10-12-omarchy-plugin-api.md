@@ -292,3 +292,20 @@ Three gaps turned up on the real machine and were fixed:
   broken `model.mjs`; later installs of the fixed file were not picked up
   ("Local plugin changed, reloading" still logged the old error). The shell
   must be restarted once.
+
+## Live check (Task 22)
+
+Run by the user on omarchy (Omarchy 4, Hyprland), 2026-10-12, with the plugin
+and `acd-inbox` service installed by `acd-inbox install`. The user reports
+that all checks worked.
+
+| Check | Result |
+|---|---|
+| Shell restart, bar glyph opens the panel | ok |
+| 1. Real Claude approval answered from the panel (digit key, 2 s countdown); Esc during a countdown sends nothing | ok |
+| 2. Notification while the panel is closed, Open shows the card; none while the panel is open | ok |
+| 3. `omarchy-restart-shell` during a countdown sends nothing; the panel reconnects | ok |
+
+Not run in this pass: pairing minos from the panel with keyring lock and
+unlock recovery, and the typing-while-another-agent-updates focus cases.
+Both are covered by unit and QML-model tests.
