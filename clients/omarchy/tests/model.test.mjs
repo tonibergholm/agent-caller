@@ -106,6 +106,13 @@ test("option rows follow the card's flags", () => {
   noRule.agent.pending = pending({ options: [{ id: "always", label: "Always", description: null, effect: "allow_always" }] });
   noRule.selectable_options = ["always"];
   assert.equal(M.optionRows(noRule)[0].pickable, false, "an always-allow option without its rule cannot be picked");
+  for (const description of ["", "   "]) {
+    const blank = card("m1/a");
+    blank.agent.pending = pending({ options: [{ id: "always", label: "Always", description, effect: "allow_always" }] });
+    blank.selectable_options = ["always"];
+    assert.equal(M.optionRows(blank)[0].rule, null, JSON.stringify(description));
+    assert.equal(M.optionRows(blank)[0].pickable, false, "a blank rule cannot be picked: " + JSON.stringify(description));
+  }
   const readOnly = card("m1/a", "request", { answerable: false });
   assert.ok(M.optionRows(readOnly).every((r) => !r.pickable));
 });
@@ -249,4 +256,15 @@ test("card meta and the countdown bar", () => {
   assert.deepEqual(M.cardMeta(c), { kind: "Claude", machine: "Box", project: "api", title: "agent", badge: "herdr", tag: "BASH APPROVAL" });
   assert.equal(M.countdownFraction({ fires_at_ms: 2000 }, 1000), 0.5);
   assert.equal(M.countdownFraction({ fires_at_ms: 0 }, 1000), 0);
+});
+
+test("a reader that overflowed stays overflowed and holds no old text", () => {
+  const r = new M.LineReader(8);
+  assert.equal(r.push("123456789\nabc\n").overflow, true);
+  assert.deepEqual(r.push("ok\n"), { lines: [], overflow: true }, "each connection needs a new reader");
+});
+
+test("the header counts the same sections as the panel", () => {
+  const v = view([card("m1/a"), card("m1/b", "working"), card("m1/c", "unknown")]);
+  assert.equal(M.headerText(v), "Inbox · 1 need you · 2 working");
 });

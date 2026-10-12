@@ -39,19 +39,28 @@ export class LineReader {
   constructor(max = MAX_LINE) {
     this.max = max;
     this.buf = "";
+    this.dead = false;
+  }
+
+  overflowed(lines) {
+    this.dead = true;
+    this.buf = "";
+    return { lines, overflow: true };
   }
 
   push(text) {
+    // Overflow is final: each connection gets a new reader.
+    if (this.dead) return { lines: [], overflow: true };
     this.buf += text;
     const lines = [];
     let i;
     while ((i = this.buf.indexOf("\n")) >= 0) {
       const line = this.buf.slice(0, i);
       this.buf = this.buf.slice(i + 1);
-      if (tooLong(line, this.max)) return { lines, overflow: true };
+      if (tooLong(line, this.max)) return this.overflowed(lines);
       if (line.length > 0) lines.push(line);
     }
-    return { lines, overflow: tooLong(this.buf, this.max) };
+    return tooLong(this.buf, this.max) ? this.overflowed(lines) : { lines, overflow: false };
   }
 }
 
@@ -88,7 +97,7 @@ export function sections(cards, machine) {
 }
 
 export function headerText(view) {
-  const working = view.cards.filter((c) => c.agent.state === "working").length;
+  const working = sections(view.cards, null).working.length;
   return `Inbox · ${view.tray.needs_you} need you · ${working} working`;
 }
 
@@ -176,7 +185,7 @@ export function optionRows(card) {
   const p = card.agent.pending;
   if (!p) return [];
   return p.options.map((o, i) => {
-    const rule = o.effect === "allow_always" ? (o.description ?? null) : null;
+    const rule = o.effect === "allow_always" && o.description?.trim() ? o.description : null;
     const pickable =
       card.answerable && i < 9 && card.selectable_options.includes(o.id) && (o.effect !== "allow_always" || rule !== null);
     return { number: i + 1, id: o.id, label: o.label, rule, pickable };
