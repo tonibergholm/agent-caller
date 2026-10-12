@@ -71,6 +71,8 @@ pub enum CloseReason {
     WriteTimeout,
     WriteError,
     ReplyOverflow,
+    /// The server task or the read task was dropped or aborted.
+    Shutdown,
 }
 
 impl CloseReason {
@@ -83,6 +85,7 @@ impl CloseReason {
             CloseReason::WriteTimeout => "write_timeout",
             CloseReason::WriteError => "write_error",
             CloseReason::ReplyOverflow => "reply_overflow",
+            CloseReason::Shutdown => "shutdown",
         }
     }
 }
@@ -318,6 +321,9 @@ impl Service {
         let me = self.clone();
         let outcomes = self.inbox.action_outcomes();
         tokio::spawn(async move {
+            // Dropped with the task (abort, runtime drop): closes every
+            // connection, so command intake stops and countdowns cancel.
+            let _guard = CloseAllOnDrop(me.clone());
             let mut tasks = tokio::task::JoinSet::new();
             tasks.spawn(me.clone().broadcast_views());
             tasks.spawn(me.clone().route_outcomes(outcomes));
@@ -326,7 +332,8 @@ impl Service {
                     Ok((stream, _)) => me.accept(stream),
                     Err(e) => {
                         tracing::warn!(kind = ?e.kind(), "accept failed");
-                        tokio::task::yield_now().await;
+                        // Not a busy loop when descriptors run out (EMFILE).
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
             }
@@ -442,6 +449,8 @@ impl Service {
         let mut reader = BufReader::new(r);
         let mut line = Vec::new();
         let mut shut = conn.shut.subscribe();
+        // Cancellation, a runtime drop or a panic close the connection too.
+        let _guard = CloseOnDrop(self.clone(), conn.clone());
         loop {
             let read = tokio::select! {
                 r = read_line(&mut reader, &mut line, self.opts.max_line) => r,
@@ -461,6 +470,27 @@ impl Service {
                 tracing::warn!(conn = conn.id, reason = why.tag(), len = line.len(), "line rejected");
             }
             return self.close(&conn, why);
+        }
+    }
+}
+
+/// Closes one connection when dropped; `close` is idempotent.
+struct CloseOnDrop(Arc<Service>, Arc<Conn>);
+
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        self.0.close(&self.1, CloseReason::Shutdown);
+    }
+}
+
+/// Closes every registered connection when dropped.
+struct CloseAllOnDrop(Arc<Service>);
+
+impl Drop for CloseAllOnDrop {
+    fn drop(&mut self) {
+        let conns: Vec<Arc<Conn>> = self.0.registry.lock().unwrap().conns.values().cloned().collect();
+        for c in conns {
+            self.0.close(&c, CloseReason::Shutdown);
         }
     }
 }

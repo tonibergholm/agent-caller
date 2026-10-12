@@ -220,7 +220,8 @@ pub fn error_line(id: &str, code: ErrorCode) -> String {
 pub(crate) struct LogGate(std::sync::Mutex<Option<std::time::Instant>>);
 
 const OVERSIZE_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
-static OVERSIZE_LOG: LogGate = LogGate::new();
+static OVERSIZE_WARN: LogGate = LogGate::new();
+static OVERSIZE_ERROR: LogGate = LogGate::new();
 
 impl LogGate {
     pub(crate) const fn new() -> Self {
@@ -287,14 +288,14 @@ pub fn view_line(view: &InboxView, max: usize) -> Option<String> {
             omitted.working = n;
         }
         if let Some(s) = fit_text(&encode(&v, omitted), FIRST_CAP, max) {
-            if OVERSIZE_LOG.allow(std::time::Instant::now()) {
+            if OVERSIZE_WARN.allow(std::time::Instant::now()) {
                 tracing::warn!(done = omitted.done, working = omitted.working, "view too large; cards left out");
             }
             return Some(s);
         }
     }
     let s = fit_text(&encode(&v, omitted), MIN_CAP, max);
-    if s.is_none() && OVERSIZE_LOG.allow(std::time::Instant::now()) {
+    if s.is_none() && OVERSIZE_ERROR.allow(std::time::Instant::now()) {
         tracing::error!(cards = v.cards.len(), "view too large even with requests only; not sent");
     }
     s
@@ -372,6 +373,9 @@ fn longest_text(v: &Value) -> usize {
 
 #[cfg(test)]
 mod tests {
+
+    use super::*;
+
     #[test]
     fn the_oversize_log_gate_lets_one_line_through_per_interval() {
         let g = super::LogGate::new();
@@ -380,8 +384,6 @@ mod tests {
         assert!(!g.allow(t + std::time::Duration::from_secs(59)));
         assert!(g.allow(t + std::time::Duration::from_secs(61)));
     }
-
-    use super::*;
     use acd_client::view::{CardGroup, CardView, TrayColor, TraySummary};
     use acd_client::voice::{ActionEvent, ActionOutcome, NotSentReason};
     use serde_json::{Value, json};

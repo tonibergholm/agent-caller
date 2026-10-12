@@ -201,3 +201,19 @@ async fn one_view_line_serves_every_connection() {
         assert_eq!(m["omitted"], json!({"done":0,"working":0}));
     }
 }
+
+#[tokio::test]
+async fn aborting_the_server_closes_every_connection_and_cancels_its_countdowns() {
+    let rig = rig(vec![pending_agent("a1", "r1")], held()).await;
+    let mut v = View::connect(&rig.socket).await;
+    v.greeting().await; // connection 1
+    let mut rx = rig.inbox.action_outcomes();
+    let id = rig.inbox.pick_owned(ActionOwner(1), "m1/a1", "r1", "allow", 1).unwrap();
+    rig.server.abort();
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("an outcome").unwrap();
+    assert_eq!((event.action_id.as_str(), event.outcome), (id.as_str(), ActionOutcome::Cancelled));
+    assert_eq!(rig.svc.connections(), 0);
+    v.send_raw(b"{\"type\":\"panel\",\"id\":\"late\",\"open\":true}\n").await;
+    v.closed().await;
+    assert_eq!(answers(&rig.f), 0);
+}
