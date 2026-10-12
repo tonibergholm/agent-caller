@@ -216,8 +216,9 @@ so it sees results of its own commands and of other views' actions.
 
 `{"type":"settings","machines":[MachineEntryView…],"notifications":bool,
 "show_idle":bool,"show_subagents":bool,"show_hook_only":bool}`. Machine
-entries include name, endpoint, connection status and `secret` status
-(§4.3). No tokens or TLS pins.
+entries include name, endpoint and `secret` status (§4.3); connection
+status comes from `InboxView.machines`, joined by machine key. No tokens
+or TLS pins.
 
 ## 6. Undo with several views
 
@@ -297,8 +298,8 @@ The service reconciles each new `InboxView` against the previous one:
   notifies only while the panel is closed).
 - When the request leaves the view (resolved or gone), the service closes
   its notification.
-- Text: "<Agent> on <machine> needs you: <request label>", from the same
-  templates as the Mac app; agent text cleaned and truncated.
+- Text: "<Agent> on <machine> needs you: <request label>"; agent text
+  cleaned and truncated as the Mac app does (its exact wording differs).
 - One action, "Open". The service accepts the action signal only for a
   notification id it created, from the current owner of
   `org.freedesktop.Notifications`, and then runs
