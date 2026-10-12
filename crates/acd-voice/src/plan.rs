@@ -273,6 +273,15 @@ impl Executor {
         Some(self.take(routed))
     }
 
+    /// Esc in the inbox panel: cancels the step only while it is thinking.
+    /// Anything later waits on the HUD, which has key for it.
+    pub fn cancel_thinking(&mut self, port: &dyn InboxPort) -> Option<Reaction> {
+        match self.state {
+            State::Thinking(id) => self.cancel(port, Some(id)),
+            _ => None,
+        }
+    }
+
     /// Esc or a click on Cancel. A countdown is cancelled by its id (spec
     /// §5.6); a step already sent cannot be undone.
     ///

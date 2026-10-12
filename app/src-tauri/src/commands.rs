@@ -60,9 +60,11 @@ pub fn cancel_action(state: State<'_, AppState>, action_id: String) -> bool {
     state.inbox.cancel(&action_id)
 }
 
+/// Esc in the inbox panel: undoes the newest countdown, else cancels a
+/// voice step that is still thinking. False when neither ran.
 #[tauri::command]
-pub fn escape(state: State<'_, AppState>) -> bool {
-    state.inbox.escape()
+pub fn escape(state: State<'_, AppState>, voice: State<'_, crate::voice::VoiceState>) -> bool {
+    state.inbox.escape() || voice.controller.cancel_thinking()
 }
 
 #[tauri::command]

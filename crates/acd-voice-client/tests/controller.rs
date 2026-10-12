@@ -413,3 +413,26 @@ async fn a_cancel_for_an_older_hud_state_does_not_cancel_the_newer_step() {
     r.voice.confirm(new);
     frame(&r.f, "request.answer").await;
 }
+
+/// Esc in the inbox panel cancels a step that is still thinking; its model
+/// answer is ignored when it lands. With nothing thinking it reports false,
+/// so the panel goes on to its own Esc handling.
+#[tokio::test]
+async fn esc_in_the_inbox_cancels_a_thinking_step() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let model: Arc<dyn IntentModel> = Arc::new(Gated { gate: gate.clone(), dropped });
+    let r = rig(vec![pending_agent()], Some(model), Display::Acks).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    assert!(!r.voice.cancel_thinking(), "nothing is thinking");
+    let voice = r.voice.clone();
+    let utterance = tokio::spawn(async move { voice.text_input("tell the box claude something".into(), true).await });
+    hud_until(&r.sink, "thinking", |h| matches!(h, Hud::Thinking { .. })).await;
+    assert!(r.voice.cancel_thinking());
+    hud_until(&r.sink, "cancelled", |h| matches!(h, Hud::Done { outcome: OutcomeView::Cancelled, .. })).await;
+    gate.notify_waiters();
+    assert_eq!(utterance.await.unwrap(), Ok(()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(matches!(r.sink.last(), Some(Hud::Done { outcome: OutcomeView::Cancelled, .. })), "the late answer never lands");
+    assert!(frames(&r.f, "request.answer").is_empty());
+}

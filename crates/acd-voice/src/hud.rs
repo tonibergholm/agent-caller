@@ -121,10 +121,11 @@ pub enum Hud {
 }
 
 impl Hud {
-    /// The HUD takes key focus only while Esc or a choice can act on it:
-    /// thinking, confirm, which-one or a countdown (spec §4.4).
+    /// The HUD takes key focus only while it waits for input (spec §4.4).
+    /// Not while thinking: every utterance passes through it, and taking
+    /// key for an instant would bounce focus away from the inbox.
     pub fn wants_key(&self) -> bool {
-        matches!(self, Hud::Thinking { .. } | Hud::Confirm { .. } | Hud::WhichOne { .. } | Hud::Countdown { .. })
+        matches!(self, Hud::Confirm { .. } | Hud::WhichOne { .. } | Hud::Countdown { .. })
     }
 
     /// It fades on its own: 1.5 s after a step fires or ends, or after

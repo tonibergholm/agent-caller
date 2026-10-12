@@ -144,7 +144,7 @@ export function outcomeText(o: OutcomeView): string {
   }
 }
 
-/** The HUD has key focus only while Esc or a choice can act on it (spec §4.4). */
+/** States whose keys the HUD acts on when it has key: those waiting for input, and thinking, which Esc cancels after a click on the HUD (spec §4.4). */
 export const wantsKey = (h: Hud): boolean =>
   h.state === "thinking" || h.state === "confirm" || h.state === "which_one" || h.state === "countdown";
 

@@ -1,7 +1,6 @@
 //! The voice HUD (voice spec §4.4): a second non-activating panel, top
 //! centre of the active screen, 18% from the top. It takes key focus only
-//! while Esc or a choice can act on it (thinking, confirm, which-one,
-//! countdown); see D17.
+//! while it waits for input (confirm, which-one, countdown); see D17.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -192,6 +191,7 @@ fn apply(app: &AppHandle, hidden: bool, wants_key: bool) -> bool {
     };
     if hidden {
         release_key(app);
+        return_key(app);
         panel.hide();
         return true;
     }
@@ -208,20 +208,15 @@ fn apply(app: &AppHandle, hidden: bool, wants_key: bool) -> bool {
         }
     } else {
         release_key(app);
-        // With the inbox closed nothing took key back, and AppKit has no
-        // reliable resign: order out, so macOS returns key to the frontmost
-        // app, then front again in this same main-thread turn.
-        if panel.as_panel().isKeyWindow() {
-            panel.hide();
-        }
+        return_key(app);
+        // Front again if `return_key` ordered it out, in this same turn.
         panel.order_front_regardless();
     }
     panel.is_visible()
 }
 
 /// Ends the handoff: key goes back to the inbox panel if it was open.
-/// Otherwise the HUD must order out for macOS to return key to the
-/// frontmost app; `apply` does that.
+/// `return_key` covers the rest.
 fn release_key(app: &AppHandle) {
     if !HANDOFF.swap(false, Ordering::SeqCst) {
         return;
@@ -231,6 +226,26 @@ fn release_key(app: &AppHandle) {
         && let Ok(inbox) = app.get_webview_panel("panel")
     {
         inbox.make_key_window();
+    }
+}
+
+/// The HUD still has key when no handoff gave it back (inbox closed) or
+/// when a click made it key. Key goes to the inbox panel if it is open;
+/// else the HUD orders out, since AppKit has no reliable resign, and macOS
+/// returns key to the frontmost app.
+fn return_key(app: &AppHandle) {
+    let Ok(hud) = app.get_webview_panel(LABEL) else {
+        return;
+    };
+    if !hud.as_panel().isKeyWindow() {
+        return;
+    }
+    if crate::panel::is_visible()
+        && let Ok(inbox) = app.get_webview_panel("panel")
+    {
+        inbox.make_key_window();
+    } else {
+        hud.hide();
     }
 }
 

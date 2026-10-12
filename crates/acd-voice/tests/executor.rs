@@ -608,8 +608,9 @@ fn the_hud_json_shape_is_the_frontend_contract() {
     let v = serde_json::to_value(Hud::Error { refusal: Refusal::DisplayFailed, transcript: None }).unwrap();
     assert_eq!(v, serde_json::json!({"state": "error", "refusal": "display_failed", "transcript": null}));
     assert!(!Hud::Hidden.fades() && !Hud::Hidden.wants_key());
-    // Thinking can be cancelled from the HUD, so it takes keys too.
-    assert!(Hud::Thinking { transcript: VoiceText::new("x"), id: 1 }.wants_key());
+    // Thinking is cancelled from the inbox or the HUD's button; it never
+    // takes key, or every typed command would bounce focus.
+    assert!(!Hud::Thinking { transcript: VoiceText::new("x"), id: 1 }.wants_key());
     assert!(!Hud::Listening.wants_key() && !Hud::Speaking { text: VoiceText::new("x") }.wants_key());
     assert!(Hud::Speaking { text: VoiceText::new("x") }.fades());
 }
@@ -659,4 +660,25 @@ async fn esc_on_the_thinking_hud_names_its_id() {
     let id = thinking.hud.input_id().unwrap();
     assert_eq!(exec.cancel(&port, Some(id + 1)), None);
     assert!(exec.cancel(&port, Some(id)).is_some());
+}
+
+/// Esc in the inbox cancels a step that is still thinking, and nothing else.
+#[tokio::test]
+async fn cancel_thinking_cancels_only_a_thinking_step() {
+    let a = pending("m1", "a");
+    let s = snapshot(vec![a.clone()]);
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    assert!(exec.cancel_thinking(&port).is_none(), "nothing is thinking");
+    let (n, _) = exec.begin(&port, s.clone(), VoiceText::new("approve"), Locale::En).unwrap();
+    let r = exec.cancel_thinking(&port).expect("a thinking step is cancelled");
+    assert!(matches!(r.hud, Hud::Done { outcome: OutcomeView::Cancelled, .. }));
+    let routed = route(&s, &VoiceText::new("approve"), None, &RouteOptions::default()).await;
+    assert!(exec.routed(n, routed).is_none(), "the late result is ignored");
+    assert!(port.enqueued().is_empty());
+
+    // A shown proposal is not thinking: Esc in the inbox leaves it alone.
+    let r = say(&mut exec, &port, &s, "yes always").await;
+    assert!(r.hud.awaiting_display().is_some());
+    assert!(exec.cancel_thinking(&port).is_none());
 }

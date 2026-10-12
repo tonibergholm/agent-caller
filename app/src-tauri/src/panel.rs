@@ -88,10 +88,17 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let events = InboxPanelEvents::new();
     let handle = app.clone();
     events.window_did_resign_key(move |_| {
-        // The voice HUD took key for input on purpose: stay open (D17).
-        if !crate::voice::hud::holds_key() {
-            hide(&handle);
-        }
+        // Judged once key has settled: a quick handoff to the HUD and back
+        // can report this resign after the handoff already ended. Stay
+        // open while the HUD holds key on purpose (D17) or either of our
+        // panels is key (the HUD was clicked, or key came back).
+        let inner = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let key = |label: &str| inner.get_webview_panel(label).is_ok_and(|p| p.as_panel().isKeyWindow());
+            if !crate::voice::hud::holds_key() && !key("panel") && !key(crate::voice::hud::LABEL) {
+                hide_on_main_thread(&inner);
+            }
+        });
         false
     });
     observe_screen_changes();

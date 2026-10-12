@@ -218,6 +218,19 @@ impl Controller {
         self.act(|exec, port| exec.cancel(port, id));
     }
 
+    /// Esc in the inbox panel: cancels a step that is still thinking. False
+    /// when nothing is, so the panel handles Esc itself.
+    pub fn cancel_thinking(&self) -> bool {
+        let mut core = self.core.lock().unwrap();
+        match core.exec.cancel_thinking(&self.port) {
+            Some(reaction) => {
+                self.emit(&mut core.exec, reaction);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Runs `f` on the executor and publishes its reaction while still
     /// holding the core lock, so states reach the HUD in the order they
     /// happened (B3).
