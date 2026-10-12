@@ -24,22 +24,67 @@ pub const PLUGIN_FILES: &[(&str, &str)] = &[
 
 pub trait Runner {
     fn run(&self, program: &str, args: &[&str]) -> Result<()>;
+    /// Waits between retries; tests replace it so they do not sleep.
+    fn pause(&self, d: Duration) {
+        std::thread::sleep(d);
+    }
 }
 
-/// Runs a program with its output captured, so probes stay quiet.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const ENABLE_ATTEMPTS: usize = 10;
+const ENABLE_PAUSE: Duration = Duration::from_millis(300);
+
+/// The last 300 characters of a tool's stderr, trimmed. This is local tool
+/// output, not agent text.
+pub fn stderr_tail(raw: &str) -> String {
+    let t = raw.trim();
+    let n = t.chars().count();
+    if n <= 300 { t.to_owned() } else { format!("...{}", t.chars().skip(n - 300).collect::<String>()) }
+}
+
+/// Runs a program with stdout discarded and stderr kept for the error.
 pub struct SystemRunner;
+
+impl SystemRunner {
+    pub fn run_with_timeout(&self, program: &str, args: &[&str], timeout: Duration) -> Result<()> {
+        use std::io::Read;
+        let mut child = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("running {program}"))?;
+        let mut pipe = child.stderr.take().context("stderr pipe")?;
+        let reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            if let Some(st) = child.try_wait()? {
+                break Some(st);
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let err = reader.join().unwrap_or_default();
+        match status {
+            Some(st) if st.success() => Ok(()),
+            Some(st) => bail!("{program} {} failed ({st}): {}", args.join(" "), stderr_tail(&err)),
+            None => bail!("{program} {} timed out after {}s: {}", args.join(" "), timeout.as_secs(), stderr_tail(&err)),
+        }
+    }
+}
 
 impl Runner for SystemRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<()> {
-        let out = std::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .with_context(|| format!("running {program}"))?;
-        if !out.status.success() {
-            bail!("{program} {} failed ({})", args.join(" "), out.status);
-        }
-        Ok(())
+        self.run_with_timeout(program, args, COMMAND_TIMEOUT)
     }
 }
 
@@ -94,6 +139,27 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
 }
 
+fn is_symlink(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// `omarchy plugin enable`, retried while the shell's rescan finishes.
+fn enable_plugin(runner: &dyn Runner) -> Result<()> {
+    let mut last = None;
+    for attempt in 0..ENABLE_ATTEMPTS {
+        if attempt > 0 {
+            runner.pause(ENABLE_PAUSE);
+        }
+        match runner.run("omarchy", &["plugin", "enable", PLUGIN_ID]) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.expect("at least one attempt")).context(format!(
+        "the plugin files are installed but `omarchy plugin enable {PLUGIN_ID}` failed {ENABLE_ATTEMPTS} times; run it by hand once the shell has rescanned"
+    ))
+}
+
 fn ours(path: &Path) -> bool {
     std::fs::read_to_string(path).is_ok_and(|t| t.contains(MARKER))
 }
@@ -108,6 +174,9 @@ pub fn install(
 ) -> Result<()> {
     let bin = l.bin();
     let unit = l.unit();
+    if is_symlink(&l.plugin_dir()) {
+        bail!("{} is a symlink; remove it first", l.plugin_dir().display());
+    }
     if unit.exists() && !ours(&unit) {
         bail!("{} exists and was not written by acd-inbox; remove it first", unit.display());
     }
@@ -128,7 +197,8 @@ pub fn install(
         write_file(&dir.join(name), text.as_bytes(), 0o644)?;
     }
     runner.run("omarchy-shell", &["shell", "rescanPlugins"])?;
-    runner.run("omarchy", &["plugin", "enable", PLUGIN_ID])?;
+    // rescanPlugins only schedules the scan, so the id can be unknown for a moment.
+    enable_plugin(runner)?;
     writeln!(out, "Installed the plugin in {}", dir.display())?;
     writeln!(out, "Restart the shell to load the plugin's QML: omarchy-restart-shell (not done for you).")?;
     writeln!(out, "Keybinding for Super+Alt+A (add to {}):\n{KEYBINDING}", l.bindings().display())?;
@@ -162,19 +232,28 @@ pub fn offer_keybinding(path: &Path, ask: &mut dyn FnMut(&str) -> bool, out: &mu
 }
 
 /// Reverses steps 1 and 2 of install; prints how to remove the binding.
+/// A unit or plugin directory it did not create is left alone.
 pub fn uninstall(l: &Layout, runner: &dyn Runner, out: &mut dyn Write) -> Result<()> {
-    let _ = runner.run("systemctl", &["--user", "disable", "--now", UNIT_NAME]);
     let unit = l.unit();
-    if ours(&unit) {
-        std::fs::remove_file(&unit)?;
+    if !unit.exists() || ours(&unit) {
+        let _ = runner.run("systemctl", &["--user", "disable", "--now", UNIT_NAME]);
+        if unit.exists() {
+            std::fs::remove_file(&unit)?;
+        }
+        let _ = runner.run("systemctl", &["--user", "daemon-reload"]);
+    } else {
+        writeln!(out, "{} was not written by acd-inbox; left in place.", unit.display())?;
     }
-    let _ = runner.run("systemctl", &["--user", "daemon-reload"]);
     let _ = runner.run("omarchy", &["plugin", "disable", PLUGIN_ID]);
     let dir = l.plugin_dir();
-    for (name, _) in PLUGIN_FILES {
-        let _ = std::fs::remove_file(dir.join(name));
+    if is_symlink(&dir) {
+        writeln!(out, "{} is a symlink; left in place.", dir.display())?;
+    } else {
+        for (name, _) in PLUGIN_FILES {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+        let _ = std::fs::remove_dir(&dir);
     }
-    let _ = std::fs::remove_dir(&dir);
     let _ = runner.run("omarchy-shell", &["shell", "rescanPlugins"]);
     let bin = l.bin();
     if bin.exists() {
@@ -189,7 +268,8 @@ pub fn uninstall(l: &Layout, runner: &dyn Runner, out: &mut dyn Write) -> Result
 pub struct Probe {
     pub protocol: u64,
     pub service: String,
-    pub locked: usize,
+    /// Machines whose secret is not `ok`, counted by status.
+    pub not_ok: std::collections::BTreeMap<String, usize>,
 }
 
 /// Connects as a view and reads `hello` and `settings`.
@@ -203,14 +283,17 @@ pub fn probe(socket: &Path, timeout: Duration) -> Result<Probe> {
     line.clear();
     r.read_line(&mut line)?;
     let settings: serde_json::Value = serde_json::from_str(&line).context("reading settings")?;
-    let locked = settings["machines"]
-        .as_array()
-        .map(|m| m.iter().filter(|e| e["secret"] != "ok").count())
-        .unwrap_or(0);
+    let mut not_ok = std::collections::BTreeMap::new();
+    for e in settings["machines"].as_array().into_iter().flatten() {
+        let st = e["secret"].as_str().unwrap_or("unknown");
+        if st != "ok" {
+            *not_ok.entry(st.to_owned()).or_insert(0) += 1;
+        }
+    }
     Ok(Probe {
         protocol: hello["protocol"].as_u64().unwrap_or(0),
         service: hello["service"].as_str().unwrap_or("").to_owned(),
-        locked,
+        not_ok,
     })
 }
 
@@ -220,10 +303,17 @@ pub fn status(l: &Layout, socket: &Path, runner: &dyn Runner, out: &mut dyn Writ
     match probe(socket, Duration::from_secs(2)) {
         Ok(p) => {
             writeln!(out, "socket: {} answers (protocol {}, service {})", socket.display(), p.protocol, p.service)?;
-            if p.locked == 0 {
+            if p.not_ok.is_empty() {
                 writeln!(out, "keyring: ok")?;
-            } else {
-                writeln!(out, "keyring: {} machine secrets not readable (locked or missing); unlock the keyring and retry from the panel's settings", p.locked)?;
+            }
+            for (st, n) in &p.not_ok {
+                let hint = match st.as_str() {
+                    "locked" => "unlock the keyring, then retry from the panel",
+                    "missing" => "the secret is gone; pair the machine again",
+                    "unreadable" => "the stored secret is damaged; pair the machine again",
+                    _ => "the keyring did not answer; retry from the panel",
+                };
+                writeln!(out, "keyring: {n} machine(s) {st}: {hint}")?;
             }
         }
         Err(_) => {

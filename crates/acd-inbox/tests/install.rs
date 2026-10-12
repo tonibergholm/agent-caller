@@ -12,16 +12,31 @@ use common::*;
 struct Recorder {
     calls: RefCell<Vec<String>>,
     fail: Option<&'static str>,
+    /// Fails the first N `plugin enable` calls.
+    enable_fails: std::cell::Cell<usize>,
+    pauses: std::cell::Cell<usize>,
+    /// Calls to these programs report as inactive/failing for `is-active`.
+    inactive: bool,
 }
 
 impl Runner for Recorder {
     fn run(&self, program: &str, args: &[&str]) -> Result<()> {
         let call = format!("{program} {}", args.join(" "));
         self.calls.borrow_mut().push(call.clone());
+        if call.contains("plugin enable") && self.enable_fails.get() > 0 {
+            self.enable_fails.set(self.enable_fails.get() - 1);
+            bail!("plugin {PLUGIN_ID} is not known");
+        }
+        if self.inactive && call.contains("is-active") {
+            bail!("inactive");
+        }
         if self.fail.is_some_and(|f| call.contains(f)) {
             bail!("{call} failed");
         }
         Ok(())
+    }
+    fn pause(&self, _: std::time::Duration) {
+        self.pauses.set(self.pauses.get() + 1);
     }
 }
 
@@ -173,4 +188,141 @@ fn install_with_a_declined_binding_leaves_bindings_lua_untouched() {
 fn the_keybinding_is_the_recorded_lua_line() {
     assert_eq!(KEYBINDING, "o.bind(\"SUPER + ALT + A\", \"Agent inbox\", \"omarchy-shell tonibergholm.agentcaller toggle\")");
     assert_eq!(layout(Path::new("/h")).bindings(), Path::new("/h/.config/hypr/bindings.lua"));
+}
+
+fn ok_install(l: &Layout, home: &Path) {
+    install(l, &build(home), &Recorder::default(), &mut |_| false, &mut Vec::new()).unwrap();
+}
+
+#[test]
+fn enable_is_retried_while_the_shell_rescans() {
+    let home = tempfile::tempdir().unwrap();
+    let l = layout(home.path());
+    let runner = Recorder { enable_fails: 3.into(), ..Default::default() };
+    install(&l, &build(home.path()), &runner, &mut |_| false, &mut Vec::new()).unwrap();
+    let enables = runner.calls.borrow().iter().filter(|c| c.contains("plugin enable")).count();
+    assert_eq!(enables, 4);
+    assert_eq!(runner.pauses.get(), 3);
+}
+
+#[test]
+fn enable_that_never_succeeds_stops_with_a_clear_error() {
+    let home = tempfile::tempdir().unwrap();
+    let l = layout(home.path());
+    let runner = Recorder { enable_fails: 1000.into(), ..Default::default() };
+    let err = install(&l, &build(home.path()), &runner, &mut |_| false, &mut Vec::new()).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("failed 10 times") && text.contains("not known"), "{text}");
+    assert_eq!(runner.calls.borrow().iter().filter(|c| c.contains("plugin enable")).count(), 10);
+}
+
+#[test]
+fn a_failing_command_reports_the_tail_of_its_stderr() {
+    let err = SystemRunner.run("sh", &["-c", "echo boom-detail >&2; exit 3"]).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("boom-detail") && text.contains("failed"), "{text}");
+    let long = "x".repeat(1000) + "END";
+    let tail = stderr_tail(&format!("  {long}\n"));
+    assert!(tail.ends_with("END") && tail.len() < 320, "{}", tail.len());
+}
+
+#[test]
+fn a_command_that_hangs_is_killed_at_the_timeout() {
+    let started = std::time::Instant::now();
+    let err = SystemRunner.run_with_timeout("sleep", &["5"], std::time::Duration::from_millis(200)).unwrap_err();
+    assert!(format!("{err:#}").contains("timed out"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}
+
+#[test]
+fn uninstall_keeps_foreign_files_and_a_foreign_unit() {
+    let home = tempfile::tempdir().unwrap();
+    let l = layout(home.path());
+    ok_install(&l, home.path());
+    std::fs::write(l.plugin_dir().join("mine.txt"), "x").unwrap();
+    std::fs::create_dir_all(l.bindings().parent().unwrap()).unwrap();
+    std::fs::write(l.bindings(), format!("-- mine\n{KEYBINDING}\n")).unwrap();
+    uninstall(&l, &Recorder::default(), &mut Vec::new()).unwrap();
+    assert!(l.plugin_dir().join("mine.txt").exists());
+    assert!(!l.plugin_dir().join("manifest.json").exists());
+    assert!(std::fs::read_to_string(l.bindings()).unwrap().contains(KEYBINDING));
+}
+
+#[test]
+fn uninstall_does_not_disable_a_unit_it_did_not_write() {
+    let home = tempfile::tempdir().unwrap();
+    let l = layout(home.path());
+    std::fs::create_dir_all(l.unit().parent().unwrap()).unwrap();
+    std::fs::write(l.unit(), "[Service]\nExecStart=/mine\n").unwrap();
+    let runner = Recorder::default();
+    let mut out = Vec::new();
+    uninstall(&l, &runner, &mut out).unwrap();
+    assert!(l.unit().exists());
+    assert!(!runner.calls.borrow().iter().any(|c| c.contains("disable --now") || c.contains("daemon-reload")));
+    assert!(String::from_utf8(out).unwrap().contains("not written by acd-inbox"));
+}
+
+#[test]
+fn a_symlinked_plugin_dir_is_neither_installed_into_nor_emptied() {
+    let home = tempfile::tempdir().unwrap();
+    let l = layout(home.path());
+    let target = home.path().join("elsewhere");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("manifest.json"), "keep").unwrap();
+    std::fs::create_dir_all(l.plugin_dir().parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, l.plugin_dir()).unwrap();
+    let runner = Recorder::default();
+    assert!(install(&l, &build(home.path()), &runner, &mut |_| false, &mut Vec::new()).is_err());
+    assert!(runner.calls.borrow().is_empty());
+    assert_eq!(std::fs::read_to_string(target.join("manifest.json")).unwrap(), "keep");
+    uninstall(&l, &Recorder::default(), &mut Vec::new()).unwrap();
+    assert_eq!(std::fs::read_to_string(target.join("manifest.json")).unwrap(), "keep");
+    assert!(l.plugin_dir().exists());
+}
+
+/// A stand-in service: sends hello and the given settings, then closes.
+fn fake_service(dir: &Path, machines: serde_json::Value) -> std::path::PathBuf {
+    let path = dir.join("fake.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    std::thread::spawn(move || {
+        use std::io::Write;
+        if let Ok((mut s, _)) = listener.accept() {
+            let _ = writeln!(s, "{}", serde_json::json!({"type":"hello","protocol":1,"service":"t"}));
+            let _ = writeln!(s, "{}", serde_json::json!({"type":"settings","machines":machines}));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    });
+    path
+}
+
+fn status_text(l: &Layout, socket: &Path, runner: &Recorder) -> String {
+    let mut out = Vec::new();
+    status(l, socket, runner, &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn status_names_each_unreadable_secret_status_with_its_own_advice() {
+    let home = tempfile::tempdir().unwrap();
+    let l = layout(home.path());
+    let socket = fake_service(
+        home.path(),
+        serde_json::json!([{"secret":"locked"},{"secret":"missing"},{"secret":"ok"}]),
+    );
+    let printed = status_text(&l, &socket, &Recorder::default());
+    assert!(printed.contains("1 machine(s) locked: unlock the keyring"), "{printed}");
+    assert!(printed.contains("1 machine(s) missing: the secret is gone; pair the machine again"), "{printed}");
+    assert!(!printed.contains("keyring: ok"), "{printed}");
+}
+
+#[test]
+fn status_with_nothing_listening_and_the_service_down() {
+    let home = tempfile::tempdir().unwrap();
+    let l = layout(home.path());
+    let runner = Recorder { inactive: true, ..Default::default() };
+    let printed = status_text(&l, &home.path().join("none.sock"), &runner);
+    assert!(printed.contains("service: not running"), "{printed}");
+    assert!(printed.contains("does not answer"), "{printed}");
+    assert!(printed.contains("keyring: unknown"), "{printed}");
+    assert!(printed.contains("plugin: missing"), "{printed}");
 }
