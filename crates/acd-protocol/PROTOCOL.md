@@ -318,12 +318,16 @@ when absent. This T3 field never enables text on hook or terminal paths.
 **Correlation keys.** acd uses these keys to deduplicate and to match
 requests across sources:
 
-| Origin | Key |
-|---|---|
-| Claude hook | `prompt_id`. It links `PermissionRequest` and `PreToolUse` for the same `AskUserQuestion`. |
-| Codex hook | `(session_id, turn_id, sha256(tool_name + tool_input))` |
-| herdr fallback | `(socket, pane_id, dialog fingerprint)` |
-| T3 | the runtime request id |
+| Origin | Key | Reusable |
+|---|---|---|
+| Claude hook | `(session_id, prompt_id, sha256(tool_name + tool_input))`. `prompt_id` alone is per user turn, so the digest separates the tools of one turn. The same key links the `PermissionRequest` and `PreToolUse` of one `AskUserQuestion`. | yes |
+| Codex hook | `(session_id, turn_id, sha256(tool_name + tool_input))`. Outcome evidence matches `tool_input.command`, because `PostToolUse.tool_input` drops `description`. | yes |
+| herdr fallback | `(socket, pane_id, dialog fingerprint)` | yes |
+| T3 | the runtime request id | no |
+
+Keys are scoped to their agent. Every key-based observation (`ready`,
+answer path, end, gone) names its agent and affects only that agent's
+requests.
 
 **Occurrences.** A key identifies one *occurrence* of a dialog.
 
@@ -335,9 +339,13 @@ requests across sources:
   a new id.
 - "Confirmed gone" means the fingerprint was absent from two consecutive
   detection reads, or the hook source reported the end of the request.
-- Claude's `prompt_id` and T3 request ids are already unique per
-  occurrence. The generation counter matters for Codex and for the herdr
-  fallback keys.
+- Claude, Codex and herdr fallback keys are reusable, so the generation
+  counter applies to them. T3 request ids are not reusable: once resolved,
+  a T3 request id is tombstoned and never opens another request.
+- Hook occurrences follow rules O1 to O7 in spec §5.1. For Claude, each
+  `PermissionRequest` opens a new occurrence even when it is byte-identical
+  to an earlier one, so the key alone does not decide whether a hook event
+  is a new occurrence.
 
 **States.**
 

@@ -88,14 +88,30 @@ fn bind_as(path: &Path, euid: u32) -> Result<(UnixListener, OwnedSocket)> {
     Ok((listener, owned))
 }
 
-/// Removes `path` only when it is definitely stale: a socket owned by
-/// `euid` whose connect fails with `ECONNREFUSED`. A live socket, another
-/// file type or owner, or any other error refuses.
+/// Refuses a path that `bind` would not replace, without touching it. Startup
+/// runs this before it binds any listener, so a refusal leaves nothing bound.
+pub fn check_path(path: &Path) -> Result<()> {
+    stale_socket(path, acd_securefs::euid()).map(drop)
+}
+
+/// Removes `path` only when it is definitely stale (see `stale_socket`).
 fn clear_stale(path: &Path, euid: u32) -> Result<()> {
+    if stale_socket(path, euid)? {
+        let shown = path.display();
+        std::fs::remove_file(path).with_context(|| format!("removing the stale socket {shown}"))?;
+    }
+    Ok(())
+}
+
+/// Whether `path` is a stale socket that `euid` may replace: a socket owned
+/// by `euid` whose connect fails with `ECONNREFUSED`. An absent path is not
+/// stale. A live socket, another file type or owner, or any other error
+/// refuses.
+fn stale_socket(path: &Path, euid: u32) -> Result<bool> {
     let shown = path.display();
     let m = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e).with_context(|| format!("cannot inspect {shown}")),
     };
     if !m.file_type().is_socket() {
@@ -109,9 +125,7 @@ fn clear_stale(path: &Path, euid: u32) -> Result<()> {
     }
     match connect_within(path, PROBE_TIMEOUT) {
         Ok(()) => bail!("{shown} is in use (another acd is running?); refusing to replace it"),
-        Err(e) if e.raw_os_error() == Some(libc::ECONNREFUSED) => {
-            std::fs::remove_file(path).with_context(|| format!("removing the stale socket {shown}"))
-        }
+        Err(e) if e.raw_os_error() == Some(libc::ECONNREFUSED) => Ok(true),
         Err(e) => Err(e)
             .with_context(|| format!("cannot tell whether {shown} is in use; not replacing it")),
     }
