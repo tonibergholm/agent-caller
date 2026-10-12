@@ -114,6 +114,11 @@ Historical flakes and environment caveats (not reproduced in this audit):
   bound.
 - `herdr_e2e` failed once in a workspace run and passed on rerun (seen in
   Task 22).
+- `crates/acd/tests/hooks_cli.rs` `a_path_that_is_not_a_socket_is_never_replaced`
+  failed once on Ubuntu CI (2026-10-12, PR #24, run 38209946246): the
+  "not a socket" message was missing and a worker panicked at
+  `acd-core/src/tls.rs:430`. It passed on rerun. The daemon may have
+  exited on a TLS setup error before the socket check.
 - `secrets::tests::repair_mode_clears_special_bits_and_reports_them`,
   `init_repairs_a_setuid_secret_and_a_loose_t3_token` and
   `hooks::claude_sessions::tests::the_system_check_recognises_this_process`
