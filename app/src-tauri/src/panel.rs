@@ -88,17 +88,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let events = InboxPanelEvents::new();
     let handle = app.clone();
     events.window_did_resign_key(move |_| {
-        // Judged once key has settled: a quick handoff to the HUD and back
-        // can report this resign after the handoff already ended. Stay
-        // open while the HUD holds key on purpose (D17) or either of our
-        // panels is key (the HUD was clicked, or key came back).
-        let inner = handle.clone();
-        let _ = handle.run_on_main_thread(move || {
-            let key = |label: &str| inner.get_webview_panel(label).is_ok_and(|p| p.as_panel().isKeyWindow());
-            if !crate::voice::hud::holds_key() && !key("panel") && !key(crate::voice::hud::LABEL) {
-                hide_on_main_thread(&inner);
-            }
-        });
+        hide_if_key_left(&handle);
         false
     });
     observe_screen_changes();
@@ -115,6 +105,26 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     }
     panel.hide();
     Ok(())
+}
+
+/// Key left one of our panels. Judged once key has settled, on a later
+/// turn of the main loop (`run_on_main_thread` from the main thread runs
+/// inline, mid-transition): the inbox hides unless the HUD holds key on
+/// purpose (D17) or either panel is key (the HUD was clicked, or key came
+/// back).
+pub fn hide_if_key_left(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let inner = handle.clone();
+        if let Err(error) = handle.run_on_main_thread(move || {
+            let key = |label: &str| inner.get_webview_panel(label).is_ok_and(|p| p.as_panel().isKeyWindow());
+            if is_visible() && !crate::voice::hud::holds_key() && !key("panel") && !key(crate::voice::hud::LABEL) {
+                hide_on_main_thread(&inner);
+            }
+        }) {
+            tracing::error!(%error, "could not dispatch the key check");
+        }
+    });
 }
 
 pub fn is_visible() -> bool {

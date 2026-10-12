@@ -355,7 +355,7 @@
       aria-label="Voice command"
       placeholder="Type a voice command, then Enter"
       bind:value={voiceText}
-      onmousedown={(e) => e.currentTarget.focus()}
+      onmousedown={(e) => e.button === 0 && e.currentTarget.focus()}
     ></textarea>
   {/if}
 

@@ -63,21 +63,11 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         // only when the user moved focus elsewhere: end the handoff and do
         // not pull the inbox panel back to key later.
         if HANDOFF.swap(false, Ordering::SeqCst) {
-            let inbox_was_open = INBOX_WAS_OPEN.swap(false, Ordering::SeqCst);
-            if inbox_was_open {
-                // The old click-away behaviour: the inbox closes unless the
-                // click landed on it. Checked after key has settled.
-                let inner = handle.clone();
-                let _ = handle.run_on_main_thread(move || {
-                    let inbox_is_key = inner
-                        .get_webview_panel("panel")
-                        .is_ok_and(|p| p.as_panel().isKeyWindow());
-                    if !inbox_is_key {
-                        crate::panel::hide(&inner);
-                    }
-                });
-            }
+            INBOX_WAS_OPEN.store(false, Ordering::SeqCst);
         }
+        // Clicking away from the HUD closes the inbox as clicking away from
+        // the inbox does, also when a click, not a handoff, made it key.
+        crate::panel::hide_if_key_left(&handle);
         false
     });
     panel.set_event_handler(Some(events.as_ref()));
