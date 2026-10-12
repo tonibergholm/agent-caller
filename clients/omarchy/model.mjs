@@ -478,3 +478,68 @@ export function selectCard(key) {
 export function escapeCloses(reply) {
   return !(reply.type === "ok" && reply.result === true);
 }
+
+/** Identity of the text field that has focus, kept by the panel because every new view rebuilds the delegates. */
+export const fieldId = {
+  reply: (cardKey) => `reply:${cardKey}`,
+  answer: (cardKey) => `answer:${cardKey}`,
+  rename: (machineKey) => `rename:${machineKey}`,
+};
+
+/** True while the field `id` should exist and so may keep focus: its reply box, editor or machine is still there. */
+export function fieldFocusValid(id, st, editor, settings) {
+  const i = id.indexOf(":");
+  if (i < 0) return false;
+  const kind = id.slice(0, i);
+  const key = id.slice(i + 1);
+  if (kind === "reply") return st.replyFor === key;
+  if (kind === "answer") return !!editor && editor.cardKey === key;
+  if (kind === "rename") return (settings?.machines ?? []).some((m) => m.key === key);
+  return false;
+}
+
+/** The editor's answer was accepted by the service; its text stays for an undo. */
+export function markSent(editor) {
+  return editor ? { ...editor, sent: true } : editor;
+}
+
+/** Text shown when an editor closes because its request changed; a sent answer closes silently. */
+export function editorClosedNotice(editor) {
+  return editor && editor.sent ? "" : EDITOR_CLOSED_TEXT;
+}
+
+/** Whether the editor must close for this view. No view (disconnect, overflow) never closes it. */
+export function editorShouldClose(editor, view) {
+  return !!editor && view !== null && view !== undefined && !answerEditorValid(editor, view.cards);
+}
+
+const requestOf = (c) => (c.agent.pending ? c.agent.pending.id : "-");
+
+/** Marks cards whose outcome is uncertain, each with the request it was uncertain for. */
+export function markUncertain(prev, cards, keys) {
+  const next = { ...prev };
+  for (const k of keys) {
+    const c = cards.find((x) => x.key === k);
+    next[k] = c ? requestOf(c) : "-";
+  }
+  return next;
+}
+
+/** An uncertain mark ends when its card leaves the view or its request changes. */
+export function pruneUncertain(marks, cards) {
+  const next = {};
+  for (const [k, req] of Object.entries(marks)) {
+    const c = cards.find((x) => x.key === k);
+    if (c && requestOf(c) === req) next[k] = req;
+  }
+  return Object.keys(next).length === Object.keys(marks).length ? marks : next;
+}
+
+/** `openCard` on a card the machine filter or a collapsed Done hides: show it. */
+export function revealCard(key, cards, machineFilter, doneOpen) {
+  const c = cards.find((x) => x.key === key);
+  if (!c) return { machineFilter, doneOpen };
+  const filter = machineFilter !== "" && c.machine_key !== machineFilter && c.action === null ? "" : machineFilter;
+  const done = c.group === "done" || c.group === "idle" ? true : doneOpen;
+  return { machineFilter: filter, doneOpen: done };
+}

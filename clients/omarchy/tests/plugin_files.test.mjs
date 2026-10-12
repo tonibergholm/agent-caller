@@ -87,7 +87,7 @@ test("every text field sends its keys through model.mjs with its IME state", () 
   assert.equal(fields.length, 4, "reply, answer, machine name, pairing");
   for (const f of fields) {
     assert.match(f.slice(0, 2500), /Keys\.onPressed: event => [a-zA-Z.]*keyEvent\(event, \{ kind: "[a-z]+"[^\n]*inputMethodComposing/);
-    assert.match(f.slice(0, 2500), /onActiveFocusChanged:[^\n]*focusedField/);
+    assert.match(f.slice(0, 2500), /onActiveFocusChanged:[\s\S]*?focusedField = (activeFocus \? )?[a-zA-Z]*Field/);
   }
 });
 
@@ -107,7 +107,7 @@ test("a typed answer goes to the request its editor was opened for", () => {
   assert.match(body, /Model\.planAnswer\(answerEditor, cards, text\)/);
   assert.match(body, /service\.send\("answer_text", plan\.fields/);
   assert.doesNotMatch(body, /pending\.(id|revision)/);
-  assert.match(panel, /onViewChanged:[\s\S]*answerEditorValid[\s\S]*pruneKeyState/);
+  assert.match(panel, /onViewChanged:[\s\S]*editorShouldClose[\s\S]*pruneKeyState/);
 });
 
 test("drafts live outside the delegates; the pairing line never does", () => {
@@ -121,8 +121,8 @@ test("drafts live outside the delegates; the pairing line never does", () => {
 
 test("the panel consumes pendingCard, clears it and reports open and closed", () => {
   const panel = read("Panel.qml");
-  assert.match(panel, /function onPendingCardChanged\(\)[\s\S]*selectCard\(panel\.host\.pendingCard\);\s*panel\.host\.pendingCard = "";/);
-  assert.match(panel, /onShownChanged: service\.send\("panel", \{ open: shown \}\)/);
+  assert.match(panel, /function onPendingCardChanged\(\)[\s\S]*selectAndReveal\(panel\.host\.pendingCard\);\s*panel\.host\.pendingCard = "";/);
+  assert.match(panel, /onShownChanged: \{\s*service\.send\("panel", \{ open: shown \}\);/);
   assert.match(panel, /function onReady\(\)[\s\S]*send\("panel", \{ open: panel\.shown \}\)/);
 });
 
@@ -134,4 +134,31 @@ test("an overflowing view is shown as an error with its count", () => {
 test("agent text is shown as plain text", () => {
   assert.match(read("Panel.qml"), /component Label: Text \{[^}]*textFormat: Text\.PlainText/s);
   assert.doesNotMatch(read("Panel.qml"), /^\s+Text \{/m, "use Label, not a bare Text");
+});
+
+test("a rebuilt field takes its focus back by identity and teardown never refocuses the catcher", () => {
+  const panel = read("Panel.qml");
+  for (const kind of ["reply", "answer", "rename"]) {
+    const f = panel.slice(panel.indexOf(`id: ${kind === "rename" ? "nameField" : kind + "Field"}`));
+    assert.match(f.slice(0, 1600), new RegExp(`Model\\.fieldId\\.${kind}\\(`), kind);
+    assert.match(f.slice(0, 1600), /Component\.onCompleted:[\s\S]*?focusId === fid\) forceActiveFocus\(\)/, kind);
+  }
+  assert.match(panel, /blocked: panel\.focusedField !== null \|\| panel\.focusId !== ""/);
+  assert.doesNotMatch(panel, /onVisibleChanged:[^\n]*catcher\.forceActiveFocus/);
+  assert.match(panel, /fieldFocusValid\(focusId, keyState, answerEditor, service\.settings\)\) releaseFocus\(\)/);
+});
+
+test("a sent answer closes silently and no view never closes the editor", () => {
+  const panel = read("Panel.qml");
+  assert.match(panel, /Model\.markSent\(answerEditor\)/);
+  assert.match(panel, /Model\.editorShouldClose\(answerEditor, view\)/);
+  assert.match(panel, /if \(view === null\) return;/);
+});
+
+test("minor state is cleared: pairing on hide, message on keys, uncertain marks", () => {
+  const panel = read("Panel.qml");
+  assert.match(panel, /onShownChanged:[\s\S]*if \(!shown\) \{\s*pairingField\.text = "";/);
+  assert.match(panel, /function keyEvent\([^)]*\) \{\s*message = "";/);
+  assert.match(panel, /Model\.pruneUncertain\(uncertain, cards\)/);
+  assert.match(panel, /Model\.markUncertain\(panel\.uncertain, panel\.cards, cards\)/);
 });

@@ -325,3 +325,54 @@ test("Esc closes the panel unless the service cancelled a countdown", () => {
   assert.equal(M.escapeCloses({ type: "ok", result: false }), true);
   assert.equal(M.escapeCloses({ type: "error", code: "unreachable" }), true);
 });
+
+test("a focused field is remembered by identity and valid while its reply box, editor or machine exists", () => {
+  const st = { selected: "m1/a", replyFor: "m1/a" };
+  const c = card("m1/a", "request", { free_text_answerable: true });
+  const editor = M.answerEditor({ ...c, agent: { ...c.agent, pending: { id: "r1", revision: 1 } } });
+  const settings = { machines: [{ key: "m1" }] };
+  assert.equal(M.fieldFocusValid(M.fieldId.reply("m1/a"), st, null, settings), true);
+  assert.equal(M.fieldFocusValid(M.fieldId.reply("m1/a"), { ...st, replyFor: null }, null, settings), false);
+  assert.equal(M.fieldFocusValid(M.fieldId.answer("m1/a"), st, editor, settings), true);
+  assert.equal(M.fieldFocusValid(M.fieldId.answer("m1/a"), st, null, settings), false);
+  assert.equal(M.fieldFocusValid(M.fieldId.rename("m1"), st, null, settings), true);
+  assert.equal(M.fieldFocusValid(M.fieldId.rename("m2"), st, null, settings), false);
+  assert.equal(M.fieldFocusValid("", st, editor, settings), false);
+  assert.equal(M.fieldFocusValid("junk", st, editor, settings), false);
+});
+
+test("a sent editor closes silently; an unsent one says the answer was not sent", () => {
+  const c = card("m1/a", "request", { free_text_answerable: true, agent: { pending: { id: "r1", revision: 1 } } });
+  const editor = M.answerEditor(c);
+  assert.equal(M.editorClosedNotice(editor), M.EDITOR_CLOSED_TEXT);
+  assert.equal(M.editorClosedNotice(M.markSent(editor)), "");
+  assert.equal(M.answerEditorValid(M.markSent(editor), [c]), true, "sent does not change validity");
+  assert.equal(M.markSent(null), null);
+});
+
+test("no view never closes an editor", () => {
+  const c = card("m1/a", "request", { free_text_answerable: true, agent: { pending: { id: "r1", revision: 1 } } });
+  const editor = M.answerEditor(c);
+  assert.equal(M.editorShouldClose(editor, null), false);
+  assert.equal(M.editorShouldClose(editor, view([c])), false);
+  assert.equal(M.editorShouldClose(editor, view([])), true);
+  assert.equal(M.editorShouldClose(null, view([])), false);
+});
+
+test("an uncertain mark ends when the request changes or the card leaves", () => {
+  const a = card("m1/a");
+  const marks = M.markUncertain({}, [a], ["m1/a", "m1/gone"]);
+  const next = M.pruneUncertain(marks, [a]);
+  assert.deepEqual(Object.keys(next), ["m1/a"]);
+  const changed = { ...a, agent: { ...a.agent, pending: { ...a.agent.pending, id: "other" } } };
+  assert.deepEqual(M.pruneUncertain(next, [changed]), {});
+  assert.deepEqual(M.pruneUncertain(next, []), {});
+});
+
+test("openCard reveals a card the machine filter or collapsed Done hides", () => {
+  const cards = [card("m1/a"), card("m2/d", "done")];
+  assert.deepEqual(M.revealCard("m1/a", cards, "m2", false), { machineFilter: "", doneOpen: false });
+  assert.deepEqual(M.revealCard("m2/d", cards, "m2", false), { machineFilter: "m2", doneOpen: true });
+  assert.deepEqual(M.revealCard("m1/a", cards, "m1", false), { machineFilter: "m1", doneOpen: false });
+  assert.deepEqual(M.revealCard("zz", cards, "m2", false), { machineFilter: "m2", doneOpen: false });
+});

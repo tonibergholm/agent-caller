@@ -25,6 +25,9 @@ Item {
     property var drafts: new Model.Drafts()
     // The text field that has focus, or null; it blocks the key catcher.
     property var focusedField: null
+    // Which field has focus, by identity: every new view rebuilds the
+    // delegates, and a rebuilt field takes focus back by this id.
+    property string focusId: ""
     property string machineFilter: ""
     property bool settingsOpen: false
     property bool doneOpen: false
@@ -45,10 +48,29 @@ Item {
     function close() { host.close(); }
     function toggle() { host.toggle(); }
 
-    function openCard(key) {
+    function selectAndReveal(key) {
         settingsOpen = false;
+        const shown = Model.revealCard(key, cards, machineFilter, doneOpen);
+        machineFilter = shown.machineFilter;
+        doneOpen = shown.doneOpen;
         keyState = Model.selectCard(key);
+    }
+
+    function openCard(key) {
+        selectAndReveal(key);
         host.open();
+    }
+
+    // A field's focus is over (its box closed or the user left it): shortcuts work again.
+    function releaseFocus() {
+        focusId = "";
+        Qt.callLater(() => { if (focusId === "" && focusedField === null) keyCatcher.forceActiveFocus(); });
+    }
+
+    // Called when a field loses focus. A rebuild gives focus back at once, so
+    // only a field still unfocused afterwards was left on purpose.
+    function fieldBlurred(id) {
+        Qt.callLater(() => { if (focusId === id && focusedField === null) releaseFocus(); });
     }
 
     function cardFor(key) {
@@ -76,7 +98,10 @@ Item {
             answerEditor = Model.answerEditor(cardFor(effect.cardKey));
             break;
         case "submitReply":
-            if (submitReply(effect.cardKey, input.text)) input.text = "";
+            if (submitReply(effect.cardKey, input.text)) {
+                input.text = "";
+                releaseFocus();
+            }
             break;
         case "submitAnswer":
             submitAnswer(input.text);
@@ -119,14 +144,23 @@ Item {
         const plan = Model.planAnswer(answerEditor, cards, text);
         switch (plan.kind) {
         case "closed":
+            message = Model.editorClosedNotice(answerEditor);
             answerEditor = null;
-            message = Model.EDITOR_CLOSED_TEXT;
+            releaseFocus();
             break;
         case "invalid":
             message = Model.reasonText(plan.reason);
             break;
         case "send":
-            service.send("answer_text", plan.fields, started(plan.fields.card));
+            const editor = answerEditor;
+            const track = started(plan.fields.card);
+            service.send("answer_text", plan.fields, reply => {
+                track(reply);
+                // Accepted: the text stays for an undo, and the editor closes
+                // silently when its request resolves.
+                if (reply.type === "ok" && answerEditor !== null && answerEditor.requestId === editor.requestId && answerEditor.revision === editor.revision)
+                    answerEditor = Model.markSent(answerEditor);
+            });
             break;
         }
     }
@@ -134,6 +168,7 @@ Item {
     // Every key goes through model.mjs: `field` says which text field has
     // focus, and `composing` is that field's IME state (spec section 7).
     function keyEvent(event, field, composing, input) {
+        message = "";
         const r = Model.onKey(visibleCards, keyState, Model.fromQt(event.key, event.text, event.modifiers, composing, field));
         keyState = r.state;
         if (r.effect.kind !== "none") {
@@ -149,19 +184,29 @@ Item {
 
     // A changed request closes its typed-answer editor; the text is dropped.
     onViewChanged: {
-        if (answerEditor !== null && !Model.answerEditorValid(answerEditor, cards)) {
-            answerEditor = null;
-            message = Model.EDITOR_CLOSED_TEXT;
-        }
         // No view (disconnected, overflow) is not a reason to drop state.
-        if (view !== null) {
-            keyState = Model.pruneKeyState(keyState, cards);
-            drafts.prune(view, service.settings);
+        if (view === null) return;
+        if (Model.editorShouldClose(answerEditor, view)) {
+            const notice = Model.editorClosedNotice(answerEditor);
+            if (notice !== "") message = notice;
+            answerEditor = null;
         }
+        keyState = Model.pruneKeyState(keyState, cards);
+        uncertain = Model.pruneUncertain(uncertain, cards);
+        drafts.prune(view, service.settings);
+        if (focusId !== "" && !Model.fieldFocusValid(focusId, keyState, answerEditor, service.settings)) releaseFocus();
     }
 
     // The service tells notification code whether a panel is open (spec section 8).
-    onShownChanged: service.send("panel", { open: shown })
+    onShownChanged: {
+        service.send("panel", { open: shown });
+        if (!shown) {
+            pairingField.text = "";
+            focusId = "";
+        }
+    }
+
+    onSettingsOpenChanged: if (!settingsOpen) pairingField.text = ""
 
     // `openCard` sets pendingCard then opens; clearing it lets the same key be sent again.
     Connections {
@@ -169,8 +214,7 @@ Item {
 
         function onPendingCardChanged() {
             if (panel.host.pendingCard === "") return;
-            panel.settingsOpen = false;
-            panel.keyState = Model.selectCard(panel.host.pendingCard);
+            panel.selectAndReveal(panel.host.pendingCard);
             panel.host.pendingCard = "";
         }
     }
@@ -179,9 +223,7 @@ Item {
         target: panel.service
 
         function onOutcomesLost(cards) {
-            const u = Object.assign({}, panel.uncertain);
-            for (const c of cards) u[c] = true;
-            panel.uncertain = u;
+            panel.uncertain = Model.markUncertain(panel.uncertain, panel.cards, cards);
         }
 
         // The service forgets a panel's state when the connection drops.
@@ -309,7 +351,7 @@ Item {
             }
 
             Label {
-                visible: cardItem.card.notice !== null || cardItem.inbox.uncertain[cardItem.card.key] === true
+                visible: cardItem.card.notice !== null || cardItem.inbox.uncertain[cardItem.card.key] !== undefined
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 color: Commons.Color.urgent
@@ -322,9 +364,19 @@ Item {
                 visible: cardItem.inbox.keyState.replyFor === cardItem.card.key
                 Layout.fillWidth: true
                 placeholderText: "Reply"
-                Component.onCompleted: text = cardItem.inbox.drafts.get(draft)
-                onVisibleChanged: if (visible) forceActiveFocus(); else cardItem.inbox.catcher.forceActiveFocus()
-                onActiveFocusChanged: cardItem.inbox.focusedField = activeFocus ? replyField : (cardItem.inbox.focusedField === replyField ? null : cardItem.inbox.focusedField)
+                readonly property string fid: Model.fieldId.reply(cardItem.card.key)
+                Component.onCompleted: {
+                    text = cardItem.inbox.drafts.get(draft);
+                    if (visible && cardItem.inbox.focusId === fid) forceActiveFocus();
+                }
+                onVisibleChanged: if (visible) forceActiveFocus()
+                onActiveFocusChanged: {
+                    if (activeFocus) { cardItem.inbox.focusedField = replyField; cardItem.inbox.focusId = fid; }
+                    else {
+                        if (cardItem.inbox.focusedField === replyField) cardItem.inbox.focusedField = null;
+                        cardItem.inbox.fieldBlurred(fid);
+                    }
+                }
                 onTextChanged: cardItem.inbox.drafts.set(draft, text)
                 Keys.onPressed: event => cardItem.inbox.keyEvent(event, { kind: "reply", cardKey: cardItem.card.key }, inputMethodComposing, replyField)
             }
@@ -335,9 +387,20 @@ Item {
                 visible: cardItem.inbox.answerEditor !== null && cardItem.inbox.answerEditor.cardKey === cardItem.card.key
                 Layout.fillWidth: true
                 placeholderText: "Answer"
-                Component.onCompleted: if (visible) text = cardItem.inbox.drafts.get(draft)
-                onVisibleChanged: if (visible) { text = cardItem.inbox.drafts.get(draft); forceActiveFocus(); } else cardItem.inbox.catcher.forceActiveFocus()
-                onActiveFocusChanged: cardItem.inbox.focusedField = activeFocus ? answerField : (cardItem.inbox.focusedField === answerField ? null : cardItem.inbox.focusedField)
+                readonly property string fid: Model.fieldId.answer(cardItem.card.key)
+                Component.onCompleted: {
+                    if (!visible) return;
+                    text = cardItem.inbox.drafts.get(draft);
+                    if (cardItem.inbox.focusId === fid) forceActiveFocus();
+                }
+                onVisibleChanged: if (visible) { text = cardItem.inbox.drafts.get(draft); forceActiveFocus(); }
+                onActiveFocusChanged: {
+                    if (activeFocus) { cardItem.inbox.focusedField = answerField; cardItem.inbox.focusId = fid; }
+                    else {
+                        if (cardItem.inbox.focusedField === answerField) cardItem.inbox.focusedField = null;
+                        cardItem.inbox.fieldBlurred(fid);
+                    }
+                }
                 onTextChanged: if (visible && draft !== "") cardItem.inbox.drafts.set(draft, text)
                 Keys.onPressed: event => cardItem.inbox.keyEvent(event, { kind: "answer", cardKey: cardItem.card.key }, inputMethodComposing, answerField)
             }
@@ -348,7 +411,7 @@ Item {
         id: keyCatcher
         anchors.fill: parent
         // Typing in a field is never a shortcut.
-        blocked: panel.focusedField !== null
+        blocked: panel.focusedField !== null || panel.focusId !== ""
         onCloseRequested: panel.catcherKey(Qt.Key_Escape, "", 0)
         onMoveRequested: function(dx, dy) {
             if (dy !== 0) panel.catcherKey(dy > 0 ? Qt.Key_Down : Qt.Key_Up, "", 0);
@@ -475,8 +538,18 @@ Item {
                             id: nameField
                             readonly property string draft: Model.draftKey.rename(modelData.key)
                             Layout.fillWidth: true
-                            Component.onCompleted: text = panel.drafts.get(draft) || modelData.name
-                            onActiveFocusChanged: panel.focusedField = activeFocus ? nameField : (panel.focusedField === nameField ? null : panel.focusedField)
+                            readonly property string fid: Model.fieldId.rename(modelData.key)
+                            Component.onCompleted: {
+                                text = panel.drafts.get(draft) || modelData.name;
+                                if (panel.focusId === fid) forceActiveFocus();
+                            }
+                            onActiveFocusChanged: {
+                                if (activeFocus) { panel.focusedField = nameField; panel.focusId = fid; }
+                                else {
+                                    if (panel.focusedField === nameField) panel.focusedField = null;
+                                    panel.fieldBlurred(fid);
+                                }
+                            }
                             onTextChanged: panel.drafts.set(draft, text === modelData.name ? "" : text)
                             Keys.onPressed: event => panel.keyEvent(event, { kind: "rename", cardKey: null }, inputMethodComposing, nameField)
                             onAccepted: {
