@@ -159,8 +159,8 @@ mod platform {
 
     /// Starts the request. The receiver gets macOS's `granted` answer when
     /// the prompt is closed; `None` when the build is not bundled. A failed
-    /// request sends nothing and drops the sender, so the receiver reports
-    /// a disconnect and the caller falls back to reading the stored state.
+    /// request sends `false`, so the caller falls back to reading the stored
+    /// state at once.
     pub fn request() -> Option<mpsc::Receiver<bool>> {
         if !bundled() {
             return None;
@@ -172,6 +172,9 @@ mod platform {
                 let _ = tx.send(granted.as_bool());
             } else {
                 tracing::warn!("notification permission request failed");
+                // Answer now so the caller falls back to the stored state
+                // instead of waiting out the prompt timeout.
+                let _ = tx.send(false);
             }
         });
         UNUserNotificationCenter::currentNotificationCenter()

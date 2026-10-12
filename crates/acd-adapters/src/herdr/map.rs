@@ -47,12 +47,18 @@ fn is_codex_context(title: &str) -> bool {
 
 pub fn agent_obs(socket_hash: &str, info: &wire::AgentInfo) -> Option<AgentObs> {
     let kind = kind(info.agent.as_deref())?;
-    let title = [&info.name, &info.title, &info.terminal_title_stripped]
-        .into_iter()
-        .flatten()
-        .map(|s| clean_display(s, TITLE_CHARS))
-        .find(|s| !s.is_empty() && !is_codex_context(s))
-        .unwrap_or_else(|| clean_display(&info.pane_id, TITLE_CHARS));
+    // Only the terminal title can carry Codex's echoed context block; an
+    // explicit name or title is the user's and is kept as written.
+    let title = [
+        (&info.name, false),
+        (&info.title, false),
+        (&info.terminal_title_stripped, true),
+    ]
+    .into_iter()
+    .filter_map(|(s, terminal)| s.as_ref().map(|s| (clean_display(s, TITLE_CHARS), terminal)))
+    .find(|(s, terminal)| !s.is_empty() && !(*terminal && is_codex_context(s)))
+    .map(|(s, _)| s)
+    .unwrap_or_else(|| clean_display(&info.pane_id, TITLE_CHARS));
     let cwd = info
         .cwd
         .as_deref()
@@ -166,9 +172,16 @@ mod tests {
         let o = agent_obs("abc", &info(agent.clone())).unwrap();
         assert_eq!(o.title, "w1:p1", "the pane id is the fallback title");
         assert_eq!(o.cwd.as_deref(), Some("/tmp/acp3/codex/d1"));
-        let mut named = agent;
+        let mut named = agent.clone();
         named["name"] = "api refactor".into();
         assert_eq!(agent_obs("abc", &info(named)).unwrap().title, "api refactor");
+        // The user's own name is kept even when it mentions the tag.
+        let mut tagged = agent;
+        tagged["name"] = "Fix <environment_context> parsing".into();
+        assert_eq!(
+            agent_obs("abc", &info(tagged)).unwrap().title,
+            "Fix <environment_context> parsing"
+        );
     }
 
     #[test]
