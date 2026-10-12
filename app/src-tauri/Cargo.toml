@@ -12,6 +12,8 @@ publish = false
 
 [build-dependencies]
 tauri-build = { version = "=2.7.1", features = [] }
+# Builds and links app/src-tauri/swift (plan S1). Same version Tauri already locks.
+swift-rs = { version = "=1.0.8", features = ["build"] }
 
 [dependencies]
 acd-client = { path = "../../crates/acd-client" }

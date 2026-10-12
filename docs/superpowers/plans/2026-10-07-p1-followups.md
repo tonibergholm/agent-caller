@@ -195,6 +195,17 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Keyring deadline.** Mutating Secret Service calls have no deadline; check whether zbus applies a reply timeout, or a hung service blocks the worker until restart.
 - **One owner per panel.** Each `Service.qml` is its own connection and owner. If Omarchy creates a bar widget per monitor, Esc in one panel does not undo a countdown started from another's.
 
+### Voice step 2 (from the final review)
+
+- **Probe vs safety paths.** The diagnostic probe records on its own engine: lock or voice-off do not cancel it (it ends after 4 s), and it shows no tray dot. A busy microphone (`VB_ERR_BUSY`) reads as "Speech recognition is not available".
+- **Pump stalls.** `dispatch` runs `trigger::refresh` and the tap restart (up to about 3 s) inline, so the event pump can stall behind a permission answer.
+- **Settings.** Download-speech-model gives no progress and does not report a failed install (the `ok` of `VB_EV_ASSETS` is dropped in `dispatch`); the first rejected status read hides the permission section.
+- **Press cancels a countdown, then listening fails.** `Executor::listen_failed` clears `trigger_cancelled`, so the HUD shows only the microphone or speech error, not that the countdown was cancelled (nothing was sent).
+- **Confirm nested under Listening.** If the user starts recording after a Confirm HUD was emitted but before `voiceShown` arrived, the unacknowledged Confirm is carried inside `Listening` (`over`), the frontend does not acknowledge it, and the display watcher invalidates it; the spoken answer is then routed as a new command. Fails closed.
+- **Stale voice shortcut.** If unregistering the previous voice shortcut fails, `hotkey::apply_voice` has already replaced `VOICE_SHORTCUT`, so the old chord is routed as the inbox hotkey until restart.
+- **Dropped audio chunk** now ends the session as "microphone unavailable" (no test: needs the live engine); a dedicated refusal text would be clearer.
+- **Plan deviations approved at merge (2026-10-12):** no Space as a hold key in the open inbox, English only with the system microphone, no "English until installed" fallback.
+
 ### Harness (`just e2e`)
 
 - `run.lock` has two millisecond races, and `just e2e-down` ignores the lock.

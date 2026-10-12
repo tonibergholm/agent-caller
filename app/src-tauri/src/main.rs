@@ -64,6 +64,11 @@ fn main() {
             voice::commands::voice_choose,
             voice::commands::voice_cancel,
             voice::commands::voice_hud_fit,
+            voice::commands::voice_probe,
+            voice::commands::voice_open_privacy,
+            voice::commands::voice_status,
+            voice::commands::voice_request_permission,
+            voice::commands::voice_install_assets,
         ])
         .setup(|app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -97,20 +102,47 @@ fn main() {
             let controller = tauri::async_runtime::block_on(async {
                 acd_voice_client::Controller::start(inbox.clone(), None, sink, voice_settings.enabled)
             });
+            #[cfg(target_os = "macos")]
+            let speech = Arc::new(voice::bridge::MacSpeech::new());
+            #[cfg(target_os = "macos")]
+            controller.attach_speech(speech.clone());
             app.manage(voice::VoiceState {
                 controller,
                 settings: std::sync::Mutex::new(voice_settings),
                 path: Some(voice_path),
+                trigger_error: std::sync::Mutex::new(None),
+                #[cfg(target_os = "macos")]
+                speech,
             });
             tray::build(app.handle())?;
             panel::create(app.handle())?;
             voice::hud::create(app.handle())?;
+            #[cfg(target_os = "macos")]
+            if let Some((link, events)) = voice::bridge::start() {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(voice::bridge::pump(link, events, move |ev| voice::dispatch(&handle, ev)));
+            }
 
             let saved_hotkey = inbox.settings().hotkey;
             if let Err(error) = hotkey::apply(app.handle(), &saved_hotkey) {
                 tracing::error!(%error, "could not register saved hotkey; using default");
                 if let Err(default_error) = hotkey::apply(app.handle(), DEFAULT_HOTKEY) {
                     tracing::error!(%default_error, "could not register default hotkey");
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let voice = app.state::<voice::VoiceState>();
+                let settings = voice.settings.lock().unwrap().clone();
+                *voice.trigger_error.lock().unwrap() = voice::trigger::apply(app.handle(), &settings, &voice::settings::VoiceSettings { enabled: false, ..settings.clone() });
+                // An upgrade can leave voice on with permissions never asked
+                // for (step 1 needed none): ask for those now, once.
+                if settings.enabled {
+                    use voice::permissions;
+                    let hold = settings.hold_key != voice::settings::HoldKey::Off;
+                    for p in permissions::to_request(hold, permissions::status) {
+                        permissions::request(p);
+                    }
                 }
             }
 

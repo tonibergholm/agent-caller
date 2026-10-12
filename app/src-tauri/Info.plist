@@ -5,5 +5,10 @@
   <!-- Menu bar app: no Dock icon, never owns the menu bar, launch does not activate it. -->
   <key>LSUIElement</key>
   <true/>
+  <!-- Voice (spec §6.4). Both strings must exist before any request API is called. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Agent Caller listens only while you hold the voice key, or between two presses of the voice shortcut, to answer your coding agents. Audio stays on this Mac.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Agent Caller turns what you say into text on this Mac to answer your coding agents. Audio and text stay on this Mac and are never saved.</string>
 </dict>
 </plist>

@@ -38,7 +38,13 @@ const proposal = (o: Partial<ProposalView> = {}): ProposalView => ({
 let seq = 0;
 
 const inputId = (s: HudState): number | null =>
-  s.state === "confirm" || s.state === "countdown" ? s.proposal_id : s.state === "thinking" ? s.id : s.state === "which_one" ? s.choice_id : null;
+  s.state === "confirm" || s.state === "countdown"
+    ? s.proposal_id
+    : s.state === "thinking" || s.state === "listening"
+      ? s.id
+      : s.state === "which_one"
+        ? s.choice_id
+        : null;
 
 async function show(state: HudState, v: InboxView = view()) {
   const api = fakeApi();
@@ -325,4 +331,57 @@ test("a fit is sent only for the state still on screen", async () => {
   await tick();
   await tick();
   expect(api.fits).toEqual([first + 2]);
+});
+
+test("listening shows the microphone, then the live text", async () => {
+  const api = await show({ state: "listening", id: 4, partial: null, over: null });
+  expect(screen.getByText("Listening…")).toBeTruthy();
+  expect(document.querySelector(".mic")).not.toBeNull();
+  api.hud!({ seq: ++seq, id: 4, hud: { state: "listening", id: 4, partial: "approve the", over: null } });
+  await tick();
+  expect(screen.getByLabelText("Heard so far").textContent).toContain("approve the");
+  expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+});
+
+/** S25: after a click on the HUD, Esc cancels the recording; Listening itself never asks for key. */
+test("Esc in the HUD cancels the recording by its id", async () => {
+  const api = await show({ state: "listening", id: 4, partial: null, over: null });
+  await userEvent.keyboard("{Escape}");
+  expect(others(api.calls)).toEqual([["voiceCancel", 4]]);
+});
+
+test("the HUD's Cancel stops the recording by its id", async () => {
+  const api = await show({ state: "listening", id: 4, partial: null, over: null });
+  await userEvent.click(screen.getByRole("button", { name: /Cancel/ }));
+  expect(others(api.calls)).toEqual([["voiceCancel", 4]]);
+});
+
+test("a confirm that waits stays visible and read-only while listening", async () => {
+  const over: HudState = { state: "confirm", proposal: proposal(), proposal_id: 9 };
+  const api = await show({ state: "listening", id: 10, partial: null, over });
+  expect(screen.getByLabelText("Rule to remember").textContent).toBe("Bash(npm test:*)");
+  expect(screen.queryByRole("button", { name: /Confirm/ })).toBeNull();
+  await userEvent.keyboard("{Enter}");
+  await userEvent.click(screen.getByRole("button", { name: /Cancel/ }));
+  expect(others(api.calls)).toEqual([["voiceCancel", 10]]);
+});
+
+test("a which-one list under listening cannot be clicked", async () => {
+  const over: HudState = { state: "which_one", candidates: [target], transcript: "approve", choice_id: 3 };
+  const api = await show({ state: "listening", id: 11, partial: null, over });
+  const button = screen.getByRole("button", { name: /Fix the build/ }) as HTMLButtonElement;
+  expect(button.disabled).toBe(true);
+  await userEvent.keyboard("1");
+  expect(others(api.calls)).toEqual([]);
+});
+
+test("permission errors open their System Settings pane; others offer none", async () => {
+  const api = await show({ state: "error", refusal: "microphone_denied", transcript: null });
+  expect(screen.getByText("Microphone access is off for Agent Caller.")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Open System Settings" }));
+  expect(api.calls).toContainEqual(["openVoicePrivacy", "microphone"]);
+  cleanup();
+  await show({ state: "error", refusal: "recording_too_long", transcript: null });
+  expect(screen.getByText("Recording stopped after 60 seconds. Nothing was sent.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Open System Settings" })).toBeNull();
 });

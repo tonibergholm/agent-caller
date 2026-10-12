@@ -1,0 +1,152 @@
+import Foundation
+import VoiceBridgeC
+#if compiler(>=6.2)
+import Speech
+#endif
+
+/// Capabilities and asset downloads (plan S4, S21), each on its own task,
+/// never on the session path. `lock` guards the cached values.
+final class Assets: @unchecked Sendable {
+    static let shared = Assets(bridge: .shared, check: Assets.check)
+
+    /// Whether SpeechTranscriber streams volatile results in the bundle.
+    /// From the step-2 spike record (S22): partials arrived only at release,
+    /// so the HUD shows "listening" without live text (spec §4.1).
+    static let partialsStream = false
+
+    private let lock = NSLock()
+    private var cached: Event?
+    private var resolved: Locale?
+    private var installing = false
+    private var issued = 0
+    private var applied = 0
+    private let bridge: Bridge
+    private let checker: @Sendable () async -> (Event, Locale?)
+
+    init(bridge: Bridge, check: @escaping @Sendable () async -> (Event, Locale?)) {
+        self.bridge = bridge
+        self.checker = check
+    }
+
+    /// The last VB_EV_CAPS, for vb_session_start's synchronous checks.
+    var caps: Event? {
+        lock.lock()
+        defer { lock.unlock() }
+        return cached
+    }
+
+    /// The locale to transcribe, set only when speech is available.
+    var locale: Locale? {
+        lock.lock()
+        defer { lock.unlock() }
+        return resolved
+    }
+
+    @discardableResult
+    func query() -> Task<Void, Never> {
+        let seq = nextSequence()
+        return Task.detached {
+            let (event, locale) = await self.checker()
+            if self.store(seq, event, locale) { self.bridge.emit(event) }
+        }
+    }
+
+    // Synchronous: NSLock cannot be taken from an async context.
+    private func nextSequence() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        issued += 1
+        return issued
+    }
+
+    /// Queries finish out of order: an older result never replaces a newer
+    /// one. False if `seq` was superseded.
+    private func store(_ seq: Int, _ event: Event, _ locale: Locale?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard seq > applied else { return false }
+        applied = seq
+        cached = event
+        resolved = locale
+        return true
+    }
+
+    private func finishInstall() {
+        lock.lock()
+        installing = false
+        lock.unlock()
+    }
+
+    func install() {
+        lock.lock()
+        let busy = installing
+        installing = true
+        lock.unlock()
+        if busy { return }
+        Task.detached {
+            let code = await Assets.download()
+            self.finishInstall()
+            self.bridge.emit(Event(kind: VB_EV_ASSETS, code: UInt32(bitPattern: code)))
+            self.query()
+        }
+    }
+
+    private static func capsEvent(_ unavailable: UInt32, _ rate: UInt32 = 0, _ locale: Locale? = nil) -> Event {
+        Event(kind: VB_EV_CAPS, code: unavailable, value: unavailable == VB_UA_NONE && partialsStream ? 1 : 0,
+              value2: rate, text: locale?.identifier)
+    }
+
+    static func check() async -> (Event, Locale?) {
+        #if compiler(>=6.2)
+        guard #available(macOS 26.0, *) else { return (capsEvent(VB_UA_OS_TOO_OLD), nil) }
+        guard SpeechTranscriber.isAvailable else { return (capsEvent(VB_UA_TRANSCRIBER_UNSUPPORTED), nil) }
+        guard let locale = await Locales.resolve() else { return (capsEvent(VB_UA_LOCALE_UNSUPPORTED), nil) }
+        guard await Locales.isInstalled(locale) else { return (capsEvent(VB_UA_ASSETS_MISSING, 0, locale), nil) }
+        // No format means every session would fail; do not claim voice is ready.
+        guard let format = await SpeechEngine(locale: locale).format() else {
+            return (capsEvent(VB_UA_TRANSCRIBER_UNSUPPORTED, 0, locale), nil)
+        }
+        return (capsEvent(VB_UA_NONE, UInt32(format.sampleRate), locale), locale)
+        #else
+        return (capsEvent(VB_UA_SDK_TOO_OLD), nil)
+        #endif
+    }
+
+    /// The system download for the English model (spec §9, plan S21).
+    static func download() async -> Int32 {
+        #if compiler(>=6.2)
+        guard #available(macOS 26.0, *), let locale = await Locales.resolve() else { return VB_ERR_SPEECH_UNAVAILABLE }
+        let module = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
+        do {
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: [module]) {
+                try await request.downloadAndInstall()
+            }
+            return VB_OK
+        } catch {
+            return VB_ERR_FAILED
+        }
+        #else
+        return VB_ERR_SPEECH_UNAVAILABLE
+        #endif
+    }
+}
+
+@_cdecl("vb_permission_status")
+public func vb_permission_status(_ permission: UInt32) -> UInt32 {
+    Permissions.status(permission)
+}
+
+@_cdecl("vb_permission_request")
+public func vb_permission_request(_ permission: UInt32) {
+    Permissions.request(permission)
+}
+
+@_cdecl("vb_query_capabilities")
+public func vb_query_capabilities() {
+    Assets.shared.query()
+}
+
+@_cdecl("vb_install_assets")
+public func vb_install_assets() {
+    Assets.shared.install()
+}

@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use acd_voice::hud::{Hud, HudEvent, OutcomeView};
+use acd_voice::refusal::Refusal;
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Size, WebviewUrl, WebviewWindow};
 use tauri_nspanel::{CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask, tauri_panel};
 
@@ -21,6 +22,7 @@ pub const MAX_HEIGHT: f64 = 420.0;
 pub const THINKING_AFTER: Duration = Duration::from_millis(150);
 /// Spec §4.4: the HUD fades 1.5 s after the step fires or speech ends.
 pub const FADE_AFTER: Duration = Duration::from_millis(1500);
+pub const PERMISSION_ERROR_FADE: Duration = Duration::from_secs(10);
 
 /// Intentional key handoff (D17): set only when `apply` makes the HUD key
 /// for input; cleared by `release_key`, or when the HUD resigns key on its
@@ -167,6 +169,10 @@ pub fn fade_delay(hud: &Hud) -> Duration {
     match hud {
         Hud::Speaking { text } => Duration::from_millis(1500 + 50 * text.char_len() as u64)
             .clamp(Duration::from_secs(3), Duration::from_secs(15)),
+        // The recovery button sits on these; give time to read and click it.
+        Hud::Error { refusal: Refusal::MicrophoneDenied | Refusal::SpeechDenied | Refusal::HoldKeyOff, .. } => {
+            PERMISSION_ERROR_FADE
+        }
         _ => FADE_AFTER,
     }
 }
@@ -381,6 +387,10 @@ mod tests {
     fn steps_fade_after_1_5_s_and_spoken_text_stays_long_enough_to_read() {
         assert_eq!(fade_delay(&Hud::Done { proposal: None, outcome: OutcomeView::Selected }), FADE_AFTER);
         assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("short") }), Duration::from_secs(3));
+        for refusal in [Refusal::MicrophoneDenied, Refusal::SpeechDenied, Refusal::HoldKeyOff] {
+            assert_eq!(fade_delay(&Hud::Error { refusal, transcript: None }), PERMISSION_ERROR_FADE, "{refusal:?} has a button to click");
+        }
+        assert_eq!(fade_delay(&Hud::Error { refusal: Refusal::StillSending, transcript: None }), FADE_AFTER);
         assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("x".repeat(100)) }), Duration::from_millis(6500));
         assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("x".repeat(1000)) }), Duration::from_secs(15));
     }
