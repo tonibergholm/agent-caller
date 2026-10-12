@@ -678,6 +678,25 @@ test("Enter in the typed command field sends it to voice; its letters are not sh
   expect(api.presentations.at(-1)?.selected).toBe("m/a");
 });
 
+test("/ focuses the typed command field, and a click focuses it too", async () => {
+  const api = fakeApi();
+  render(Panel, { view: view({ cards: [card()] }), api, voiceInput: true });
+  const field = screen.getByRole("textbox", { name: "Voice command" }) as HTMLTextAreaElement;
+  await userEvent.keyboard("/");
+  expect(document.activeElement).toBe(field);
+  expect(field.value).toBe("");
+  field.blur();
+  await fireEvent.mouseDown(field);
+  expect(document.activeElement).toBe(field);
+});
+
+test("/ does nothing without the typed command field", async () => {
+  const api = fakeApi();
+  render(Panel, { view: view({ cards: [card()] }), api });
+  await userEvent.keyboard("/");
+  expect(api.calls).toEqual([]);
+});
+
 test("turning the typed command field off drops its draft", async () => {
   const props = { view: view({ cards: [card()] }), api: fakeApi(), voiceInput: true };
   const { rerender } = render(Panel, props);

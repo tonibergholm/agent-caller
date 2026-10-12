@@ -138,6 +138,9 @@
       case "focusAnswer":
         answerField(effect.cardKey)?.focus();
         return;
+      case "focusVoice":
+        document.querySelector<HTMLTextAreaElement>("textarea[data-field=voice]")?.focus();
+        return;
       case "markSeen":
         await api.markSeen(effect.cardKey);
         return;
@@ -352,6 +355,7 @@
       aria-label="Voice command"
       placeholder="Type a voice command, then Enter"
       bind:value={voiceText}
+      onmousedown={(e) => e.currentTarget.focus()}
     ></textarea>
   {/if}
 
@@ -361,6 +365,7 @@
       <span><kbd>1</kbd>–<kbd>9</kbd> answer</span>
       <span><kbd>T</kbd> type</span>
       <span><kbd>R</kbd> reply</span>
+      {#if voiceInput}<span><kbd>/</kbd> command</span>{/if}
       <span><kbd>Esc</kbd> close / undo</span>
     </span>
     {#if view.show_idle}
