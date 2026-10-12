@@ -151,19 +151,27 @@ pub fn hello_line(version: &str) -> String {
 
 /// A `settings` line under `max` bytes. Machine entries are small (names
 /// at most 64 characters), so the cut below is for robustness: entries are
-/// left out from the end and counted in `omitted_machines`.
+/// left out from the end and counted in `omitted_machines`, which is always
+/// the number of entries removed from `s.machines`.
+///
+/// Fail closed: when the line is still at or over `max` with no machines
+/// left (or none to begin with), the machine-less line is returned anyway.
+/// It is the smallest settings line there is, since nothing else in it
+/// varies in size, and the `warn` below records that it does not fit.
 pub fn settings_line(s: &SettingsSnapshot, max: usize) -> String {
     let whole = serde_json::to_string(s).expect("serializable");
     if whole.len() < max {
         return whole;
     }
+    let original = s.machines.len();
     let mut cut = s.clone();
-    let mut omitted = 0usize;
     loop {
         cut.machines.pop();
-        omitted += 1;
+        let omitted = original - cut.machines.len();
         let mut v = serde_json::to_value(&cut).expect("serializable");
-        v["omitted_machines"] = omitted.into();
+        if omitted > 0 {
+            v["omitted_machines"] = omitted.into();
+        }
         let line = v.to_string();
         if line.len() < max || cut.machines.is_empty() {
             tracing::warn!(omitted, "settings too large; machines left out");
@@ -583,5 +591,72 @@ mod tests {
         let out = parse(&cut);
         let kept = out["machines"].as_array().unwrap().len();
         assert_eq!(kept + out["omitted_machines"].as_u64().unwrap() as usize, 100);
+    }
+
+    fn machine_views(n: usize) -> Vec<acd_client::view::MachineEntryView> {
+        use acd_client::settings::{EndpointConfig, SecretStatus};
+        use acd_client::view::{MachineEntryView, PairingState};
+        (0..n)
+            .map(|i| MachineEntryView {
+                key: format!("{i:08}-0000-4000-8000-000000000000"),
+                name: "n".repeat(64),
+                endpoint: EndpointConfig::Tcp { host: "h".repeat(200), port: 1 },
+                pairing: PairingState::Paired,
+                secret: SecretStatus::Ok,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn settings_over_the_limit_with_no_machines_left_report_the_real_count() {
+        let snap = |machines| SettingsSnapshot { machines, notifications: true, show_idle: false, show_subagents: false, show_hook_only: false };
+        // No machines to begin with: nothing was omitted, whatever the limit.
+        let none = parse(&settings_line(&snap(vec![]), 10));
+        assert!(none.get("omitted_machines").is_none(), "{none}");
+        assert_eq!(none["machines"].as_array().unwrap().len(), 0);
+        // Too small for any machine: all are left out and all are counted.
+        let all = parse(&settings_line(&snap(machine_views(3)), 10));
+        assert_eq!(all["machines"].as_array().unwrap().len(), 0);
+        assert_eq!(all["omitted_machines"], 3);
+    }
+
+    #[test]
+    fn every_agent_string_key_is_kept_or_named_as_cuttable_text() {
+        // A new string field on Agent, Request, Option or Question fails here
+        // until it is put in KEEP (never cut) or CUTTABLE (cut to fit).
+        const CUTTABLE: &[&str] = &[
+            "title", "cwd", "project", "last_message", "parent_title", "detail", "label", "description",
+            "raw_screen", "header", "text",
+        ];
+        let a: acd_protocol::Agent = serde_json::from_value(json!({
+            "id":"a","machine_id":"m","source":"herdr","kind":"claude","title":"t","cwd":"/c","project":"p",
+            "state":"needs_you","state_since":"2026-10-08T00:00:00Z","failed":false,"last_message":"lm",
+            "can_send":true,"role":"subagent","parent_title":"pt",
+            "pending":{"id":"r","revision":1,"agent_id":"a","kind":"question","status":"open","answer_path":"hook",
+                "title":"T","detail":"d",
+                "options":[{"id":"o","label":"l","description":"ds","effect":"allow"}],
+                "questions":[{"id":"q","header":"h","text":"qq","multi_select":false,"options":[{"id":"o","label":"l","description":"ds","effect":"choose"}]}],
+                "free_text":true,"raw_screen":"rs","opened_at":"2026-10-08T00:00:00Z"}
+        })).unwrap();
+        fn keys(v: &Value, out: &mut Vec<String>) {
+            match v {
+                Value::Object(m) => {
+                    for (k, v) in m {
+                        if v.is_string() {
+                            out.push(k.clone());
+                        }
+                        keys(v, out);
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|i| keys(i, out)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        keys(&serde_json::to_value(&a).unwrap(), &mut found);
+        assert!(found.len() > 15, "the sample agent is not fully populated: {found:?}");
+        for k in found {
+            assert!(KEEP.contains(&k.as_str()) || CUTTABLE.contains(&k.as_str()), "agent string key {k:?} is neither KEEP nor CUTTABLE");
+        }
     }
 }

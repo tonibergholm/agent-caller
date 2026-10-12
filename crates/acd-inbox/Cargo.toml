@@ -13,6 +13,7 @@ testing = []
 acd-client.workspace = true
 acd-protocol.workspace = true
 acd-securefs.workspace = true
+gethostname.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

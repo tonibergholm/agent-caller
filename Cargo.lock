@@ -123,6 +123,7 @@ dependencies = [
  "acd-inbox",
  "acd-protocol",
  "acd-securefs",
+ "gethostname",
  "serde",
  "serde_json",
  "tempfile",
