@@ -135,6 +135,15 @@ fn main() {
                 let voice = app.state::<voice::VoiceState>();
                 let settings = voice.settings.lock().unwrap().clone();
                 *voice.trigger_error.lock().unwrap() = voice::trigger::apply(app.handle(), &settings, &voice::settings::VoiceSettings { enabled: false, ..settings.clone() });
+                // An upgrade can leave voice on with permissions never asked
+                // for (step 1 needed none): ask for those now, once.
+                if settings.enabled {
+                    use voice::permissions;
+                    let hold = settings.hold_key != voice::settings::HoldKey::Off;
+                    for p in permissions::to_request(hold, permissions::status) {
+                        permissions::request(p);
+                    }
+                }
             }
 
             let handle = app.handle().clone();

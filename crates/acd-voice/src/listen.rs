@@ -296,6 +296,14 @@ impl Recorder {
         if self.active() != Some(ev.generation()) {
             return None;
         }
+        // The final deadline holds whatever order the timer and the events
+        // run in, like the cap: a late final is never routed.
+        if let Phase::Finishing { since, .. } = self.phase
+            && now.duration_since(since) >= self.limits.final_timeout
+        {
+            self.phase = Phase::Idle;
+            return Some(Progress::Done(Heard::TimedOut));
+        }
         // The cap holds whatever order the timer and the events run in (S9).
         if let Phase::Listening { since, .. } = self.phase
             && now.duration_since(since) >= self.limits.max
@@ -520,6 +528,26 @@ mod tests {
         assert_eq!(r.active(), Some(1), "finishing");
         assert_eq!(r.tick(t0 + ms(500) + FINAL_TIMEOUT - ms(1)), None);
         assert_eq!(r.tick(t0 + ms(500) + FINAL_TIMEOUT), Some((1, Heard::TimedOut)));
+    }
+
+    /// Review: a final that reaches the recorder after the deadline but
+    /// before the timer ran is not routed.
+    #[test]
+    fn a_final_after_the_deadline_is_not_accepted() {
+        let t0 = Instant::now();
+        let mut r = Recorder::default();
+        r.start(1, t0);
+        r.stop(t0 + ms(500));
+        let late = ListenEvent::Final { generation: 1, text: VoiceText::new("approve"), audio: ms(900), voiced: ms(600) };
+        let on_time = late.clone();
+        assert_eq!(r.event(late, t0 + ms(500) + FINAL_TIMEOUT), Some(Progress::Done(Heard::TimedOut)));
+        r.start(2, t0);
+        r.stop(t0 + ms(500));
+        let on_time = match on_time {
+            ListenEvent::Final { text, audio, voiced, .. } => ListenEvent::Final { generation: 2, text, audio, voiced },
+            other => other,
+        };
+        assert!(matches!(r.event(on_time, t0 + ms(500) + FINAL_TIMEOUT - ms(1)), Some(Progress::Done(Heard::Transcript(_)))));
     }
 
     #[test]

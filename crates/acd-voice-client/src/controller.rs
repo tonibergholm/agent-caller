@@ -38,6 +38,8 @@ pub enum InputError {
     Empty,
     #[error("Voice is off. Turn it on in Settings.")]
     Off,
+    #[error("A recording is running. Finish or cancel it first.")]
+    Recording,
 }
 
 /// Where an utterance came from. A log tag only: safety never sees it,
@@ -197,6 +199,9 @@ impl Controller {
         if text.trim().is_empty() {
             return Err(InputError::Empty);
         }
+        if self.core.lock().unwrap().recorder.active().is_some() {
+            return Err(InputError::Recording);
+        }
         let snapshot = self.freeze(panel_open);
         self.utterance(VoiceText::new(text), snapshot, Source::Typed, None).await
     }
@@ -310,6 +315,11 @@ impl Controller {
     pub fn hold(&self, down: bool, panel_open: bool) {
         let snapshot = down.then(|| self.freeze(panel_open));
         let mut core = self.core.lock().unwrap();
+        // A press while a recording is live (a toggle one, or a key repeat)
+        // must not become the hold: its release would stop that recording.
+        if down && core.recorder.listening().is_some() {
+            return;
+        }
         if let Some(ev) = core.hold.key(down) {
             self.trigger(&mut core, ev, snapshot);
         }

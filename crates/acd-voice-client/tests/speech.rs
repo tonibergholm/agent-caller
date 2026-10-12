@@ -537,6 +537,33 @@ async fn the_toggle_starts_and_a_second_press_stops() {
     assert!(!r.voice.listening());
 }
 
+/// Review: a hold press during a toggle recording must not become its hold.
+#[tokio::test]
+async fn a_hold_press_during_a_toggle_recording_leaves_it_alone() {
+    let (r, speech) = speech_rig(vec![pending_agent()]).await;
+    r.voice.toggle(false);
+    let g = speech.last_start().unwrap();
+    r.voice.hold(true, false);
+    r.voice.hold(false, false);
+    assert!(r.voice.listening(), "the release did not stop the toggle recording");
+    r.voice.hold(true, false);
+    r.voice.other_key();
+    assert!(r.voice.listening(), "a chord did not cancel it");
+    assert_eq!(speech.calls(), [Call::Start(g)]);
+}
+
+/// Review: typed input cannot run beside a live recording.
+#[tokio::test]
+async fn typed_input_is_refused_while_a_recording_runs() {
+    let (r, _speech) = speech_rig(vec![pending_agent()]).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.hold(true, true);
+    let err = r.voice.text_input("approve".into(), true).await.unwrap_err();
+    assert_eq!(err.to_string(), "A recording is running. Finish or cancel it first.");
+    r.voice.hold(false, true);
+    assert!(r.voice.text_input("approve".into(), true).await.is_err(), "still finishing");
+}
+
 #[tokio::test]
 async fn a_press_with_voice_off_listens_to_nothing() {
     let (r, speech) = speech_rig(vec![pending_agent()]).await;

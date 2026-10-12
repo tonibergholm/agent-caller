@@ -102,8 +102,11 @@ final class Assets: @unchecked Sendable {
         guard SpeechTranscriber.isAvailable else { return (capsEvent(VB_UA_TRANSCRIBER_UNSUPPORTED), nil) }
         guard let locale = await Locales.resolve() else { return (capsEvent(VB_UA_LOCALE_UNSUPPORTED), nil) }
         guard await Locales.isInstalled(locale) else { return (capsEvent(VB_UA_ASSETS_MISSING, 0, locale), nil) }
-        let format = await SpeechEngine(locale: locale).format()
-        return (capsEvent(VB_UA_NONE, UInt32(format?.sampleRate ?? 0), locale), locale)
+        // No format means every session would fail; do not claim voice is ready.
+        guard let format = await SpeechEngine(locale: locale).format() else {
+            return (capsEvent(VB_UA_TRANSCRIBER_UNSUPPORTED, 0, locale), nil)
+        }
+        return (capsEvent(VB_UA_NONE, UInt32(format.sampleRate), locale), locale)
         #else
         return (capsEvent(VB_UA_SDK_TOO_OLD), nil)
         #endif

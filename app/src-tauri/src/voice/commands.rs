@@ -35,7 +35,25 @@ pub fn voice_set_settings(
                 permissions::request(p);
             }
         }
-        *voice.trigger_error.lock().unwrap() = super::trigger::apply(&app, &settings, &prev);
+        let error = super::trigger::apply(&app, &settings, &prev);
+        // A shortcut that cannot be registered is not kept: after a restart
+        // it would leave the toggle dead while Settings promised the old one.
+        if let Some(message) = &error
+            && settings.toggle_shortcut != prev.toggle_shortcut
+        {
+            let restored = VoiceSettings { toggle_shortcut: prev.toggle_shortcut.clone(), ..settings.clone() };
+            if let Some(path) = &voice.path {
+                let _ = restored.save(path);
+            }
+            *voice.settings.lock().unwrap() = restored.clone();
+            *voice.trigger_error.lock().unwrap() = super::trigger::apply(&app, &restored, &settings);
+            super::emit_status(&app);
+            if let Err(error) = app.emit("voice://settings", &restored) {
+                tracing::error!(%error, "could not emit the voice settings");
+            }
+            return Err(message.clone());
+        }
+        *voice.trigger_error.lock().unwrap() = error;
         super::emit_status(&app);
     }
     #[cfg(not(target_os = "macos"))]
