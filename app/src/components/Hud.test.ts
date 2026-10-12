@@ -1,6 +1,6 @@
 import { cleanup, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
-import { tick } from "svelte";
+import { flushSync, tick } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
 import Hud from "./Hud.svelte";
 import { fakeApi, view } from "../lib/fixtures";
@@ -316,9 +316,12 @@ test("a fit is sent only for the state still on screen", async () => {
   await tick();
   const first = api.fits.at(-1)!;
   api.fits.length = 0;
-  // Two states before one flush: only the newer one is measured.
+  // A newer state arrives after the older one rendered, before its
+  // measurement ran: the older measurement is dropped.
   api.hud!({ seq: first + 1, id: null, hud: { state: "error", refusal: "did_not_understand", transcript: "y" } });
+  flushSync();
   api.hud!({ seq: first + 2, id: null, hud: { state: "speaking", text: "z" } });
+  flushSync();
   await tick();
   await tick();
   expect(api.fits).toEqual([first + 2]);
