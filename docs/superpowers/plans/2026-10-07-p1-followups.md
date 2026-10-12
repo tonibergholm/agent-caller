@@ -26,6 +26,27 @@ Phase plans and live-run records retain the original evidence.
   Delivery rechecks the rival and safely returns `request_not_ready`, but
   the client offers an answer until the user clicks. This differs from the
   spec's read-only rule; see [live check 5](../../research/2026-10-09-p3-live.md).
+Additional P3 live-record residuals (recorded 2026-10-10):
+
+- Hook-token retirement deliberately considers every live Claude registry
+  session, including ignored or unrelated sessions that never used acd.
+  These can retain the previous token until its 30-day expiry, while
+  `status_message` says they "still use the previous token". The retention
+  is conservative; the diagnostic does not prove actual token use.
+- Rotation status can remain silent for the first registry scan period
+  (observed about 20–30 s), then report "waiting for a complete registry
+  scan". This is a cosmetic reporting delay.
+- Hook-config reload depends on the settings source: the live run saw a
+  project-local symlink reload, while `--settings <file>` did not reload
+  even after `/clear`. The observation was inferred from pending counts,
+  not captured headers; user-level settings reload was not verified there.
+- A held permission declined with terminal Esc resolved as `terminal`
+  after 1.7 s in that run, rather than immediately.
+
+The [P3 consequences and reinstall rerun](../../research/2026-10-09-p3-live.md)
+retain the complete evidence. The launchd reinstall race was fixed and
+six subsequent reinstalls passed; it is not an open gap.
+
 Remaining limits from the gates and historical P3 plan:
 
 - `PostToolUseFailure` is installed and counted as "the tool ran", but its
