@@ -16,7 +16,7 @@ Ui.Panel {
     // Card key from `openCard`, handed to the popup content (Task 19).
     property string pendingCard: ""
 
-    readonly property var bar: Model.barState(service.view, service.connected)
+    readonly property var tray: Model.barState(service.view, service.connected)
 
     function openCard(key) {
         root.pendingCard = key;
@@ -39,13 +39,13 @@ Ui.Panel {
 
             Text {
                 text: "◉"
-                font.strikeout: root.bar.tone === "down"
-                color: root.bar.tone === "urgent" ? Commons.Color.urgent : Commons.Color.muted
+                font.strikeout: root.tray.tone === "down"
+                color: root.tray.tone === "urgent" ? Commons.Color.urgent : Commons.Color.muted
             }
 
             Text {
-                visible: root.bar.count > 0
-                text: root.bar.text
+                visible: root.tray.count > 0
+                text: root.tray.text
                 color: Commons.Color.urgent
             }
         }
