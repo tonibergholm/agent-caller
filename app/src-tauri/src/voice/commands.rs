@@ -22,7 +22,8 @@ pub fn voice_set_settings(
     if let Some(path) = &voice.path {
         settings.save(path).map_err(|_| "Could not save the voice settings".to_owned())?;
     }
-    let was_on = std::mem::replace(&mut *voice.settings.lock().unwrap(), settings.clone()).enabled;
+    let prev = std::mem::replace(&mut *voice.settings.lock().unwrap(), settings.clone());
+    let was_on = prev.enabled;
     voice.controller.set_enabled(settings.enabled);
     #[cfg(target_os = "macos")]
     {
@@ -34,7 +35,7 @@ pub fn voice_set_settings(
                 permissions::request(p);
             }
         }
-        *voice.trigger_error.lock().unwrap() = super::trigger::apply(&app, &settings);
+        *voice.trigger_error.lock().unwrap() = super::trigger::apply(&app, &settings, &prev);
         super::emit_status(&app);
     }
     #[cfg(not(target_os = "macos"))]

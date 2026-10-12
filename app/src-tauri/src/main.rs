@@ -130,7 +130,7 @@ fn main() {
             {
                 let voice = app.state::<voice::VoiceState>();
                 let settings = voice.settings.lock().unwrap().clone();
-                *voice.trigger_error.lock().unwrap() = voice::trigger::apply(app.handle(), &settings);
+                *voice.trigger_error.lock().unwrap() = voice::trigger::apply(app.handle(), &settings, &voice::settings::VoiceSettings { enabled: false, ..settings.clone() });
             }
 
             let handle = app.handle().clone();

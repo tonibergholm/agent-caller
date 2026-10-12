@@ -127,8 +127,10 @@ pub fn set_hotkey(
     app: AppHandle,
     state: State<'_, AppState>,
     hotkey: String,
+    voice: State<'_, crate::voice::VoiceState>,
 ) -> Result<(), String> {
-    if crate::hotkey::conflicts_with_voice(&hotkey) {
+    let saved = voice.settings.lock().unwrap().toggle_shortcut.clone();
+    if crate::hotkey::conflicts_with_voice(&hotkey, saved.as_deref()) {
         return Err("That is the voice shortcut. Choose another inbox hotkey.".into());
     }
     let previous = crate::hotkey::current_shortcut();

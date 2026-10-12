@@ -32,12 +32,19 @@ pub fn check_voice(hotkey: &str, panel: Option<Shortcut>) -> Result<Shortcut, St
     Ok(shortcut)
 }
 
-/// Whether `hotkey` is the voice toggle; the inbox hotkey must not be.
-pub fn conflicts_with_voice(hotkey: &str) -> bool {
-    parse_shortcut(hotkey).ok().is_some_and(|s| Some(s) == voice_shortcut())
+/// Whether `hotkey` equals the voice toggle `voice`.
+pub fn conflicts(hotkey: &str, voice: Option<Shortcut>) -> bool {
+    parse_shortcut(hotkey).ok().is_some_and(|s| Some(s) == voice)
 }
 
-/// Registers the voice toggle, or unregisters it with `None`.
+/// Whether `hotkey` is the voice toggle, registered or only saved (voice may
+/// be off); the inbox hotkey must not be either.
+pub fn conflicts_with_voice(hotkey: &str, saved: Option<&str>) -> bool {
+    conflicts(hotkey, voice_shortcut()) || conflicts(hotkey, saved.and_then(|s| parse_shortcut(s).ok()))
+}
+
+/// Registers the voice toggle, or unregisters it with `None`. If the new
+/// shortcut cannot be registered, the old one stays live.
 pub fn apply_voice(app: &AppHandle, hotkey: Option<&str>) -> Result<(), String> {
     let next = hotkey.map(|h| check_voice(h, current_shortcut())).transpose()?;
     let shortcuts = app.global_shortcut();
@@ -141,7 +148,7 @@ fn parse_shortcut(hotkey: &str) -> Result<Shortcut, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fired, check_voice, parse_shortcut, route};
+    use super::{Fired, check_voice, conflicts, parse_shortcut, route};
 
     #[test]
     fn parses_new_shortcut_before_any_registration_change() {
@@ -168,5 +175,17 @@ mod tests {
         assert!(check_voice("Control+Alt+Space", Some(panel)).is_err());
         assert!(check_voice("not a shortcut", Some(panel)).is_err());
         assert_eq!(check_voice("Control+Alt+V", Some(panel)), parse_shortcut("Control+Alt+V"));
+    }
+
+    /// `set_hotkey` refuses the voice toggle, registered (voice on) or only
+    /// saved (voice off, the default Control+Alt+V).
+    #[test]
+    fn the_inbox_hotkey_cannot_be_the_voice_toggle() {
+        let voice = parse_shortcut("Control+Alt+V").unwrap();
+        assert!(conflicts("Control+Alt+V", Some(voice)), "voice on");
+        assert!(conflicts("Control+Alt+V", parse_shortcut("Control+Alt+V").ok()), "voice off, saved default");
+        assert!(!conflicts("Control+Alt+Space", Some(voice)));
+        assert!(!conflicts("Control+Alt+V", None), "no toggle");
+        assert!(!conflicts("not a shortcut", Some(voice)));
     }
 }

@@ -43,11 +43,29 @@ impl TapGate {
     /// Retires the old tap, runs `reset` (the controller's `hold_lost`), then
     /// `swap` (stop the old tap, start the new one; it returns the new
     /// generation, or 0 when no tap runs), and installs that generation.
+    #[cfg(test)]
     pub fn replace(&self, reset: impl FnOnce(), swap: impl FnOnce() -> u64) {
+        self.replace_if(|| true, reset, swap);
+    }
+
+    /// Like `replace`, but `decide` runs first, under the gate. If it returns
+    /// false nothing changes (the installed tap stays) and this returns
+    /// false. Deciding under the gate means the decision cannot go stale
+    /// against a concurrent replacement.
+    pub fn replace_if(
+        &self,
+        decide: impl FnOnce() -> bool,
+        reset: impl FnOnce(),
+        swap: impl FnOnce() -> u64,
+    ) -> bool {
         let mut current = self.enter();
+        if !decide() {
+            return false;
+        }
         *current = 0;
         reset();
         *current = swap();
+        true
     }
 
     /// Callers blocked on the gate right now, for barrier tests.
@@ -135,18 +153,28 @@ fn stop_hold() {
     HOLD_ACTIVE.store(false, Ordering::SeqCst);
 }
 
-/// Makes both triggers match `settings`. Returns the toggle shortcut's
-/// registration error, for Settings. The tap is replaced under `TAP`: the
-/// old generation is retired, a held recording is cancelled (the old tap's
-/// key-up will never be seen), the old tap thread exits, and only then does
-/// the new tap start and its generation count (S26).
-pub fn apply(app: &AppHandle, settings: &VoiceSettings) -> Option<String> {
+/// Whether a save leaves the running tap alone: it runs, and neither
+/// `enabled` nor the hold key changed (toggling `debug_input` must not cancel
+/// a held recording).
+pub fn keep_tap(active: bool, prev: &VoiceSettings, next: &VoiceSettings) -> bool {
+    active && prev.enabled == next.enabled && prev.hold_key == next.hold_key
+}
+
+/// Makes both triggers match `settings`; `prev` is what was saved before.
+/// Returns the toggle shortcut's registration error, for Settings (Task 9).
+/// A failed registration keeps the previous voice shortcut live. The tap is
+/// replaced under `TAP`, unless it is unchanged: the old generation is
+/// retired, a held recording is cancelled (the old tap's key-up will never
+/// be seen), the old tap thread exits, and only then does the new tap start
+/// and its generation count (S26).
+pub fn apply(app: &AppHandle, settings: &VoiceSettings, prev: &VoiceSettings) -> Option<String> {
     let voice = app.state::<VoiceState>();
     let toggle = settings.toggle_shortcut.as_deref().filter(|_| settings.enabled);
     let error = crate::hotkey::apply_voice(app, toggle).err();
     let granted = permissions::status(Permission::InputMonitoring) == PermissionState::Granted;
     let start = should_start_hold(settings.enabled, settings.hold_key, granted, false);
-    TAP.replace(
+    TAP.replace_if(
+        || !keep_tap(hold_active(), prev, settings),
         || voice.controller.hold_lost(),
         || {
             stop_hold();
@@ -157,23 +185,28 @@ pub fn apply(app: &AppHandle, settings: &VoiceSettings) -> Option<String> {
 }
 
 /// Starts the hold key if it should run and does not, for example right
-/// after Input Monitoring was granted (plan S17).
+/// after Input Monitoring was granted (plan S17). The decision reads the
+/// saved settings under the gate, so it cannot start a tap that a concurrent
+/// save just turned off.
 pub fn refresh(app: &AppHandle) {
     if TAP_NEEDS_RELAUNCH {
         return;
     }
     let voice = app.state::<VoiceState>();
-    let settings = voice.settings.lock().unwrap().clone();
-    let granted = permissions::status(Permission::InputMonitoring) == PermissionState::Granted;
-    if should_start_hold(settings.enabled, settings.hold_key, granted, hold_active()) {
-        TAP.replace(
-            || voice.controller.hold_lost(),
-            || {
-                stop_hold();
-                start_hold(settings.hold_key)
-            },
-        );
-    }
+    let key = std::cell::Cell::new(HoldKey::Off);
+    TAP.replace_if(
+        || {
+            let settings = voice.settings.lock().unwrap().clone();
+            let granted = permissions::status(Permission::InputMonitoring) == PermissionState::Granted;
+            key.set(settings.hold_key);
+            should_start_hold(settings.enabled, settings.hold_key, granted, hold_active())
+        },
+        || voice.controller.hold_lost(),
+        || {
+            stop_hold();
+            start_hold(key.get())
+        },
+    );
 }
 
 /// The toggle shortcut fired.
@@ -228,7 +261,12 @@ mod tests {
 
     /// Waits, without sleeping, until `n` callers are blocked on the gate.
     fn until_waiting(gate: &TapGate, n: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while gate.waiting_for_test() < n {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {n} caller(s) to block on the gate"
+            );
             thread::yield_now();
         }
     }
@@ -317,5 +355,57 @@ mod tests {
         replacing.join().unwrap();
         assert_eq!(*log.lock().unwrap(), ["down 5", "reset"]);
         assert!(!gate.deliver(5, || push(&log, "late down 5")));
+    }
+
+    /// Refresh must decide under the gate: a save that turned voice off while
+    /// it waited must stop it from starting a tap.
+    #[test]
+    fn a_decision_under_the_gate_sees_a_concurrent_replacement() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let gate = Arc::new(TapGate::new());
+        let enabled = Arc::new(AtomicBool::new(true));
+        let (in_swap_tx, in_swap_rx) = mpsc::channel::<()>();
+        let (finish_tx, finish_rx) = mpsc::channel::<()>();
+        let saving = {
+            let (gate, enabled) = (gate.clone(), enabled.clone());
+            thread::spawn(move || {
+                gate.replace(|| {}, || {
+                    enabled.store(false, Ordering::SeqCst);
+                    in_swap_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                    0
+                })
+            })
+        };
+        in_swap_rx.recv().unwrap();
+        let refreshing = {
+            let (gate, enabled) = (gate.clone(), enabled.clone());
+            thread::spawn(move || {
+                gate.replace_if(|| enabled.load(Ordering::SeqCst), || {}, || panic!("started a tap while off"))
+            })
+        };
+        until_waiting(&gate, 1);
+        finish_tx.send(()).unwrap();
+        saving.join().unwrap();
+        assert!(!refreshing.join().unwrap(), "declined");
+    }
+
+    #[test]
+    fn replace_if_declining_keeps_the_installed_tap() {
+        let gate = TapGate::new();
+        gate.replace(|| {}, || 5);
+        assert!(!gate.replace_if(|| false, || panic!("reset"), || panic!("swap")));
+        assert!(gate.deliver(5, || {}));
+    }
+
+    /// Saving only `debug_input` keeps a running tap (and a held key).
+    #[test]
+    fn a_save_that_changes_neither_enabled_nor_the_key_keeps_the_tap() {
+        let on = VoiceSettings { enabled: true, ..VoiceSettings::default() };
+        let debug = VoiceSettings { debug_input: true, ..on.clone() };
+        assert!(keep_tap(true, &on, &debug));
+        assert!(!keep_tap(false, &on, &debug), "no tap running");
+        assert!(!keep_tap(true, &on, &VoiceSettings { enabled: false, ..on.clone() }));
+        assert!(!keep_tap(true, &on, &VoiceSettings { hold_key: HoldKey::LeftOption, ..on.clone() }));
     }
 }
