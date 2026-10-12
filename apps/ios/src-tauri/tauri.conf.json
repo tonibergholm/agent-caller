@@ -5,7 +5,7 @@
   "identifier": "dev.agentcaller.inbox.ios",
   "build": {
     "frontendDist": "../../../app/dist",
-    "beforeBuildCommand": "npm --prefix ../../app run build"
+    "beforeBuildCommand": "npm --prefix ../../app run build:ios"
   },
   "app": {
     "windows": [
