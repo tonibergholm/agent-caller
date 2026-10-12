@@ -611,7 +611,7 @@ fn the_hud_json_shape_is_the_frontend_contract() {
     // Thinking is cancelled from the inbox or the HUD's button; it never
     // takes key, or every typed command would bounce focus.
     assert!(!Hud::Thinking { transcript: VoiceText::new("x"), id: 1 }.wants_key());
-    assert!(!Hud::Listening.wants_key() && !Hud::Speaking { text: VoiceText::new("x") }.wants_key());
+    assert!(!Hud::Listening { id: 1, partial: None, over: None }.wants_key() && !Hud::Speaking { text: VoiceText::new("x") }.wants_key());
     assert!(Hud::Speaking { text: VoiceText::new("x") }.fades());
 }
 
@@ -681,4 +681,191 @@ async fn cancel_thinking_cancels_only_a_thinking_step() {
     let r = say(&mut exec, &port, &s, "yes always").await;
     assert!(r.hud.awaiting_display().is_some());
     assert!(exec.cancel_thinking(&port).is_none());
+}
+
+/// Review Focus 3, spec §4.4: the press cancels the countdown before any
+/// recognition, and the "cancel" said during that recording reports it.
+#[tokio::test]
+async fn the_trigger_cancels_a_countdown_at_press_and_a_spoken_cancel_reports_it() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    say_shown(&mut exec, &port, &s, "approve").await;
+    let (_, over) = exec.listen(&port);
+    assert_eq!(port.cancelled(), ["act-0"], "cancelled at the press");
+    assert_eq!(over, None);
+    let r = say(&mut exec, &port, &s, "cancel").await;
+    assert!(matches!(r.hud, Hud::Done { outcome: OutcomeView::Cancelled, .. }), "{:?}", r.hud);
+    assert!(port.enqueued().len() == 1, "only the cancelled approve was ever enqueued");
+}
+
+/// Review Focus 3: a press too short to route still says what it did.
+#[tokio::test]
+async fn a_short_press_after_cancelling_a_countdown_says_cancelled() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    say_shown(&mut exec, &port, &s, "approve").await;
+    exec.listen(&port);
+    assert!(matches!(exec.resume().hud, Hud::Done { outcome: OutcomeView::Cancelled, .. }));
+    assert_eq!(exec.resume().hud, Hud::Hidden, "reported once");
+}
+
+#[tokio::test]
+async fn a_press_before_the_hud_showed_a_countdown_enqueues_nothing() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    let id = say(&mut exec, &port, &s, "approve").await.hud.awaiting_display().unwrap();
+    exec.listen(&port);
+    assert_eq!(exec.shown(&port, id), None, "a late acknowledgement starts nothing");
+    assert!(port.enqueued().is_empty());
+    assert!(matches!(exec.resume().hud, Hud::Done { outcome: OutcomeView::Cancelled, .. }));
+}
+
+/// Plan S7: the step that waits stays on screen, and "confirm" said during
+/// the recording confirms it.
+#[tokio::test]
+async fn a_press_keeps_a_waiting_confirm_and_a_spoken_confirm_still_works() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    say_shown(&mut exec, &port, &s, "yes always").await;
+    let (_, over) = exec.listen(&port);
+    assert!(matches!(over, Some(Hud::Confirm { .. })), "{over:?}");
+    assert!(port.cancelled().is_empty());
+    let r = exec.reply(&port, &VoiceText::new("confirm"), Locale::En).unwrap();
+    assert!(matches!(r.hud, Hud::Countdown { action_id: Some(_), .. }), "{:?}", r.hud);
+    assert_eq!(port.enqueued(), [pick("m/a", "r-a", "always")]);
+}
+
+#[tokio::test]
+async fn an_ignored_recording_shows_the_waiting_step_again() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    let Hud::Confirm { proposal_id, .. } = say_shown(&mut exec, &port, &s, "yes always").await.hud else {
+        panic!("expected confirm")
+    };
+    exec.listen(&port);
+    assert!(matches!(exec.resume().hud, Hud::Confirm { proposal_id: p, .. } if p == proposal_id));
+    assert!(exec.confirm(&port, Some(proposal_id)).is_some(), "still confirmable by Enter or a click");
+}
+
+/// Plan S8: after a failed recording nothing waits off screen.
+#[tokio::test]
+async fn a_failed_recording_ends_a_waiting_confirm() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    let Hud::Confirm { proposal_id, .. } = say_shown(&mut exec, &port, &s, "yes always").await.hud else {
+        panic!("expected confirm")
+    };
+    exec.listen(&port);
+    assert_eq!(exec.listen_failed(Refusal::MicrophoneUnavailable).hud, error(Refusal::MicrophoneUnavailable));
+    assert_eq!(exec.confirm(&port, Some(proposal_id)), None);
+    assert!(exec.reply(&port, &VoiceText::new("confirm"), Locale::En).is_none());
+    assert!(port.enqueued().is_empty());
+}
+
+#[tokio::test]
+async fn a_press_drops_a_step_still_thinking() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    let (n, _) = exec.begin(&port, s.clone(), VoiceText::new("approve"), Locale::En).unwrap();
+    exec.listen(&port);
+    let routed = route(&s, &VoiceText::new("approve"), None, &RouteOptions::default()).await;
+    assert_eq!(exec.routed(n, routed), None, "the old route result is dropped");
+    assert!(port.enqueued().is_empty());
+}
+
+/// Step-1 final review B4 still holds with a press.
+#[tokio::test]
+async fn a_fired_step_keeps_its_outcome_through_a_press() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    say_shown(&mut exec, &port, &s, "approve").await;
+    port.cancel_works.store(false, Ordering::SeqCst);
+    exec.listen(&port);
+    assert!(matches!(exec.resume().hud, Hud::Sending { .. }));
+    assert!(matches!(exec.listen_failed(Refusal::RecordingTooLong).hud, Hud::Error { .. }));
+    let done = exec.outcome("act-0", VoiceOutcome::Delivered).unwrap();
+    assert!(matches!(done.hud, Hud::Done { outcome: OutcomeView::Delivered, .. }));
+}
+
+#[tokio::test]
+async fn a_countdown_that_cannot_be_cancelled_keeps_its_outcome_after_a_press() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    say_shown(&mut exec, &port, &s, "approve").await;
+    port.cancel_works.store(false, Ordering::SeqCst);
+    exec.listen(&port);
+    assert!(matches!(exec.resume().hud, Hud::Sending { .. }));
+    let done = exec.outcome("act-0", VoiceOutcome::Delivered).unwrap();
+    assert!(matches!(done.hud, Hud::Done { outcome: OutcomeView::Delivered, .. }));
+}
+
+/// A notice (Task 4) may take the HUD only when no step is on it.
+#[tokio::test]
+async fn only_an_idle_executor_takes_a_notice() {
+    let a = pending("m", "a");
+    let s = select(snapshot(vec![a.clone()]), "m/a");
+    let port = FakePort::with(&[&a]);
+    let mut exec = Executor::new();
+    assert!(exec.is_idle());
+    say_shown(&mut exec, &port, &s, "yes always").await;
+    assert!(!exec.is_idle(), "a confirm waits");
+    exec.cancel(&port, None);
+    assert!(exec.is_idle(), "a finished step is idle");
+}
+
+#[test]
+fn listening_is_part_of_the_frontend_contract() {
+    let over = Hud::Error { refusal: Refusal::NoTarget, transcript: None };
+    let hud = Hud::Listening { id: 3, partial: Some(VoiceText::new("app")), over: Some(Box::new(over)) };
+    let v = serde_json::to_value(HudEvent::new(9, &hud)).unwrap();
+    assert_eq!(v["id"], 3, "the HUD's Cancel names the recording");
+    assert_eq!(v["hud"]["state"], "listening");
+    assert_eq!(v["hud"]["partial"], "app");
+    assert_eq!(v["hud"]["over"]["state"], "error");
+    let bare = serde_json::to_value(Hud::Listening { id: 1, partial: None, over: None }).unwrap();
+    assert_eq!(bare, serde_json::json!({"state": "listening", "id": 1, "partial": null, "over": null}));
+    assert!(!hud.wants_key() && !hud.fades() && hud.awaiting_display().is_none());
+    assert!(!format!("{hud:?}").contains("app\""), "Debug shows lengths only");
+    for (r, s) in [
+        (Refusal::MicrophoneDenied, "microphone_denied"),
+        (Refusal::MicrophoneUnavailable, "microphone_unavailable"),
+        (Refusal::SpeechDenied, "speech_denied"),
+        (Refusal::SpeechUnavailable, "speech_unavailable"),
+        (Refusal::SpeechAssetsMissing, "speech_assets_missing"),
+        (Refusal::RecordingTooLong, "recording_too_long"),
+        (Refusal::HoldKeyOff, "hold_key_off"),
+    ] {
+        assert_eq!(serde_json::to_value(r).unwrap(), s);
+    }
+}
+
+#[test]
+fn listen_errors_map_to_classified_refusals() {
+    use acd_voice::listen::{ListenError, Unavailable};
+    assert_eq!(Refusal::from(ListenError::MicrophoneDenied), Refusal::MicrophoneDenied);
+    assert_eq!(Refusal::from(ListenError::MicrophoneUnavailable), Refusal::MicrophoneUnavailable);
+    assert_eq!(Refusal::from(ListenError::SpeechDenied), Refusal::SpeechDenied);
+    assert_eq!(Refusal::from(ListenError::AssetsMissing), Refusal::SpeechAssetsMissing);
+    assert_eq!(Refusal::from(ListenError::SpeechUnavailable), Refusal::SpeechUnavailable);
+    assert_eq!(Refusal::from(ListenError::Failed), Refusal::SpeechUnavailable);
+    assert_eq!(Refusal::from(Unavailable::AssetsMissing), Refusal::SpeechAssetsMissing);
+    assert_eq!(Refusal::from(Unavailable::OsTooOld), Refusal::SpeechUnavailable);
 }

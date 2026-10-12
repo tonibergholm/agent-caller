@@ -102,8 +102,11 @@ pub enum OutcomeView {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Hud {
     Hidden,
-    /// Shown by the audio steps; step 1 has no microphone.
-    Listening,
+    /// Recording `id` (spec §6.2). `partial` is the live text when the
+    /// backend streams it. `over` is a step that waits for input (confirm,
+    /// which-one): it stays on screen, read-only, while the user speaks
+    /// (step-2 plan S7). Never takes key (spec §4.4).
+    Listening { id: u64, partial: Option<VoiceText>, over: Option<Box<Hud>> },
     Thinking { transcript: VoiceText, id: u64 },
     /// Waits for Enter, a click or "confirm" on this `proposal_id`, which
     /// the HUD must first acknowledge as shown (D22).
@@ -129,7 +132,7 @@ impl Hud {
     }
 
     /// It fades on its own: 1.5 s after a step fires or ends, or after
-    /// speech. A later outcome is shown again as `Done`.
+    /// speech. Listening does not fade. A later outcome is shown again as `Done`.
     pub fn fades(&self) -> bool {
         matches!(self, Hud::Sending { .. } | Hud::Done { .. } | Hud::Error { .. } | Hud::Speaking { .. })
     }
@@ -140,6 +143,7 @@ impl Hud {
     pub fn input_id(&self) -> Option<u64> {
         match self {
             Hud::Thinking { id, .. } => Some(*id),
+            Hud::Listening { id, .. } => Some(*id),
             Hud::WhichOne { choice_id, .. } => Some(*choice_id),
             Hud::Confirm { proposal_id, .. } | Hud::Countdown { proposal_id, .. } => Some(*proposal_id),
             _ => None,
