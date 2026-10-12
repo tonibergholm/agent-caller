@@ -175,6 +175,16 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Panel frame.** No unit test for `save_now`; the order of the screen-parameters notification and macOS's refit moves needs a runtime check with a display unplugged.
 - **Countdowns.** Turning idle agents off cancels a countdown on an Idle card that the view would now keep; the Done header count includes an out-of-filter card kept for its countdown; no panel test for J/K and Esc on a counting Done row while Done is collapsed.
 
+### Voice step 2 (from the final review)
+
+- **Microphone permission never asked on upgrade.** A step-1 `voice.json` with `enabled: true` skips the request that only runs when voice goes off to on, so the first press shows "Microphone access is off" before the app is listed in System Settings. Ask on first use, or when Settings opens.
+- **Stuck hold.** A hold-key down while a toggle recording runs is a no-op, but `Hold` still records it: the release stops the toggle recording, and a chord cancels it.
+- **Probe vs safety paths.** The diagnostic probe records on its own engine: lock or voice-off do not cancel it (it ends after 4 s), and it shows no tray dot. A busy microphone (`VB_ERR_BUSY`) reads as "Speech recognition is not available".
+- **Final timeout.** A final that arrives after the finishing deadline but before the timer ran is still accepted (`Recorder::event`); the test covers only timer-first order.
+- **Pump stalls.** `dispatch` runs `trigger::refresh` and the tap restart (up to about 3 s) inline, so the event pump can stall behind a permission answer.
+- **Settings.** The "Open System Settings" button sits on an Error HUD that fades after 1.5 s. Download-speech-model gives no progress; the first rejected status read hides the permission section.
+- **Plan deviations not yet approved:** Space as a hold key in the open inbox, English only and the system microphone, no "English until installed" fallback.
+
 ### Harness (`just e2e`)
 
 - `run.lock` has two millisecond races, and `just e2e-down` ignores the lock.
