@@ -92,23 +92,29 @@ pub fn set_listening(app: &AppHandle, on: bool) {
     render(app);
 }
 
-fn render(app: &AppHandle) {
+/// What the icon shows, read at draw time so the last closure to run on
+/// the main thread always draws the newest state, whichever thread queued it.
+fn draw_state() -> (TrayColor, Option<String>, bool) {
     let summary = LAST.lock().unwrap().clone().unwrap_or(TraySummary {
         color: TrayColor::Grey,
         needs_you: 0,
     });
-    let listening = LISTENING.load(Ordering::SeqCst);
+    (summary.color, title(summary.needs_you), LISTENING.load(Ordering::SeqCst))
+}
+
+fn render(app: &AppHandle) {
     let handle = app.clone();
     if let Err(error) = app.run_on_main_thread(move || {
+        let (color, title, listening) = draw_state();
         if let Some(tray) = handle.tray_by_id("main") {
             if let Err(error) = tray.set_icon(Some(Image::new_owned(
-                summary_icon(summary.color, listening),
+                summary_icon(color, listening),
                 SIZE,
                 SIZE,
             ))) {
                 tracing::warn!(%error, "could not update tray icon");
             }
-            if let Err(error) = tray.set_title(title(summary.needs_you)) {
+            if let Err(error) = tray.set_title(title) {
                 tracing::warn!(%error, "could not update tray title");
             }
         }
@@ -147,6 +153,18 @@ mod tests {
         assert_eq!(at(&on, corner_x, corner_y), MIC);
         assert_eq!(at(&off, corner_x, corner_y), [0, 0, 0, 0]);
         assert_eq!(at(&on, SIZE / 2, SIZE / 2), [245, 166, 35, 255], "the state colour stays");
+    }
+
+    /// The state is read when the icon is drawn, so a closure queued before
+    /// a newer update still draws the newest state (privacy indicator).
+    #[test]
+    fn draw_state_reads_the_newest_summary_and_microphone() {
+        *LAST.lock().unwrap() = Some(TraySummary { color: TrayColor::Blue, needs_you: 2 });
+        LISTENING.store(true, Ordering::SeqCst);
+        assert_eq!(draw_state(), (TrayColor::Blue, Some("2".to_owned()), true));
+        *LAST.lock().unwrap() = Some(TraySummary { color: TrayColor::Green, needs_you: 0 });
+        LISTENING.store(false, Ordering::SeqCst);
+        assert_eq!(draw_state(), (TrayColor::Green, None, false));
     }
 
     #[test]

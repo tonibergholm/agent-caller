@@ -145,9 +145,15 @@ pub fn voice_open_privacy(window: WebviewWindow, kind: super::permissions::Permi
         tracing::debug!(label = window.label(), "ignored a System Settings request from another window");
         return Ok(());
     }
-    std::process::Command::new("/usr/bin/open")
+    let mut child = std::process::Command::new("/usr/bin/open")
         .arg(kind.privacy_url())
-        .status()
-        .map(|_| ())
-        .map_err(|_| "Could not open System Settings".to_owned())
+        .spawn()
+        .map_err(|_| "Could not open System Settings".to_owned())?;
+    // Reaped off the main thread; a failed exit is logged by class only.
+    std::thread::spawn(move || match child.wait() {
+        Ok(status) if status.success() => {}
+        Ok(_) => tracing::warn!("open exited with a failure opening System Settings"),
+        Err(_) => tracing::warn!("could not wait for open"),
+    });
+    Ok(())
 }
