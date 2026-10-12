@@ -554,6 +554,21 @@ export function markUncertain(prev, cards, keys) {
   return next;
 }
 
+/** A terminal outcome that arrives later settles a card marked uncertain. */
+export function clearUncertain(marks, outcome) {
+  if (outcome.result.kind === "fired" || !(outcome.card in marks)) return marks;
+  const next = Object.assign({}, marks);
+  delete next[outcome.card];
+  return next;
+}
+
+/** The machine filter in force: none when its machine was removed (the inbox must not look empty). */
+export function activeFilter(filter, settings) {
+  if (filter === "") return null;
+  if (settings && !settings.machines.some((m) => m.key === filter)) return null;
+  return filter;
+}
+
 /** An uncertain mark ends when its card leaves the view or its request changes. */
 export function pruneUncertain(marks, cards) {
   const next = {};

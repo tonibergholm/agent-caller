@@ -232,6 +232,21 @@ test("another view's fired action never marks a card here", () => {
   assert.deepEqual(t.lost(), []);
 });
 
+test("a later terminal outcome settles an uncertain card; a fired one does not", () => {
+  const marks = { "m1/a": "-", "m1/b": "r2" };
+  assert.deepEqual(M.clearUncertain(marks, { card: "m1/a", result: { kind: "delivered" } }), { "m1/b": "r2" });
+  assert.equal(M.clearUncertain(marks, { card: "m1/a", result: { kind: "fired" } }), marks);
+  assert.equal(M.clearUncertain(marks, { card: "m9/z", result: { kind: "cancelled" } }), marks);
+});
+
+test("a filter on a removed machine no longer hides the inbox", () => {
+  const settings = { machines: [{ key: "m1" }, { key: "m2" }] };
+  assert.equal(M.activeFilter("", settings), null);
+  assert.equal(M.activeFilter("m2", settings), "m2");
+  assert.equal(M.activeFilter("gone", settings), null);
+  assert.equal(M.activeFilter("m2", null), "m2", "no settings yet: keep it");
+});
+
 test("ids are unique and short", () => {
   const ids = new M.Ids("bar");
   const a = ids.next();

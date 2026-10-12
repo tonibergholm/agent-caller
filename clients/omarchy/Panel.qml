@@ -37,7 +37,7 @@ Item {
 
     readonly property var view: service.view
     readonly property var cards: view ? view.cards : []
-    readonly property var groups: Model.sections(cards, machineFilter === "" ? null : machineFilter)
+    readonly property var groups: Model.sections(cards, Model.activeFilter(machineFilter, service.settings))
     readonly property var visibleCards: groups.needs.concat(groups.working, doneOpen ? groups.done : [])
     readonly property var chips: Model.machineChips(view, service.settings)
 
@@ -242,6 +242,11 @@ Item {
 
         function onOutcomesLost(cards) {
             panel.uncertain = Model.markUncertain(panel.uncertain, panel.cards, cards);
+        }
+
+        // An outcome that arrives after the loss settles the card again.
+        function onOutcome(msg) {
+            panel.uncertain = Model.clearUncertain(panel.uncertain, msg);
         }
 
         // The service forgets a panel's state when the connection drops.

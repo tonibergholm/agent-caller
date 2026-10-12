@@ -191,6 +191,10 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Keyboard navigation in a tall list.** J/K moves the selection but the card `Flickable` does not scroll to it, so with more cards than fit the highlighted one can be off screen (`model.mjs` returns a `select` effect that `Panel.run` ignores).
 - **Notification history on a flap.** A request that leaves the view when its machine disconnects is forgotten by `notify.rs`, so the same request and revision notifies again on reconnect; keep a bounded history instead.
 - **Keyring: an individually locked item.** `unlock` only unlocks the collection; with the collection unlocked and one item locked the "Unlock keyring" action cannot recover it. Search for the locked items and unlock their paths too.
+- **Locked after a failed mutation.** A re-pair or removal that gets `Locked` leaves a previously cached `Cached::Value`, so the settings still say `ok` and the panel does not offer "Unlock keyring".
+- **Settings vs the view of a slow edit.** `pair`, `remove_machine`, `rename_machine` and `set_show` wake the view before the settings snapshot is built, so a panel can briefly join a new view with the old settings.
+- **Preference write inside admission.** `set_notifications` saves `service.json` while `Service::admit` holds the connection gate; on stalled storage a close cannot take the gate to cancel countdowns. Move it to the slow-command path.
+- **Installer stderr.** The reader pushes every chunk into an unbounded channel until the child exits; keep a rolling tail in the reader instead.
 - **Rename racing remove** returns `settings_failed`, not `unknown_machine`.
 - **Keyring deadline.** Mutating Secret Service calls have no deadline; check whether zbus applies a reply timeout, or a hung service blocks the worker until restart.
 - **One owner per panel.** Each `Service.qml` is its own connection and owner. If Omarchy creates a bar widget per monitor, Esc in one panel does not undo a countdown started from another's.
