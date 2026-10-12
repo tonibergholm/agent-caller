@@ -165,10 +165,8 @@ pub(crate) struct Registry {
 
 pub struct Service {
     pub inbox: Arc<Inbox>,
-    #[allow(dead_code)] // read by the unlock and refresh commands (Task 10)
     pub(crate) secrets: Arc<dyn SecretControl>,
     prefs_tx: watch::Sender<Prefs>,
-    #[allow(dead_code)] // read by set_notifications callers (Task 10)
     prefs_path: Option<PathBuf>,
     pub(crate) registry: Mutex<Registry>,
     pub(crate) settings_gen: AtomicU64,
@@ -284,7 +282,6 @@ impl Service {
         self.panel_tx.send_if_modified(|v| std::mem::replace(v, any) != any);
     }
 
-    #[allow(dead_code)] // wired by Task 10
     pub(crate) fn set_notifications(&self, on: bool) -> std::io::Result<()> {
         let mut p = *self.prefs_tx.borrow();
         p.notifications = on;
@@ -368,7 +365,6 @@ impl Service {
     }
 
     /// `publish_settings` in the background.
-    #[allow(dead_code)] // called by the settings commands (Task 10)
     pub(crate) fn settings_changed(self: &Arc<Self>) {
         let me = self.clone();
         tokio::spawn(async move { me.publish_settings().await });

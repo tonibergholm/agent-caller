@@ -119,7 +119,7 @@ async fn ids_are_remembered_up_to_a_bound() {
         .skip(3) // hello, settings, view
         .map(|l| serde_json::from_str::<serde_json::Value>(&l).unwrap()["code"].as_str().unwrap_or("").to_owned())
         .collect();
-    assert_eq!(codes, ["unsupported", "unsupported", "duplicate_id", "unsupported", "unsupported"],
+    assert_eq!(codes, ["", "", "duplicate_id", "", ""],
         "a repeat within the last 2 ids is refused; an older one is forgotten");
 }
 
@@ -159,5 +159,5 @@ async fn default_options_remember_1024_ids() {
     send("i0".into()); // forgotten
     let code = |l: String| serde_json::from_str::<serde_json::Value>(&l).unwrap()["code"].as_str().unwrap_or("").to_owned();
     let codes: Vec<String> = std::iter::from_fn(|| conn.outbox.try_next_for_test()).map(code).collect();
-    assert_eq!(codes, ["duplicate_id", "unsupported"]);
+    assert_eq!(codes, ["duplicate_id", ""]);
 }
