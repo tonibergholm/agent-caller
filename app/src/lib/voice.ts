@@ -32,3 +32,51 @@ export const VOICE_OFF: VoiceSettings = {
 
 /** Mirrors the app's voice::permissions::Permission. */
 export type PermissionKind = "microphone" | "speech" | "input_monitoring";
+
+/** Mirrors voice::permissions::PermissionState. */
+export type PermissionState = "not_determined" | "granted" | "denied" | "restricted";
+
+/** Mirrors acd_voice::listen::Unavailable. */
+export type Unavailable =
+  | "checking"
+  | "not_mac"
+  | "os_too_old"
+  | "sdk_too_old"
+  | "transcriber_unsupported"
+  | "locale_unsupported"
+  | "assets_missing";
+
+/** Mirrors voice::status::VoiceStatus. */
+export type VoiceStatus = {
+  unavailable: Unavailable | null;
+  streams_partials: boolean;
+  locale: string | null;
+  microphone: PermissionState;
+  /** null when Speech Recognition is not needed. */
+  speech: PermissionState | null;
+  input_monitoring: PermissionState;
+  hold_key_active: boolean;
+  relaunch_for_hold_key: boolean;
+  /** Why the voice shortcut could not be registered; the old one stays live. */
+  toggle_error: string | null;
+};
+
+/** Spec §9: "Not available on this Mac" with the reason. */
+export const unavailableText: Record<Unavailable, string> = {
+  checking: "Checking speech recognition on this Mac…",
+  not_mac: "Voice needs macOS.",
+  os_too_old: "Not available on this Mac: voice needs macOS 26 or later.",
+  sdk_too_old: "Not available in this build: it was built without the macOS 26 SDK.",
+  transcriber_unsupported: "Not available on this Mac: on-device speech recognition is not supported.",
+  locale_unsupported: "Not available on this Mac: English speech recognition is not supported.",
+  assets_missing: "The English speech model is not installed.",
+};
+
+export const HOLD_KEYS: [HoldKey, string][] = [
+  ["right_option", "Right Option"],
+  ["left_option", "Left Option"],
+  ["right_command", "Right Command"],
+  ["right_control", "Right Control"],
+  ["fn", "Fn"],
+  ["off", "Off"],
+];

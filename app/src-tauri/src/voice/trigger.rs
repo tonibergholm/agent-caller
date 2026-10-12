@@ -161,7 +161,7 @@ pub fn keep_tap(active: bool, prev: &VoiceSettings, next: &VoiceSettings) -> boo
 }
 
 /// Makes both triggers match `settings`; `prev` is what was saved before.
-/// Returns the toggle shortcut's registration error, for Settings (Task 9).
+/// Returns the toggle shortcut's registration error, for Settings.
 /// A failed registration keeps the previous voice shortcut live. The tap is
 /// replaced under `TAP`, unless it is unchanged: the old generation is
 /// retired, a held recording is cancelled (the old tap's key-up will never

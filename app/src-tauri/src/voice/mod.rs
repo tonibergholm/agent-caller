@@ -6,6 +6,7 @@ pub mod bridge;
 pub mod hud;
 pub mod permissions;
 pub mod settings;
+pub mod status;
 #[cfg(target_os = "macos")]
 pub mod trigger;
 
@@ -103,7 +104,7 @@ pub fn dispatch(app: &AppHandle, ev: bridge::BridgeEvent) {
     }
 }
 
-/// Tells Settings to fetch the voice status again (Task 9).
+/// Tells Settings to fetch the voice status again.
 #[cfg(target_os = "macos")]
 pub fn emit_status(app: &AppHandle) {
     if let Err(error) = app.emit("voice://status", ()) {

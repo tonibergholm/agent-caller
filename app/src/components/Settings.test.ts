@@ -1,9 +1,9 @@
-import { cleanup, render, screen } from "@testing-library/svelte";
+import { cleanup, render, screen, waitFor } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import Settings from "./Settings.svelte";
-import { fakeApi, view } from "../lib/fixtures";
-import { VOICE_OFF } from "../lib/voice";
+import { STATUS_OK, fakeApi, view } from "../lib/fixtures";
+import { DEFAULT_VOICE_TOGGLE, VOICE_OFF } from "../lib/voice";
 import type { MachineEntryView } from "../lib/bindings/MachineEntryView";
 
 afterEach(() => {
@@ -330,4 +330,74 @@ test("the voice probe shows only with voice and the debug setting on, and lists 
   expect(api.calls).toContainEqual(["voiceProbe", 1]);
   api.voiceProbeReport!('{"microphone":"granted","step":1}');
   expect(await screen.findByText(/"microphone":"granted"/)).toBeTruthy();
+});
+
+const on = { ...VOICE_OFF, enabled: true };
+
+test("each permission shows its state and the action that helps", async () => {
+  const api = fakeApi({ voice: on, status: { ...STATUS_OK, microphone: "not_determined", input_monitoring: "denied" } });
+  render(Settings, { api });
+  await userEvent.click(await screen.findByRole("button", { name: "Ask for Microphone" }));
+  expect(api.calls).toContainEqual(["requestVoicePermission", "microphone"]);
+  await userEvent.click(screen.getByRole("button", { name: "Open System Settings for Input Monitoring" }));
+  expect(api.calls).toContainEqual(["openVoicePrivacy", "input_monitoring"]);
+  expect(screen.getByText("Needed only for the hold key. The voice shortcut works without it.")).toBeTruthy();
+  expect(screen.queryByText("Speech Recognition")).toBeNull();
+});
+
+test("Speech Recognition shows only when the status lists it", async () => {
+  const api = fakeApi({ voice: on, status: { ...STATUS_OK, speech: "not_determined" } });
+  render(Settings, { api });
+  await userEvent.click(await screen.findByRole("button", { name: "Ask for Speech Recognition" }));
+  expect(api.calls).toContainEqual(["requestVoicePermission", "speech"]);
+});
+
+test("an unavailable Mac says why, and a missing model can be downloaded", async () => {
+  render(Settings, { api: fakeApi({ voice: on, status: { ...STATUS_OK, unavailable: "os_too_old" } }) });
+  expect(await screen.findByText("Not available on this Mac: voice needs macOS 26 or later.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Download speech model" })).toBeNull();
+  cleanup();
+  const api = fakeApi({ voice: on, status: { ...STATUS_OK, unavailable: "assets_missing" } });
+  render(Settings, { api });
+  await userEvent.click(await screen.findByRole("button", { name: "Download speech model" }));
+  expect(api.calls).toContainEqual(["installSpeechAssets"]);
+});
+
+test("the hold key and the voice shortcut are saved, and an empty shortcut turns it off", async () => {
+  const api = fakeApi({ voice: on });
+  render(Settings, { api });
+  await userEvent.selectOptions(await screen.findByRole("combobox", { name: "Hold key" }), "left_option");
+  expect(api.calls).toContainEqual(["setVoiceSettings", { ...on, hold_key: "left_option" }]);
+  const input = screen.getByRole("textbox", { name: "Voice shortcut" }) as HTMLInputElement;
+  expect(input.value).toBe(DEFAULT_VOICE_TOGGLE);
+  await userEvent.clear(input);
+  await userEvent.type(input, "Control+Alt+M");
+  await userEvent.click(screen.getByRole("button", { name: "Save shortcut" }));
+  expect(api.calls).toContainEqual(["setVoiceSettings", { ...on, hold_key: "left_option", toggle_shortcut: "Control+Alt+M" }]);
+  await userEvent.clear(input);
+  await userEvent.click(screen.getByRole("button", { name: "Save shortcut" }));
+  expect(api.calls).toContainEqual(["setVoiceSettings", { ...on, hold_key: "left_option", toggle_shortcut: null }]);
+});
+
+test("a refused shortcut says why and the hold key select reverts on failure", async () => {
+  const api = fakeApi({ voice: on });
+  api.setVoiceSettings = async () => {
+    throw new Error("That is the inbox hotkey. Choose another voice shortcut.");
+  };
+  render(Settings, { api });
+  await userEvent.click(await screen.findByRole("button", { name: "Save shortcut" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("inbox hotkey");
+  const select = screen.getByRole("combobox", { name: "Hold key" }) as HTMLSelectElement;
+  await userEvent.selectOptions(select, "fn");
+  expect(select.value).toBe("right_option");
+});
+
+test("the status reloads when the app says it changed", async () => {
+  const api = fakeApi({ voice: on, status: { ...STATUS_OK, microphone: "not_determined" } });
+  render(Settings, { api });
+  await screen.findByRole("button", { name: "Ask for Microphone" });
+  api.status = STATUS_OK;
+  api.voiceStatusChanged!();
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Ask for Microphone" })).toBeNull());
+  expect(screen.getAllByText("Allowed").length).toBeGreaterThan(0);
 });

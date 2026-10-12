@@ -157,3 +157,39 @@ pub fn voice_open_privacy(window: WebviewWindow, kind: super::permissions::Permi
     });
     Ok(())
 }
+
+/// Settings' view of voice. On macOS it also retries the hold key, so a
+/// grant made in System Settings takes effect when Settings regains focus
+/// (plan S17).
+#[tauri::command]
+pub fn voice_status(app: AppHandle) -> super::status::VoiceStatus {
+    #[cfg(target_os = "macos")]
+    super::trigger::refresh(&app);
+    super::status::current(&app)
+}
+
+/// "Ask" next to a permission that was never asked. Settings window only.
+#[tauri::command]
+pub fn voice_request_permission(window: WebviewWindow, kind: super::permissions::Permission) {
+    if window.label() != "settings" {
+        tracing::debug!(label = window.label(), "ignored a permission request from another window");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    super::permissions::request(kind);
+    #[cfg(not(target_os = "macos"))]
+    let _ = kind;
+}
+
+/// "Download speech model" (plan S21). Settings window only.
+#[tauri::command]
+pub fn voice_install_assets(window: WebviewWindow, voice: State<'_, VoiceState>) {
+    if window.label() != "settings" {
+        tracing::debug!(label = window.label(), "ignored an asset request from another window");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    voice.speech.install_assets();
+    #[cfg(not(target_os = "macos"))]
+    let _ = voice;
+}

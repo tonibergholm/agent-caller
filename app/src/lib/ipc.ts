@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { InboxView } from "./bindings/InboxView";
 import type { MachineEntryView } from "./bindings/MachineEntryView";
 import type { HudEvent } from "./hud";
-import type { PermissionKind, Presentation, VoiceSettings } from "./voice";
+import type { PermissionKind, Presentation, VoiceSettings, VoiceStatus } from "./voice";
 
 export interface Api {
   pick(cardKey: string, requestId: string, optionId: string, revision: number): Promise<void>;
@@ -52,6 +52,11 @@ export interface Api {
   voiceProbe(step: number): Promise<void>;
   /** Opens the System Settings pane for one permission (plan S19). */
   openVoicePrivacy(kind: PermissionKind): Promise<void>;
+  getVoiceStatus(): Promise<VoiceStatus>;
+  /** The app says the status changed; fetch it again. */
+  onVoiceStatus(cb: () => void): Promise<() => void>;
+  requestVoicePermission(kind: PermissionKind): Promise<void>;
+  installSpeechAssets(): Promise<void>;
   onVoiceProbe(cb: (report: string) => void): Promise<() => void>;
 }
 
@@ -94,5 +99,9 @@ export const tauriApi: Api = {
   voiceHudFit: (seq, height) => invoke("voice_hud_fit", { seq, height }),
   voiceProbe: (step) => invoke("voice_probe", { step }),
   openVoicePrivacy: (kind) => invoke("voice_open_privacy", { kind }),
+  getVoiceStatus: () => invoke("voice_status"),
+  onVoiceStatus: (cb) => listen("voice://status", () => cb()),
+  requestVoicePermission: (kind) => invoke("voice_request_permission", { kind }),
+  installSpeechAssets: () => invoke("voice_install_assets"),
   onVoiceProbe: (cb) => listen<string>("voice://probe", (e) => cb(e.payload)),
 };

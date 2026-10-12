@@ -341,21 +341,18 @@ impl MacSpeech {
     }
 
     /// The resolved speech locale, for Settings.
-    // Read by Settings in Task 9.
-    #[allow(dead_code)]
     pub fn locale(&self) -> Option<String> {
         self.caps.lock().unwrap().1.clone()
     }
 
-    // Called by Settings commands in Task 9.
+    // Unused on purpose: its answer re-emits the status, which the Settings
+    // fetch would trigger again.
     #[allow(dead_code)]
     pub fn refresh(&self) {
         // SAFETY: no arguments; returns at once.
         unsafe { ffi::vb_query_capabilities() }
     }
 
-    // Called by Settings commands in Task 9.
-    #[allow(dead_code)]
     pub fn install_assets(&self) {
         // SAFETY: no arguments; returns at once.
         unsafe { ffi::vb_install_assets() }
