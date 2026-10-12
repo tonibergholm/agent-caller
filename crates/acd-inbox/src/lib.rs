@@ -8,3 +8,5 @@ pub mod commands;
 pub mod server;
 pub mod secrets;
 pub mod notify;
+#[cfg(target_os = "linux")]
+pub mod linux;
