@@ -245,8 +245,9 @@ impl Settings {
                     // changed cannot tell a kept `Alt+Space` from the old
                     // default, so the old default moves to the new one. A
                     // value chosen after this runs is never touched again.
-                    // The save is best effort: an unwritable file must not stop
-                    // startup, and the migration runs again on the next start.
+                    // The migration save is best effort: an unwritable file
+                    // must not stop startup for this reason, and the migration
+                    // runs again on the next start.
                     if !s.hotkey_migrated {
                         if s.hotkey == LEGACY_DEFAULT_HOTKEY {
                             s.hotkey = DEFAULT_HOTKEY.into();

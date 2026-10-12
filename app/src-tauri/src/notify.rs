@@ -159,7 +159,8 @@ mod platform {
 
     /// Starts the request. The receiver gets macOS's `granted` answer when
     /// the prompt is closed; `None` when the build is not bundled. A failed
-    /// request sends nothing, so the receiver times out.
+    /// request sends nothing and drops the sender, so the receiver reports
+    /// a disconnect and the caller falls back to reading the stored state.
     pub fn request() -> Option<mpsc::Receiver<bool>> {
         if !bundled() {
             return None;
