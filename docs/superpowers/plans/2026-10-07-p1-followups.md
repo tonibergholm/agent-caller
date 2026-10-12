@@ -17,6 +17,15 @@ Phase plans and live-run records retain the original evidence.
 
 ## Hooks and service
 
+- With a literal Tailscale IP in `listen` and no Tailscale CLI, startup
+  refuses the address before emitting the missing-CLI warning. The warning
+  is also gated on the `tailscale` keyword instead of
+  `bind::needs_tailscale_probe`; this diagnostic gap remains unresolved.
+- An already-known rival Codex pane can start showing the same command
+  without revoking the original request's advertised `keys` readiness.
+  Delivery rechecks the rival and safely returns `request_not_ready`, but
+  the client offers an answer until the user clicks. This differs from the
+  spec's read-only rule; see [live check 5](../../research/2026-10-09-p3-live.md).
 Remaining limits from the gates and historical P3 plan:
 
 - `PostToolUseFailure` is installed and counted as "the tool ran", but its

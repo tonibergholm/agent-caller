@@ -53,7 +53,20 @@ before pressing Esc), `E2E_CLIENT_PORT` / `E2E_HOOK_PORT` / `E2E_T3_PORT` (never
 The default `run-all.sh` runs scenarios 10, 20, 30, 31, 40, 41 and 50.
 Scenario 51 (T3 typed answers) and diagnostics 60/61 are opt-in, via
 `just e2e-one <name>` after `just e2e-up`; they are not covered merely by
-running `just e2e`. Read each scenario before invoking it.
+running `just e2e`. Read each scenario before invoking it. Diagnostic 61
+also requires installing and trusting the scratch Codex hooks via
+`codex-trust.sh add` (subject to the Preconditions above):
+
+```sh
+just e2e-up
+tests/e2e/codex-trust.sh add   # stop if this fails; do not run diagnostic 61
+just e2e-one 61-codex-deny-capture
+just e2e-down                # stops agents, then restores Codex trust config
+```
+
+Run `just e2e-down` even if trust setup or the diagnostic fails. If teardown
+cannot restore the config, follow Recovery below; stop scratch Codex
+processes before `codex-trust.sh restore`.
 
 ## Recovery after an interrupted run
 
