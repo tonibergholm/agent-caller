@@ -1,3 +1,4 @@
+use std::future::IntoFuture;
 use std::io::Write;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -498,6 +499,10 @@ pub async fn run(dir: &Path) -> Result<()> {
             tracing::warn!("listen contains \"tailscale\" but no Tailscale addresses are reported");
         }
     }
+    // A socket path that `bind` would refuse fails startup here, before any
+    // listener is bound (#16).
+    local_socket::check_path(&socket_path(dir))?;
+    local_socket::check_path(&hook_socket_path(dir))?;
     // D13: the hook endpoint binds first, so a taken hook port fails startup
     // before any socket file exists. One router serves both hook listeners,
     // so they share the hold cap and hold ids.
@@ -619,20 +624,26 @@ pub async fn run(dir: &Path) -> Result<()> {
     for (addr, listener) in listeners {
         tracing::info!(%addr, "listening");
         let app = app.clone();
-        let tls_listener = core_tls::TlsListener::new(
+        let mut tls_listener = core_tls::TlsListener::new(
             listener,
             tls_rx.clone(),
             admission.clone(),
             core_tls::Limits::default(),
         );
+        let ended = tls_listener.ended();
         servers.spawn(async move {
-            if let Err(e) = axum::serve(
+            let serve = axum::serve(
                 tls_listener,
                 app.into_make_service_with_connect_info::<core_tls::Admit>(),
             )
-            .await
-            {
-                tracing::error!(%addr, error = %e, "server stopped");
+            .into_future();
+            tokio::select! {
+                result = serve => {
+                    if let Err(e) = result {
+                        tracing::error!(%addr, error = %e, "server stopped");
+                    }
+                }
+                () = ended => tracing::error!(%addr, "TLS listener task ended"),
             }
             format!("listener {addr}")
         });
