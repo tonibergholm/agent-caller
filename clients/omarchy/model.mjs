@@ -446,3 +446,35 @@ export class Tracker {
     return cards;
   }
 }
+
+/**
+ * What submitting a typed answer does (spec §7, as Panel.svelte). The answer
+ * goes to the request the editor was opened for, never the card's current
+ * one. `none`: nothing to send and the text stays (a countdown runs or the
+ * card is busy). `closed`: the request changed, so the editor closes and the
+ * text is dropped. `invalid`: the text cannot be sent.
+ */
+export function planAnswer(editor, cards, text) {
+  if (!answerEditorValid(editor, cards)) return { kind: "closed" };
+  const card = cards.find((c) => c.key === editor.cardKey);
+  if (card.action !== null || card.busy) return { kind: "none" };
+  const r = validateAnswer(text);
+  if (!r.ok) return { kind: "invalid", reason: r.reason };
+  return { kind: "send", fields: { card: editor.cardKey, request: editor.requestId, revision: editor.revision, text: r.text } };
+}
+
+/** A reply box belongs to its card: it closes when the card leaves the view. */
+export function pruneKeyState(st, cards) {
+  if (st.replyFor !== null && !cards.some((c) => c.key === st.replyFor)) return { ...st, replyFor: null };
+  return st;
+}
+
+/** `openCard`: select that card and close any reply box. */
+export function selectCard(key) {
+  return { selected: key, replyFor: null };
+}
+
+/** The service answers `escape` with true when it cancelled this panel's newest countdown; else the panel closes. */
+export function escapeCloses(reply) {
+  return !(reply.type === "ok" && reply.result === true);
+}

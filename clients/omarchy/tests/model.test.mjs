@@ -284,3 +284,44 @@ test("Backoff doubles to the cap and resets only when told", () => {
   b.reset();
   assert.equal(b.next(), 500);
 });
+
+test("a typed answer is sent to the request its editor was opened for", () => {
+  const c = card("m1/a", "request", { free_text_answerable: true, agent: { pending: { id: "r1", revision: 3 } } });
+  const editor = M.answerEditor(c);
+  const plan = M.planAnswer(editor, [c], "  yes\r\nplease ");
+  assert.deepEqual(plan, { kind: "send", fields: { card: "m1/a", request: "r1", revision: 3, text: "yes\nplease" } });
+});
+
+test("a changed request closes the editor at submit time and nothing is sent", () => {
+  const c = card("m1/a", "request", { free_text_answerable: true, agent: { pending: { id: "r1", revision: 3 } } });
+  const editor = M.answerEditor(c);
+  const bumped = { ...c, agent: { pending: { id: "r1", revision: 4 } } };
+  assert.equal(M.planAnswer(editor, [bumped], "x").kind, "closed");
+  assert.equal(M.planAnswer(editor, [], "x").kind, "closed");
+  assert.equal(M.planAnswer(null, [c], "x").kind, "closed");
+});
+
+test("a card with a countdown or busy takes no second answer", () => {
+  const base = card("m1/a", "request", { free_text_answerable: true, agent: { pending: { id: "r1", revision: 3 } } });
+  const editor = M.answerEditor(base);
+  assert.equal(M.planAnswer(editor, [{ ...base, action: { id: "a1", fires_at_ms: 1 } }], "x").kind, "none");
+  assert.equal(M.planAnswer(editor, [{ ...base, busy: true }], "x").kind, "none");
+  assert.equal(M.planAnswer(editor, [base], "   ").kind, "invalid");
+});
+
+test("the reply box closes when its card leaves the view", () => {
+  const st = { selected: "m1/a", replyFor: "m1/a" };
+  assert.deepEqual(M.pruneKeyState(st, [card("m1/a")]), st);
+  assert.deepEqual(M.pruneKeyState(st, [card("m1/b")]), { selected: "m1/a", replyFor: null });
+  assert.deepEqual(M.pruneKeyState({ selected: null, replyFor: null }, []), { selected: null, replyFor: null });
+});
+
+test("openCard selects its card and closes a reply box", () => {
+  assert.deepEqual(M.selectCard("m1/a"), { selected: "m1/a", replyFor: null });
+});
+
+test("Esc closes the panel unless the service cancelled a countdown", () => {
+  assert.equal(M.escapeCloses({ type: "ok", result: true }), false);
+  assert.equal(M.escapeCloses({ type: "ok", result: false }), true);
+  assert.equal(M.escapeCloses({ type: "error", code: "unreachable" }), true);
+});
