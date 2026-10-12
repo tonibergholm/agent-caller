@@ -49,8 +49,9 @@ pub enum WorkerError {
     /// The deadline passed before the job started: it never ran.
     Expired,
     /// A write or delete that may or may not have run: it was cut off, or it
-    /// is still queued behind a slow job such as an unlock, and the serial
-    /// worker will still run it. Callers map it to the unknown status (D36).
+    /// is queued behind a slow job such as an unlock and then runs, or
+    /// expires unrun; the caller cannot tell which. Callers map it to the
+    /// unknown status (D36).
     Ambiguous,
 }
 
@@ -303,6 +304,22 @@ impl WorkerStore {
         true
     }
 
+    /// Publishes a read's result. Like `publish`, but while the entry is
+    /// `Unknown` only a successful read replaces it: a failed read (say a
+    /// retry queued behind the still-running change) must not hide that the
+    /// change is unconfirmed, or re-pairing would refuse (D36).
+    fn publish_read(&self, key: &str, generation: u64, entry: Cached) -> bool {
+        let mut c = self.cache.lock().unwrap();
+        if c.generations.get(key).copied().unwrap_or(0) != generation {
+            return false;
+        }
+        if matches!(c.entries.get(key), Some(Cached::Unknown)) && !matches!(entry, Cached::Value(_)) {
+            return false;
+        }
+        c.entries.insert(key.to_owned(), entry);
+        true
+    }
+
     fn read_through(&self, key: &str) -> Result<Option<String>, SecretError> {
         let generation = self.generation(key);
         let result = self.worker.read(key);
@@ -317,7 +334,7 @@ impl WorkerStore {
                 Cached::of(*e)
             }
         };
-        if !self.publish(key, generation, entry.clone()) {
+        if !self.publish_read(key, generation, entry.clone()) {
             tracing::debug!("a keyring read finished after a change; its result was dropped");
             // Answer from what the change left in the cache.
             let current = self.cache.lock().unwrap().entries.get(key).cloned();

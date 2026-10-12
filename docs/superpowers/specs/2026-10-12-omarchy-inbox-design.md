@@ -130,7 +130,7 @@ missing, the "Open" action is left out of notifications.
   holding its own lock. Pairing stores the secret first, then commits the
   machine under the lock. If the commit fails, a new machine's stored
   secret is removed and a re-paired machine's previous secret is
-  restored (as `acd-client` does today).
+  restored, unless it is unknown (as `acd-client` does today).
 
 ### 4.4 Socket startup
 
@@ -339,7 +339,7 @@ The service reconciles each new `InboxView` against the previous one:
   `secret_store_locked` / `secret_store_timeout` and changes nothing.
 - Pairing: the pairing string is parsed, its secret stored through the
   worker, then the machine committed; a failure after storing removes a
-  new machine's secret or restores a re-paired machine's previous one. The reply carries the machine key and name only.
+  new machine's secret or restores a re-paired machine's previous one, unless it is unknown. The reply carries the machine key and name only.
 - The service never sends a token or pin to a view. The pairing string
   goes from view to service only; it is never logged or echoed.
 - The local machine uses the local `acd` socket and token file, as the

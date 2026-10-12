@@ -113,6 +113,22 @@ fn a_timed_out_write_leaves_the_key_unknown_until_a_read_after_it_settles() {
     assert_eq!(s.status("k"), SecretStatus::Unreadable);
 }
 
+#[test]
+fn a_failed_read_does_not_hide_an_unconfirmed_change() {
+    let backend = FakeBackend::default();
+    backend.0.lock().unwrap().hang_writes = Hang::UntilReleased;
+    let release = Release(backend.clone());
+    let s = store(&backend, WorkerTimeouts { op: Duration::from_millis(200), ..QUICK });
+    assert_eq!(s.set("k", "v").unwrap_err().kind(), SecretErrorKind::Unknown);
+    // The retry queues behind the running write and times out.
+    s.refresh(&["k".into()]);
+    assert_eq!(s.get("k").unwrap_err().kind(), SecretErrorKind::Unknown, "re-pairing needs Unknown");
+    assert_eq!(s.status("k"), SecretStatus::Unknown);
+    drop(release);
+    s.refresh(&["k".into()]);
+    assert_eq!(s.get("k").unwrap().as_deref(), Some("v"), "a successful read clears it");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hung_write_fails_everything_closed_and_nothing_reconnects() {
     let f = FakeServer::start(TOKEN, acd_client::fake::Identity::Paired).await;
