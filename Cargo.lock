@@ -124,6 +124,7 @@ dependencies = [
  "acd-protocol",
  "acd-securefs",
  "gethostname",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

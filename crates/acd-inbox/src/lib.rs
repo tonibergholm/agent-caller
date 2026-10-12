@@ -2,3 +2,4 @@
 //! (omarchy spec §4). Views connect over a Unix socket and speak JSON lines.
 pub mod protocol;
 pub mod prefs;
+pub mod startup;
