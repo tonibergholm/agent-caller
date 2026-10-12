@@ -77,15 +77,17 @@ impl KeychainSecrets {
     /// again.
     #[cfg(target_os = "ios")]
     fn write(&self, key: &str, value: &[u8]) -> security_framework::base::Result<()> {
+        // Build the access control first: a failure here must not cost the
+        // stored secret, so nothing is deleted until the add can be attempted.
+        let access = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+            0,
+        )?;
         match delete_generic_password(&self.service, key) {
             Ok(()) => {}
             Err(error) if error.code() == NOT_FOUND => {}
             Err(error) => return Err(error),
         }
-        let access = SecAccessControl::create_with_protection(
-            Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
-            0,
-        )?;
         let mut options = PasswordOptions::new_generic_password(&self.service, key);
         options.set_access_control(access);
         set_generic_password_options(value, options)
