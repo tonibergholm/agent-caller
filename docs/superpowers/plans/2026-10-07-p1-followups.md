@@ -175,6 +175,11 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **`acd status | head`** panics on a broken pipe.
 - **herdr machines.** herdr's own SSH machines could reach remote panes without a per-machine acd; acd would still be needed on each machine for the hook endpoint.
 
+- **TLS listener `ended()` is single-shot.** A second call returns a future that never resolves, and `TlsListener::accept` now waits forever on a dead accept task. The daemon calls `ended()` once, before the listener moves, so it cannot wedge today. Other `TlsListener::new` callers (tests) never select on it. Make the signal cloneable (`watch`) or document it on `accept`.
+- **Shutdown log noise.** The teardown race that used to panic can now take the `ended` branch and log `TLS listener task ended` at error level during a clean SIGTERM. Skip the log once a stop has begun.
+- **Run error printed after shutdown.** `main.rs` prints the `run` error only after `rt.shutdown_timeout`, so a panic in another task during shutdown can exit 70 and hide the real error. Log the error before shutdown.
+- **Startup path-check ordering.** `check_path(hook.sock)` runs before the hook endpoint bind; no test pins which error wins when the hook port is taken and `hook.sock` is invalid. An existing socket path is probed twice (check, then bind), up to about 2 s per path.
+
 ### Mac app
 
 - **Panel frame.** No unit test for `save_now`; the order of the screen-parameters notification and macOS's refit moves needs a runtime check with a display unplugged.
