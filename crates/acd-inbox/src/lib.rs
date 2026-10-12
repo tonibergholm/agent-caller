@@ -11,3 +11,4 @@ pub mod notify;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod serve;
+pub mod install;

@@ -13,11 +13,20 @@ struct Cli {
 enum Command {
     /// Run the service (the systemd user unit starts this).
     Serve,
+    /// Install the service, the shell plugin and, if you agree, a keybinding.
+    Install,
+    /// Remove the service and the plugin.
+    Uninstall,
+    /// Report the service, the socket, the plugin and the keyring.
+    Status,
 }
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Serve => acd_inbox::serve::run(),
+        Command::Install => acd_inbox::install::run_install(),
+        Command::Uninstall => acd_inbox::install::run_uninstall(),
+        Command::Status => acd_inbox::install::run_status(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
