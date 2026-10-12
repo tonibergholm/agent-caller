@@ -96,8 +96,23 @@ pub fn request(p: Permission) {
     unsafe { super::bridge::ffi::vb_permission_request(p.code()) }
 }
 
+/// Whether the system answers `p` in a dialog over the app (Microphone,
+/// Speech Recognition), after which Settings should come back to the
+/// front. Input Monitoring sends the user to System Settings instead,
+/// where they must stay.
+pub fn answered_in_place(p: Permission) -> bool {
+    !matches!(p, Permission::InputMonitoring)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_comes_back_after_in_place_dialogs_only() {
+        assert!(super::answered_in_place(super::Permission::Microphone));
+        assert!(super::answered_in_place(super::Permission::Speech));
+        assert!(!super::answered_in_place(super::Permission::InputMonitoring));
+    }
+
     use super::*;
 
     #[test]

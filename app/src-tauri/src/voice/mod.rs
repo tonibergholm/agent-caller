@@ -69,9 +69,12 @@ pub fn dispatch(app: &AppHandle, ev: bridge::BridgeEvent) {
             voice.speech.set_capabilities(caps, locale);
             emit_status(app);
         }
-        E::Permission { .. } => {
+        E::Permission { which, .. } => {
             trigger::refresh(app);
             emit_status(app);
+            if permissions::answered_in_place(which) {
+                crate::settings_window::raise(app);
+            }
         }
         E::Assets { .. } => emit_status(app),
         E::System => voice.controller.system_stop(),
