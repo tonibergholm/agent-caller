@@ -230,3 +230,26 @@ async fn no_reply_carries_secrets_or_message_text() {
         assert!(!text.contains(TOKEN) && !text.contains("sha256") && r.get("message").is_none(), "{text}");
     }
 }
+
+/// The service queues a reply and the settings it caused apart, so the
+/// settings may be written first. `cmd` must not lose them (CI flake).
+#[tokio::test]
+async fn cmd_keeps_settings_that_arrive_before_the_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 256];
+        let n = s.read(&mut buf).await.unwrap();
+        assert!(n > 0);
+        s.write_all(b"{\"type\":\"settings\",\"machines\":[]}\n{\"type\":\"ok\",\"id\":\"c1\"}\n").await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+    let mut v = View::connect(&path).await;
+    assert_eq!(v.cmd(json!({"type":"escape"})).await["type"], "ok");
+    let m = v.recv_until(|m| m["type"] == "settings").await;
+    assert!(m["machines"].as_array().unwrap().is_empty());
+    server.abort();
+}

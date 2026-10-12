@@ -207,12 +207,16 @@ pub struct View {
     r: BufReader<OwnedReadHalf>,
     w: OwnedWriteHalf,
     n: u64,
+    /// The latest `settings` that `cmd` read past on its way to a reply. A
+    /// reply and the settings it caused are queued apart, so either may be
+    /// written first; `recv_until` looks here before it reads.
+    passed: Option<Value>,
 }
 
 impl View {
     pub async fn connect(path: &Path) -> View {
         let (r, w) = UnixStream::connect(path).await.unwrap().into_split();
-        View { r: BufReader::new(r), w, n: 0 }
+        View { r: BufReader::new(r), w, n: 0, passed: None }
     }
 
     /// The next message; `None` once the service closed the connection.
@@ -240,6 +244,11 @@ impl View {
     }
 
     pub async fn recv_until(&mut self, pred: impl Fn(&Value) -> bool) -> Value {
+        if let Some(m) = self.passed.take() {
+            if pred(&m) {
+                return m;
+            }
+        }
         loop {
             let m = self.recv().await.expect("the service closed the connection");
             if pred(&m) {
@@ -264,7 +273,15 @@ impl View {
         let id = format!("c{}", self.n);
         v["id"] = id.clone().into();
         self.send(&v).await;
-        self.recv_until(|m| m["id"] == id.as_str() && (m["type"] == "ok" || m["type"] == "error")).await
+        loop {
+            let m = self.recv().await.expect("the service closed the connection");
+            if m["id"] == id.as_str() && (m["type"] == "ok" || m["type"] == "error") {
+                return m;
+            }
+            if m["type"] == "settings" {
+                self.passed = Some(m);
+            }
+        }
     }
 
     /// Reads until the service closes the connection.
