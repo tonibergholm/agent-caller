@@ -110,6 +110,11 @@ test("a typed answer goes to the request its editor was opened for", () => {
   assert.match(panel, /onViewChanged:[\s\S]*editorShouldClose[\s\S]*pruneKeyState/);
 });
 
+test("a rename keeps its draft until the service accepts the name", () => {
+  const panel = read("Panel.qml");
+  assert.match(panel, /rename_machine"[^\n]*reply => \{\s*panel\.report\(reply\);\s*if \(reply\.type === "ok"\) panel\.drafts\.clear\(draft\)/);
+});
+
 test("a reply keeps its draft until the service accepts it", () => {
   const panel = read("Panel.qml");
   const body = panel.slice(panel.indexOf("function submitReply"), panel.indexOf("// Sends to the request the editor"));
@@ -138,7 +143,10 @@ test("drafts live outside the delegates; the pairing line never does", () => {
 
 test("the panel consumes pendingCard, clears it and reports open and closed", () => {
   const panel = read("Panel.qml");
-  assert.match(panel, /function onPendingCardChanged\(\)[\s\S]*selectAndReveal\(panel\.host\.pendingCard\);\s*panel\.host\.pendingCard = "";/);
+  assert.match(panel, /function onPendingCardChanged\(\) \{\s*panel\.consumePendingCard\(\);/);
+  // Kept until the card is in the view, so a reconnect does not lose it.
+  assert.match(panel, /function consumePendingCard\(\)[\s\S]*cardFor\(key\) === null\) return;\s*selectAndReveal\(key\);\s*host\.pendingCard = "";/);
+  assert.match(panel, /onViewChanged:[\s\S]*consumePendingCard\(\)/);
   assert.match(panel, /onShownChanged: \{\s*service\.send\("panel", \{ open: shown \}\);/);
   assert.match(panel, /function onReady\(\)[\s\S]*send\("panel", \{ open: panel\.shown \}\)/);
 });

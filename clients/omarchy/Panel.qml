@@ -61,6 +61,15 @@ Item {
         host.open();
     }
 
+    // The card from a notification is selected once the view has it: while
+    // reconnecting there is no view, and revealing needs the card's data.
+    function consumePendingCard() {
+        const key = host.pendingCard;
+        if (key === "" || cardFor(key) === null) return;
+        selectAndReveal(key);
+        host.pendingCard = "";
+    }
+
     // A field's focus is over (its box closed or the user left it): shortcuts work again.
     function releaseFocus() {
         focusId = "";
@@ -135,7 +144,12 @@ Item {
             if (reply.type !== "ok") return;
             const card = cardFor(cardKey);
             if (card) drafts.clear(Model.draftKey.reply(card));
-            if (field) field.text = "";
+            // A rebuilt view may have destroyed the field already; the draft
+            // is cleared, so a new one starts empty.
+            try {
+                if (field) field.text = "";
+            } catch (e) {
+            }
             if (keyState.replyFor === cardKey) keyState = Object.assign({}, keyState, { replyFor: null });
             releaseFocus();
         });
@@ -197,6 +211,7 @@ Item {
             answerEditor = null;
         }
         keyState = Model.pruneKeyState(keyState, cards);
+        consumePendingCard();
         uncertain = Model.pruneUncertain(uncertain, cards);
         drafts.prune(view, service.settings);
         if (focusId !== "" && !Model.fieldFocusValid(focusId, keyState, answerEditor, service.settings)) releaseFocus();
@@ -218,9 +233,7 @@ Item {
         target: panel.host
 
         function onPendingCardChanged() {
-            if (panel.host.pendingCard === "") return;
-            panel.selectAndReveal(panel.host.pendingCard);
-            panel.host.pendingCard = "";
+            panel.consumePendingCard();
         }
     }
 
@@ -565,10 +578,11 @@ Item {
                             }
                             onTextChanged: panel.drafts.set(draft, text === modelData.name ? "" : text)
                             Keys.onPressed: event => panel.keyEvent(event, { kind: "rename", cardKey: null }, inputMethodComposing, nameField)
-                            onAccepted: {
-                                panel.drafts.clear(draft);
-                                panel.service.send("rename_machine", { machine: modelData.key, name: text }, panel.report);
-                            }
+                            // The draft stays until the service accepts the name.
+                            onAccepted: panel.service.send("rename_machine", { machine: modelData.key, name: text }, reply => {
+                                panel.report(reply);
+                                if (reply.type === "ok") panel.drafts.clear(draft);
+                            })
                         }
 
                         Label {

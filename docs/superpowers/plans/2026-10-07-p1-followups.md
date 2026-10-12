@@ -187,6 +187,7 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Show idle is not saved.** `Inbox::set_show_idle` changes memory only (the Mac app behaves the same), so the Omarchy toggle resets when the service restarts. Persisting it changes shared client behaviour; decide for both clients.
 - **Uninstall and a binary install did not write.** Uninstall now keeps the binary unless it found its own unit, but an identical binary that was already in place is still removed with it.
 - **Uninstall provenance.** `acd-inbox uninstall` disables the plugin and removes its named files without checking they came from install; a foreign directory under the same id is not protected (the install side refuses foreign units and symlinks).
+- **Notifications across restarts.** If `org.freedesktop.Notifications` restarts while requests are open, a close for a saved id goes to the new owner and may close an unrelated notification. On service shutdown the tracked notifications are not closed, so a restart can leave a stale one beside the new.
 - **Rename racing remove** returns `settings_failed`, not `unknown_machine`.
 - **Keyring deadline.** Mutating Secret Service calls have no deadline; check whether zbus applies a reply timeout, or a hung service blocks the worker until restart.
 - **One owner per panel.** Each `Service.qml` is its own connection and owner. If Omarchy creates a bar widget per monitor, Esc in one panel does not undo a countdown started from another's.

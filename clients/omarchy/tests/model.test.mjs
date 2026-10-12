@@ -217,6 +217,12 @@ test("an outcome that arrives before the reply naming its action is not resurrec
   assert.deepEqual(t.lost(), []);
 });
 
+test("a fired outcome that beats its reply still marks the card when the connection drops", () => {
+  const t = new M.Tracker();
+  t.outcome({ type: "outcome", action: "x1", card: "m1/a", result: { kind: "fired" } });
+  assert.deepEqual(t.disconnected(), ["m1/a"]);
+});
+
 test("ids are unique and short", () => {
   const ids = new M.Ids("bar");
   const a = ids.next();

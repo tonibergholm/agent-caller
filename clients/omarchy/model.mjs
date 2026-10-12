@@ -441,8 +441,12 @@ export class Tracker {
   }
 
   outcome(msg) {
-    if (msg.result.kind === "fired") this.fired.add(msg.action);
-    else {
+    if (msg.result.kind === "fired") {
+      this.fired.add(msg.action);
+      // The outcome can be written before the reply that names the action;
+      // the card is on the message, so a drop right now still warns.
+      if (!this.actions.has(msg.action) && !this.ended.has(msg.action) && msg.card) this.actions.set(msg.action, msg.card);
+    } else {
       this.actions.delete(msg.action);
       this.fired.delete(msg.action);
       this.ended.add(msg.action);
