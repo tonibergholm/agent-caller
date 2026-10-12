@@ -345,3 +345,12 @@ fn a_noisy_command_keeps_only_the_end_of_its_stderr() {
     let text = format!("{err:#}");
     assert!(text.contains("LAST") && text.len() < 1000, "{}", text.len());
 }
+
+#[test]
+fn omarchy_tools_run_through_a_login_shell_only_when_omarchy_path_is_unset() {
+    let (p, a) = login_wrapped("omarchy-shell", &["shell", "rescanPlugins"], false);
+    assert_eq!(p, "bash");
+    assert_eq!(a, ["-lc", "exec \"$@\"", "acd-inbox", "omarchy-shell", "shell", "rescanPlugins"]);
+    assert_eq!(login_wrapped("omarchy", &["plugin", "enable", "x"], true), ("omarchy".to_owned(), vec!["plugin".into(), "enable".into(), "x".into()]));
+    assert_eq!(login_wrapped("systemctl", &["--user", "restart", "u"], false).0, "systemctl");
+}

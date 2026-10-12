@@ -68,7 +68,7 @@ export function parseMessage(line) {
   let v;
   try {
     v = JSON.parse(line);
-  } catch {
+  } catch (_e) {
     return null;
   }
   return v !== null && typeof v === "object" && !Array.isArray(v) && typeof v.type === "string" ? v : null;
@@ -351,7 +351,7 @@ export function onKey(visible, st, ev) {
     const down = k === "j" || k === "ArrowDown";
     const next = idx < 0 ? 0 : Math.min(visible.length - 1, Math.max(0, idx + (down ? 1 : -1)));
     const selected = visible[next].key;
-    return { state: { ...st, selected }, effect: selected === st.selected ? NONE : { kind: "select", key: selected } };
+    return { state: Object.assign({}, st, { selected }), effect: selected === st.selected ? NONE : { kind: "select", key: selected } };
   }
   const card = idx >= 0 ? visible[idx] : undefined;
   if (!card) return none;
@@ -465,7 +465,7 @@ export function planAnswer(editor, cards, text) {
 
 /** A reply box belongs to its card: it closes when the card leaves the view. */
 export function pruneKeyState(st, cards) {
-  if (st.replyFor !== null && !cards.some((c) => c.key === st.replyFor)) return { ...st, replyFor: null };
+  if (st.replyFor !== null && !cards.some((c) => c.key === st.replyFor)) return Object.assign({}, st, { replyFor: null });
   return st;
 }
 
@@ -500,7 +500,7 @@ export function fieldFocusValid(id, st, editor, settings) {
 
 /** The editor's answer was accepted by the service; its text stays for an undo. */
 export function markSent(editor) {
-  return editor ? { ...editor, sent: true } : editor;
+  return editor ? Object.assign({}, editor, { sent: true }) : editor;
 }
 
 /** Text shown when an editor closes because its request changed; a sent answer closes silently. */
@@ -517,7 +517,7 @@ const requestOf = (c) => (c.agent.pending ? c.agent.pending.id : "-");
 
 /** Marks cards whose outcome is uncertain, each with the request it was uncertain for. */
 export function markUncertain(prev, cards, keys) {
-  const next = { ...prev };
+  const next = Object.assign({}, prev);
   for (const k of keys) {
     const c = cards.find((x) => x.key === k);
     next[k] = c ? requestOf(c) : "-";

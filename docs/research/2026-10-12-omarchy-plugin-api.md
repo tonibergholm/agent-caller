@@ -274,3 +274,21 @@ Probe plugin directories removed, `omarchy plugin disable` run, `rescanPlugins` 
 enabling; scratch files and the probe socket removed from `/tmp` and `$XDG_RUNTIME_DIR`.
 The probe used plugin ids `tonibergholm.probe` and `tonibergholm.probe2` (a second directory,
 because of the reload caveat in item 10).
+
+## Task 21 findings (install on omarchy)
+
+Items 1, 2, 3, 11 and 12 were already applied in `clients/omarchy/*` and `install.rs`.
+Three gaps turned up on the real machine and were fixed:
+
+- **JS syntax.** The shell's QML engine rejects an optional catch binding
+  (`catch {`) and object spread (`{ ...x }`) in `.mjs`. The shell logged
+  `model.mjs:71:11: Syntax error` and refused the widget. `qmllint <file>.mjs`
+  reports these as `[syntax]` warnings, so run it on the `.mjs` too. Fixed with
+  `catch (_e)` and `Object.assign({}, ...)`; a test guards both.
+- **OMARCHY_PATH.** A plain `ssh host cmd` has no `OMARCHY_PATH`, so the
+  installer's `omarchy` and `omarchy-shell` calls would fail. `login_wrapped`
+  runs them through `bash -lc 'exec "$@"'` when it is unset.
+- **Reload caveat confirmed.** After the first install the shell had loaded the
+  broken `model.mjs`; later installs of the fixed file were not picked up
+  ("Local plugin changed, reloading" still logged the old error). The shell
+  must be restarted once.

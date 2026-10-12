@@ -162,3 +162,11 @@ test("minor state is cleared: pairing on hide, message on keys, uncertain marks"
   assert.match(panel, /Model\.pruneUncertain\(uncertain, cards\)/);
   assert.match(panel, /Model\.markUncertain\(panel\.uncertain, panel\.cards, cards\)/);
 });
+
+// Quickshell's QML JS engine rejects an optional catch binding; the shell
+// failed to load the widget with "model.mjs:71:11: Syntax error" (Task 21).
+test("model.mjs avoids syntax the QML JS engine rejects", () => {
+  const src = read("model.mjs");
+  assert.doesNotMatch(src, /\bcatch\s*\{/, "optional catch binding");
+  assert.doesNotMatch(src, /\{\s*\.\.\./, "object spread");
+});

@@ -45,14 +45,27 @@ pub fn stderr_tail(raw: &str) -> String {
     if n <= 300 { t.to_owned() } else { format!("...{}", t.chars().skip(n - 300).collect::<String>()) }
 }
 
+/// `omarchy` and `omarchy-shell` need OMARCHY_PATH, which a login shell sets
+/// and a plain `ssh host cmd` does not (research note, header). Without it,
+/// run them through `bash -lc 'exec "$@"'` so they find it.
+pub fn login_wrapped(program: &str, args: &[&str], omarchy_path_set: bool) -> (String, Vec<String>) {
+    if omarchy_path_set || !program.starts_with("omarchy") {
+        return (program.to_owned(), args.iter().map(|a| (*a).to_owned()).collect());
+    }
+    let mut argv = vec!["-lc".to_owned(), "exec \"$@\"".to_owned(), "acd-inbox".to_owned(), program.to_owned()];
+    argv.extend(args.iter().map(|a| (*a).to_owned()));
+    ("bash".to_owned(), argv)
+}
+
 /// Runs a program with stdout discarded and stderr kept for the error.
 pub struct SystemRunner;
 
 impl SystemRunner {
     pub fn run_with_timeout(&self, program: &str, args: &[&str], timeout: Duration) -> Result<()> {
         use std::io::Read;
-        let mut child = std::process::Command::new(program)
-            .args(args)
+        let (prog, argv) = login_wrapped(program, args, std::env::var_os("OMARCHY_PATH").is_some_and(|v| !v.is_empty()));
+        let mut child = std::process::Command::new(&prog)
+            .args(&argv)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
