@@ -6,6 +6,7 @@
   import { statusKind, statusReason, statusText } from "../lib/format";
   import { fromEvent, normalize, onKey, type Effect, type KeyState } from "../lib/keys";
   import { dotKind, listedMachines, sections } from "../lib/panel";
+  import { isMobile } from "../lib/platform";
   import type { Presentation } from "../lib/voice";
   import Card from "./Card.svelte";
   import ReplyBox from "./ReplyBox.svelte";
@@ -18,7 +19,20 @@
     api,
     hotkey = "Control+Option+Space",
     voiceInput = false,
-  }: { view: InboxView; api: Api; hotkey?: string; voiceInput?: boolean } = $props();
+    onsettings,
+  }: {
+    view: InboxView;
+    api: Api;
+    hotkey?: string;
+    voiceInput?: boolean;
+    /** Touch: opens Settings inside the inbox window. Absent on macOS, which opens its own window. */
+    onsettings?: () => void;
+  } = $props();
+
+  // Touch layout (iOS build): full screen, no drag, no key hints, no voice presentation.
+  const mobile = isMobile();
+  /** Mobile: the machine whose status dot is tapped open. */
+  let dotOpen = $state<string | null>(null);
 
   // svelte-ignore state_referenced_locally
   let st = $state<KeyState>(normalize(view, { selected: null, replyFor: null }));
@@ -95,10 +109,11 @@
       machine_filter: filter,
       done_collapsed: !doneOpen,
     };
-    api.publishPresentation(presentation).catch(() => {});
+    if (!mobile) api.publishPresentation(presentation).catch(() => {});
   });
 
   onMount(() => {
+    if (mobile) return;
     let off: (() => void) | undefined;
     let closed = false;
     api
@@ -187,7 +202,8 @@
             return;
           }
         }
-        await api.hide();
+        // A phone app stays in the foreground: there is no panel to hide.
+        if (!mobile) await api.hide();
         return;
     }
   }
@@ -244,20 +260,26 @@
       />
     {/if}
     {#if st.replyFor === c.key}
-      <ReplyBox bind:value={replyText} />
+      <ReplyBox
+        bind:value={replyText}
+        onsend={() => act(run({ kind: "submitReply", cardKey: c.key }))}
+        oncancel={() => (st = { ...st, replyFor: null })}
+      />
     {/if}
   </div>
 {/snippet}
 
 <main
   class="panel"
+  class:mobile
   style:scroll-padding-top="{topH}px"
   style:scroll-padding-bottom="{footH}px"
 >
   <!-- The panel is borderless: this strip (and the header's empty space) drags it.
        It sticks to the top so the handle never scrolls away. Tauri's drag script
        toggles maximize from a document-level mouseup with detail 2 (a double click),
-       which a panel refuses; stopping that mouseup here keeps it from firing. -->
+       which a panel refuses; stopping that mouseup here keeps it from firing.
+       Touch layout: no window to drag, so no strip and no drag attribute. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="top"
@@ -266,23 +288,41 @@
       if (e.detail >= 2) e.stopPropagation();
     }}
   >
-    <div class="grip" data-tauri-drag-region aria-hidden="true"></div>
-    <header data-tauri-drag-region>
+    {#if !mobile}<div class="grip" data-tauri-drag-region aria-hidden="true"></div>{/if}
+    <header {...(mobile ? {} : { "data-tauri-drag-region": "" })}>
       <h1>Inbox</h1>
       <span class="summary">{needCount} need you · {workingCount} working</span>
       <span class="dots">
         {#each machines as m (m.key)}
-          <span
-            class="dot"
-            role="img"
-            data-status={m.status.kind}
-            data-dot={dotKind(m.status)}
-            title="{m.name}: {statusText(m.status)}"
-            aria-label="{m.name}: {statusText(m.status)}"
-          ></span>
+          {#if mobile}
+            <!-- Touch has no hover tooltip: a tap shows the status as text below. -->
+            <button
+              class="dot"
+              type="button"
+              data-status={m.status.kind}
+              data-dot={dotKind(m.status)}
+              aria-label="{m.name}: {statusText(m.status)}"
+              aria-expanded={dotOpen === m.key}
+              onclick={() => (dotOpen = dotOpen === m.key ? null : m.key)}
+            ></button>
+          {:else}
+            <span
+              class="dot"
+              role="img"
+              data-status={m.status.kind}
+              data-dot={dotKind(m.status)}
+              title="{m.name}: {statusText(m.status)}"
+              aria-label="{m.name}: {statusText(m.status)}"
+            ></span>
+          {/if}
         {/each}
       </span>
-      <button class="gear" aria-label="Settings" title="Settings" onclick={() => act(api.openSettings())}>
+      <button
+        class="gear"
+        aria-label="Settings"
+        title="Settings"
+        onclick={() => (onsettings ? onsettings() : act(api.openSettings()))}
+      >
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
@@ -301,6 +341,10 @@
         {/each}
       </nav>
     {/if}
+    {#if mobile && dotOpen !== null}
+      {@const open = machines.find((m) => m.key === dotOpen)}
+      {#if open}<p class="dot-detail" role="status">{open.name}: {statusText(open.status)}</p>{/if}
+    {/if}
   </div>
 
   {#if error}
@@ -316,7 +360,7 @@
 
   {#if secs.needs.length + secs.working.length + secs.done.length === 0}
     <p class="empty">No agents need you.</p>
-    <p class="hint">Press {hotkey} to open this panel.</p>
+    {#if !mobile}<p class="hint">Press {hotkey} to open this panel.</p>{/if}
   {/if}
 
   {#if secs.needs.length > 0}
@@ -345,7 +389,7 @@
     </section>
   {/if}
 
-  {#if voiceInput}
+  {#if voiceInput && !mobile}
     <!-- The step-1 stand-in for speech (voice plan D13). A textarea, so
          keys.ts treats it as a field and J/K/digits stay text. -->
     <textarea
@@ -360,14 +404,16 @@
   {/if}
 
   <footer bind:clientHeight={footH}>
-    <span class="keys">
-      <span><kbd>J</kbd><kbd>K</kbd> move</span>
-      <span><kbd>1</kbd>–<kbd>9</kbd> answer</span>
-      <span><kbd>T</kbd> type</span>
-      <span><kbd>R</kbd> reply</span>
-      {#if voiceInput}<span><kbd>/</kbd> command</span>{/if}
-      <span><kbd>Esc</kbd> close / undo</span>
-    </span>
+    {#if !mobile}
+      <span class="keys">
+        <span><kbd>J</kbd><kbd>K</kbd> move</span>
+        <span><kbd>1</kbd>–<kbd>9</kbd> answer</span>
+        <span><kbd>T</kbd> type</span>
+        <span><kbd>R</kbd> reply</span>
+        {#if voiceInput}<span><kbd>/</kbd> command</span>{/if}
+        <span><kbd>Esc</kbd> close / undo</span>
+      </span>
+    {/if}
     {#if view.show_idle}
       <button class="idle" onclick={() => act(api.setShowIdle(false))}>Hide idle</button>
     {:else if view.hidden_idle > 0}
@@ -557,6 +603,7 @@
     background: var(--crimson-fill);
     padding: 6px 10px;
     border-radius: var(--r);
+    overflow-wrap: anywhere;
   }
   .machine-alert {
     font-size: 12px;
@@ -564,6 +611,7 @@
     background: var(--crimson-fill);
     padding: 6px 10px;
     border-radius: var(--r);
+    overflow-wrap: anywhere;
   }
   .empty {
     margin: 24px 0 0;
@@ -635,5 +683,83 @@
   .voice:focus {
     outline: none;
     box-shadow: 0 0 0 1px rgba(6, 182, 212, 0.4), var(--glow);
+  }
+
+  /* Touch layout (iOS build). Full screen, inside the safe area; every button
+     in the panel, including those in cards and rows, is at least 44 pt. */
+  .panel.mobile {
+    height: 100dvh;
+    padding: 0 calc(12px + env(safe-area-inset-right)) 0 calc(12px + env(safe-area-inset-left));
+  }
+  .panel.mobile .top {
+    margin: 0 calc(-12px - env(safe-area-inset-right)) 0 calc(-12px - env(safe-area-inset-left));
+    padding: env(safe-area-inset-top) calc(12px + env(safe-area-inset-right)) 8px calc(12px + env(safe-area-inset-left));
+  }
+  .panel.mobile footer {
+    margin: auto calc(-12px - env(safe-area-inset-right)) 0 calc(-12px - env(safe-area-inset-left));
+    padding: 8px calc(12px + env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
+  }
+  .panel.mobile :global(button:not(.dot)) {
+    min-height: 44px;
+    height: auto;
+  }
+  .panel.mobile .gear {
+    width: 44px;
+    height: 44px;
+  }
+  .panel.mobile .fchip {
+    height: auto;
+    min-height: 44px;
+    padding: 0 12px;
+  }
+  .panel.mobile :global(textarea) {
+    font-size: 16px;
+  }
+  .panel.mobile .dot-detail {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .dot {
+    padding: 0;
+    border: 0;
+  }
+  .dots .dot {
+    min-height: 0;
+    width: 8px;
+    height: 8px;
+  }
+  button.dot {
+    cursor: pointer;
+  }
+  /* Touch: each dot is a 44 pt button with its 8 px dot drawn in the centre.
+     Neighbouring 44 pt areas stay apart (gap 7 px), so each dot gets its own taps. */
+  .panel.mobile .dots button.dot {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    background: none;
+    box-shadow: none;
+    animation: none;
+  }
+  .panel.mobile .dots button.dot::after {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--slate);
+  }
+  .panel.mobile .dots button.dot[data-dot="online"]::after {
+    background: var(--emerald);
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
+  }
+  .panel.mobile .dots button.dot[data-dot="syncing"]::after {
+    background: var(--cyan);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  .panel.mobile .dots button.dot[data-dot="error"]::after {
+    background: var(--crimson);
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
   }
 </style>

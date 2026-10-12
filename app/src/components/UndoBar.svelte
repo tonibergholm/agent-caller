@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ActionView } from "../lib/bindings/ActionView";
+  import { isMobile } from "../lib/platform";
 
   /** The undo window the daemon applies to every answer (spec §8). */
   const WINDOW_MS = 2000;
@@ -10,22 +11,34 @@
     oncancel,
   }: { action: ActionView; now: number; oncancel: (actionId: string) => void } = $props();
 
+  const mobile = isMobile();
   const remaining = $derived(Math.max(0, action.fires_at_ms - now));
   const seconds = $derived((remaining / 1000).toFixed(1));
   const fraction = $derived(Math.min(1, remaining / WINDOW_MS));
 </script>
 
-<button class="undo" onclick={() => oncancel(action.id)}>
+{#snippet content()}
   <span class="line">
     <span class="what">
       <span class="lbl">Sending “{action.label}”</span>
       <span class="secs">{seconds}s</span>
     </span>
-    <span class="esc"><kbd>Esc</kbd> to undo</span>
+    {#if mobile}
+      <button class="cancel" type="button" onclick={() => oncancel(action.id)}>Cancel</button>
+    {:else}
+      <span class="esc"><kbd>Esc</kbd> to undo</span>
+    {/if}
   </span>
   {#if action.detail}<span class="rule">{action.detail}</span>{/if}
   <span class="track" aria-hidden="true"><span class="bar" style:width="{fraction * 100}%"></span></span>
-</button>
+{/snippet}
+
+{#if mobile}
+  <!-- Touch: the bar is not a target, so a stray tap cannot send the undo. -->
+  <div class="undo">{@render content()}</div>
+{:else}
+  <button class="undo" onclick={() => oncancel(action.id)}>{@render content()}</button>
+{/if}
 
 <style>
   .undo {
@@ -43,6 +56,9 @@
     border: 1px solid rgba(6, 182, 212, 0.4);
     border-radius: var(--r);
     cursor: pointer;
+  }
+  div.undo {
+    cursor: default;
   }
   .line {
     display: flex;
@@ -74,6 +90,17 @@
     white-space: nowrap;
     color: var(--text-dim);
     font-size: 11px;
+  }
+  .cancel {
+    flex: none;
+    min-height: 44px;
+    padding: 0 12px;
+    font: 600 12.5px var(--font-sans);
+    color: var(--cyan-bright);
+    background: var(--fill-subtle);
+    border: 1px solid rgba(6, 182, 212, 0.4);
+    border-radius: var(--r);
+    cursor: pointer;
   }
   kbd {
     font: 500 10px/1 var(--font-mono);

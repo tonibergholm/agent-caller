@@ -1,9 +1,13 @@
 <script lang="ts">
   import type { CardView } from "../lib/bindings/CardView";
   import { since } from "../lib/format";
+  import { isMobile } from "../lib/platform";
   import { age, toolName, typeTag } from "../lib/panel";
   import AnswerBox from "./AnswerBox.svelte";
   import UndoBar from "./UndoBar.svelte";
+
+  // Touch layout (iOS build): detail is printed, not put in tooltips.
+  const mobile = isMobile();
 
   let {
     card,
@@ -77,6 +81,7 @@
 <article
   class="card"
   class:selected
+  class:mobile
   class:offline={!card.live}
   data-key={card.key}
   aria-busy={card.busy}
@@ -93,11 +98,12 @@
     <span class="source" data-source={card.agent.source}>{sourceLabel}</span>
     {#if card.agent.role === "subagent"}
       <span class="subagent">subagent</span>
-      {#if card.agent.parent_title}<span class="parent" title={card.agent.parent_title}>↳ {card.agent.parent_title}</span>{/if}
+      {#if card.agent.parent_title}<span class="parent" title={mobile ? undefined : card.agent.parent_title}>↳ {card.agent.parent_title}</span>{/if}
     {/if}
-    {#if place}<span class="project" title={card.agent.cwd ?? undefined}>{place}</span>{/if}
+    {#if place}<span class="project" title={mobile ? undefined : (card.agent.cwd ?? undefined)}>{place}</span>{/if}
     <span class="tag">{typeTag(card)}</span>
   </div>
+  {#if mobile && card.agent.cwd}<div class="path">{card.agent.cwd}</div>{/if}
   {#if card.agent.last_message}
     <div class="last">{card.agent.last_message}</div>
   {/if}
@@ -146,12 +152,13 @@
               class="option {effectClass(o.effect, ok)}"
               class:primary={o.id === primaryId}
               disabled={!ok}
-              title={ok ? (o.description ?? undefined) : "Not supported here"}
+              title={mobile ? undefined : ok ? (o.description ?? undefined) : "Not supported here"}
               onclick={() => onpick(o.id, pending.id, pending.revision)}
             >
               <kbd>{i + 1}</kbd>
               <span class="label">{o.label}</span>
               {#if o.description}<span class="desc">{o.description}</span>{/if}
+              {#if mobile && !ok}<span class="note">Not supported here</span>{/if}
             </button>
           {/each}
         </div>
@@ -162,6 +169,9 @@
     {:else if card.live && !card.busy && pending.status !== "answering"}
       <div class="readonly">{readonlyLabel}</div>
     {/if}
+  {:else if card.live && !card.busy}
+    <!-- A needs-you card whose request is gone: the terminal is still where to answer. -->
+    <div class="readonly">{readonlyLabel}</div>
   {/if}
 
   {#if card.live && (card.can_reply || card.can_mark_seen)}
@@ -472,5 +482,53 @@
     to {
       transform: rotate(360deg);
     }
+  }
+  /* Touch layout (iOS build): full-width options with the rule below, 44 pt
+     targets, and text that wraps instead of being cut off or hidden in a tooltip. */
+  .path {
+    font: 400 11px/1.3 var(--font-mono);
+    color: var(--text-dim);
+    overflow-wrap: anywhere;
+  }
+  .card.mobile .title {
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .card.mobile .parent {
+    max-width: none;
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .card.mobile .project {
+    max-width: 100%;
+  }
+  .card.mobile .options {
+    flex-direction: column;
+  }
+  .card.mobile .option {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    padding: 8px 12px 8px 8px;
+  }
+  .card.mobile .option .desc {
+    flex: 0 0 100%;
+    max-width: none;
+    padding-left: 25px;
+  }
+  .card.mobile .note {
+    flex: 0 0 100%;
+    padding-left: 25px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .card.mobile :global(button) {
+    min-height: 44px;
+  }
+  .card.mobile :global(textarea) {
+    min-height: 44px;
+    font-size: 16px;
   }
 </style>

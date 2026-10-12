@@ -290,7 +290,8 @@ test("the panel has a drag region and J/K scroll the selection into view", async
       view: view({ cards: [card({ key: "m/a" }), card({ key: "m/b" })] }),
       api: fakeApi(),
     });
-    expect(container.querySelector("[data-tauri-drag-region]")).not.toBeNull();
+    expect(container.querySelector("header[data-tauri-drag-region]")).not.toBeNull();
+    expect(container.querySelector(".grip[data-tauri-drag-region]")).not.toBeNull();
     await userEvent.keyboard("j");
     expect(calls.at(-1)).toMatch(/^m\/[ab]:\{"block":"nearest"\}$/);
     const before = calls.length;

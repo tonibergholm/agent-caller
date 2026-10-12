@@ -5,12 +5,17 @@ import { mount } from "svelte";
 import "./styles/tokens.css";
 import App from "./App.svelte";
 import { card, fakeApi, view } from "./lib/fixtures";
+import { setPreviewMobile } from "./lib/platform";
 import type { CardView } from "./lib/bindings/CardView";
 import type { InboxView } from "./lib/bindings/InboxView";
 import type { MachineView } from "./lib/bindings/MachineView";
 
 const params = new URLSearchParams(location.search);
 const scene = params.get("scene") ?? "main";
+// `?mobile` shows the touch layout without `npm run dev:ios`. Local cards move
+// to dev-box, because the phone has no local machine.
+const onPhone = params.has("mobile");
+setPreviewMobile(onPhone ? true : null);
 const now = Date.now();
 const ago = (s: number) => new Date(now - s * 1000).toISOString();
 
@@ -20,7 +25,8 @@ const machines: MachineView[] = [
   { key: "gpu", name: "gpu-node", machine_id: "m3", status: { kind: "syncing" }, is_local: false, duplicate_of: null },
 ];
 
-function mk(key: string, machine: string, over: Partial<CardView>, agent: Partial<CardView["agent"]>): CardView {
+function mk(key: string, machineIn: string, over: Partial<CardView>, agent: Partial<CardView["agent"]>): CardView {
+  const machine = onPhone && machineIn === "local" ? "dev" : machineIn;
   const c = card({ key: `${machine}/${key}`, machine_key: machine, machine_name: machines.find((m) => m.key === machine)!.name, ...over });
   c.agent = { ...c.agent, ...agent };
   return c;
@@ -144,6 +150,20 @@ if (scene === "subagent") {
   subw.agent.role = "subagent";
   subw.agent.parent_title = "Plan the OAuth2 rollout";
   v = { ...v, show_subagents: true, cards: [sub, bash, subw, ...cards.slice(4)] };
+}
+if (scene === "noreq") {
+  // A needs-you card whose request is already gone: says where to answer.
+  v = { ...v, cards: cards.map((c, i) => (i === 1 ? { ...c, agent: { ...c.agent, pending: null } } : c)) };
+}
+if (scene === "banner") {
+  // Long unbroken paths in the banners: they must wrap, not run off the edge.
+  const long = "/Users/dev/Library/Application Support/agent-caller/very/long/unbroken/path/without/spaces/acd.sock";
+  const localBanner: MachineView["status"] = { kind: "local_unavailable", message: long };
+  const remoteBanner: MachineView["status"] = { kind: "auth_failed", message: `token file ${long}` };
+  v = {
+    ...v,
+    machines: machines.map((m) => (m.key === "local" ? { ...m, status: localBanner } : m.key === "gpu" ? { ...m, status: remoteBanner } : m)),
+  };
 }
 if (scene === "empty") v = view({ machines });
 if (scene === "offline") {
