@@ -4,6 +4,8 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # release.yml calls this workflow as its test gate.
+  workflow_call:
 
 jobs:
   test:

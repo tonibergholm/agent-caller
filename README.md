@@ -24,10 +24,12 @@ The Mac app is the reference client. Any other client (a CLI, a phone app)
 can speak `acd/1` to the same daemon. The protocol is in
 [`crates/acd-protocol/PROTOCOL.md`](crates/acd-protocol/PROTOCOL.md).
 
-> **Status: pre-release (0.1.0).** There are no binary releases yet, and
-> the Mac app is ad-hoc signed unless you supply a signing identity. You
-> build both from source. Expect breaking
-> changes to the config and protocol before 1.0.
+> **Status: pre-release (0.1.0).** Each release is published on
+> [GitHub Releases](https://github.com/tonibergholm/agent-caller/releases)
+> as a pre-release. The binaries are ad-hoc signed, and the Mac app is not
+> notarized, so macOS asks you to confirm its first launch. See
+> [docs/release.md](docs/release.md). You can also build from source.
+> Expect breaking changes to the config and protocol before 1.0.
 
 ## Screenshots
 
@@ -112,6 +114,23 @@ spec §9, "Hook endpoint trust", for details.
 - [Tailscale](https://tailscale.com) for remote machines.
 - Optional sources: [herdr](https://github.com/herdrdev/herdr)
   0.9.3 or newer (below 0.10), and T3 Code.
+
+## Install a release
+
+Each pre-release ships `acd` for macOS (Apple silicon and Intel) and for
+Linux (x86_64 and arm64). The Linux archives also contain `acd-inbox`.
+The Mac app is a `.dmg` for Apple silicon. `scripts/install.sh` downloads
+the archive for your machine, checks its SHA-256 against `SHA256SUMS`, and
+installs the binaries into `~/.local/bin`:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/tonibergholm/agent-caller/v0.1.0/scripts/install.sh
+sh install.sh --tag v0.1.0
+```
+
+Open the `.dmg` and drag the app to Applications. Because the app is not
+notarized, follow the first-launch steps in [docs/release.md](docs/release.md).
+The sections below build from source.
 
 ## Install the daemon
 
