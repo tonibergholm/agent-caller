@@ -239,6 +239,17 @@ test("a later terminal outcome settles an uncertain card; a fired one does not",
   assert.equal(M.clearUncertain(marks, { card: "m9/z", result: { kind: "cancelled" } }), marks);
 });
 
+test("only the lost action's own terminal outcome settles its card", () => {
+  const t = new M.Tracker();
+  t.started("x1", "m1/a");
+  t.lost();
+  // Another action on the same card, or another view's, settles nothing.
+  assert.equal(t.settles({ action: "other", card: "m1/a", result: { kind: "delivered" } }), false);
+  assert.equal(t.settles({ action: "x1", card: "m1/a", result: { kind: "fired" } }), false);
+  assert.equal(t.settles({ action: "x1", card: "m1/a", result: { kind: "delivered" } }), true);
+  assert.equal(t.settles({ action: "x1", card: "m1/a", result: { kind: "delivered" } }), false, "once");
+});
+
 test("a filter on a removed machine no longer hides the inbox", () => {
   const settings = { machines: [{ key: "m1" }, { key: "m2" }] };
   assert.equal(M.activeFilter("", settings), null);

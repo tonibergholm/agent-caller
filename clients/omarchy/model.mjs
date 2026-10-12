@@ -433,6 +433,9 @@ export class Tracker {
     // Ended actions whose reply may still be in flight: the outcome can be
     // written before the `ok` that names the action.
     this.ended = new Set();
+    // Actions whose outcome was lost: only their own terminal outcome
+    // settles the card they marked uncertain.
+    this.lostIds = new Set();
   }
 
   started(actionId, cardKey) {
@@ -458,9 +461,16 @@ export class Tracker {
   /** outcomes_lost: every action still open is uncertain; returns their cards. */
   lost() {
     const cards = [...new Set(this.actions.values())];
+    for (const id of this.actions.keys()) this.lostIds.add(id);
+    while (this.lostIds.size > 256) this.lostIds.delete(this.lostIds.values().next().value);
     this.actions.clear();
     this.fired.clear();
     return cards;
+  }
+
+  /** Whether `msg` is the terminal outcome of an action whose outcome was lost. */
+  settles(msg) {
+    return msg.result.kind !== "fired" && this.lostIds.delete(msg.action);
   }
 
   /**

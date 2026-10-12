@@ -246,7 +246,7 @@ Item {
 
         // An outcome that arrives after the loss settles the card again.
         function onOutcome(msg) {
-            panel.uncertain = Model.clearUncertain(panel.uncertain, msg);
+            if (panel.service.tracker.settles(msg)) panel.uncertain = Model.clearUncertain(panel.uncertain, msg);
         }
 
         // The service forgets a panel's state when the connection drops.
