@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import Hud from "./components/Hud.svelte";
   import Panel from "./components/Panel.svelte";
   import Settings from "./components/Settings.svelte";
@@ -21,6 +21,12 @@
   const mobile = isMobile();
   // Touch: Settings is shown in place of the inbox (the phone has one window).
   let settingsOpen = $state(false);
+  const openSettings = () => (settingsOpen = true);
+  // Focus returns to the gear that opened Settings.
+  function closeSettings() {
+    settingsOpen = false;
+    void tick().then(() => document.querySelector<HTMLElement>("button.gear")?.focus());
+  }
 
   let v = $state<InboxView | null>(null);
   // The phone has no "This Mac": its machine, cards and banner are left out.
@@ -82,15 +88,18 @@
 {:else if resolvedLabel === "hud"}
   <!-- Never the panel: a second panel would publish its own presentation. -->
   <Hud {api} view={v} />
-{:else if shown && mobile && settingsOpen}
-  <Settings {api} onback={() => (settingsOpen = false)} />
 {:else if shown}
+  {#if mobile && settingsOpen}
+    <Settings {api} onback={closeSettings} />
+  {/if}
+  <!-- The panel stays mounted under Settings, so drafts and filters survive. -->
   <Panel
     view={shown}
     {api}
     {hotkey}
     {voiceInput}
-    onsettings={mobile ? () => (settingsOpen = true) : undefined}
+    paused={mobile && settingsOpen}
+    onsettings={mobile ? openSettings : undefined}
   />
 {:else if loadError}
   <main role="alert">{loadError}</main>

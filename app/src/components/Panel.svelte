@@ -20,6 +20,7 @@
     hotkey = "Control+Option+Space",
     voiceInput = false,
     onsettings,
+    paused = false,
   }: {
     view: InboxView;
     api: Api;
@@ -27,6 +28,11 @@
     voiceInput?: boolean;
     /** Touch: opens Settings inside the inbox window. Absent on macOS, which opens its own window. */
     onsettings?: () => void;
+    /**
+     * Touch: another view is on top. The panel stays mounted (drafts, filter and
+     * Done state survive) but is hidden, out of the focus order, and ignores keys.
+     */
+    paused?: boolean;
   } = $props();
 
   // Touch layout (iOS build): full screen, no drag, no key hints, no voice presentation.
@@ -209,6 +215,7 @@
   }
 
   function handle(event: KeyboardEvent) {
+    if (paused) return;
     error = null;
     const { state, effect } = onKey(nav, st, fromEvent(event));
     st = state;
@@ -272,6 +279,8 @@
 <main
   class="panel"
   class:mobile
+  hidden={paused}
+  inert={paused}
   style:scroll-padding-top="{topH}px"
   style:scroll-padding-bottom="{footH}px"
 >
@@ -423,6 +432,10 @@
 </main>
 
 <style>
+  /* Author display rules would beat the hidden attribute; keep it authoritative. */
+  .panel[hidden] {
+    display: none;
+  }
   .panel {
     display: flex;
     flex-direction: column;
@@ -603,7 +616,6 @@
     background: var(--crimson-fill);
     padding: 6px 10px;
     border-radius: var(--r);
-    overflow-wrap: anywhere;
   }
   .machine-alert {
     font-size: 12px;
@@ -611,7 +623,6 @@
     background: var(--crimson-fill);
     padding: 6px 10px;
     border-radius: var(--r);
-    overflow-wrap: anywhere;
   }
   .empty {
     margin: 24px 0 0;
@@ -715,6 +726,33 @@
   .panel.mobile :global(textarea) {
     font-size: 16px;
   }
+  /* A long unbroken path in a banner wraps on the phone. macOS keeps its layout. */
+  .panel.mobile .error,
+  .panel.mobile .machine-alert {
+    overflow-wrap: anywhere;
+  }
+  /* Six machines do not fit beside the title and gear at 375 pt: the dots
+     scroll sideways, and the summary gives up its width first. */
+  .panel.mobile header {
+    gap: 10px;
+  }
+  .panel.mobile .summary {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .panel.mobile .dots {
+    flex: 0 1 auto;
+    max-width: 40%;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .panel.mobile .dots::-webkit-scrollbar {
+    display: none;
+  }
   .panel.mobile .dot-detail {
     margin: 0;
     font-size: 12px;
@@ -737,7 +775,9 @@
   .panel.mobile .dots button.dot {
     display: grid;
     place-items: center;
+    flex: none;
     width: 44px;
+    min-width: 44px;
     height: 44px;
     background: none;
     box-shadow: none;

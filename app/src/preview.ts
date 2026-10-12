@@ -165,6 +165,18 @@ if (scene === "banner") {
     machines: machines.map((m) => (m.key === "local" ? { ...m, status: localBanner } : m.key === "gpu" ? { ...m, status: remoteBanner } : m)),
   };
 }
+if (scene === "many") {
+  // Six remote machines: the header dots must scroll, not overflow the screen.
+  const extra: MachineView[] = ["box-a", "box-b", "box-c", "box-d", "box-e", "box-f"].map((name, i) => ({
+    key: `m${i}`,
+    name,
+    machine_id: `mm${i}`,
+    status: i % 2 ? { kind: "offline", since_ms: now - 60_000, error: "refused" } : { kind: "online" },
+    is_local: false,
+    duplicate_of: null,
+  }));
+  v = { ...v, machines: [...machines, ...extra] };
+}
 if (scene === "empty") v = view({ machines });
 if (scene === "offline") {
   const off = machines.map((m) => (m.key === "gpu" ? { ...m, status: { kind: "offline" as const, since_ms: now - 300_000, error: "connection refused" } } : m));

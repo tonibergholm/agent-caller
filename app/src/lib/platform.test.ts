@@ -10,10 +10,15 @@ test("the default build is macOS, not mobile", () => {
   expect(isMobile()).toBe(false);
 });
 
-test("VITE_PLATFORM=ios selects the mobile layout, read at call time", () => {
+test("a stray VITE_PLATFORM=ios in the shell does not select the mobile layout", () => {
   vi.stubEnv("VITE_PLATFORM", "ios");
+  expect(isMobile()).toBe(false);
+});
+
+test("the ios Vite mode selects the mobile layout, read at call time", () => {
+  vi.stubEnv("MODE", "ios");
   expect(isMobile()).toBe(true);
-  vi.stubEnv("VITE_PLATFORM", "macos");
+  vi.stubEnv("MODE", "production");
   expect(isMobile()).toBe(false);
 });
 

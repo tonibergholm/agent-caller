@@ -25,6 +25,15 @@ test("hideLocal drops the countdowns of local cards and keeps the others", () =>
   expect(hideLocal(v).actions.map((a) => a.id)).toEqual(["a2"]);
 });
 
+test("hideLocal leaves hidden_idle as the daemon sent it (known limit: it may count local idle agents)", () => {
+  const v = view({
+    machines: [local, dev],
+    cards: [card({ key: "local/a", machine_key: "local" })],
+    hidden_idle: 3,
+  });
+  expect(hideLocal(v).hidden_idle).toBe(3);
+});
+
 test("hideLocal returns the same view when there is no local machine", () => {
   const v = view({ machines: [dev], cards: [card({ key: "dev/b", machine_key: "dev" })] });
   expect(hideLocal(v)).toBe(v);

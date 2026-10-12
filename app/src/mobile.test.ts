@@ -1,7 +1,7 @@
-// Touch-first (iOS) layout. Every test here runs with VITE_PLATFORM=ios, the
+// Touch-first (iOS) layout. Every test here runs in the ios Vite mode, the
 // value `npm run build:ios` sets; the macOS defaults are covered by the other
 // test files, which run without the stub.
-import { cleanup, render, screen } from "@testing-library/svelte";
+import { cleanup, render, screen, waitFor } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App.svelte";
@@ -15,7 +15,7 @@ import type { MachineView } from "./lib/bindings/MachineView";
 import { VOICE_OFF } from "./lib/voice";
 import panelSource from "./components/Panel.svelte?raw";
 
-beforeEach(() => vi.stubEnv("VITE_PLATFORM", "ios"));
+beforeEach(() => vi.stubEnv("MODE", "ios"));
 afterEach(() => {
   cleanup();
   vi.unstubAllEnvs();
@@ -233,8 +233,38 @@ test("mobile app: the gear opens Settings in the same window, and Back returns t
   expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Add from clipboard" })).toBeTruthy();
   expect(api.calls.map((c) => c[0])).not.toContain("openSettings");
-  await userEvent.click(screen.getByRole("button", { name: "‹ Inbox" }));
+  await userEvent.click(screen.getByRole("button", { name: "Inbox" }));
   expect(await screen.findByText("No agents need you.")).toBeTruthy();
+});
+
+test("mobile app: focus moves to Back when Settings opens, and back to the gear when it closes", async () => {
+  const api = fakeApi();
+  api.getView = async () => view({ machines: [devMachine] });
+  render(App, { api, label: "panel" });
+  const gear = await screen.findByRole("button", { name: "Settings" });
+  await userEvent.click(gear);
+  const back = await screen.findByRole("button", { name: "Inbox" });
+  await waitFor(() => expect(document.activeElement).toBe(back));
+  // The "‹" glyph is decoration: it is not part of the button's name.
+  expect(back.querySelector("[aria-hidden=true]")?.textContent).toBe("‹");
+  await userEvent.click(back);
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Settings" })));
+});
+
+test("mobile app: a reply draft typed in the inbox survives Settings and Back", async () => {
+  const api = fakeApi();
+  const working = card({ key: "dev/w", group: "working", live: true, can_reply: true });
+  working.agent.pending = null;
+  api.getView = async () => view({ machines: [devMachine], cards: [working] });
+  const { container } = render(App, { api, label: "panel" });
+  await userEvent.click(await screen.findByRole("button", { name: /reply/i }));
+  await userEvent.type(container.querySelector<HTMLTextAreaElement>("textarea[data-field=reply]")!, "draft");
+  await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+  await screen.findByRole("heading", { name: "Settings" });
+  await userEvent.click(screen.getByRole("button", { name: "Inbox" }));
+  await waitFor(() =>
+    expect(container.querySelector<HTMLTextAreaElement>("textarea[data-field=reply]")?.value).toBe("draft"),
+  );
 });
 
 // Settings: no hotkey, notification or voice sections, and nothing read for them.

@@ -20,6 +20,7 @@
 
   // Touch layout (iOS build): the phone has no local daemon and no macOS-only settings.
   const mobile = isMobile();
+  let backButton = $state<HTMLButtonElement>();
 
   let machines = $state<MachineEntryView[]>([]);
   const listed = $derived(mobile ? machines.filter((m) => m.endpoint.kind !== "local") : machines);
@@ -156,6 +157,8 @@
   }
 
   onMount(() => {
+    // Touch: focus moves to Back when this view opens, so the change is announced.
+    if (mobile && onback) backButton?.focus();
     let off: (() => void) | undefined;
     let offProbe: (() => void) | undefined;
     let offStatus: (() => void) | undefined;
@@ -317,7 +320,7 @@
 <main class="settings" class:mobile>
   {#if mobile && onback}
     <!-- Touch: Settings is a view inside the inbox window, not a second window. -->
-    <button class="back" type="button" onclick={onback}>‹ Inbox</button>
+    <button class="back" type="button" bind:this={backButton} onclick={onback}><span aria-hidden="true">‹</span> Inbox</button>
   {/if}
   <h1>Settings</h1>
 
