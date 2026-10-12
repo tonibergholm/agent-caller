@@ -355,11 +355,11 @@ async fn which_one_then_a_digit_presents_the_choice() {
     assert_eq!(port.enqueued(), [pick("m/b", "r-b", "allow")]);
 }
 
-/// Final review B5: targets that differ only past the model-context caps
-/// show in full, and targets that would look the same get a disambiguator.
+/// Final review B5: targets show in full however long they are, and
+/// targets that would look the same get a disambiguator.
 #[tokio::test]
 async fn targets_with_shared_prefixes_render_distinguishably() {
-    let (prefix, title) = ("m".repeat(150), "t".repeat(150));
+    let (prefix, title) = ("m".repeat(300), "t".repeat(300));
     let mut a = pending("m1", "a");
     (a.machine_name, a.title) = (format!("{prefix}-one"), format!("{title}-A"));
     let mut b = pending("m2", "b");
@@ -608,6 +608,9 @@ fn the_hud_json_shape_is_the_frontend_contract() {
     let v = serde_json::to_value(Hud::Error { refusal: Refusal::DisplayFailed, transcript: None }).unwrap();
     assert_eq!(v, serde_json::json!({"state": "error", "refusal": "display_failed", "transcript": null}));
     assert!(!Hud::Hidden.fades() && !Hud::Hidden.wants_key());
+    // Thinking can be cancelled from the HUD, so it takes keys too.
+    assert!(Hud::Thinking { transcript: VoiceText::new("x"), id: 1 }.wants_key());
+    assert!(!Hud::Listening.wants_key() && !Hud::Speaking { text: VoiceText::new("x") }.wants_key());
     assert!(Hud::Speaking { text: VoiceText::new("x") }.fades());
 }
 

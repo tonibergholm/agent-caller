@@ -1,6 +1,7 @@
 //! The voice HUD (voice spec §4.4): a second non-activating panel, top
 //! centre of the active screen, 18% from the top. It takes key focus only
-//! while it waits for input (confirm, which-one, countdown); see D17.
+//! while Esc or a choice can act on it (thinking, confirm, which-one,
+//! countdown); see D17.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 

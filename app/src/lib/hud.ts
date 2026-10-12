@@ -144,9 +144,9 @@ export function outcomeText(o: OutcomeView): string {
   }
 }
 
-/** The HUD has key focus only while it waits for input (spec §4.4). */
+/** The HUD has key focus only while Esc or a choice can act on it (spec §4.4). */
 export const wantsKey = (h: Hud): boolean =>
-  h.state === "confirm" || h.state === "which_one" || h.state === "countdown";
+  h.state === "thinking" || h.state === "confirm" || h.state === "which_one" || h.state === "countdown";
 
 /** The proposal the HUD must acknowledge once it is on screen (D22). */
 export function awaitingDisplay(h: Hud): number | null {

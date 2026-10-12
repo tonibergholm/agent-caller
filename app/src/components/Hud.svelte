@@ -183,7 +183,7 @@
       {#if hud.action_id !== null}
         <span class="track" aria-hidden="true"><span class="bar" style:width="{fraction * 100}%"></span></span>
       {/if}
-    {:else if hud.state === "which_one"}
+    {:else if hud.state === "which_one" || hud.state === "thinking"}
       <div class="buttons"><button onclick={cancel}>Cancel <kbd>Esc</kbd></button></div>
     {/if}
   </main>

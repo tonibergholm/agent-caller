@@ -186,8 +186,16 @@ test("the countdown reads the inbox action and cancels on Esc, not Enter", async
   expect(api.calls).toEqual([["voiceCancel", 9]]);
 });
 
-test("states that do not wait for input ignore keys", async () => {
+test("Esc or Cancel while thinking cancels that utterance; Enter and digits do nothing", async () => {
   const api = await show({ state: "thinking", transcript: "approve", id: 30 });
+  await userEvent.keyboard("{Enter}1{Escape}");
+  expect(api.calls).toEqual([["voiceCancel", 30]]);
+  await userEvent.click(screen.getByRole("button", { name: /Cancel/ }));
+  expect(api.calls).toEqual([["voiceCancel", 30], ["voiceCancel", 30]]);
+});
+
+test("states that do not wait for input ignore keys", async () => {
+  const api = await show({ state: "speaking", text: "2 need you." });
   await userEvent.keyboard("{Escape}{Enter}1");
   expect(api.calls).toEqual([]);
 });

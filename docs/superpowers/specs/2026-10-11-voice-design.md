@@ -142,12 +142,14 @@ step is dropped; voice never retargets silently.
 
 A second panel, separate from the inbox panel class, top centre of the
 active screen, 18% from the top (`DESIGN.md`, floating overlays).
-- It never activates the app. While listening, thinking, speaking or
-  showing an error, it does not take keyboard focus either.
+- It never activates the app. While listening, speaking or showing an
+  error, it does not take keyboard focus either.
 - It becomes key (takes keyboard focus, without activating the app) only
-  while it waits for input: confirm, which-one, or a running countdown.
-  Then Enter confirms, digits pick a candidate, and Esc cancels. When
-  that state ends, focus returns to the previous window.
+  while Esc or a choice can act on it: thinking, confirm, which-one, or a
+  running countdown. Then Enter confirms, digits pick a candidate, and Esc
+  cancels; Esc while thinking drops the utterance and any model call
+  (user decision 2026-10-12). When that state ends, focus returns to the
+  previous window.
 - Every input also has a clickable control in the HUD.
 - Pressing the voice trigger again while a voice countdown runs cancels
   that countdown at once, before any new recognition.
@@ -191,9 +193,9 @@ A read or select on it needs none (§6.1). A
 card in a collapsed Done section, and an idle agent hidden by the idle
 setting, can be the target of `send` only, and only when named; the step
 always needs confirmation and the HUD shows the full target and payload.
-Answers, reads and selections never target them. (Decided 2026-10-11 by
-the orchestrator; revisit with the user. It replaces "cards in a collapsed
-Done section are never targets".)
+Answers, reads and selections never target them. (Confirmed by the user
+2026-10-12. It replaces "cards in a collapsed Done section are never
+targets".)
 
 ### 5.3 Fast path
 

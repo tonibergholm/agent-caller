@@ -514,14 +514,16 @@ fn refusal_for(e: EnqueueError) -> Refusal {
     }
 }
 
-/// How long a machine name, title or disambiguator may be on the HUD. Far
-/// above the model-context caps, so names that differ late still differ
-/// (final review B5); the HUD wraps them.
-pub const HUD_NAME_MAX: usize = 200;
+/// A machine name, title or disambiguator as the HUD shows it: cleaned but
+/// never cut, so names that differ late still differ (final review B5).
+/// The HUD wraps them.
+fn shown(s: &str) -> String {
+    clean(s, usize::MAX)
+}
 
 /// What identifies a target on the HUD: agent kind, machine and title.
 fn shown_as(card: &CardSnap) -> (&'static str, String, String) {
-    (speech::kind_name(card.kind), clean(&card.machine_name, HUD_NAME_MAX), clean(&card.title, HUD_NAME_MAX))
+    (speech::kind_name(card.kind), shown(&card.machine_name), shown(&card.title))
 }
 
 /// The project, or the card key when the project does not tell `card`
@@ -533,10 +535,10 @@ fn disambiguator(snapshot: &Snapshot, card: &CardSnap) -> Option<String> {
     if twins.is_empty() {
         return None;
     }
-    let project = |c: &CardSnap| c.project.as_deref().map(|p| clean(p, HUD_NAME_MAX)).filter(|p| !p.is_empty());
+    let project = |c: &CardSnap| c.project.as_deref().map(shown).filter(|p| !p.is_empty());
     match project(card) {
         Some(p) if twins.iter().all(|t| project(t).as_ref() != Some(&p)) => Some(p),
-        _ => Some(clean(&card.key, HUD_NAME_MAX)),
+        _ => Some(shown(&card.key)),
     }
 }
 
