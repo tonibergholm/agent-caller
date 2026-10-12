@@ -35,3 +35,16 @@ async fn start_service_listens_privately_and_names_the_local_machine() {
     drop(running);
     assert!(std::fs::symlink_metadata(&paths.socket).is_err(), "the socket goes with the service");
 }
+
+#[test]
+fn shutdown_does_not_wait_for_a_long_blocking_job() {
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    // Stands in for an unlock_secrets call held open by a keyring prompt.
+    rt.block_on(async {
+        tokio::task::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_secs(10)));
+        tokio::task::yield_now().await;
+    });
+    let start = std::time::Instant::now();
+    acd_inbox::serve::shutdown_runtime(rt);
+    assert!(start.elapsed() < std::time::Duration::from_secs(5), "exit waited for the blocking job");
+}

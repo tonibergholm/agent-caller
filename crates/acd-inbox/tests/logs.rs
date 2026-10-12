@@ -32,6 +32,9 @@ async fn agent_text_secrets_and_raw_lines_never_reach_the_logs() {
     // and through tracing: frames carry tokens and agent text.
     log::trace!(target: "tungstenite::protocol", "SECRET-FRAME {TOKEN}");
     log::warn!(target: "tokio_tungstenite::compat", "SECRET-WARN");
+    // Positive control: a `log` record from an allowed target arrives, so the
+    // bridge is installed and the absences below mean something.
+    log::info!(target: "acd_bridge_probe", "BRIDGE-OK");
     tracing::debug!(target: "rustls::conn", "SECRET-TLS");
     tracing::trace!(target: "zbus::connection", "SECRET-DBUS");
 
@@ -61,6 +64,7 @@ async fn agent_text_secrets_and_raw_lines_never_reach_the_logs() {
     let logs = logs();
     assert!(logs.contains("connection accepted"), "the capture works");
     assert!(logs.contains("line rejected"), "rejections are logged by tag");
+    assert!(logs.contains("BRIDGE-OK"), "the log bridge is installed");
     assert!(logs.contains("command"), "trace is on for acd-inbox itself");
     assert!(!logs.contains("SECRET"), "agent, user or dependency text reached the logs");
     assert!(!logs.contains(TOKEN), "a token reached the logs");

@@ -148,7 +148,8 @@ async fn a_view_that_cannot_fit_is_reported_and_recovers() {
     for (seq, id) in [(2, "a2"), (3, "a3"), (4, "a4"), (5, "a5")] {
         c.send(json!({"type":"agent.removed","epoch":"e1","seq":seq,"agent_id":id})).await;
     }
-    let view = v.recv_until(|m| m["type"] == "view").await;
+    // Under load an intermediate view (2 to 4 cards) can arrive first.
+    let view = v.recv_until(|m| m["type"] == "view" && m["view"]["cards"].as_array().is_some_and(|c| c.len() == 1)).await;
     assert_eq!(view["view"]["cards"].as_array().unwrap().len(), 1, "the inbox shows again once it fits");
 }
 

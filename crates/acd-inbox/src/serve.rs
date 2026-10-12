@@ -98,7 +98,14 @@ pub fn init_logging_to<W>(env: Option<&str>, writer: W) -> Result<(), TryInitErr
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
 {
-    let env = env.and_then(|e| EnvFilter::try_new(e).ok()).unwrap_or_else(|| EnvFilter::new("info"));
+    let env = match env.map(EnvFilter::try_new) {
+        Some(Ok(filter)) => filter,
+        Some(Err(e)) => {
+            eprintln!("acd-inbox: ignoring an invalid RUST_LOG, using info: {e}");
+            EnvFilter::new("info")
+        }
+        None => EnvFilter::new("info"),
+    };
     tracing_subscriber::registry()
         .with(env)
         .with(deny_list())
@@ -112,6 +119,16 @@ pub fn init_logging() {
     if let Err(e) = init_logging_to(env.as_deref(), std::io::stderr) {
         eprintln!("acd-inbox: logging is already set up: {e}");
     }
+}
+
+/// How long exit waits for blocking jobs (a keyring prompt can hold one for
+/// 120 s), well inside systemd's 90 s stop timeout.
+pub const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Ends `rt` without waiting on blocking jobs past [`RUNTIME_GRACE`]. Plain
+/// `drop` waits for every `spawn_blocking` task without bound.
+pub fn shutdown_runtime(rt: tokio::runtime::Runtime) {
+    rt.shutdown_timeout(RUNTIME_GRACE);
 }
 
 /// `acd-inbox serve` (plan D25).
@@ -136,15 +153,18 @@ fn linux_run() -> Result<()> {
     let paths = Paths::from_env()?;
     let local = prefs::local_name(&gethostname::gethostname().to_string_lossy());
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(async move {
+    let result = rt.block_on(async move {
+        // Before anything slow, so a SIGTERM during startup is not lost.
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let store = Arc::new(WorkerStore::new(SecretWorker::spawn(SecretServiceBackend::new(), WorkerTimeouts::LIVE)));
         let prefill = store.clone();
         let running = start_service(&paths, store.clone(), store, Timing::default(), &local, move |keys| {
             prefill.prefill(&keys)
         })
         .await?;
-        match DbusNotify::connect().await {
-            Ok((backend, actions)) => {
+        let connected = tokio::time::timeout(std::time::Duration::from_secs(5), DbusNotify::connect()).await;
+        match connected {
+            Ok(Ok((backend, actions))) => {
                 let opener = ShellOpener::find(std::env::var_os("PATH").as_deref(), std::path::Path::new("/usr/bin"))
                     .map(|o| Arc::new(o) as Arc<dyn Opener>);
                 if opener.is_none() {
@@ -158,12 +178,12 @@ fn linux_run() -> Result<()> {
                     actions,
                 ));
             }
-            Err(e) => tracing::warn!(
+            Ok(Err(e)) => tracing::warn!(
                 class = crate::linux::dbus::error_class(&e),
                 "no notification server; notifications are off for this session"
             ),
+            Err(_) => tracing::warn!(class = "timeout", "no notification server; notifications are off for this session"),
         }
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {
             _ = term.recv() => {}
             _ = tokio::signal::ctrl_c() => {}
@@ -173,7 +193,9 @@ fn linux_run() -> Result<()> {
         // every connection and cancels countdowns; waiting for the abort to
         // finish makes sure that happened before the process exits.
         running.server.abort();
-        let _ = (&mut { running.server }).await;
+        let _ = running.server.await;
         anyhow::Ok(())
-    })
+    });
+    shutdown_runtime(rt);
+    result
 }
