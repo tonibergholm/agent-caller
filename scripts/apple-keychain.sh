@@ -22,6 +22,11 @@ keychain_password=$(openssl rand -hex 24)
 
 printf '%s' "$APPLE_CERTIFICATE" | base64 --decode >"$tmp/certificate.p12"
 security create-keychain -p "$keychain_password" "$keychain"
+# Publish the path now so the cleanup step can delete the keychain even if a
+# later command here fails.
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+	printf 'keychain=%s\n' "$keychain" >>"$GITHUB_OUTPUT"
+fi
 security set-keychain-settings -lut 21600 "$keychain"
 security unlock-keychain -p "$keychain_password" "$keychain"
 security import "$tmp/certificate.p12" -k "$keychain" \

@@ -72,7 +72,7 @@ Notes on the choices:
    git push origin vX.Y.Z
    ```
 
-7. The `ci` job runs first. A failing test stops the release. The build
+7. The `prepare` and `ci` jobs run first. A failing test stops the release. The build
    jobs run next, and the publish job creates a **draft** pre-release with
    the artifacts, `SHA256SUMS` and the CHANGELOG section as notes. If a run
    fails part way, re-run it. The publish job deletes an existing draft for
@@ -118,9 +118,10 @@ The pipeline chooses a mode from these values:
 - `APPLE_CERTIFICATE` set with an empty `APPLE_CERTIFICATE_PASSWORD`: the
   job fails with an error. Nothing is signed.
 
-Each secret is set only on the steps that use it: the decision step (which
-receives booleans, not values), the certificate import, the signing and
-notarization steps, and the step that bundles the dmg. No job sets secrets
+The decision step receives only booleans (is each secret set), never values.
+Each secret value is set only on the steps that use it: the certificate
+import, the signing and notarization steps, and the step that bundles the
+dmg. No job sets secrets
 at job level. The Rust build, the npm install and the Linux jobs get no Apple
 secrets. The app binary is compiled in a separate step
 (`tauri build --no-bundle`) before the bundle step runs, so Cargo build
