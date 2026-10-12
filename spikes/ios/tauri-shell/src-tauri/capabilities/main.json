@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "main",
+  "description": "THROWAWAY spike: the single iOS window may listen for inbox events",
+  "windows": ["main"],
+  "permissions": ["core:event:default", "clipboard-manager:allow-read-text"]
+}
