@@ -1,0 +1,412 @@
+// Pure view logic for the Omarchy plugin (omarchy spec §7). No QML or I/O,
+// so `node --test` covers it. Service.qml, BarWidget.qml and Panel.qml
+// import it as `Model`.
+
+export const MAX_LINE = 4 * 1024 * 1024;
+export const ANSWER_MAX_BYTES = 16 * 1024;
+export const REPLY_MAX_BYTES = 64 * 1024;
+export const UNDO_MS = 2000;
+export const UNCERTAIN_TEXT = "Check the terminal";
+
+/**
+ * UTF-8 length of a JS string, in pure JS: QML's host has no TextEncoder
+ * (plan D20). A lone surrogate counts 3, as its replacement character would.
+ */
+export function utf8Length(s) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      n += 4;
+      i += 1;
+    } else n += 3;
+  }
+  return n;
+}
+
+// A UTF-16 unit is at least one UTF-8 byte and at most three.
+const tooLong = (s, max) => s.length > max || (s.length * 3 > max && utf8Length(s) > max);
+
+/**
+ * Joins Quickshell SplitParser output into lines and enforces the 4 MiB
+ * limit (plan D20). SplitParser splits bytes before decoding, so text
+ * arrives as whole characters; this reader also copes with a line given in
+ * pieces. On overflow the caller drops the connection.
+ */
+export class LineReader {
+  constructor(max = MAX_LINE) {
+    this.max = max;
+    this.buf = "";
+  }
+
+  push(text) {
+    this.buf += text;
+    const lines = [];
+    let i;
+    while ((i = this.buf.indexOf("\n")) >= 0) {
+      const line = this.buf.slice(0, i);
+      this.buf = this.buf.slice(i + 1);
+      if (tooLong(line, this.max)) return { lines, overflow: true };
+      if (line.length > 0) lines.push(line);
+    }
+    return { lines, overflow: tooLong(this.buf, this.max) };
+  }
+}
+
+export function parseMessage(line) {
+  let v;
+  try {
+    v = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  return v !== null && typeof v === "object" && !Array.isArray(v) && typeof v.type === "string" ? v : null;
+}
+
+export class Ids {
+  constructor(prefix) {
+    this.prefix = prefix;
+    this.n = 0;
+  }
+
+  next() {
+    this.n += 1;
+    return `${this.prefix}-${this.n}`;
+  }
+}
+
+/** The three sections, as app/src/lib/panel.ts: a countdown card stays whatever the machine filter says. */
+export function sections(cards, machine) {
+  const shown = machine === null ? cards : cards.filter((c) => c.machine_key === machine || c.action !== null);
+  return {
+    needs: shown.filter((c) => c.group === "request"),
+    working: shown.filter((c) => c.group === "working" || c.group === "unknown"),
+    done: shown.filter((c) => c.group === "done" || c.group === "idle"),
+  };
+}
+
+export function headerText(view) {
+  const working = view.cards.filter((c) => c.agent.state === "working").length;
+  return `Inbox · ${view.tray.needs_you} need you · ${working} working`;
+}
+
+export function barState(view, connected) {
+  if (!connected || !view) return { count: 0, tone: "down", text: "" };
+  const n = view.tray.needs_you;
+  return { count: n, tone: n > 0 ? "urgent" : "dim", text: n > 0 ? String(n) : "" };
+}
+
+function dotKind(status) {
+  switch (status.kind) {
+    case "online":
+      return "online";
+    case "connecting":
+    case "syncing":
+      return "syncing";
+    case "offline":
+      return "offline";
+    default:
+      return "error";
+  }
+}
+
+const CHIP_TEXT = {
+  online: "Online",
+  syncing: "Connecting",
+  offline: "Offline",
+  error: "Error",
+  locked: "Keyring locked",
+  not_paired: "Not paired",
+  unreadable: "Pair again",
+  unknown: "Keyring state unknown. Retry",
+};
+
+/** Machine chips: connection status from the view, joined by key with secret status from settings (plan S1, S6). */
+export function machineChips(view, settings) {
+  const entries = new Map((settings?.machines ?? []).map((m) => [m.key, m]));
+  return (view?.machines ?? [])
+    .filter((m) => m.duplicate_of === null)
+    .map((m) => {
+      let status = dotKind(m.status);
+      const e = entries.get(m.key);
+      if (e && e.endpoint.kind === "tcp") {
+        if (e.secret === "locked") status = "locked";
+        else if (e.secret === "missing") status = "not_paired";
+        else if (e.secret === "unreadable") status = "unreadable";
+        else if (e.secret === "unknown") status = "unknown";
+      }
+      return { key: m.key, name: m.name, status, label: CHIP_TEXT[status] };
+    });
+}
+
+export function keyringLocked(settings) {
+  return (settings?.machines ?? []).some((m) => m.secret === "locked");
+}
+
+const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.:-]{0,39}$/;
+
+export function requestTag(card) {
+  const p = card.agent.pending;
+  if (!p) return "NEEDS YOU";
+  switch (p.kind) {
+    case "permission":
+      return TOOL_NAME.test(p.title) ? `${p.title.toUpperCase()} APPROVAL` : "APPROVAL";
+    case "question":
+      return "QUESTION";
+    case "blocked_unparsed":
+      return "BLOCKED";
+    default:
+      return "REQUEST";
+  }
+}
+
+const KIND = { claude: "Claude", codex: "Codex" };
+
+export function cardMeta(card) {
+  const a = card.agent;
+  const project = a.project ?? (a.cwd ? a.cwd.split("/").filter(Boolean).pop() ?? null : null);
+  const badge = a.source === "herdr" ? "herdr" : a.source === "t3" ? "T3" : null;
+  return { kind: KIND[a.kind] ?? "agent", machine: card.machine_name, project, title: a.title, badge, tag: requestTag(card) };
+}
+
+/** Options as the panel lists them (plan D30). */
+export function optionRows(card) {
+  const p = card.agent.pending;
+  if (!p) return [];
+  return p.options.map((o, i) => {
+    const rule = o.effect === "allow_always" ? (o.description ?? null) : null;
+    const pickable =
+      card.answerable && i < 9 && card.selectable_options.includes(o.id) && (o.effect !== "allow_always" || rule !== null);
+    return { number: i + 1, id: o.id, label: o.label, rule, pickable };
+  });
+}
+
+/**
+ * A typed-answer editor remembers the request it was opened for (spec §7):
+ * the answer goes to that request id and revision, never to a later one.
+ */
+export function answerEditor(card) {
+  const p = card.agent.pending;
+  if (!card.free_text_answerable || !p) return null;
+  return { cardKey: card.key, requestId: p.id, revision: p.revision };
+}
+
+/** False once the card is gone, its request changed, or it no longer takes a typed answer: the editor closes. */
+export function answerEditorValid(editor, cards) {
+  if (!editor) return false;
+  const card = cards.find((c) => c.key === editor.cardKey);
+  const p = card?.agent.pending;
+  return !!card && card.free_text_answerable && !!p && p.id === editor.requestId && p.revision === editor.revision;
+}
+
+export const EDITOR_CLOSED_TEXT = "The request changed. Your answer was not sent.";
+
+/** The error state for a view the service could not fit (plan D9). */
+export function overflowText(needsYou) {
+  return `Too many requests to show here (${needsYou} need you). Answer some in the terminal.`;
+}
+
+/** Draft keys (plan D35): a draft belongs to a card and its request, or to a machine. */
+export const draftKey = {
+  answer: (editor) => `answer:${editor.cardKey}:${editor.requestId}:${editor.revision}`,
+  reply: (card) => `reply:${card.key}:${card.agent.pending ? card.agent.pending.id : "-"}`,
+  rename: (machineKey) => `rename:${machineKey}`,
+};
+
+/**
+ * Typed text kept outside QML delegates, which a new view recreates
+ * (plan D35). The pairing line is never stored here.
+ */
+export class Drafts {
+  constructor() {
+    this.texts = new Map();
+  }
+
+  get(key) {
+    return this.texts.get(key) ?? "";
+  }
+
+  set(key, text) {
+    if (text === "") this.texts.delete(key);
+    else this.texts.set(key, text);
+  }
+
+  clear(key) {
+    this.texts.delete(key);
+  }
+
+  /** Drops drafts whose card, request or machine is gone. */
+  prune(view, settings) {
+    const live = new Set();
+    for (const c of view?.cards ?? []) {
+      live.add(draftKey.reply(c));
+      const e = answerEditor(c);
+      if (e) live.add(draftKey.answer(e));
+    }
+    for (const m of settings?.machines ?? []) live.add(draftKey.rename(m.key));
+    for (const key of [...this.texts.keys()]) if (!live.has(key)) this.texts.delete(key);
+  }
+}
+
+/** "N not shown" for the cards a large view left out (plan D9). */
+export function omittedText(omitted) {
+  const parts = [];
+  if (omitted?.done > 0) parts.push(`${omitted.done} done`);
+  if (omitted?.working > 0) parts.push(`${omitted.working} working`);
+  return parts.length === 0 ? "" : `${parts.join(" and ")} not shown`;
+}
+
+export function countdownFraction(action, nowMs) {
+  return Math.max(0, Math.min(1, (action.fires_at_ms - nowMs) / UNDO_MS));
+}
+
+/** Qt enum values (Qt::Key, Qt::KeyboardModifier). */
+export const QT = {
+  Key_Escape: 0x01000000,
+  Key_Return: 0x01000004,
+  Key_Enter: 0x01000005,
+  Key_Up: 0x01000013,
+  Key_Down: 0x01000015,
+  ShiftModifier: 0x02000000,
+  ControlModifier: 0x04000000,
+  AltModifier: 0x08000000,
+  MetaModifier: 0x10000000,
+};
+
+/** `field`: null, or {kind: "reply"|"answer"|"pairing", cardKey}. `composing`: the focused field's inputMethodComposing. */
+export function fromQt(key, text, modifiers, composing, field) {
+  const name =
+    key === QT.Key_Escape ? "Escape"
+    : key === QT.Key_Return || key === QT.Key_Enter ? "Enter"
+    : key === QT.Key_Up ? "ArrowUp"
+    : key === QT.Key_Down ? "ArrowDown"
+    : text;
+  return {
+    key: name,
+    shift: (modifiers & QT.ShiftModifier) !== 0,
+    ctrl: (modifiers & QT.ControlModifier) !== 0,
+    alt: (modifiers & QT.AltModifier) !== 0,
+    meta: (modifiers & QT.MetaModifier) !== 0,
+    composing: !!composing,
+    field: field ?? null,
+  };
+}
+
+const NONE = { kind: "none" };
+
+/** Keys (omarchy spec §7), as app/src/lib/keys.ts, over the cards in display order. */
+export function onKey(visible, st, ev) {
+  const none = { state: st, effect: NONE };
+  if (ev.composing || ev.ctrl || ev.alt || ev.meta) return none;
+  if (ev.key === "Escape") return { state: st, effect: { kind: "escape" } };
+  if (ev.field) {
+    if (ev.key !== "Enter" || ev.shift) return none;
+    if (ev.field.kind === "answer" && ev.field.cardKey) return { state: st, effect: { kind: "submitAnswer", cardKey: ev.field.cardKey } };
+    if (ev.field.kind === "reply" && st.replyFor) return { state: st, effect: { kind: "submitReply", cardKey: st.replyFor } };
+    if (ev.field.kind === "pairing") return { state: st, effect: { kind: "submitPairing" } };
+    return none;
+  }
+  const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+  const idx = visible.findIndex((c) => c.key === st.selected);
+  if (k === "j" || k === "ArrowDown" || k === "k" || k === "ArrowUp") {
+    if (visible.length === 0) return none;
+    const down = k === "j" || k === "ArrowDown";
+    const next = idx < 0 ? 0 : Math.min(visible.length - 1, Math.max(0, idx + (down ? 1 : -1)));
+    const selected = visible[next].key;
+    return { state: { ...st, selected }, effect: selected === st.selected ? NONE : { kind: "select", key: selected } };
+  }
+  const card = idx >= 0 ? visible[idx] : undefined;
+  if (!card) return none;
+  if (/^[1-9]$/.test(k)) {
+    const row = optionRows(card).find((r) => r.number === Number(k));
+    if (!row || !row.pickable) return none;
+    const p = card.agent.pending;
+    return { state: st, effect: { kind: "pick", cardKey: card.key, requestId: p.id, optionId: row.id, revision: p.revision } };
+  }
+  if (k === "t" && card.free_text_answerable) return { state: st, effect: { kind: "focusAnswer", cardKey: card.key } };
+  if (k === "r" && card.can_reply) return { state: st, effect: { kind: "openReply", cardKey: card.key } };
+  if (k === "e" && card.can_mark_seen) return { state: st, effect: { kind: "markSeen", cardKey: card.key } };
+  return none;
+}
+
+// acd_protocol::text: controls other than \n and \t, bidi controls, line and paragraph separators.
+const FORBIDDEN = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\u2028\u2029]/u;
+
+/** As Inbox::answer_text: CRLF to LF, trimmed, 1 byte to 16 KiB, no forbidden characters. */
+export function validateAnswer(text) {
+  const t = text.replace(/\r\n/g, "\n").trim();
+  if (!t) return { ok: false, reason: "empty" };
+  if (utf8Length(t) > ANSWER_MAX_BYTES) return { ok: false, reason: "too_long" };
+  if (FORBIDDEN.test(t)) return { ok: false, reason: "characters" };
+  return { ok: true, text: t };
+}
+
+/** As Inbox::reply: not blank, at most 64 KiB; sent as typed. */
+export function validateReply(text) {
+  if (!text.trim()) return { ok: false, reason: "empty" };
+  if (utf8Length(text) > REPLY_MAX_BYTES) return { ok: false, reason: "too_long" };
+  return { ok: true, text };
+}
+
+const REASONS = {
+  empty: "Type something first.",
+  too_long: "That is too long to send.",
+  characters: "The text has characters that cannot be sent.",
+};
+
+export function reasonText(reason) {
+  return REASONS[reason] ?? "That cannot be sent.";
+}
+
+const UPDATE = "The inbox service did not understand that. Update the plugin or the service.";
+const ERRORS = {
+  stale: "The request changed. Review it again.",
+  unknown_card: "That agent is gone.",
+  not_answerable: "Answer this one in the terminal.",
+  unknown_option: "That option cannot be picked here.",
+  already_counting: "A countdown is already running for this card.",
+  bad_text: "The text is empty, too long, or has characters that cannot be sent.",
+  cannot_reply: "This agent cannot take a reply right now.",
+  cannot_mark_seen: "This agent cannot be marked seen.",
+  hidden: "The agent is hidden now. Nothing was sent.",
+  unknown_machine: "That machine is not in the list.",
+  not_paired: "This machine is not paired. Paste its pairing line.",
+  bad_name: "Names are 1 to 64 characters.",
+  bad_pairing: "That is not an acd pairing line. Run `acd pair` on the machine and copy its output.",
+  bad_request: UPDATE,
+  secret_store_locked: "The keyring is locked. Unlock it and try again.",
+  secret_store_timeout: "The keyring is not responding. Press Retry on the machine once it answers.",
+  secret_store_failed: "The keyring could not be used.",
+  settings_failed: "Could not save the settings.",
+  duplicate_id: "That was already sent.",
+  unsupported: UPDATE,
+  unreachable: "The inbox service is not running. Start it with: systemctl --user start acd-inbox",
+};
+
+export function errorText(code) {
+  return ERRORS[code] ?? "Something went wrong.";
+}
+
+/** This view's actions without a terminal outcome yet. */
+export class Tracker {
+  constructor() {
+    this.actions = new Map();
+  }
+
+  started(actionId, cardKey) {
+    this.actions.set(actionId, cardKey);
+  }
+
+  outcome(msg) {
+    if (msg.result.kind !== "fired") this.actions.delete(msg.action);
+  }
+
+  /** outcomes_lost: every action still open is uncertain; returns their cards. */
+  lost() {
+    const cards = [...new Set(this.actions.values())];
+    this.actions.clear();
+    return cards;
+  }
+}
