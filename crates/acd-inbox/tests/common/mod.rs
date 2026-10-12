@@ -129,3 +129,146 @@ pub async fn frame_of_type(f: &FakeServer, ty: &str) -> Value {
 pub fn answers(f: &FakeServer) -> usize {
     f.received().iter().filter(|v| v["type"] == "request.answer").count()
 }
+
+use std::path::{Path, PathBuf};
+
+use acd_inbox::{
+    prefs::Prefs,
+    server::{NoKeyring, SecretControl, ServerOptions, Service},
+};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+pub type MakeSecrets = Box<dyn FnOnce(&FakeServer) -> (Arc<dyn SecretStore>, Arc<dyn SecretControl>) + Send>;
+
+pub struct RigOptions {
+    pub agents: Vec<Value>,
+    pub timing: Timing,
+    pub server: ServerOptions,
+    pub control: Arc<dyn SecretControl>,
+    /// Builds the inbox's store and the service's keyring control; default:
+    /// a `MemorySecrets` holding m1's secret, and `control`.
+    pub secrets: Option<MakeSecrets>,
+    /// Wait for the fake daemon connection and send `agents`.
+    pub connect: bool,
+}
+
+impl Default for RigOptions {
+    fn default() -> Self {
+        RigOptions {
+            agents: vec![pending_agent("a1", "r1")],
+            timing: fast(),
+            server: ServerOptions::default(),
+            control: Arc::new(NoKeyring),
+            secrets: None,
+            connect: true,
+        }
+    }
+}
+
+pub struct Rig {
+    pub f: FakeServer,
+    pub c: Option<FakeConn>,
+    pub inbox: Arc<Inbox>,
+    pub svc: Arc<Service>,
+    pub socket: PathBuf,
+    pub server: tokio::task::JoinHandle<()>,
+    _dir: tempfile::TempDir,
+}
+
+pub async fn rig(agents: Vec<Value>, timing: Timing) -> Rig {
+    rig_with(RigOptions { agents, timing, ..Default::default() }).await
+}
+
+pub async fn rig_with(o: RigOptions) -> Rig {
+    type MakeStore = Box<dyn FnOnce(&FakeServer) -> Arc<dyn SecretStore> + Send>;
+    let slot: Arc<std::sync::Mutex<Option<Arc<dyn SecretControl>>>> = Arc::new(std::sync::Mutex::new(None));
+    let make: Option<MakeStore> = o.secrets.map(|make| {
+        let out = slot.clone();
+        Box::new(move |f: &FakeServer| {
+            let (store, control) = make(f);
+            *out.lock().unwrap() = Some(control);
+            store
+        }) as MakeStore
+    });
+    let (f, c, inbox) = inbox_rig(o.connect.then_some(o.agents), o.timing, make).await;
+    let control = slot.lock().unwrap().take().unwrap_or(o.control);
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("s.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let svc = Service::new(inbox.clone(), Prefs::default(), None, control, o.server);
+    let server = svc.spawn(listener);
+    Rig { f, c, inbox, svc, socket, server, _dir: dir }
+}
+
+/// A view: a socket client that speaks the JSON-lines protocol.
+pub struct View {
+    r: BufReader<OwnedReadHalf>,
+    w: OwnedWriteHalf,
+    n: u64,
+}
+
+impl View {
+    pub async fn connect(path: &Path) -> View {
+        let (r, w) = UnixStream::connect(path).await.unwrap().into_split();
+        View { r: BufReader::new(r), w, n: 0 }
+    }
+
+    /// The next message; `None` once the service closed the connection.
+    pub async fn recv(&mut self) -> Option<Value> {
+        let mut line = String::new();
+        let n = tokio::time::timeout(Duration::from_secs(5), self.r.read_line(&mut line))
+            .await
+            .expect("no message within 5 s")
+            .ok()?;
+        if n == 0 {
+            return None;
+        }
+        Some(serde_json::from_str(&line).expect("one JSON object per line"))
+    }
+
+    pub async fn greeting(&mut self) -> (Value, Value, Value) {
+        let h = self.recv().await.unwrap();
+        let s = self.recv().await.unwrap();
+        let v = self.recv().await.unwrap();
+        assert_eq!(
+            (h["type"].as_str(), s["type"].as_str(), v["type"].as_str()),
+            (Some("hello"), Some("settings"), Some("view"))
+        );
+        (h, s, v)
+    }
+
+    pub async fn recv_until(&mut self, pred: impl Fn(&Value) -> bool) -> Value {
+        loop {
+            let m = self.recv().await.expect("the service closed the connection");
+            if pred(&m) {
+                return m;
+            }
+        }
+    }
+
+    pub async fn send(&mut self, v: &Value) {
+        let mut bytes = serde_json::to_vec(v).unwrap();
+        bytes.push(b'\n');
+        self.w.write_all(&bytes).await.unwrap();
+    }
+
+    pub async fn send_raw(&mut self, bytes: &[u8]) {
+        let _ = self.w.write_all(bytes).await;
+    }
+
+    /// Sends `v` with a fresh id; returns the `ok` or `error` reply to it.
+    pub async fn cmd(&mut self, mut v: Value) -> Value {
+        self.n += 1;
+        let id = format!("c{}", self.n);
+        v["id"] = id.clone().into();
+        self.send(&v).await;
+        self.recv_until(|m| m["id"] == id.as_str() && (m["type"] == "ok" || m["type"] == "error")).await
+    }
+
+    /// Reads until the service closes the connection.
+    pub async fn closed(&mut self) {
+        while self.recv().await.is_some() {}
+    }
+}

@@ -126,6 +126,8 @@ impl Outbox {
     }
 
     /// The next line to write, waiting until one is due; `None` once closed.
+    /// One writer task owns this: a second concurrent caller would share
+    /// one wake-up (`notify_one`) and could leave a line unwritten.
     pub async fn next(&self) -> Option<String> {
         loop {
             let notified = self.ready.notified();
@@ -166,7 +168,12 @@ impl Outbox {
             Phase::Open => {}
         }
         for step in 1..=4 {
-            let class = (s.last + step) % 4;
+            let mut class = (s.last + step) % 4;
+            // A view never precedes the settings it was built from: when
+            // both are pending, the settings go first whatever the turn.
+            if class == 3 && s.settings.is_some() {
+                class = 2;
+            }
             let line = match class {
                 0 => s.replies.pop_front(),
                 1 if s.lost => {
@@ -275,6 +282,50 @@ mod tests {
         o.outcomes_lost();
         assert_eq!(next(&o).await, crate::protocol::outcomes_lost_line());
         nothing_due(&o);
+    }
+
+    #[tokio::test]
+    async fn new_settings_precede_a_pending_view_whatever_the_turn() {
+        let o = greeted(OUTCOME_QUEUE, REPLY_QUEUE).await;
+        o.set_settings("s1".into());
+        assert_eq!(next(&o).await, "s1");
+        o.set_view("v1".into());
+        o.set_settings("s2".into());
+        assert_eq!(next(&o).await, "s2");
+        assert_eq!(next(&o).await, "v1");
+        nothing_due(&o);
+    }
+
+    #[tokio::test]
+    async fn a_second_overflow_before_the_loss_is_read_still_sends_one_loss() {
+        let o = greeted(2, REPLY_QUEUE).await;
+        for i in 0..3 {
+            o.outcome(format!("a{i}")); // a2 overflows
+        }
+        o.outcome("b0".into());
+        o.outcome("b1".into());
+        o.outcome("b2".into()); // overflows again, the loss still unread
+        o.outcome("c0".into());
+        assert_eq!(next(&o).await, crate::protocol::outcomes_lost_line());
+        assert_eq!(next(&o).await, "c0", "only outcomes queued after the last clear survive");
+        nothing_due(&o);
+    }
+
+    #[tokio::test]
+    async fn a_task_parked_in_next_is_woken_by_a_push_from_another_task() {
+        let o = std::sync::Arc::new(greeted(OUTCOME_QUEUE, REPLY_QUEUE).await);
+        let parked = tokio::spawn({
+            let o = o.clone();
+            async move { o.next().await }
+        });
+        tokio::task::yield_now().await;
+        let pusher = tokio::spawn({
+            let o = o.clone();
+            async move { o.outcome("late".into()) }
+        });
+        pusher.await.unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(1), parked).await.expect("woken").unwrap();
+        assert_eq!(got.as_deref(), Some("late"));
     }
 
     #[tokio::test]

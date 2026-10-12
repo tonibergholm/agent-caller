@@ -215,6 +215,28 @@ pub fn error_line(id: &str, code: ErrorCode) -> String {
     json!({"type": "error", "id": id, "code": code}).to_string()
 }
 
+/// Lets a log line through at most once per `OVERSIZE_LOG_EVERY`: a view that
+/// stays too large is re-encoded on every change, and each would warn.
+pub(crate) struct LogGate(std::sync::Mutex<Option<std::time::Instant>>);
+
+const OVERSIZE_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+static OVERSIZE_LOG: LogGate = LogGate::new();
+
+impl LogGate {
+    pub(crate) const fn new() -> Self {
+        LogGate(std::sync::Mutex::new(None))
+    }
+
+    pub(crate) fn allow(&self, now: std::time::Instant) -> bool {
+        let mut last = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|t| now.saturating_duration_since(t) < OVERSIZE_LOG_EVERY) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+}
+
 /// Keys inside an agent whose strings are ids, enums or times: never cut.
 const KEEP: &[&str] = &[
     "id", "machine_id", "agent_id", "source", "kind", "state", "status", "answer_path", "effect",
@@ -265,12 +287,14 @@ pub fn view_line(view: &InboxView, max: usize) -> Option<String> {
             omitted.working = n;
         }
         if let Some(s) = fit_text(&encode(&v, omitted), FIRST_CAP, max) {
-            tracing::warn!(done = omitted.done, working = omitted.working, "view too large; cards left out");
+            if OVERSIZE_LOG.allow(std::time::Instant::now()) {
+                tracing::warn!(done = omitted.done, working = omitted.working, "view too large; cards left out");
+            }
             return Some(s);
         }
     }
     let s = fit_text(&encode(&v, omitted), MIN_CAP, max);
-    if s.is_none() {
+    if s.is_none() && OVERSIZE_LOG.allow(std::time::Instant::now()) {
         tracing::error!(cards = v.cards.len(), "view too large even with requests only; not sent");
     }
     s
@@ -348,6 +372,15 @@ fn longest_text(v: &Value) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_oversize_log_gate_lets_one_line_through_per_interval() {
+        let g = super::LogGate::new();
+        let t = std::time::Instant::now();
+        assert!(g.allow(t));
+        assert!(!g.allow(t + std::time::Duration::from_secs(59)));
+        assert!(g.allow(t + std::time::Duration::from_secs(61)));
+    }
+
     use super::*;
     use acd_client::view::{CardGroup, CardView, TrayColor, TraySummary};
     use acd_client::voice::{ActionEvent, ActionOutcome, NotSentReason};

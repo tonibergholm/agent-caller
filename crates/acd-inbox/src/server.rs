@@ -1,14 +1,19 @@
-//! The service (omarchy spec §5): connections, admission and close. Task 9
-//! adds the socket side.
+//! The service (omarchy spec §5): connections, admission and close, and the
+//! socket side: accept, read and write tasks and the broadcasters.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use acd_client::voice::ActionEvent;
 use acd_client::{actions::ActionOwner, inbox::Inbox, settings::SecretError};
-use tokio::sync::watch;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{broadcast, watch};
 
+use crate::{commands, startup};
 use crate::outbox::{OUTCOME_QUEUE, Outbox, REPLY_QUEUE};
 use crate::prefs::{self, Prefs};
 use crate::protocol;
@@ -133,8 +138,9 @@ impl Conn {
         g
     }
 
-    /// False when the id was seen among the remembered ones. Refused (and
-    /// so true) once closed: nothing is replied then anyway.
+    /// False when the id was seen among the remembered ones. Ids are still
+    /// recorded after close; replies to a closed connection are dropped by
+    /// the outbox.
     pub(crate) fn remember(&self, id: &str) -> bool {
         self.lock().ids.insert(id)
     }
@@ -162,7 +168,6 @@ pub struct Service {
     #[allow(dead_code)] // read by set_notifications callers (Task 10)
     prefs_path: Option<PathBuf>,
     pub(crate) registry: Mutex<Registry>,
-    #[allow(dead_code)] // advanced by the settings broadcast (Task 9)
     pub(crate) settings_gen: AtomicU64,
     next_conn: AtomicU64,
     panels: Mutex<HashSet<u64>>,
@@ -305,5 +310,232 @@ impl Service {
         conn.outbox.close();
         conn.shut.send_replace(true);
         tracing::info!(conn = conn.id, reason = why.tag(), cancelled, "connection closed");
+    }
+
+    /// Serves `listener`. The view and outcome broadcasters stop when the
+    /// returned task is aborted.
+    pub fn spawn(self: &Arc<Self>, listener: UnixListener) -> tokio::task::JoinHandle<()> {
+        let me = self.clone();
+        let outcomes = self.inbox.action_outcomes();
+        tokio::spawn(async move {
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn(me.clone().broadcast_views());
+            tasks.spawn(me.clone().route_outcomes(outcomes));
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => me.accept(stream),
+                    Err(e) => {
+                        tracing::warn!(kind = ?e.kind(), "accept failed");
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        })
+    }
+
+    /// Recomputes `settings` off the async workers and publishes it unless
+    /// a newer publication got there first (plan D32).
+    pub async fn publish_settings(self: &Arc<Self>) {
+        let generation = self.settings_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let me = self.clone();
+        let Ok(line) = tokio::task::spawn_blocking(move || {
+            let p = *me.prefs_tx.borrow();
+            protocol::settings_line(&prefs::snapshot(&me.inbox, p), me.opts.max_line)
+        })
+        .await
+        else {
+            return;
+        };
+        self.store_settings(generation, line);
+    }
+
+    pub(crate) fn store_settings(&self, generation: u64, line: String) {
+        let mut reg = self.registry.lock().unwrap();
+        if generation <= reg.settings.0 {
+            return;
+        }
+        reg.settings = (generation, line.clone());
+        for c in reg.conns.values() {
+            c.outbox.set_settings(line.clone());
+        }
+    }
+
+    /// `publish_settings` in the background.
+    #[allow(dead_code)] // called by the settings commands (Task 10)
+    pub(crate) fn settings_changed(self: &Arc<Self>) {
+        let me = self.clone();
+        tokio::spawn(async move { me.publish_settings().await });
+    }
+
+    /// The only publisher of views (plan D32). Each view is encoded once
+    /// and the line is shared by every connection.
+    async fn broadcast_views(self: Arc<Self>) {
+        let mut rx = self.inbox.view();
+        loop {
+            let view = rx.borrow_and_update().clone();
+            // A view that cannot fit becomes `view_overflow`, which replaces
+            // the previous view: the panel never shows a stale inbox (D9).
+            let line = protocol::view_or_overflow_line(&view, self.opts.max_line);
+            {
+                let mut reg = self.registry.lock().unwrap();
+                reg.view = line.clone();
+                for c in reg.conns.values() {
+                    c.outbox.set_view(line.clone());
+                }
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Sends each outcome to every view; a lag sends `outcomes_lost` to
+    /// every view (§5.1). `spawn` runs it on the inbox's stream.
+    pub async fn route_outcomes(self: Arc<Self>, mut rx: broadcast::Receiver<ActionEvent>) {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let line = protocol::outcome_line(&event);
+                    for c in self.registry.lock().unwrap().conns.values() {
+                        c.outbox.outcome(line.clone());
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "outcome stream lagged");
+                    for c in self.registry.lock().unwrap().conns.values() {
+                        c.outbox.outcomes_lost();
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
+
+    fn accept(self: &Arc<Self>, stream: UnixStream) {
+        if !startup::peer_ok(&stream) {
+            tracing::warn!("connection refused: the peer is another user");
+            return;
+        }
+        // Registered before anything is written: the connection receives
+        // outcomes from here on, hello included.
+        let conn = self.register();
+        tracing::info!(conn = conn.id, "connection accepted");
+        let (r, w) = stream.into_split();
+        tokio::spawn(self.clone().write_loop(conn.clone(), w));
+        tokio::spawn(self.clone().read_loop(conn, r));
+    }
+
+    async fn write_loop(self: Arc<Self>, conn: Arc<Conn>, mut w: OwnedWriteHalf) {
+        while let Some(line) = conn.outbox.next().await {
+            let mut bytes = line.into_bytes();
+            bytes.push(b'\n');
+            match tokio::time::timeout(self.opts.write_timeout, w.write_all(&bytes)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return self.close(&conn, CloseReason::WriteError),
+                Err(_) => return self.close(&conn, CloseReason::WriteTimeout),
+            }
+        }
+        let _ = w.shutdown().await;
+    }
+
+    async fn read_loop(self: Arc<Self>, conn: Arc<Conn>, r: OwnedReadHalf) {
+        let mut reader = BufReader::new(r);
+        let mut line = Vec::new();
+        let mut shut = conn.shut.subscribe();
+        loop {
+            let read = tokio::select! {
+                r = read_line(&mut reader, &mut line, self.opts.max_line) => r,
+                _ = shut.wait_for(|closed| *closed) => return,
+            };
+            let why = match read {
+                Ok(true) => match commands::handle(&self, &conn, &line) {
+                    Ok(()) => continue,
+                    Err(commands::Malformed) => CloseReason::Malformed,
+                },
+                Ok(false) => CloseReason::Eof,
+                Err(LineError::TooLong) => CloseReason::Oversize,
+                Err(LineError::Io) => CloseReason::ReadError,
+            };
+            if why != CloseReason::Eof {
+                // Tag and length only: raw lines are never logged (§4.1).
+                tracing::warn!(conn = conn.id, reason = why.tag(), len = line.len(), "line rejected");
+            }
+            return self.close(&conn, why);
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LineError {
+    TooLong,
+    Io,
+}
+
+/// Reads one line, newline excluded, into `buf`. `Ok(false)` at end of
+/// input; a final line without a newline is dropped. A line longer than
+/// `max` is `TooLong`, and nothing past `max` is buffered.
+pub async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R, buf: &mut Vec<u8>, max: usize) -> Result<bool, LineError> {
+    buf.clear();
+    loop {
+        let available = r.fill_buf().await.map_err(|_| LineError::Io)?;
+        if available.is_empty() {
+            return Ok(false);
+        }
+        if let Some(i) = available.iter().position(|&b| b == b'\n') {
+            if buf.len() + i > max {
+                return Err(LineError::TooLong);
+            }
+            buf.extend_from_slice(&available[..i]);
+            r.consume(i + 1);
+            return Ok(true);
+        }
+        let n = available.len();
+        if buf.len() + n > max {
+            return Err(LineError::TooLong);
+        }
+        buf.extend_from_slice(available);
+        r.consume(n);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acd_client::{
+        inbox::InboxOptions,
+        settings::{MemorySecrets, Settings},
+    };
+
+    #[tokio::test]
+    async fn lines_are_split_capped_and_a_final_partial_line_is_dropped() {
+        let mut r = BufReader::new(&b"one\ntwo\nthree"[..]);
+        let mut buf = Vec::new();
+        assert_eq!(read_line(&mut r, &mut buf, 16).await, Ok(true));
+        assert_eq!(buf, b"one");
+        assert_eq!(read_line(&mut r, &mut buf, 16).await, Ok(true));
+        assert_eq!(buf, b"two");
+        assert_eq!(read_line(&mut r, &mut buf, 16).await, Ok(false));
+        let mut r = BufReader::new(&b"12345\n"[..]);
+        assert_eq!(read_line(&mut r, &mut buf, 5).await, Ok(true), "exactly max fits");
+        let mut r = BufReader::new(&b"123456\n"[..]);
+        assert_eq!(read_line(&mut r, &mut buf, 5).await, Err(LineError::TooLong));
+        let mut r = BufReader::with_capacity(2, &b"123456"[..]);
+        assert_eq!(read_line(&mut r, &mut buf, 5).await, Err(LineError::TooLong), "without a newline too");
+    }
+
+    #[test]
+    fn an_older_settings_publication_never_overwrites_a_newer_one() {
+        let inbox = Inbox::new(
+            Settings { machines: vec![], ..Settings::fresh() },
+            Arc::new(MemorySecrets::default()),
+            InboxOptions { timing: Default::default(), settings_path: None, client_name: "t".into(), client_version: "0".into() },
+        );
+        let svc = Service::new(inbox, Prefs::default(), None, Arc::new(NoKeyring), ServerOptions::default());
+        let conn = svc.register();
+        svc.store_settings(2, "new".into());
+        svc.store_settings(1, "old".into());
+        assert_eq!(svc.registry.lock().unwrap().settings, (2, "new".to_owned()));
+        let lines: Vec<String> = std::iter::from_fn(|| conn.outbox.try_next_for_test()).collect();
+        assert!(lines.contains(&"new".to_owned()) && !lines.contains(&"old".to_owned()));
     }
 }
