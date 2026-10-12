@@ -23,6 +23,7 @@ final class Capture: AudioCapture, @unchecked Sendable {
     func start(to format: AVAudioFormat, onLost: @escaping @Sendable () -> Void) throws -> AsyncStream<Chunk> {
         lock.lock()
         defer { lock.unlock() }
+        guard !running else { throw BridgeError.micUnavailable }
         let input = engine.inputNode
         let micFormat = input.outputFormat(forBus: 0)
         guard micFormat.sampleRate > 0, micFormat.channelCount > 0,

@@ -44,6 +44,7 @@ protocol AnalyzerEngine: AnyObject, Sendable {
 actor Transcription: SpeechWork {
     private let engine: AnalyzerEngine
     private var cancelled = false
+    private var failed = false
     private var reader: Task<String, Error>?
     private var pump: Task<Void, Never>?
     private var audio: Double = 0
@@ -63,6 +64,7 @@ actor Transcription: SpeechWork {
         do {
             try await engine.start()
         } catch {
+            failed = true
             await engine.cancel() // a failed startup leaves nothing running
             throw error
         }
@@ -99,7 +101,7 @@ actor Transcription: SpeechWork {
     }
 
     func finish() async throws -> Heard {
-        guard !cancelled else { throw CancellationError() }
+        guard !cancelled, !failed else { throw CancellationError() }
         await pump?.value
         let text: String
         do {
@@ -107,6 +109,7 @@ actor Transcription: SpeechWork {
             text = try await reader?.value ?? ""
         } catch {
             // Every error path ends the analyzer and the reader.
+            failed = true
             reader?.cancel()
             await engine.cancel()
             throw error

@@ -84,3 +84,11 @@ counts.
   also found `available`.
 - Probe serialization: a second click while a probe ran returned
   `"error": "busy"` (S20 holds).
+
+## LiveTests (Task 5A)
+
+Run by hand: `swift test --package-path app/src-tauri/swift --filter LiveTests`.
+- `testTranscribesASpokenClip` (a `say` clip): passed in 1.53 s. The text contained "approve" and the audio and voiced durations matched. No early final was lost although `results()` subscribes after `analyzer.start`, so the subscribe ordering stays as is.
+- `testCancelEndsAWaitingFinish`: passed in 0.09 s.
+- `testCaptureStartsAndStops`: skipped, because the microphone is not granted to the test runner. No prompt was triggered.
+- Speech Recognition permission did not block the clip test in this runner.

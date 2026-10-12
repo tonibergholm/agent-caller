@@ -127,3 +127,54 @@ final class TranscriptionErrorPathTests: XCTestCase {
         XCTAssertEqual(engine.cancels, 1)
     }
 }
+
+final class TranscriptionCancelTests: XCTestCase {
+    /// `cancel` ends a `finish` that waits for chunks that never end.
+    func testCancelEndsAWaitingFinish() async throws {
+        let engine = FakeEngine()
+        let t = Transcription(engine: engine)
+        let (chunks, sink) = AsyncStream.makeStream(of: Chunk.self) // never finishes
+        try await t.start(chunks) { _ in }
+        let finishing = Task { () -> Bool in
+            do { _ = try await t.finish(); return false } catch { return true }
+        }
+        // Let finish reach its wait, then cancel.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await t.cancel()
+        // Unstructured race: a hung finish must fail the test, not hang it.
+        let done = Gate()
+        let outcome = OutcomeBox()
+        Task { outcome.set(await finishing.value); done.release() }
+        Task { try? await Task.sleep(nanoseconds: 5_000_000_000); done.release() }
+        await done.wait()
+        let threw = outcome.value
+        XCTAssertTrue(threw, "finish must throw and return after cancel")
+        sink.finish()
+    }
+
+    func testFinishAfterAFailedFinishThrows() async throws {
+        let engine = FailingEngine()
+        let t = Transcription(engine: engine)
+        let (chunks, sink) = AsyncStream.makeStream(of: Chunk.self)
+        try await t.start(chunks) { _ in }
+        sink.finish()
+        _ = try? await t.finish()
+        do { _ = try await t.finish(); XCTFail("a later finish must throw") } catch {}
+    }
+
+    func testFinishAfterAFailedStartThrows() async {
+        let engine = FailingEngine()
+        engine.failStart = true
+        let t = Transcription(engine: engine)
+        let (chunks, _) = AsyncStream.makeStream(of: Chunk.self)
+        _ = try? await t.start(chunks) { _ in }
+        do { _ = try await t.finish(); XCTFail("must throw") } catch {}
+    }
+}
+
+final class OutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+    var value: Bool { lock.lock(); defer { lock.unlock() }; return stored }
+    func set(_ v: Bool) { lock.lock(); stored = v; lock.unlock() }
+}
