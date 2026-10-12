@@ -250,6 +250,14 @@ test("only the lost action's own terminal outcome settles its card", () => {
   assert.equal(t.settles({ action: "x1", card: "m1/a", result: { kind: "delivered" } }), false, "once");
 });
 
+test("a fired action's result after a reconnect settles its card", () => {
+  const t = new M.Tracker();
+  t.started("x1", "m1/a");
+  t.outcome({ type: "outcome", action: "x1", card: "m1/a", result: { kind: "fired" } });
+  assert.deepEqual(t.disconnected(), ["m1/a"]);
+  assert.equal(t.settles({ action: "x1", card: "m1/a", result: { kind: "delivered" } }), true);
+});
+
 test("a filter on a removed machine no longer hides the inbox", () => {
   const settings = { machines: [{ key: "m1" }, { key: "m2" }] };
   assert.equal(M.activeFilter("", settings), null);

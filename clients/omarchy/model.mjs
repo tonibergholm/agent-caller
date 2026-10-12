@@ -479,7 +479,11 @@ export class Tracker {
    * saw; returns those cards. The rest are forgotten.
    */
   disconnected() {
-    const cards = [...new Set([...this.fired].map((id) => this.actions.get(id)).filter((c) => c !== undefined))];
+    const known = [...this.fired].filter((id) => this.actions.has(id));
+    const cards = [...new Set(known.map((id) => this.actions.get(id)))];
+    // Their results can still arrive on the next connection and settle the card.
+    for (const id of known) this.lostIds.add(id);
+    while (this.lostIds.size > 256) this.lostIds.delete(this.lostIds.values().next().value);
     this.actions.clear();
     this.fired.clear();
     return cards;
