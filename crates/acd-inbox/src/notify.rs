@@ -250,8 +250,16 @@ impl Notifier {
                 NoteCmd::Show { key, summary, body } => {
                     match self.backend.show(&summary, &body, self.opener.is_some()).await {
                         Ok(id) => {
+                            // A daemon started by this very call had no owner
+                            // before it; record the one that answered. A known
+                            // owner stays as read before `show`, so a daemon
+                            // replaced since then is not trusted.
+                            let recorded = match &owner {
+                                Some(_) => owner.clone(),
+                                None => self.backend.owner().await,
+                            };
                             let mut s = self.state.lock().unwrap();
-                            s.by_id.insert(id, (key.card.clone(), owner.clone()));
+                            s.by_id.insert(id, (key.card.clone(), recorded));
                             s.ids.insert(key, id);
                         }
                         Err(e) => {

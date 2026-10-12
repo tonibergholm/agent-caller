@@ -94,6 +94,8 @@ struct FakeNotify {
     owner: Mutex<Option<String>>,
     fail: Mutex<bool>,
     attempts: Mutex<u32>,
+    /// A D-Bus activatable server: it gets an owner when `show` starts it.
+    starts_as: Mutex<Option<String>>,
 }
 
 #[async_trait::async_trait]
@@ -102,6 +104,9 @@ impl NotifyBackend for FakeNotify {
         *self.attempts.lock().unwrap() += 1;
         if *self.fail.lock().unwrap() {
             return Err(NotifyError::Unavailable);
+        }
+        if let Some(name) = self.starts_as.lock().unwrap().take() {
+            *self.owner.lock().unwrap() = Some(name);
         }
         let mut n = self.next.lock().unwrap();
         *n += 1;
@@ -164,6 +169,19 @@ async fn actions_from_a_new_notification_server_are_ignored() {
     *backend.owner.lock().unwrap() = Some(":1.42".into());
     assert!(!n.on_action(&ActionSignal { id, action: OPEN_ACTION.into(), sender: ":1.42".into() }).await);
     assert!(opened.0.lock().unwrap().is_empty());
+}
+
+/// Review: a server that was not running before the first `show` still gets
+/// its Open action trusted afterwards.
+#[tokio::test]
+async fn actions_work_when_the_first_notification_started_the_server() {
+    let (backend, opened, n) = fake();
+    *backend.owner.lock().unwrap() = None;
+    *backend.starts_as.lock().unwrap() = Some(":1.77".into());
+    n.apply(&view(vec![card("a1", 1, false)]), true, false).await;
+    let id = backend.shows.lock().unwrap()[0].0;
+    assert!(n.on_action(&ActionSignal { id, action: OPEN_ACTION.into(), sender: ":1.77".into() }).await);
+    assert_eq!(*opened.0.lock().unwrap(), ["m1/a1"]);
 }
 
 #[tokio::test]
