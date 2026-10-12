@@ -124,11 +124,13 @@ missing, the "Open" action is left out of notifications.
   start), not only one that exists.
 - Secret status per machine: `MachineEntryView` gains `secret`:
   `ok | locked | missing | unreadable`, so a locked keyring is not shown
-  as "not paired".
+  as "not paired". Connection status stays in `InboxView.machines`;
+  views join the two by machine key.
 - Secrets outside locks: `Inbox` never calls the `SecretStore` while
   holding its own lock. Pairing stores the secret first, then commits the
-  machine under the lock, and removes the stored secret if the commit
-  fails.
+  machine under the lock. If the commit fails, a new machine's stored
+  secret is removed and a re-paired machine's previous secret is
+  restored (as `acd-client` does today).
 
 ### 4.4 Socket startup
 
@@ -160,6 +162,8 @@ view fits, and the panel shows the marker.
   bounded queue of 256. On overflow the service sends
   `{"type":"outcomes_lost"}` once, drops the queue, and the view shows
   the results of its fired actions as uncertain ("Check the terminal").
+  The service's own subscription to `acd-client`'s outcome stream can
+  lag too: on `Lagged` it sends `outcomes_lost` to every connection.
 - The service writes with backpressure: a view that does not read for
   30 s is disconnected.
 
@@ -205,9 +209,8 @@ is one of `{"kind":"fired"}`, `{"kind":"delivered"}`, `{"kind":"rejected",
 gets exactly one terminal result unless `outcomes_lost` intervenes.
 
 Outcomes go to every connection (the bar and a TUI may show the same
-card). The service subscribes a connection to outcomes before it
-executes that connection's first command, so a fast result is never
-missed.
+card). A connection is subscribed when it is accepted, before `hello`,
+so it sees results of its own commands and of other views' actions.
 
 ### 5.4 Settings snapshot
 
@@ -321,8 +324,8 @@ The service reconciles each new `InboxView` against the previous one:
   machine. A dismissed or timed-out prompt returns
   `secret_store_locked` / `secret_store_timeout` and changes nothing.
 - Pairing: the pairing string is parsed, its secret stored through the
-  worker, then the machine committed; a failure after storing removes the
-  stored secret. The reply carries the machine key and name only.
+  worker, then the machine committed; a failure after storing removes a
+  new machine's secret or restores a re-paired machine's previous one. The reply carries the machine key and name only.
 - The service never sends a token or pin to a view. The pairing string
   goes from view to service only; it is never logged or echoed.
 - The local machine uses the local `acd` socket and token file, as the
