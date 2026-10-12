@@ -401,3 +401,39 @@ test("the status reloads when the app says it changed", async () => {
   await waitFor(() => expect(screen.queryByRole("button", { name: "Ask for Microphone" })).toBeNull());
   expect(screen.getAllByText("Allowed").length).toBeGreaterThan(0);
 });
+
+test("nothing permission-related shows before the first status arrives", async () => {
+  let release!: (s: typeof STATUS_OK) => void;
+  const api = fakeApi({ voice: on });
+  api.getVoiceStatus = () => new Promise((r) => (release = r));
+  render(Settings, { api });
+  await screen.findByRole("combobox", { name: "Hold key" });
+  expect(screen.queryByRole("group", { name: "Permissions" })).toBeNull();
+  expect(screen.queryByText("Not asked yet")).toBeNull();
+  expect(screen.queryByText("The hold key needs Input Monitoring.")).toBeNull();
+  release({ ...STATUS_OK, microphone: "not_determined" });
+  expect(await screen.findByRole("button", { name: "Ask for Microphone" })).toBeTruthy();
+});
+
+test("a shortcut registration error is shown once, with a closing stop", async () => {
+  const api = fakeApi({ voice: on, status: { ...STATUS_OK, toggle_error: "Could not register Control+Alt+M: in use" } });
+  render(Settings, { api });
+  const note = await screen.findByText(/Could not register Control\+Alt\+M/);
+  expect(note.textContent?.trim()).toBe("Could not register Control+Alt+M: in use. The previous shortcut stays active.");
+});
+
+test("a slower, older status response never replaces a newer one", async () => {
+  const api = fakeApi({ voice: on });
+  const pending: ((s: typeof STATUS_OK) => void)[] = [];
+  api.getVoiceStatus = () => new Promise((r) => pending.push(r));
+  render(Settings, { api });
+  await waitFor(() => expect(pending.length).toBe(1));
+  api.voiceStatusChanged!();
+  await waitFor(() => expect(pending.length).toBe(2));
+  pending[1]({ ...STATUS_OK, microphone: "denied" });
+  await screen.findByText("Denied");
+  pending[0]({ ...STATUS_OK, microphone: "not_determined" });
+  await new Promise((r) => setTimeout(r, 20));
+  expect(screen.queryByRole("button", { name: "Ask for Microphone" })).toBeNull();
+  expect(screen.getByText("Denied")).toBeTruthy();
+});

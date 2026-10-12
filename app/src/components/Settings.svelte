@@ -38,6 +38,9 @@
   let toggleDraft = $state("");
   /** The stored voice settings arrived; until then the keys below would show defaults. */
   let voiceLoaded = $state(false);
+  /** The first status arrived; until then the placeholder below must not show. */
+  let statusLoaded = $state(false);
+  let statusSeq = 0;
 
   const stateText: Record<PermissionState, string> = {
     granted: "Allowed",
@@ -65,11 +68,20 @@
     },
   ]);
 
-  const loadStatus = () =>
-    api.getVoiceStatus().then(
-      (s) => (status = s),
+  // Only the latest request may apply, so overlapping loads cannot go back in time.
+  const loadStatus = () => {
+    const seq = ++statusSeq;
+    return api.getVoiceStatus().then(
+      (s) => {
+        if (seq !== statusSeq) return;
+        status = s;
+        statusLoaded = true;
+      },
       () => {},
     );
+  };
+
+  const withStop = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`);
 
   let names = $state<Record<string, string>>({});
   let error = $state<string | null>(null);
@@ -346,7 +358,9 @@
       Voice control
     </label>
 
-    {#if status.unavailable}
+    {#if !statusLoaded}
+      <!-- Nothing permission-related until the first status arrives. -->
+    {:else if status.unavailable}
       <p class="note" role="status">{unavailableText[status.unavailable]}</p>
       {#if status.unavailable === "assets_missing"}
         <button onclick={() => act(() => api.installSpeechAssets(), "Could not start the download")}>Download speech model</button>
@@ -355,6 +369,7 @@
       <p class="note">Speech: {status.locale}, transcribed on this Mac{status.streams_partials ? ", with live text" : ""}.</p>
     {/if}
 
+    {#if statusLoaded}
     <div class="permissions" role="group" aria-label="Permissions">
       {#each rows as row (row.kind)}
         <div class="permission">
@@ -369,6 +384,7 @@
         </div>
       {/each}
     </div>
+    {/if}
 
     {#if voiceLoaded}
       <label>
@@ -379,7 +395,7 @@
           {/each}
         </select>
       </label>
-      {#if voice.enabled && voice.hold_key !== "off" && !status.hold_key_active}
+      {#if statusLoaded && voice.enabled && voice.hold_key !== "off" && !status.hold_key_active}
         <p class="note">
           {status.relaunch_for_hold_key
             ? "Quit and reopen Agent Caller to use the hold key."
@@ -395,7 +411,7 @@
       </label>
       <button disabled={!voice.enabled} onclick={saveToggle}>Save shortcut</button>
       {#if status.toggle_error}
-        <p class="note" role="status">The voice shortcut could not be registered: {status.toggle_error} The previous shortcut stays active.</p>
+        <p class="note" role="status">{withStop(status.toggle_error)} The previous shortcut stays active.</p>
       {/if}
     {/if}
 
