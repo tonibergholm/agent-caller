@@ -91,4 +91,20 @@ int32_t vb_init(void *ctx, vb_event_fn on_event);
 /* Task 1A spike probe; the report arrives as VB_EV_PROBE. */
 void vb_probe_run(uint32_t step);
 
+/* Permission state now (VB_PS_*). Any thread. */
+uint32_t vb_permission_status(uint32_t permission);
+
+/* Shows the system prompt if the user was never asked. The answer arrives
+ * as VB_EV_PERMISSION. */
+void vb_permission_request(uint32_t permission);
+
+/* Checks SpeechTranscriber for English on its own task (S4). The answer
+ * arrives as VB_EV_CAPS. vb_init runs it once. */
+void vb_query_capabilities(void);
+
+/* Downloads the English speech model on its own task, never on the session
+ * path (S4, S21). VB_EV_ASSETS, then a new VB_EV_CAPS. A second call while
+ * one runs does nothing. */
+void vb_install_assets(void);
+
 #endif

@@ -13,16 +13,29 @@ struct Event: Equatable {
     var voicedMs: UInt64 = 0
 }
 
-/// The one way out of Swift (plan S3, S5). Every event goes through
-/// `events`, a serial queue, so the Rust callback never runs twice at once
-/// and never on the audio thread.
+/// The way out of Swift (plan S5). Bounded and coalescing:
+/// - one pending capture state (latest wins) and one pending partial
+///   (latest wins);
+/// - one latched lock or sleep code;
+/// - a FIFO of at most `capacity` other events. When it is full, the new
+///   event is dropped and an overflow is latched, delivered first next time.
+/// At most one drain block is queued on `events` at any time, and the Rust
+/// callback runs only there: never on the audio thread, never twice at
+/// once. `lock` guards every field below it.
 final class Bridge: @unchecked Sendable {
     static let shared = Bridge()
+    static let capacity = 64
 
     let events = DispatchQueue(label: "dev.agentcaller.voice.events")
     private let lock = NSLock()
     private var sink: ((Event) -> Void)?
     private var current: UInt64 = 0
+    private var fifo: [Event] = []
+    private var partial: Event?
+    private var capture: Event?
+    private var system: UInt32?
+    private var overflowed = false
+    private var scheduled = false
 
     func install(_ sink: @escaping (Event) -> Void) {
         lock.lock()
@@ -30,8 +43,14 @@ final class Bridge: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// The live session; session events of any other generation are
-    /// dropped (spec §4.2). 0 means no session.
+    var isInitialized: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return sink != nil
+    }
+
+    /// The live session; its events are delivered, any other session's are
+    /// dropped at delivery (spec §4.2). 0 means none.
     func setCurrent(_ generation: UInt64) {
         lock.lock()
         current = generation
@@ -44,24 +63,96 @@ final class Bridge: @unchecked Sendable {
         return current
     }
 
-    /// An event of session `e.generation`: dropped unless it is the live one.
-    func emitSession(_ e: Event) {
-        events.async {
-            guard e.generation != 0, e.generation == self.currentGeneration else { return }
-            self.deliver(e)
+    var scheduledForTest: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return scheduled
+    }
+
+    func emit(_ e: Event) {
+        push {
+            if fifo.count >= Bridge.capacity {
+                overflowed = true
+            } else {
+                fifo.append(e)
+            }
         }
     }
 
-    /// An event not tied to a session.
-    func emit(_ e: Event) {
-        events.async { self.deliver(e) }
+    /// A final or error of session `e.generation`; checked at delivery.
+    func emitSession(_ e: Event) {
+        emit(e)
     }
 
-    private func deliver(_ e: Event) {
+    func emitPartial(_ generation: UInt64, _ text: String) {
+        push { partial = Event(generation: generation, kind: VB_EV_PARTIAL, text: text) }
+    }
+
+    /// Never filtered: the indicator must learn every stop (S18).
+    func emitCapture(_ generation: UInt64, on: Bool) {
+        push { capture = Event(generation: generation, kind: VB_EV_CAPTURE, value: on ? 1 : 0) }
+    }
+
+    func emitSystem(_ code: UInt32) {
+        push { system = code }
+    }
+
+    static func isStale(_ e: Event, current: UInt64) -> Bool {
+        switch e.kind {
+        case VB_EV_PARTIAL, VB_EV_FINAL, VB_EV_ERROR: return e.generation == 0 || e.generation != current
+        default: return false
+        }
+    }
+
+    private func push(_ change: () -> Void) {
         lock.lock()
-        let sink = self.sink
+        change()
+        let schedule = !scheduled
+        scheduled = true
         lock.unlock()
-        sink?(e)
+        if schedule {
+            events.async { self.drain() }
+        }
+    }
+
+    /// Delivers what is pending: overflow, lock, capture state, the FIFO in
+    /// order, the latest partial.
+    private func drain() {
+        while true {
+            lock.lock()
+            var batch: [Event] = []
+            if overflowed {
+                batch.append(Event(kind: VB_EV_OVERFLOW))
+                overflowed = false
+            }
+            if let code = system {
+                batch.append(Event(kind: VB_EV_SYSTEM, code: code))
+                system = nil
+            }
+            if let c = capture {
+                batch.append(c)
+                capture = nil
+            }
+            batch += fifo
+            fifo.removeAll(keepingCapacity: true)
+            if let p = partial {
+                batch.append(p)
+                partial = nil
+            }
+            if batch.isEmpty {
+                scheduled = false
+                lock.unlock()
+                return
+            }
+            let sink = self.sink
+            lock.unlock()
+            for e in batch {
+                // Read per event: a cancel during the batch must still drop
+                // the session events that follow it.
+                if Bridge.isStale(e, current: currentGeneration) { continue }
+                sink?(e)
+            }
+        }
     }
 }
 
@@ -97,5 +188,6 @@ public func vb_init(_ ctx: UnsafeMutableRawPointer?, _ onEvent: vb_event_fn?) ->
             onEvent(ctx, &ev)
         }
     }
+    Assets.shared.query()
     return VB_OK
 }
