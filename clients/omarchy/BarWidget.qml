@@ -1,5 +1,5 @@
 // Bar widget (omarchy spec section 7): a glyph and the number of agents that
-// need the user. Muted when none, urgent when some, struck through when the
+// need the user. Dim when none, urgent when some, a crossed glyph when the
 // service is unreachable. Click toggles the popup. The entry point is a
 // Ui.Panel whose KeyboardPanel holds the popup; Task 19 fills it.
 import QtQuick
@@ -13,10 +13,15 @@ Ui.Panel {
     // The widget declares its own IPC target below.
     manageIpc: false
 
+    // The bar sizes the slot from the entry item's implicit size.
+    implicitWidth: button.implicitWidth
+    implicitHeight: button.implicitHeight
+
     // Card key from `openCard`, handed to the popup content (Task 19).
     property string pendingCard: ""
 
-    readonly property var tray: Model.barState(service.view, service.connected)
+    // `bar` is Ui.Panel's own property, so the view-model has another name.
+    readonly property var tray: Model.barState(service.view, service.connected, service.overflow)
 
     function openCard(key) {
         root.pendingCard = key;
@@ -27,33 +32,15 @@ Ui.Panel {
         id: service
     }
 
-    Item {
+    Ui.WidgetButton {
         id: button
-        implicitWidth: row.implicitWidth + Commons.Style.spacing.sm * 2
-        implicitHeight: row.implicitHeight
-
-        Row {
-            id: row
-            anchors.centerIn: parent
-            spacing: Commons.Style.spacing.xs
-
-            Text {
-                text: "◉"
-                font.strikeout: root.tray.tone === "down"
-                color: root.tray.tone === "urgent" ? Commons.Color.urgent : Commons.Color.muted
-            }
-
-            Text {
-                visible: root.tray.count > 0
-                text: root.tray.text
-                color: Commons.Color.urgent
-            }
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            onClicked: root.toggle()
-        }
+        anchors.fill: parent
+        bar: root.bar
+        text: Model.barLabel(root.tray)
+        active: root.tray.tone === "urgent"
+        dimmed: root.tray.tone !== "urgent"
+        tooltipText: root.tray.tone === "down" ? "Agent inbox unreachable" : "Agent inbox"
+        onPressed: function(mouseButton) { root.toggle(); }
     }
 
     Ui.KeyboardPanel {

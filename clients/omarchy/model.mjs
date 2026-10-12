@@ -101,10 +101,37 @@ export function headerText(view) {
   return `Inbox · ${view.tray.needs_you} need you · ${working} working`;
 }
 
-export function barState(view, connected) {
-  if (!connected || !view) return { count: 0, tone: "down", text: "" };
-  const n = view.tray.needs_you;
+export function barState(view, connected, overflow = -1) {
+  if (!connected) return { count: 0, tone: "down", text: "" };
+  // A view_overflow carries only the count of agents that need the user.
+  const n = view ? view.tray.needs_you : overflow;
+  if (n === undefined || n === null || n < 0) return { count: 0, tone: "down", text: "" };
   return { count: n, tone: n > 0 ? "urgent" : "dim", text: n > 0 ? String(n) : "" };
+}
+
+/** The bar label: a struck glyph when unreachable, else the glyph and the count. */
+export function barLabel(bar) {
+  if (bar.tone === "down") return "\u2298";
+  return bar.count > 0 ? `\u25c9 ${bar.text}` : "\u25c9";
+}
+
+/** Reconnect delays double to a cap. Only a valid hello resets them (a service that accepts and drops must not be retried at 2 Hz). */
+export class Backoff {
+  constructor(start = 500, cap = 10000) {
+    this.start = start;
+    this.cap = cap;
+    this.ms = start;
+  }
+
+  next() {
+    const d = this.ms;
+    this.ms = Math.min(this.ms * 2, this.cap);
+    return d;
+  }
+
+  reset() {
+    this.ms = this.start;
+  }
 }
 
 function dotKind(status) {

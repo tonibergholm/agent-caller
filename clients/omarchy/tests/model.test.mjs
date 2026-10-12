@@ -79,6 +79,9 @@ test("the bar is dim, urgent or down", () => {
   assert.deepEqual(M.barState(view([card("m1/a")]), true), { count: 1, tone: "urgent", text: "1" });
   assert.equal(M.barState(view([card("m1/a")]), false).tone, "down");
   assert.equal(M.barState(null, true).tone, "down");
+  assert.deepEqual(M.barState(null, true, 3), { count: 3, tone: "urgent", text: "3" });
+  assert.deepEqual(M.barState(null, true, 0), { count: 0, tone: "dim", text: "" });
+  assert.equal(M.barState(null, false, 3).tone, "down");
 });
 
 test("a locked keyring is not shown as not paired", () => {
@@ -267,4 +270,17 @@ test("a reader that overflowed stays overflowed and holds no old text", () => {
 test("the header counts the same sections as the panel", () => {
   const v = view([card("m1/a"), card("m1/b", "working"), card("m1/c", "unknown")]);
   assert.equal(M.headerText(v), "Inbox · 1 need you · 2 working");
+});
+
+test("barLabel shows the count, a plain glyph, or the unreachable glyph", () => {
+  assert.equal(M.barLabel({ count: 2, tone: "urgent", text: "2" }), "\u25c9 2");
+  assert.equal(M.barLabel({ count: 0, tone: "dim", text: "" }), "\u25c9");
+  assert.equal(M.barLabel({ count: 0, tone: "down", text: "" }), "\u2298");
+});
+
+test("Backoff doubles to the cap and resets only when told", () => {
+  const b = new M.Backoff(500, 2000);
+  assert.deepEqual([b.next(), b.next(), b.next(), b.next()], [500, 1000, 2000, 2000]);
+  b.reset();
+  assert.equal(b.next(), 500);
 });

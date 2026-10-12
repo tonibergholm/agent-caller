@@ -48,10 +48,25 @@ test("every write is flushed and every QML file uses model.mjs", () => {
 });
 
 test("a view message carries its omitted counts to the panel", () => {
-  assert.match(read("Service.qml"), /root\.omitted = msg\.omitted;/);
+  assert.match(read("Service.qml"), /root.omitted = msg\.omitted \|\| /);
 });
 
 test("the service never stores or prints a command's fields", () => {
   const src = read("Service.qml");
   assert.doesNotMatch(src, /pairing/i);
+});
+
+test("the bar slot is sized from the button and the button fills the entry item", () => {
+  const bar = read("BarWidget.qml");
+  assert.match(bar, /implicitWidth:\s*button\.implicitWidth/);
+  assert.match(bar, /implicitHeight:\s*button\.implicitHeight/);
+  assert.match(bar, /Ui\.WidgetButton\s*\{[^}]*id: button[^}]*anchors\.fill: parent/s);
+});
+
+test("the bar reads overflow and only a valid hello resets the backoff", () => {
+  assert.match(read("BarWidget.qml"), /barState\(service\.view, service\.connected, service\.overflow\)/);
+  const svc = read("Service.qml");
+  assert.match(svc, /backoff\.reset\(\)/);
+  assert.equal((svc.match(/backoff\.reset\(\)/g) || []).length, 1);
+  assert.match(svc, /if \(msg\.protocol !== 1\) dropConnection\(\);\s*else \{[^}]*backoff\.reset\(\)/s);
 });

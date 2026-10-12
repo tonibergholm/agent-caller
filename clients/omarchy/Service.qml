@@ -20,7 +20,7 @@ Item {
     property var reader: new Model.LineReader()
     // Reply callbacks by command id. Nothing else about a command is kept.
     property var waiting: ({})
-    property int backoffMs: 500
+    property var backoff: new Model.Backoff()
 
     signal outcome(var msg)
     signal outcomesLost(var cards)
@@ -30,8 +30,7 @@ Item {
 
     function reconnectSoon() {
         if (retry.running) return;
-        retry.interval = root.backoffMs;
-        root.backoffMs = Math.min(root.backoffMs * 2, 10000);
+        retry.interval = root.backoff.next();
         retry.start();
     }
 
@@ -47,14 +46,19 @@ Item {
         switch (msg.type) {
         case "hello":
             if (msg.protocol !== 1) dropConnection();
-            else root.ready();
+            else {
+                // Only a valid hello clears the backoff: a service that accepts
+                // and drops must not be retried at full speed.
+                root.backoff.reset();
+                root.ready();
+            }
             break;
         case "settings":
             root.settings = msg;
             break;
         case "view":
             root.view = msg.view;
-            root.omitted = msg.omitted;
+            root.omitted = msg.omitted || ({ done: 0, working: 0 });
             root.overflow = -1;
             break;
         case "view_overflow":
@@ -99,7 +103,6 @@ Item {
         onConnectedChanged: {
             root.connected = connected;
             if (connected) {
-                root.backoffMs = 500;
                 root.overflow = -1;
                 // One reader per connection: it stays dead after an overflow.
                 root.reader = new Model.LineReader();
