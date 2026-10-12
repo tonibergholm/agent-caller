@@ -156,6 +156,7 @@ Task text refers to these by number.
 - **D38. Writes use a plain Secret Service session.** secret-service 5.2 keeps its encrypted (DH) session private, and its `create_item` would run prompts. So `write_in` opens its own "plain" session for `CreateItem`.
   - The secret crosses the user's session bus unencrypted. Only processes of the same user can see it, and they can already read the keyring.
   - Reads keep the crate's DH session.
+  - Accepted by the orchestrator 2026-10-12: while the keyring is unlocked, any same-user process can already ask the Secret Service for the secret, so an encrypted bus session would add no protection here.
   - If that trade-off is not acceptable, the alternative is to implement DH (hkdf, aes, cbc) in `linux::keyring`. That is a separate change.
 
 ## Review answers
