@@ -4,6 +4,7 @@ pub mod commands;
 #[cfg(target_os = "macos")]
 pub mod bridge;
 pub mod hud;
+pub mod permissions;
 pub mod settings;
 
 use std::path::PathBuf;
@@ -11,12 +12,14 @@ use std::sync::{Arc, Mutex};
 
 use acd_voice::hud::Hud;
 use acd_voice_client::{Controller, HudSink};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 pub struct VoiceState {
     pub controller: Arc<Controller>,
     pub settings: Mutex<settings::VoiceSettings>,
     pub path: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    pub speech: bridge::Speech,
 }
 
 /// HUD states go to the HUD webview; selections go to the inbox panel.
@@ -48,11 +51,33 @@ impl HudSink for TauriSink {
 /// Handles one event from the Swift bridge, on the async runtime.
 #[cfg(target_os = "macos")]
 pub fn dispatch(app: &AppHandle, ev: bridge::BridgeEvent) {
+    use bridge::BridgeEvent as E;
+    let voice = app.state::<VoiceState>();
     match ev {
-        bridge::BridgeEvent::Probe(report) => {
-            if let Err(error) = app.emit("voice://probe", report) {
+        E::Listen(e) => voice.controller.speech_event(e),
+        E::Capabilities { caps, locale } => {
+            voice.speech.set_capabilities(caps, locale);
+            emit_status(app);
+        }
+        E::Permission { .. } | E::Assets { .. } => emit_status(app),
+        E::System => voice.controller.system_stop(),
+        E::Capture { generation, on } => voice.controller.capture(generation, on),
+        E::Overflow => voice.controller.overflow(),
+        // Task 7B wires the hold key.
+        E::Hold { .. } | E::OtherKey { .. } | E::TapDisabled { .. } => {}
+        E::Probe(report) => {
+            // Only the settings window shows the probe report.
+            if let Err(error) = app.emit_to("settings", "voice://probe", report) {
                 tracing::error!(%error, "could not emit the probe report");
             }
         }
+    }
+}
+
+/// Tells Settings to fetch the voice status again (Task 9).
+#[cfg(target_os = "macos")]
+pub fn emit_status(app: &AppHandle) {
+    if let Err(error) = app.emit("voice://status", ()) {
+        tracing::error!(%error, "could not emit the voice status");
     }
 }

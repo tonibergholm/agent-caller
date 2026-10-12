@@ -98,22 +98,24 @@ fn main() {
             let controller = tauri::async_runtime::block_on(async {
                 acd_voice_client::Controller::start(inbox.clone(), None, sink, voice_settings.enabled)
             });
+            #[cfg(target_os = "macos")]
+            let speech = Arc::new(voice::bridge::MacSpeech::new());
+            #[cfg(target_os = "macos")]
+            controller.attach_speech(speech.clone());
             app.manage(voice::VoiceState {
                 controller,
                 settings: std::sync::Mutex::new(voice_settings),
                 path: Some(voice_path),
+                #[cfg(target_os = "macos")]
+                speech,
             });
             tray::build(app.handle())?;
             panel::create(app.handle())?;
             voice::hud::create(app.handle())?;
             #[cfg(target_os = "macos")]
-            if let Some(mut events) = voice::bridge::start() {
+            if let Some((link, events)) = voice::bridge::start() {
                 let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    while let Some(ev) = events.recv().await {
-                        voice::dispatch(&handle, ev);
-                    }
-                });
+                tauri::async_runtime::spawn(voice::bridge::pump(link, events, move |ev| voice::dispatch(&handle, ev)));
             }
 
             let saved_hotkey = inbox.settings().hotkey;
