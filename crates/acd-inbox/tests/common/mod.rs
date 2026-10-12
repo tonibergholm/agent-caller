@@ -244,10 +244,10 @@ impl View {
     }
 
     pub async fn recv_until(&mut self, pred: impl Fn(&Value) -> bool) -> Value {
-        if let Some(m) = self.passed.take() {
-            if pred(&m) {
-                return m;
-            }
+        if let Some(m) = self.passed.take()
+            && pred(&m)
+        {
+            return m;
         }
         loop {
             let m = self.recv().await.expect("the service closed the connection");
