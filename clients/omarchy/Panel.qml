@@ -387,7 +387,12 @@ Item {
                     text = cardItem.inbox.drafts.get(draft);
                     if (visible && cardItem.inbox.focusId === fid) forceActiveFocus();
                 }
-                onVisibleChanged: if (visible) forceActiveFocus()
+                // Reopening shows the draft (empty once the reply was accepted),
+                // also for a field that a view rebuild created in between.
+                onVisibleChanged: if (visible) {
+                    text = cardItem.inbox.drafts.get(draft);
+                    forceActiveFocus();
+                }
                 onActiveFocusChanged: {
                     if (activeFocus) { cardItem.inbox.focusedField = replyField; cardItem.inbox.focusId = fid; }
                     else {

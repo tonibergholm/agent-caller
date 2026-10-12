@@ -124,6 +124,11 @@ test("a reply keeps its draft until the service accepts it", () => {
   assert.match(body, /if \(reply\.type !== "ok"\) return;[\s\S]*drafts\.clear/);
 });
 
+test("a reopened reply box shows its draft, empty once the reply was accepted", () => {
+  const panel = read("Panel.qml");
+  assert.match(panel, /onVisibleChanged: if \(visible\) \{\s*text = cardItem\.inbox\.drafts\.get\(draft\);\s*forceActiveFocus\(\);/);
+});
+
 test("the settings list scrolls and removing a machine asks first", () => {
   const panel = read("Panel.qml");
   assert.match(panel, /Flickable \{\s*visible: panel\.settingsOpen[\s\S]*contentHeight: settingsColumn\.implicitHeight/);
