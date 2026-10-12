@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use acd_client::inbox::Inbox;
 use acd_client::voice::{ActionEvent, ActionOutcome};
 use acd_voice::hud::Hud;
+use acd_voice::listen::{self, Heard, Hold, Limits, ListenEvent, Progress, Recorder, SpeechInput, Start, Stopped, TriggerEvent};
 use acd_voice::plan::{Executor, Reaction};
+use acd_voice::refusal::Refusal;
 use acd_voice::router::model::IntentModel;
 use acd_voice::router::{RouteOptions, route};
 use acd_voice::snapshot::{Presentation, Snapshot};
@@ -25,6 +27,9 @@ pub trait HudSink: Send + Sync {
     /// Publishes `hud` as number `seq`; false if it could not be sent.
     fn hud(&self, seq: u64, hud: &Hud) -> bool;
     fn select(&self, card_key: &str);
+    /// The microphone went on or off, as Swift reported it (spec §6.2,
+    /// plan S18): the menu bar indicator.
+    fn listening(&self, _on: bool) {}
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -33,6 +38,31 @@ pub enum InputError {
     Empty,
     #[error("Voice is off. Turn it on in Settings.")]
     Off,
+}
+
+/// Where an utterance came from. A log tag only: safety never sees it,
+/// so speech gets exactly the typed path (step-2 plan S15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Typed,
+    Speech,
+}
+
+impl Source {
+    fn tag(self) -> &'static str {
+        match self {
+            Source::Typed => "typed",
+            Source::Speech => "speech",
+        }
+    }
+}
+
+/// When a transcript left the recorder (plan S23). Admission drops it if
+/// voice was reset, locked, overflowed or pressed again since.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Admission {
+    session: u64,
+    epoch: u64,
 }
 
 /// Everything admission depends on, behind one lock (B4): the executor,
@@ -44,6 +74,18 @@ struct Core {
     exec: Executor,
     enabled: bool,
     session: u64,
+    /// Grows with every recording, lock, overflow and voice on or off (S23).
+    epoch: u64,
+    /// The recording, its hold key, the snapshot frozen at the press
+    /// (plan S6) and the step shown under Listening (plan S7).
+    recorder: Recorder,
+    hold: Hold,
+    frozen: Option<Snapshot>,
+    over: Option<Hud>,
+    /// The recording whose capture Swift reports running (S18).
+    mic: Option<u64>,
+    /// The highest generation Swift reported stopped (S18).
+    mic_off: u64,
 }
 
 pub struct Controller {
@@ -62,6 +104,8 @@ pub struct Controller {
     seq: AtomicU64,
     /// Test hook: runs with no lock held, just before admission.
     admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// The platform's capture and transcription; `None` until attached.
+    speech: Mutex<Option<Arc<dyn SpeechInput>>>,
 }
 
 impl Controller {
@@ -79,7 +123,18 @@ impl Controller {
             runtime: tokio::runtime::Handle::current(),
             port: AcdPort::new(inbox.clone()),
             inbox,
-            core: Mutex::new(Core { exec: Executor::new(), enabled, session: 0 }),
+            core: Mutex::new(Core {
+                exec: Executor::new(),
+                enabled,
+                session: 0,
+                epoch: 0,
+                recorder: Recorder::default(),
+                hold: Hold::default(),
+                frozen: None,
+                over: None,
+                mic: None,
+                mic_off: 0,
+            }),
             presentation: Mutex::new(None),
             model,
             sink,
@@ -87,6 +142,7 @@ impl Controller {
             session_tx: watch::channel(0).0,
             seq: AtomicU64::new(0),
             admission_hook: Mutex::new(None),
+            speech: Mutex::new(None),
         });
         this.runtime.spawn(forward_outcomes(Arc::downgrade(&this), outcomes));
         this
@@ -114,10 +170,7 @@ impl Controller {
             return;
         }
         core.enabled = on;
-        core.session += 1;
-        self.session_tx.send_replace(core.session);
-        core.exec.reset(&self.port);
-        self.emit(&mut core.exec, Reaction { hud: Hud::Hidden, select: None });
+        self.invalidate(&mut core);
     }
 
     /// Test hook: `hook` runs just before admission, with no lock held, so
@@ -128,14 +181,27 @@ impl Controller {
         *self.admission_hook.lock().unwrap() = Some(Arc::new(hook));
     }
 
-    /// The step-1 stand-in for a recording: typed text as the transcript.
+    /// Typed text as the transcript (step 1's debug input).
     pub async fn text_input(&self, text: String, panel_open: bool) -> Result<(), InputError> {
         if text.trim().is_empty() {
             return Err(InputError::Empty);
         }
-        let started = Instant::now();
-        let transcript = VoiceText::new(text);
         let snapshot = self.freeze(panel_open);
+        self.utterance(VoiceText::new(text), snapshot, Source::Typed, None).await
+    }
+
+    /// One utterance, typed or spoken, through the same admission, route
+    /// and safety path (plan S15). `snapshot` was frozen at submit for typed
+    /// text and at the press for speech (plan S6). A spoken one carries the
+    /// token taken when it left the recorder (plan S23).
+    async fn utterance(
+        &self,
+        transcript: VoiceText,
+        snapshot: Snapshot,
+        source: Source,
+        token: Option<Admission>,
+    ) -> Result<(), InputError> {
+        let started = Instant::now();
         let hook = self.admission_hook.lock().unwrap().clone();
         if let Some(hook) = hook {
             hook();
@@ -146,6 +212,14 @@ impl Controller {
             let mut core = self.core.lock().unwrap();
             if !core.enabled {
                 return Err(InputError::Off);
+            }
+            // S23: a transcript from before a press, lock, overflow or
+            // voice off and on never enters the executor.
+            if let Some(t) = token
+                && (t.session != core.session || t.epoch != core.epoch)
+            {
+                tracing::info!(target: "acd_voice", source = source.tag(), "stale transcript dropped");
+                return Ok(());
             }
             let session = core.session;
             let changes = self.session_tx.subscribe();
@@ -169,7 +243,7 @@ impl Controller {
         let (session, n, mut changes) = match admitted {
             Ok(admitted) => admitted,
             Err(route) => {
-                tracing::info!(target: "acd_voice", chars = transcript.char_len(), route, "utterance routed");
+                tracing::info!(target: "acd_voice", chars = transcript.char_len(), source = source.tag(), route, "utterance routed");
                 return Ok(());
             }
         };
@@ -185,6 +259,7 @@ impl Controller {
         tracing::info!(
             target: "acd_voice",
             chars = transcript.char_len(),
+            source = source.tag(),
             route = routed.tag(),
             elapsed_ms = started.elapsed().as_millis() as u64,
             "utterance routed"
@@ -193,6 +268,313 @@ impl Controller {
             self.emit(&mut core.exec, r);
         }
         Ok(())
+    }
+
+    /// Attaches the platform's capture and transcription (spec §4.1).
+    pub fn attach_speech(&self, input: Arc<dyn SpeechInput>) {
+        *self.speech.lock().unwrap() = Some(input);
+    }
+
+    /// Test hook: shorter limits than 60 s and 5 s.
+    #[doc(hidden)]
+    pub fn set_listen_limits_for_test(&self, limits: Limits) {
+        self.core.lock().unwrap().recorder = Recorder::new(limits);
+    }
+
+    /// Whether a recording is listening (not finishing).
+    pub fn listening(&self) -> bool {
+        self.core.lock().unwrap().recorder.listening().is_some()
+    }
+
+    /// The hold key went down or up. `panel_open` is read at the press,
+    /// because the snapshot freezes then (spec §4.3, plan S6).
+    pub fn hold(&self, down: bool, panel_open: bool) {
+        let snapshot = down.then(|| self.freeze(panel_open));
+        let mut core = self.core.lock().unwrap();
+        if let Some(ev) = core.hold.key(down) {
+            self.trigger(&mut core, ev, snapshot);
+        }
+    }
+
+    /// Another key went down: a chord cancels (plan S11).
+    pub fn other_key(&self) {
+        let mut core = self.core.lock().unwrap();
+        if let Some(ev) = core.hold.other_key() {
+            self.trigger(&mut core, ev, None);
+        }
+    }
+
+    /// The tap was disabled or is being replaced, so a key-up may be lost
+    /// (plan S26).
+    pub fn hold_lost(&self) {
+        let mut core = self.core.lock().unwrap();
+        if let Some(ev) = core.hold.reset() {
+            self.trigger(&mut core, ev, None);
+        }
+    }
+
+    /// The toggle shortcut: starts, or stops a recording.
+    pub fn toggle(&self, panel_open: bool) {
+        let snapshot = self.freeze(panel_open);
+        let mut core = self.core.lock().unwrap();
+        let ev = listen::toggle(core.recorder.listening().is_some());
+        self.trigger(&mut core, ev, Some(snapshot));
+    }
+
+    /// Esc in the inbox panel (plan S25). True if it cancelled a recording;
+    /// false lets the inbox handle Esc as before.
+    pub fn escape_listening(&self) -> bool {
+        let mut core = self.core.lock().unwrap();
+        if core.recorder.active().is_none() {
+            return false;
+        }
+        self.cancel_listening(&mut core);
+        true
+    }
+
+    /// Swift reports the microphone started or stopped for `generation`
+    /// (S18). Only this drives the indicator. Generations only grow, so an
+    /// `on` at or below the highest `off` seen is stale and ignored, and an
+    /// `off` clears any older `on` too.
+    pub fn capture(&self, generation: u64, on: bool) {
+        let mut core = self.core.lock().unwrap();
+        if on {
+            if generation <= core.mic_off {
+                return;
+            }
+            if core.recorder.active() != Some(generation) {
+                // Capture for a recording Rust no longer has: stop it.
+                if let Some(input) = self.input() {
+                    input.cancel(generation);
+                }
+                return;
+            }
+            if core.mic != Some(generation) {
+                core.mic = Some(generation);
+                self.sink.listening(true);
+            }
+        } else {
+            core.mic_off = core.mic_off.max(generation);
+            if core.mic.is_some_and(|m| m <= generation) {
+                core.mic = None;
+                self.sink.listening(false);
+            }
+        }
+    }
+
+    /// The bridge dropped an event (plan S5). It could have been a chord's
+    /// other key, a key-up, a final or a lock, and a dropped lock cannot be
+    /// told apart from the others. So it invalidates exactly as a lock does
+    /// (S24): recording, thinking step, unsent voice countdown, transcripts,
+    /// snapshots and any confirmation on screen.
+    pub fn overflow(&self) {
+        let mut core = self.core.lock().unwrap();
+        tracing::info!(target: "acd_voice", "bridge overflow: voice invalidated");
+        core.hold = Hold::default();
+        self.invalidate(&mut core);
+    }
+
+    /// The screen locked or the Mac is going to sleep (spec §6.2, plan S24).
+    pub fn system_stop(&self) {
+        let mut core = self.core.lock().unwrap();
+        tracing::info!(target: "acd_voice", "voice invalidated for lock or sleep");
+        core.hold = Hold::default();
+        self.invalidate(&mut core);
+    }
+
+    /// A message that is not a step, such as "the hold key stopped working"
+    /// (spec §9). Shown only when no step and no recording is on the HUD, so
+    /// it never hides a step that waits.
+    pub fn notice(&self, refusal: Refusal) {
+        let mut core = self.core.lock().unwrap();
+        if core.recorder.active().is_none() && core.exec.is_idle() {
+            let hud = Hud::Error { refusal, transcript: None };
+            self.emit(&mut core.exec, Reaction { hud, select: None });
+        }
+    }
+
+    /// An event from the platform (spec §4.2). Events of any recording but
+    /// the current one are dropped by the recorder.
+    pub fn speech_event(&self, ev: ListenEvent) {
+        let mut core = self.core.lock().unwrap();
+        let Some(id) = core.recorder.active() else {
+            return;
+        };
+        // A final before the key went up is not the user's release: nothing
+        // is routed from it and the recording goes on.
+        if matches!(ev, ListenEvent::Final { .. }) && core.recorder.listening() == Some(id) {
+            return;
+        }
+        match core.recorder.event(ev, Instant::now()) {
+            None => {}
+            Some(Progress::Partial(text)) => {
+                let hud = Hud::Listening { id, partial: Some(text), over: core.over.clone().map(Box::new) };
+                self.emit(&mut core.exec, Reaction { hud, select: None });
+            }
+            Some(Progress::Done(heard)) => {
+                // Too long or failed: make sure Swift lets go too.
+                if !matches!(heard, Heard::Transcript(_) | Heard::Ignored(_))
+                    && let Some(input) = self.input()
+                {
+                    input.cancel(id);
+                }
+                self.heard(&mut core, heard);
+            }
+        }
+    }
+
+    fn input(&self) -> Option<Arc<dyn SpeechInput>> {
+        self.speech.lock().unwrap().clone()
+    }
+
+    /// Voice off, lock or sleep (plan S24): the recording is cancelled, an
+    /// in-flight route is dropped and its model call cancelled (step-1 B4),
+    /// an unsent voice countdown is cancelled, and every transcript,
+    /// snapshot and shown confirmation is forgotten.
+    fn invalidate(&self, core: &mut Core) {
+        if let Some(generation) = core.recorder.cancel()
+            && let Some(input) = self.input()
+        {
+            input.cancel(generation);
+        }
+        core.frozen = None;
+        core.over = None;
+        core.epoch += 1;
+        core.session += 1;
+        self.session_tx.send_replace(core.session);
+        core.exec.reset(&self.port);
+        self.emit(&mut core.exec, Reaction { hud: Hud::Hidden, select: None });
+    }
+
+    fn trigger(&self, core: &mut Core, ev: TriggerEvent, snapshot: Option<Snapshot>) {
+        match ev {
+            TriggerEvent::Start => {
+                if let Some(snapshot) = snapshot {
+                    self.start_listening(core, snapshot);
+                }
+            }
+            TriggerEvent::Stop => self.stop_listening(core),
+            TriggerEvent::Cancel => self.cancel_listening(core),
+        }
+    }
+
+    fn start_listening(&self, core: &mut Core, snapshot: Snapshot) {
+        if !core.enabled || core.recorder.listening().is_some() {
+            return;
+        }
+        let Some(input) = self.input() else {
+            return;
+        };
+        if let Some(why) = input.capabilities().unavailable {
+            tracing::info!(target: "acd_voice", reason = ?why, "voice cannot listen");
+            let r = core.exec.listen_failed(Refusal::from(why));
+            self.emit(&mut core.exec, r);
+            return;
+        }
+        let (id, over) = core.exec.listen(&self.port);
+        core.epoch += 1;
+        if let Start::Replaced(old) = core.recorder.start(id, Instant::now()) {
+            input.cancel(old);
+        }
+        if let Err(e) = input.start(id, core.recorder.limits().max) {
+            core.recorder.cancel();
+            tracing::info!(target: "acd_voice", error = ?e, "recording refused");
+            let r = core.exec.listen_failed(Refusal::from(e));
+            self.emit(&mut core.exec, r);
+            return;
+        }
+        core.frozen = Some(snapshot);
+        core.over = over.clone();
+        tracing::info!(target: "acd_voice", "listening");
+        let hud = Hud::Listening { id, partial: None, over: over.map(Box::new) };
+        self.emit(&mut core.exec, Reaction { hud, select: None });
+        self.schedule_tick(core.recorder.limits().max);
+    }
+
+    fn stop_listening(&self, core: &mut Core) {
+        match core.recorder.stop(Instant::now()) {
+            None => {}
+            Some(Stopped::Finishing(generation)) => {
+                if let Some(input) = self.input() {
+                    input.stop(generation);
+                }
+                self.schedule_tick(core.recorder.limits().final_timeout);
+            }
+            // Released at or after the cap, before the timer ran (S9).
+            Some(Stopped::TooLong(generation)) => {
+                if let Some(input) = self.input() {
+                    input.cancel(generation);
+                }
+                self.heard(core, Heard::TooLong);
+            }
+        }
+    }
+
+    fn cancel_listening(&self, core: &mut Core) {
+        let Some(generation) = core.recorder.cancel() else {
+            return;
+        };
+        if let Some(input) = self.input() {
+            input.cancel(generation);
+        }
+        core.frozen = None;
+        core.over = None;
+        tracing::info!(target: "acd_voice", "recording cancelled");
+        let r = core.exec.resume();
+        self.emit(&mut core.exec, r);
+    }
+
+    /// How the recording ended (plan S8, S9). A transcript is routed on its
+    /// own task with the admission token taken here, under the lock (S23).
+    fn heard(&self, core: &mut Core, heard: Heard) {
+        let snapshot = core.frozen.take();
+        core.over = None;
+        let refusal = match heard {
+            Heard::Transcript(text) => {
+                let token = Admission { session: core.session, epoch: core.epoch };
+                let (Some(snapshot), Some(me)) = (snapshot, self.me.upgrade()) else {
+                    return;
+                };
+                self.runtime.spawn(async move {
+                    let _ = me.utterance(text, snapshot, Source::Speech, Some(token)).await;
+                });
+                return;
+            }
+            Heard::Ignored(why) => {
+                tracing::info!(target: "acd_voice", ignored = ?why, "recording ignored");
+                let r = core.exec.resume();
+                self.emit(&mut core.exec, r);
+                return;
+            }
+            Heard::Failed(e) => Refusal::from(e),
+            Heard::TooLong => Refusal::RecordingTooLong,
+            Heard::TimedOut => Refusal::SpeechUnavailable,
+        };
+        tracing::info!(target: "acd_voice", refusal = ?refusal, "recording failed");
+        let r = core.exec.listen_failed(refusal);
+        self.emit(&mut core.exec, r);
+    }
+
+    fn schedule_tick(&self, after: Duration) {
+        let me = self.me.clone();
+        self.runtime.spawn(async move {
+            tokio::time::sleep(after).await;
+            if let Some(this) = me.upgrade() {
+                this.tick();
+            }
+        });
+    }
+
+    /// The 60 s cap and the final timeout (spec §6.2, plan S5, S9).
+    fn tick(&self) {
+        let mut core = self.core.lock().unwrap();
+        let Some((generation, heard)) = core.recorder.tick(Instant::now()) else {
+            return;
+        };
+        if let Some(input) = self.input() {
+            input.cancel(generation);
+        }
+        self.heard(&mut core, heard);
     }
 
     /// The HUD rendered proposal `id` (D22).
@@ -215,7 +597,15 @@ impl Controller {
     /// showed; a cancel for a state since replaced is ignored. `None`
     /// cancels whatever is current.
     pub fn cancel(&self, id: Option<u64>) {
-        self.act(|exec, port| exec.cancel(port, id));
+        let mut core = self.core.lock().unwrap();
+        let active = core.recorder.active();
+        if active.is_some() && (id.is_none() || id == active) {
+            self.cancel_listening(&mut core);
+            return;
+        }
+        if let Some(reaction) = core.exec.cancel(&self.port, id) {
+            self.emit(&mut core.exec, reaction);
+        }
     }
 
     /// Esc in the inbox panel: cancels a step that is still thinking. False
