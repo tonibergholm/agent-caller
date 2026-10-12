@@ -165,7 +165,8 @@ pub struct MachineEntryView {
     pub name: String,
     pub endpoint: EndpointConfig,
     pub pairing: PairingState,
-    /// For inbox views; omitted from Mac app TypeScript bindings.
+    /// For acd-inbox views (omarchy spec §4.3). Not in the Mac app's
+    /// TypeScript bindings, which do not use it (plan D5).
     #[cfg_attr(feature = "ts", ts(skip))]
     pub secret: SecretStatus,
 }

@@ -337,15 +337,26 @@ impl Inbox {
             endpoint: EndpointConfig::Tcp { host: pairing.host.clone(), port: pairing.port },
         });
         let secret = MachineSecret { token: pairing.token, pin: pairing.pin };
-        enum Restore { Previous(Option<String>), Nothing }
+        /// What a failed commit puts back (D36).
+        enum Restore {
+            Previous(Option<String>),
+            /// The previous item is unknown: nothing to restore, no guess.
+            Nothing,
+        }
         let restore = match self.secrets.get(&entry.key) {
             Ok(previous) => Restore::Previous(previous),
             Err(e) if e.kind() == SecretErrorKind::Unknown => Restore::Nothing,
-            Err(e) => { self.fail_closed(&entry.key, &e); return Err(MachineError::SecretRead(e)); }
+            Err(e) => {
+                self.fail_closed(&entry.key, &e);
+                return Err(MachineError::SecretRead(e));
+            }
         };
         self.secrets
             .set(&entry.key, &secret.to_json())
-            .map_err(|e| { self.fail_closed(&entry.key, &e); MachineError::SecretWrite(e) })?;
+            .map_err(|e| {
+                self.fail_closed(&entry.key, &e);
+                MachineError::SecretWrite(e)
+            })?;
         let info = tcp_info(&pairing.host, pairing.port, &secret);
         let mut inner = self.inner.lock().unwrap();
         let mut candidate = inner.settings.clone();
@@ -506,7 +517,10 @@ impl Inbox {
             handle.retry_now();
         }
     }
-    /// Retries a machine's connection, creating its handle if needed.
+
+    /// Retries a machine's connection, or creates its handle if it has none,
+    /// for example because its secret could not be read at start (omarchy
+    /// spec §4.3, plan D6). The secret is read outside `inner`.
     pub fn reconnect_machine(self: &Arc<Self>, key: &str) -> Result<(), MachineError> {
         let _edit = self.edits.lock();
         let (entry, handle) = {
@@ -514,11 +528,18 @@ impl Inbox {
             let m = inner.machines.iter().find(|m| m.entry.key == key).ok_or(MachineError::UnknownMachine)?;
             (m.entry.clone(), m.handle.clone())
         };
-        if let Some(handle) = handle { handle.retry_now(); return Ok(()); }
+        if let Some(handle) = handle {
+            handle.retry_now();
+            return Ok(());
+        }
         let info = match &entry.endpoint {
             EndpointConfig::Local => connect_info(&entry, &self.secrets).ok_or(MachineError::NotPaired)?,
             EndpointConfig::Tcp { host, port } => {
-                let raw = self.secrets.get(&entry.key).map_err(MachineError::SecretRead)?.ok_or(MachineError::NotPaired)?;
+                let raw = self
+                    .secrets
+                    .get(&entry.key)
+                    .map_err(MachineError::SecretRead)?
+                    .ok_or(MachineError::NotPaired)?;
                 let secret = MachineSecret::from_json(&raw).map_err(MachineError::SecretRead)?;
                 tcp_info(host, *port, &secret)
             }
@@ -527,8 +548,13 @@ impl Inbox {
             let mut inner = self.inner.lock().unwrap();
             let client_id = inner.settings.client_id.clone();
             let instance = self.next_instance.fetch_add(1, Ordering::Relaxed);
-            let Some(machine) = inner.machines.iter_mut().find(|m| m.entry == entry) else { return Err(MachineError::UnknownMachine); };
-            if let Some(existing) = &machine.handle { existing.retry_now(); return Ok(()); }
+            let Some(machine) = inner.machines.iter_mut().find(|m| m.entry == entry) else {
+                return Err(MachineError::UnknownMachine);
+            };
+            if let Some(existing) = &machine.handle {
+                existing.retry_now();
+                return Ok(());
+            }
             let handle = spawn_with(&entry, info, &self.opts, instance, &client_id);
             machine.handle = Some(handle.clone());
             handle
@@ -537,11 +563,21 @@ impl Inbox {
         self.wake();
         Ok(())
     }
+
+    /// After a SecretStore error of kind `Unknown`, the machine's credentials
+    /// are uncertain: stop its handle and end its countdowns (fail closed).
+    /// Only a successful read (`reconnect_machine`) or a re-pairing brings
+    /// it back.
     fn fail_closed(&self, key: &str, e: &SecretError) {
-        if e.kind() != SecretErrorKind::Unknown { return; }
+        if e.kind() != SecretErrorKind::Unknown {
+            return;
+        }
         let mut inner = self.inner.lock().unwrap();
         if let Some(machine) = inner.machines.iter_mut().find(|m| m.entry.key == key)
-            && let Some(handle) = machine.handle.take() { handle.cancel(); }
+            && let Some(handle) = machine.handle.take()
+        {
+            handle.cancel();
+        }
         for action in inner.actions.end_machine(key) {
             self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
         }

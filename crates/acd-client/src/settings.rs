@@ -82,9 +82,15 @@ pub enum SecretErrorKind {
 }
 
 impl SecretError {
-    pub fn locked() -> Self { SecretError(SECRET_LOCKED.into()) }
-    pub fn timeout() -> Self { SecretError(SECRET_TIMEOUT.into()) }
-    pub fn unknown() -> Self { SecretError(SECRET_UNKNOWN.into()) }
+    pub fn locked() -> Self {
+        SecretError(SECRET_LOCKED.into())
+    }
+    pub fn timeout() -> Self {
+        SecretError(SECRET_TIMEOUT.into())
+    }
+    pub fn unknown() -> Self {
+        SecretError(SECRET_UNKNOWN.into())
+    }
     pub fn kind(&self) -> SecretErrorKind {
         match self.0.as_str() {
             SECRET_LOCKED => SecretErrorKind::Locked,
@@ -95,10 +101,20 @@ impl SecretError {
     }
 }
 
-/// What a machine's stored secret looks like right now.
+/// What a machine's stored secret looks like right now (omarchy spec §4.3):
+/// a locked keyring is not "not paired".
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SecretStatus { Ok, Locked, Missing, Unreadable, Unknown }
+pub enum SecretStatus {
+    Ok,
+    Locked,
+    Missing,
+    Unreadable,
+    /// A change to the item could not be confirmed, or the keyring does not
+    /// answer; the machine stays disconnected until a successful read
+    /// (retry) or a re-pairing.
+    Unknown,
+}
 
 /// Canonical base64url without padding, decoding to exactly 32 bytes: the
 /// same rule as acd's `parse_token` (non-zero trailing bits are rejected).
@@ -274,11 +290,14 @@ pub trait SecretStore: Send + Sync {
             Ok(Some(raw)) if MachineSecret::from_json(&raw).is_ok() => SecretStatus::Ok,
             Ok(Some(_)) => SecretStatus::Unreadable,
             Err(e) if e.kind() == SecretErrorKind::Locked => SecretStatus::Locked,
+            // An unconfirmed change, or a keyring that does not answer (D36).
             Err(e) if matches!(e.kind(), SecretErrorKind::Unknown | SecretErrorKind::Timeout) => SecretStatus::Unknown,
             Err(_) => SecretStatus::Unreadable,
         }
     }
-    /// Forget what is known about `key` until a successful read.
+    /// Forget what is known about `key`: its status is `Unknown` until a
+    /// successful read. acd-inbox's store implements it; the Keychain store
+    /// does not need to (omarchy plan D36).
     fn mark_unknown(&self, _key: &str) {}
 }
 
@@ -302,6 +321,7 @@ impl SecretStore for MemorySecrets {
 /// Reads each key from the inner store once per process. The Keychain can
 /// ask the user for every read, so listings must not go back to it.
 /// Failed reads are not cached: a denied prompt can be retried.
+/// Does not track `mark_unknown`; acd-inbox uses its own `WorkerStore`.
 pub struct CachedSecrets<S> {
     inner: S,
     cache: Mutex<HashMap<String, Option<String>>>,
@@ -363,9 +383,15 @@ mod tests {
         assert_eq!(m.status("k"), SecretStatus::Ok);
         struct Locked;
         impl SecretStore for Locked {
-            fn get(&self, _: &str) -> Result<Option<String>, SecretError> { Err(SecretError::locked()) }
-            fn set(&self, _: &str, _: &str) -> Result<(), SecretError> { Err(SecretError::locked()) }
-            fn delete(&self, _: &str) -> Result<(), SecretError> { Err(SecretError::locked()) }
+            fn get(&self, _: &str) -> Result<Option<String>, SecretError> {
+                Err(SecretError::locked())
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), SecretError> {
+                Err(SecretError::locked())
+            }
+            fn delete(&self, _: &str) -> Result<(), SecretError> {
+                Err(SecretError::locked())
+            }
         }
         assert_eq!(Locked.status("k"), SecretStatus::Locked);
         assert_eq!(CachedSecrets::new(Locked).status("k"), SecretStatus::Locked);
