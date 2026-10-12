@@ -128,9 +128,28 @@ final class TranscriptionErrorPathTests: XCTestCase {
     }
 }
 
+/// Fails only where told, so the later calls would succeed without the `failed` latch.
+final class FlakyEngine: AnalyzerEngine, @unchecked Sendable {
+    struct Boom: Error {}
+    private let lock = NSLock()
+    private var finalizeCount = 0
+    var failStart = false
+    var failFirstFinalize = false
+    var finalizes: Int { lock.lock(); defer { lock.unlock() }; return finalizeCount }
+    private func nextFinalize() -> Int { lock.lock(); defer { lock.unlock() }; finalizeCount += 1; return finalizeCount }
+
+    func format() async -> AVAudioFormat? { nil }
+    func start() async throws { if failStart { throw Boom() } }
+    func feed(_ buffer: AVAudioPCMBuffer) {}
+    func endInput() {}
+    func results() -> AsyncThrowingStream<(String, Bool), Error> { AsyncThrowingStream { $0.finish() } }
+    func finalize() async throws { if nextFinalize() == 1 && failFirstFinalize { throw Boom() } }
+    func cancel() async {}
+}
+
 final class TranscriptionCancelTests: XCTestCase {
     /// `cancel` ends a `finish` that waits for chunks that never end.
-    func testCancelEndsAWaitingFinish() async throws {
+    func testCancelEndsAFinishThatWaitsForChunks() async throws {
         let engine = FakeEngine()
         let t = Transcription(engine: engine)
         let (chunks, sink) = AsyncStream.makeStream(of: Chunk.self) // never finishes
@@ -153,22 +172,25 @@ final class TranscriptionCancelTests: XCTestCase {
     }
 
     func testFinishAfterAFailedFinishThrows() async throws {
-        let engine = FailingEngine()
+        let engine = FlakyEngine()
+        engine.failFirstFinalize = true
         let t = Transcription(engine: engine)
         let (chunks, sink) = AsyncStream.makeStream(of: Chunk.self)
         try await t.start(chunks) { _ in }
         sink.finish()
         _ = try? await t.finish()
         do { _ = try await t.finish(); XCTFail("a later finish must throw") } catch {}
+        XCTAssertEqual(engine.finalizes, 1, "finalize is not called again")
     }
 
     func testFinishAfterAFailedStartThrows() async {
-        let engine = FailingEngine()
+        let engine = FlakyEngine()
         engine.failStart = true
         let t = Transcription(engine: engine)
         let (chunks, _) = AsyncStream.makeStream(of: Chunk.self)
         _ = try? await t.start(chunks) { _ in }
-        do { _ = try await t.finish(); XCTFail("must throw") } catch {}
+        do { _ = try await t.finish(); XCTFail("a later finish must throw") } catch {}
+        XCTAssertEqual(engine.finalizes, 0, "finalize is never reached")
     }
 }
 
