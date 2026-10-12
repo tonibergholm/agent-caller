@@ -22,13 +22,26 @@ can speak `acd/1` to the same daemon. The protocol is in
 [`crates/acd-protocol/PROTOCOL.md`](crates/acd-protocol/PROTOCOL.md).
 
 > **Status: pre-release (0.1.0).** There are no binary releases yet, and
-> the Mac app is unsigned. You build both from source. Expect breaking
+> the Mac app is ad-hoc signed unless you supply a signing identity. You
+> build both from source. Expect breaking
 > changes to the config and protocol before 1.0.
+
+## Screenshots
+
+The current Svelte UI, rendered with sample agents through the development
+preview. These screenshots contain fixture data, not live sessions.
+
+![Agent Caller inbox with local and remote approvals and a typed T3 question](docs/images/inbox.png)
+
+![Agent Caller settings with machine pairing and visibility controls](docs/images/settings.png)
 
 ## What it does
 
 - Answers permission prompts and single-question, single-select
-  questions. Other question shapes are shown read-only.
+  questions, including typed answers for T3 questions that allow custom
+  text. Multi-question and multi-select requests are shown read-only.
+- Filters the inbox by machine and optionally shows idle agents, T3
+  subagent threads and agents known only through hooks.
 - Sends free-text follow-ups to idle or finished agents.
 - Offers "Yes, always" for Claude `Bash` permissions, showing the exact
   rule it will save.
@@ -60,9 +73,10 @@ rules are fixed:
   dialog an answer belongs to, it does not deliver it. Before it sends a
   key through herdr, it re-reads the screen and compares a fingerprint of
   the dialog.
-- **No free-form input.** acd sends a single option key for a matching
-  dialog, or a follow-up that herdr accepts only when the agent is not
-  blocked. Nothing else.
+- **Bounded input paths.** Terminal delivery sends one option key for a
+  matching dialog, or a follow-up that herdr accepts only when the agent
+  is not blocked. Typed question answers go through T3 RPC only, when
+  the request explicitly supports them.
 - **First answer wins.** For hook and T3 answers, the agent accepts
   exactly one answer and the late one gets "Answered elsewhere". Key
   answers through herdr are best effort: a terminal answer can land
@@ -149,15 +163,22 @@ loopback IP or a Tailscale IP, because the token travels over plain
 
 ## Install the app (macOS)
 
+From the repository root, with [`just`](https://github.com/casey/just) installed:
+
 ```sh
-cd app
-npm ci
-npm run tauri build -- --bundles app
-open src-tauri/target/release/bundle/macos
+just app-install
 ```
 
-Move `Agent Caller.app` to `/Applications` and open it. It lives in the
-menu bar and adds the local machine on its own.
+This builds the app, replaces `/Applications/Agent Caller.app` and opens
+it. It lives in the menu bar and adds the local machine on its own.
+The build uses ad-hoc signing by default. Set `APPLE_SIGNING_IDENTITY` to
+your stable signing identity before running the command to keep Keychain
+and privacy grants across rebuilds. Ad-hoc rebuilds can prompt for
+Keychain access again.
+
+To build without installing, run `npm ci` and
+`npm run tauri build -- --bundles app` from `app/`; the bundle is in
+`app/src-tauri/target/release/bundle/macos/`.
 
 To add a remote machine, run this on that machine and copy the line it
 prints:
@@ -167,7 +188,10 @@ acd pair --host <machine>.<tailnet>.ts.net
 ```
 
 Then click **Add from clipboard** in the app's settings. The line carries the client token and the certificate pin. The
-app stores tokens in the Keychain. After `acd tls rotate`, pair again.
+app stores remote credentials in the Keychain; the local connection uses
+`acd.sock` and reads the local token from the daemon config directory.
+After `acd tls rotate`, pair remote machines again. On a remote Mac,
+allow incoming connections for `acd` if the macOS firewall prompts.
 
 ### Using the app
 
@@ -178,15 +202,27 @@ using.
 
 | Key | Action |
 |---|---|
-| `J` / `K` | Move between cards |
+| `J` / `K`, arrow down / up | Move between cards |
 | `1`–`9` | Pick an option and start the countdown |
+| `T` | Focus the typed answer field for a T3 question |
 | `R` | Reply to an idle or finished agent |
 | `E` | Mark the agent seen |
-| `Enter` | Send the reply (in the reply field) |
+| `Enter` | Send the reply or typed answer (in its text field) |
 | `Esc` | Undo during the countdown, or close the panel |
 
 The app waits 2 seconds before it sends an answer or reply. Press `Esc`
-or click the countdown button to cancel.
+or click the countdown button to cancel. `Shift+Enter` adds a line in a
+text field. Drag the panel header to move it and its edges to resize it;
+the app remembers its position and size.
+
+Settings lets you change the hotkey and show idle agents, subagent threads
+and hook-only agents (all off by default). Hook-only agents still appear
+when they have a pending request or are waiting on you. Hidden subagent
+threads are excluded from counts, the tray badge and notifications.
+
+Notifications appear for new requests while the panel is closed. If macOS
+does not show them, enable Agent Caller in System Settings → Notifications;
+the app does not yet request authorization or display its permission state.
 
 ## Configuration
 
@@ -228,7 +264,10 @@ Other commands:
 
 The design spec,
 [`docs/superpowers/specs/2026-10-07-agent-inbox-design.md`](docs/superpowers/specs/2026-10-07-agent-inbox-design.md),
-is authoritative. Known gaps and deferred work are in
+records the design and review decisions. For shipped behavior, check the
+implementation and the [protocol guide](crates/acd-protocol/PROTOCOL.md);
+historical plans are not instructions to reimplement completed phases.
+Known gaps and deferred work are in
 [`docs/superpowers/plans/2026-10-07-p1-followups.md`](docs/superpowers/plans/2026-10-07-p1-followups.md).
 
 ## Development
@@ -241,6 +280,12 @@ cd app && npm ci && npm run verify   # macOS only
 ```
 
 CI runs the workspace on Ubuntu and macOS and the app on macOS.
+
+To preview the UI with sample data, run `npm ci` and `npm run dev` in
+`app/`, then open `/preview.html?scene=main` or
+`/preview.html?scene=settings` on the URL Vite prints. This development
+preview is excluded from the production build. See
+[the screenshot guide](docs/images/README.md) for capture instructions.
 
 `just e2e` runs real Claude Code, Codex and T3 agents against a scratch
 daemon under `/tmp/ace2e`. It makes model calls, so run it only from an

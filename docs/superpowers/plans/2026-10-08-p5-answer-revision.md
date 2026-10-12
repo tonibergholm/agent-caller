@@ -1,5 +1,10 @@
 # P5 follow-up: answer revisions
 
+> **Historical plan.** The corresponding subsystem is implemented. Task
+> checkboxes and code snippets record the original implementation/review
+> process; consult the current code and [known gaps](2026-10-07-p1-followups.md)
+> before making changes. Do not replay this plan as unfinished work.
+
 ## Problem
 
 `Registry::update_request` (crates/acd-core/src/registry.rs:319) rewrites an

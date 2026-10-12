@@ -21,15 +21,16 @@ protocol. The reference client is a Tauri menubar app for macOS.
 
 ## Docs
 
-- Spec (authoritative): `docs/superpowers/specs/2026-10-07-agent-inbox-design.md`
+- Design and review decisions: `docs/superpowers/specs/2026-10-07-agent-inbox-design.md`
 - Roadmap: `docs/superpowers/plans/2026-10-07-roadmap.md`
 - Deferred items and known flakes: `docs/superpowers/plans/2026-10-07-p1-followups.md`
-- Per-phase plans: `docs/superpowers/plans/`
+- Historical per-phase plans: `docs/superpowers/plans/` (do not replay their task lists)
 - Live check records and research: `docs/research/`
 
-Read the spec section and the follow-ups entry for an area before you
-change it. If the code and the spec disagree, report it. Do not change
-either one to match the other without saying so.
+Read the relevant spec section, current code and follow-ups before changing
+an area. The protocol guide is the wire contract; phase plans and research
+are historical evidence. Report discrepancies and explicitly document
+intentional behavior changes; do not restore obsolete plan snippets.
 
 ## Commands
 
@@ -69,10 +70,12 @@ check as pending for CI.
 
 ## Platform limits
 
-`launchctl` service install and the Keychain work only on macOS, and the
-reference app (bundle, hotkey, notifications) is verified only on macOS. Live checks need herdr, T3 Code, Tailscale
-and the test machines. Linux sessions cannot verify any of these. Say
-so when your change touches them.
+Service install uses launchd on macOS and systemd user units on Linux.
+The Keychain and reference app (bundle, hotkey, notifications) are verified
+only on macOS. A Linux session can verify the Linux daemon and service,
+but cannot verify macOS integration. Live integration checks require
+herdr, T3 Code, Tailscale and the actual target machines; report any
+checks you could not run.
 
 The tests below fail in sandboxes that ignore special file mode bits or
 restrict `ps`, and pass outside them:
