@@ -56,7 +56,7 @@ pub fn agent_obs(socket_hash: &str, info: &wire::AgentInfo) -> Option<AgentObs> 
     ]
     .into_iter()
     .filter_map(|(s, terminal)| s.as_ref().map(|s| (clean_display(s, TITLE_CHARS), terminal)))
-    .find(|(s, terminal)| !s.is_empty() && !(*terminal && is_codex_context(s)))
+    .find(|(s, terminal)| !s.is_empty() && !(*terminal && kind == AgentKind::Codex && is_codex_context(s)))
     .map(|(s, _)| s)
     .unwrap_or_else(|| clean_display(&info.pane_id, TITLE_CHARS));
     let cwd = info
@@ -176,11 +176,18 @@ mod tests {
         named["name"] = "api refactor".into();
         assert_eq!(agent_obs("abc", &info(named)).unwrap().title, "api refactor");
         // The user's own name is kept even when it mentions the tag.
-        let mut tagged = agent;
+        let mut tagged = agent.clone();
         tagged["name"] = "Fix <environment_context> parsing".into();
         assert_eq!(
             agent_obs("abc", &info(tagged)).unwrap().title,
             "Fix <environment_context> parsing"
+        );
+        // Only Codex echoes the block; another agent's terminal title is kept.
+        let mut other = agent.clone();
+        other["agent"] = "claude".into();
+        assert_eq!(
+            agent_obs("abc", &info(other)).unwrap().title,
+            context
         );
     }
 
