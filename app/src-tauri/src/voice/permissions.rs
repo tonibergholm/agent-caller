@@ -7,8 +7,6 @@ pub const SPEECH_PERMISSION_REQUIRED: bool = true;
 
 /// Whether the event tap works only after a relaunch once Input Monitoring
 /// is granted. From the step-2 spike (S17): it does not.
-// Read by the hold key in Task 7B.
-#[allow(dead_code)]
 pub const TAP_NEEDS_RELAUNCH: bool = false;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,8 +28,6 @@ pub enum PermissionState {
 
 impl Permission {
     /// `VB_PERM_*`.
-    // Used by `status` and `request` (Task 9).
-    #[allow(dead_code)]
     pub fn code(self) -> u32 {
         match self {
             Permission::Microphone => 1,
@@ -77,8 +73,6 @@ impl PermissionState {
 /// voice needs that the user was never asked about. The microphone always,
 /// Speech Recognition if the spike said so, Input Monitoring only with a
 /// hold key.
-// Called when voice is turned on (Task 9).
-#[allow(dead_code)]
 pub fn to_request(hold_key_on: bool, state: impl Fn(Permission) -> PermissionState) -> Vec<Permission> {
     let mut needed = vec![Permission::Microphone];
     if SPEECH_PERMISSION_REQUIRED {
@@ -91,8 +85,6 @@ pub fn to_request(hold_key_on: bool, state: impl Fn(Permission) -> PermissionSta
 }
 
 #[cfg(target_os = "macos")]
-// Called by Settings and voice-on (Task 9).
-#[allow(dead_code)]
 pub fn status(p: Permission) -> PermissionState {
     // SAFETY: a plain integer in and out (header contract).
     PermissionState::from_code(unsafe { super::bridge::ffi::vb_permission_status(p.code()) })
@@ -101,8 +93,6 @@ pub fn status(p: Permission) -> PermissionState {
 /// Shows the system prompt if never asked; the answer arrives as
 /// `BridgeEvent::Permission`.
 #[cfg(target_os = "macos")]
-// Called by Settings and voice-on (Task 9).
-#[allow(dead_code)]
 pub fn request(p: Permission) {
     // SAFETY: a plain integer; returns at once.
     unsafe { super::bridge::ffi::vb_permission_request(p.code()) }

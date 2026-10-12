@@ -80,7 +80,7 @@ export const tauriApi: Api = {
   publishPresentation: (presentation) => invoke("voice_publish_presentation", { presentation }),
   voiceTextInput: (text) => invoke("voice_text_input", { text }),
   getVoiceSettings: () => invoke("voice_get_settings"),
-  setVoiceSettings: (s) => invoke("voice_set_settings", { enabled: s.enabled, debugInput: s.debug_input }),
+  setVoiceSettings: (s) => invoke("voice_set_settings", { settings: s }),
   onVoiceSettings: (cb) => listen<VoiceSettings>("voice://settings", (e) => cb(e.payload)),
   onVoiceSelect: (cb) => listen<string>("voice://select", (e) => cb(e.payload)),
   onHud: (cb) => listen<HudEvent>("voice://hud", (e) => cb(e.payload)),

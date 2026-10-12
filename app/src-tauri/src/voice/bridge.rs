@@ -24,8 +24,8 @@ pub const VB_ERR_ASSETS_MISSING: i32 = 5;
 pub const VB_ERR_BUSY: i32 = 6;
 #[allow(dead_code)]
 pub const VB_ERR_FAILED: i32 = 7;
-#[allow(dead_code)]
 pub const VB_ERR_INPUT_MONITORING_DENIED: i32 = 8;
+// Any other code maps to it in `trigger::tap_result`; tests name it.
 #[allow(dead_code)]
 pub const VB_ERR_TAP_FAILED: i32 = 9;
 #[allow(dead_code)]
@@ -115,15 +115,15 @@ pub(crate) mod ffi {
     unsafe extern "C" {
         pub fn vb_init(ctx: *mut c_void, on_event: VbEventFn) -> i32;
         pub fn vb_probe_run(step: u32);
-        #[allow(dead_code)]
         pub fn vb_permission_status(permission: u32) -> u32;
-        #[allow(dead_code)]
         pub fn vb_permission_request(permission: u32);
         pub fn vb_query_capabilities();
         pub fn vb_session_start(generation: u64, max_ms: u32, speech_required: u32) -> i32;
         pub fn vb_session_stop(generation: u64);
         pub fn vb_session_cancel(generation: u64);
         pub fn vb_install_assets();
+        pub fn vb_tap_start(keycode: u16, down_mask: u64, out_tap: *mut u64) -> i32;
+        pub fn vb_tap_stop();
     }
 }
 
@@ -134,7 +134,7 @@ pub enum BridgeEvent {
     Listen(ListenEvent),
     Capabilities { caps: Capabilities, locale: Option<String> },
     Permission { which: Permission, state: PermissionState },
-    /// The hold key went down or up (Task 7B).
+    /// The hold key went down or up.
     Hold { tap: u64, down: bool },
     /// Another key went down; which one is never sent (S11).
     OtherKey { tap: u64 },

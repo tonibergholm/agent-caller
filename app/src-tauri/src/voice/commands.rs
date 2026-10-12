@@ -7,26 +7,42 @@ use super::settings::VoiceSettings;
 
 #[tauri::command]
 pub fn voice_get_settings(voice: State<'_, VoiceState>) -> VoiceSettings {
-    *voice.settings.lock().unwrap()
+    voice.settings.lock().unwrap().clone()
 }
 
 #[tauri::command]
 pub fn voice_set_settings(
     app: AppHandle,
     voice: State<'_, VoiceState>,
-    enabled: bool,
-    debug_input: bool,
+    settings: VoiceSettings,
 ) -> Result<VoiceSettings, String> {
-    let next = VoiceSettings { enabled, debug_input };
-    if let Some(path) = &voice.path {
-        next.save(path).map_err(|_| "Could not save the voice settings".to_owned())?;
+    if let Some(toggle) = &settings.toggle_shortcut {
+        crate::hotkey::check_voice(toggle, crate::hotkey::current_shortcut())?;
     }
-    *voice.settings.lock().unwrap() = next;
-    voice.controller.set_enabled(enabled);
-    if let Err(error) = app.emit("voice://settings", next) {
+    if let Some(path) = &voice.path {
+        settings.save(path).map_err(|_| "Could not save the voice settings".to_owned())?;
+    }
+    let was_on = std::mem::replace(&mut *voice.settings.lock().unwrap(), settings.clone()).enabled;
+    voice.controller.set_enabled(settings.enabled);
+    #[cfg(target_os = "macos")]
+    {
+        use super::permissions;
+        use super::settings::HoldKey;
+        // Spec §6.4: ask when voice is turned on.
+        if settings.enabled && !was_on {
+            for p in permissions::to_request(settings.hold_key != HoldKey::Off, permissions::status) {
+                permissions::request(p);
+            }
+        }
+        *voice.trigger_error.lock().unwrap() = super::trigger::apply(&app, &settings);
+        super::emit_status(&app);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = was_on;
+    if let Err(error) = app.emit("voice://settings", &settings) {
         tracing::error!(%error, "could not emit the voice settings");
     }
-    Ok(next)
+    Ok(settings)
 }
 
 #[tauri::command]

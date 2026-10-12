@@ -106,6 +106,7 @@ fn main() {
                 controller,
                 settings: std::sync::Mutex::new(voice_settings),
                 path: Some(voice_path),
+                trigger_error: std::sync::Mutex::new(None),
                 #[cfg(target_os = "macos")]
                 speech,
             });
@@ -124,6 +125,12 @@ fn main() {
                 if let Err(default_error) = hotkey::apply(app.handle(), DEFAULT_HOTKEY) {
                     tracing::error!(%default_error, "could not register default hotkey");
                 }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let voice = app.state::<voice::VoiceState>();
+                let settings = voice.settings.lock().unwrap().clone();
+                *voice.trigger_error.lock().unwrap() = voice::trigger::apply(app.handle(), &settings);
             }
 
             let handle = app.handle().clone();

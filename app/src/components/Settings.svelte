@@ -104,7 +104,7 @@
   const endpointText = (m: MachineEntryView) =>
     m.endpoint.kind === "local" ? "This Mac (acd.sock)" : `${m.endpoint.host}:${m.endpoint.port}`;
 
-  const setVoice = (box: HTMLInputElement, field: keyof VoiceSettings) =>
+  const setVoice = (box: HTMLInputElement, field: "enabled" | "debug_input") =>
     act(async () => {
       try {
         voice = await api.setVoiceSettings({ ...voice, [field]: box.checked });

@@ -9,7 +9,23 @@ export type Presentation = {
   done_collapsed: boolean;
 };
 
-/** Mirrors the app's voice::settings::VoiceSettings. */
-export type VoiceSettings = { enabled: boolean; debug_input: boolean };
+/** Mirrors the app's voice::settings::HoldKey. */
+export type HoldKey = "right_option" | "left_option" | "right_command" | "right_control" | "fn" | "off";
 
-export const VOICE_OFF: VoiceSettings = { enabled: false, debug_input: false };
+/** Mirrors the app's voice::settings::VoiceSettings. */
+export type VoiceSettings = {
+  enabled: boolean;
+  debug_input: boolean;
+  hold_key: HoldKey;
+  /** null turns the toggle shortcut off. */
+  toggle_shortcut: string | null;
+};
+
+export const DEFAULT_VOICE_TOGGLE = "Control+Alt+V";
+
+export const VOICE_OFF: VoiceSettings = {
+  enabled: false,
+  debug_input: false,
+  hold_key: "right_option",
+  toggle_shortcut: DEFAULT_VOICE_TOGGLE,
+};

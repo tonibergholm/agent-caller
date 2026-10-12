@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import Settings from "./Settings.svelte";
 import { fakeApi, view } from "../lib/fixtures";
+import { VOICE_OFF } from "../lib/voice";
 import type { MachineEntryView } from "../lib/bindings/MachineEntryView";
 
 afterEach(() => {
@@ -274,10 +275,10 @@ test("the Voice section turns voice and the typed command field on", async () =>
   expect(voice.checked).toBe(false);
   expect(typed.disabled).toBe(true);
   await userEvent.click(voice);
-  expect(api.calls).toContainEqual(["setVoiceSettings", { enabled: true, debug_input: false }]);
+  expect(api.calls).toContainEqual(["setVoiceSettings", { ...VOICE_OFF, enabled: true }]);
   expect(typed.disabled).toBe(false);
   await userEvent.click(typed);
-  expect(api.calls).toContainEqual(["setVoiceSettings", { enabled: true, debug_input: true }]);
+  expect(api.calls).toContainEqual(["setVoiceSettings", { ...VOICE_OFF, enabled: true, debug_input: true }]);
 });
 
 test("a failed voice change puts the box back and says why", async () => {
@@ -316,14 +317,14 @@ test("the hook-only toggle reflects the daemon's view and reverts when saving fa
 });
 
 test("the voice probe shows only with voice and the debug setting on, and lists its reports", async () => {
-  for (const voice of [{ enabled: true, debug_input: false }, { enabled: false, debug_input: true }]) {
+  for (const voice of [{ ...VOICE_OFF, enabled: true, debug_input: false }, { ...VOICE_OFF, enabled: false, debug_input: true }]) {
     render(Settings, { api: fakeApi({ voice }) });
     await screen.findByRole("checkbox", { name: "Voice control" });
     expect(screen.queryByRole("button", { name: "1. Status" })).toBeNull();
     cleanup();
   }
 
-  const api = fakeApi({ voice: { enabled: true, debug_input: true } });
+  const api = fakeApi({ voice: { ...VOICE_OFF, enabled: true, debug_input: true } });
   render(Settings, { api });
   await userEvent.click(await screen.findByRole("button", { name: "1. Status" }));
   expect(api.calls).toContainEqual(["voiceProbe", 1]);

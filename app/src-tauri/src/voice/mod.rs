@@ -6,6 +6,8 @@ pub mod bridge;
 pub mod hud;
 pub mod permissions;
 pub mod settings;
+#[cfg(target_os = "macos")]
+pub mod trigger;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -18,6 +20,8 @@ pub struct VoiceState {
     pub controller: Arc<Controller>,
     pub settings: Mutex<settings::VoiceSettings>,
     pub path: Option<PathBuf>,
+    /// The toggle shortcut's last registration error, for Settings.
+    pub trigger_error: Mutex<Option<String>>,
     #[cfg(target_os = "macos")]
     pub speech: bridge::Speech,
 }
@@ -59,12 +63,32 @@ pub fn dispatch(app: &AppHandle, ev: bridge::BridgeEvent) {
             voice.speech.set_capabilities(caps, locale);
             emit_status(app);
         }
-        E::Permission { .. } | E::Assets { .. } => emit_status(app),
+        E::Permission { .. } => {
+            trigger::refresh(app);
+            emit_status(app);
+        }
+        E::Assets { .. } => emit_status(app),
         E::System => voice.controller.system_stop(),
         E::Capture { generation, on } => voice.controller.capture(generation, on),
         E::Overflow => voice.controller.overflow(),
-        // Task 7B wires the hold key.
-        E::Hold { .. } | E::OtherKey { .. } | E::TapDisabled { .. } => {}
+        // Only the current tap's events count, checked and delivered under
+        // one lock with tap replacement (S26).
+        E::Hold { tap, down } => {
+            trigger::TAP.deliver(tap, || voice.controller.hold(down, crate::panel::is_visible()));
+        }
+        E::OtherKey { tap } => {
+            trigger::TAP.deliver(tap, || voice.controller.other_key());
+        }
+        E::TapDisabled { tap, reenabled } => {
+            trigger::TAP.deliver(tap, || {
+                voice.controller.hold_lost();
+                if !reenabled {
+                    trigger::hold_off();
+                    voice.controller.notice(acd_voice::refusal::Refusal::HoldKeyOff);
+                    emit_status(app);
+                }
+            });
+        }
         E::Probe(report) => {
             // Only the settings window shows the probe report.
             if let Err(error) = app.emit_to("settings", "voice://probe", report) {
