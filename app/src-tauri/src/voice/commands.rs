@@ -136,3 +136,18 @@ pub fn voice_probe(window: WebviewWindow, voice: State<'_, VoiceState>, step: u3
     #[cfg(not(target_os = "macos"))]
     let _ = step;
 }
+
+/// Opens one of three fixed System Settings panes (plan S19). Settings and
+/// HUD windows only.
+#[tauri::command]
+pub fn voice_open_privacy(window: WebviewWindow, kind: super::permissions::Permission) -> Result<(), String> {
+    if window.label() != "settings" && !hud::is_hud(window.label()) {
+        tracing::debug!(label = window.label(), "ignored a System Settings request from another window");
+        return Ok(());
+    }
+    std::process::Command::new("/usr/bin/open")
+        .arg(kind.privacy_url())
+        .status()
+        .map(|_| ())
+        .map_err(|_| "Could not open System Settings".to_owned())
+}

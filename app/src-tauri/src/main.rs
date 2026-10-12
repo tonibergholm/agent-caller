@@ -65,6 +65,7 @@ fn main() {
             voice::commands::voice_cancel,
             voice::commands::voice_hud_fit,
             voice::commands::voice_probe,
+            voice::commands::voice_open_privacy,
         ])
         .setup(|app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

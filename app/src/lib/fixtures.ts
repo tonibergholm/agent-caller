@@ -179,6 +179,7 @@ export function fakeApi(
       api.fits.push(seq);
     },
     voiceProbe: rec("voiceProbe", undefined),
+    openVoicePrivacy: rec("openVoicePrivacy", undefined),
     onVoiceProbe: async (cb: (report: string) => void) => {
       api.voiceProbeReport = cb;
       return () => {};

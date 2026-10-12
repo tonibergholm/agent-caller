@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { InboxView } from "./bindings/InboxView";
 import type { MachineEntryView } from "./bindings/MachineEntryView";
 import type { HudEvent } from "./hud";
-import type { Presentation, VoiceSettings } from "./voice";
+import type { PermissionKind, Presentation, VoiceSettings } from "./voice";
 
 export interface Api {
   pick(cardKey: string, requestId: string, optionId: string, revision: number): Promise<void>;
@@ -50,6 +50,8 @@ export interface Api {
   voiceHudFit(seq: number, height: number): Promise<void>;
   /** Spike probe step (plan Task 1A); the report arrives through `onVoiceProbe`. */
   voiceProbe(step: number): Promise<void>;
+  /** Opens the System Settings pane for one permission (plan S19). */
+  openVoicePrivacy(kind: PermissionKind): Promise<void>;
   onVoiceProbe(cb: (report: string) => void): Promise<() => void>;
 }
 
@@ -91,5 +93,6 @@ export const tauriApi: Api = {
   voiceCancel: (id) => invoke("voice_cancel", { id }),
   voiceHudFit: (seq, height) => invoke("voice_hud_fit", { seq, height }),
   voiceProbe: (step) => invoke("voice_probe", { step }),
+  openVoicePrivacy: (kind) => invoke("voice_open_privacy", { kind }),
   onVoiceProbe: (cb) => listen<string>("voice://probe", (e) => cb(e.payload)),
 };

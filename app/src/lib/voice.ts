@@ -29,3 +29,6 @@ export const VOICE_OFF: VoiceSettings = {
   hold_key: "right_option",
   toggle_shortcut: DEFAULT_VOICE_TOGGLE,
 };
+
+/** Mirrors the app's voice::permissions::Permission. */
+export type PermissionKind = "microphone" | "speech" | "input_monitoring";

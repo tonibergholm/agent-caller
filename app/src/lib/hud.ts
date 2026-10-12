@@ -1,4 +1,5 @@
 import type { Effect } from "./bindings/Effect";
+import type { PermissionKind } from "./voice";
 
 // Mirrors acd_voice::hud and acd_voice::refusal (serde shapes pinned by
 // the_hud_json_shape_is_the_frontend_contract).
@@ -28,7 +29,14 @@ export type Refusal =
   | "not_permitted"
   | "display_failed"
   | "hidden"
-  | "still_sending";
+  | "still_sending"
+  | "microphone_denied"
+  | "microphone_unavailable"
+  | "speech_denied"
+  | "speech_unavailable"
+  | "speech_assets_missing"
+  | "recording_too_long"
+  | "hold_key_off";
 
 export type NotSentReason =
   | "offline"
@@ -75,7 +83,7 @@ export type OutcomeView =
 
 export type Hud =
   | { state: "hidden" }
-  | { state: "listening" }
+  | { state: "listening"; id: number; partial: string | null; over: Hud | null }
   | { state: "thinking"; transcript: string; id: number }
   | { state: "confirm"; proposal: ProposalView; proposal_id: number }
   | { state: "which_one"; candidates: TargetView[]; transcript: string; choice_id: number }
@@ -115,6 +123,13 @@ export const refusalText: Record<Refusal, string> = {
   display_failed: "The HUD could not show the step. Nothing was sent.",
   hidden: "That agent is hidden now. Nothing was sent.",
   still_sending: "Still sending the last step.",
+  microphone_denied: "Microphone access is off for Agent Caller.",
+  microphone_unavailable: "Microphone unavailable.",
+  speech_denied: "Speech Recognition is off for Agent Caller.",
+  speech_unavailable: "Speech recognition is not available. Nothing was sent.",
+  speech_assets_missing: "The English speech model is not installed. Download it in Settings.",
+  recording_too_long: "Recording stopped after 60 seconds. Nothing was sent.",
+  hold_key_off: "The hold key stopped working. The voice shortcut still works.",
 };
 
 const notSentText: Record<NotSentReason, string> = {
@@ -144,13 +159,31 @@ export function outcomeText(o: OutcomeView): string {
   }
 }
 
-/** States whose keys the HUD acts on when it has key: those waiting for input, and thinking, which Esc cancels after a click on the HUD (spec §4.4). */
+/**
+ * States whose keys the HUD acts on when it has key: those waiting for input,
+ * and thinking and listening, which Esc cancels after a click on the HUD
+ * (spec §4.4, plan S25). Rust's `Hud::wants_key` stays false for listening.
+ */
 export const wantsKey = (h: Hud): boolean =>
-  h.state === "thinking" || h.state === "confirm" || h.state === "which_one" || h.state === "countdown";
+  h.state === "thinking" || h.state === "listening" || h.state === "confirm" || h.state === "which_one" || h.state === "countdown";
 
 /** The proposal the HUD must acknowledge once it is on screen (D22). */
 export function awaitingDisplay(h: Hud): number | null {
   if (h.state === "confirm") return h.proposal_id;
   if (h.state === "countdown" && h.action_id === null) return h.proposal_id;
   return null;
+}
+
+/** The System Settings pane that fixes a refusal, if one does (plan S19). */
+export function privacyPane(r: Refusal): PermissionKind | null {
+  switch (r) {
+    case "microphone_denied":
+      return "microphone";
+    case "speech_denied":
+      return "speech";
+    case "hold_key_off":
+      return "input_monitoring";
+    default:
+      return null;
+  }
 }

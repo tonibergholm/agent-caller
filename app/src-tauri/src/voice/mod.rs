@@ -50,6 +50,11 @@ impl HudSink for TauriSink {
             tracing::error!(%error, "could not emit the voice selection");
         }
     }
+
+    /// Runs under the controller's lock: only dispatches (tray::render).
+    fn listening(&self, on: bool) {
+        crate::tray::set_listening(&self.app, on);
+    }
 }
 
 /// Handles one event from the Swift bridge, on the async runtime.

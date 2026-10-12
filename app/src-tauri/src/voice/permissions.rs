@@ -46,8 +46,6 @@ impl Permission {
     }
 
     /// The System Settings pane for this permission (plan S19).
-    // Opened from Settings (Task 9).
-    #[allow(dead_code)]
     pub fn privacy_url(self) -> &'static str {
         match self {
             Permission::Microphone => "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
