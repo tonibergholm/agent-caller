@@ -121,7 +121,10 @@ pub fn focus_webview(app: &AppHandle, label: &str) {
         unsafe {
             let window = &*(w.ns_window() as *const AnyObject);
             let view = &*(w.inner() as *const AnyObject);
-            let _: bool = msg_send![window, makeFirstResponder: view];
+            let took: bool = msg_send![window, makeFirstResponder: view];
+            if !took {
+                tracing::warn!("the webview refused key focus");
+            }
         }
     }) {
         tracing::warn!(%error, "could not give the webview key focus");
