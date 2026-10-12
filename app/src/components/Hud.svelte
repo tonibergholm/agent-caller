@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import type { InboxView } from "../lib/bindings/InboxView";
-  import { awaitingDisplay, outcomeText, refusalText, wantsKey, type Hud, type ProposalView } from "../lib/hud";
+  import { awaitingDisplay, outcomeText, privacyPane, refusalText, wantsKey, type Hud, type ProposalView } from "../lib/hud";
   import type { Api } from "../lib/ipc";
 
   /** acd-client's undo window (spec §8): the bar's full width. */
@@ -15,6 +15,9 @@
   const seen = { seq: 0 };
   // The input id of the state on screen (`HudEvent.id`), sent back with Esc, clicks and digits.
   let shownId = $state<number | null>(null);
+  // Listening keeps a step that waits on screen, read-only (plan S7).
+  const under = $derived<Hud>(hud.state === "listening" && hud.over ? hud.over : hud);
+  const listening = $derived(hud.state === "listening");
 
   // Rejections are dropped silently: the console never sees voice text.
   const quiet = (p: Promise<unknown>) => void p.catch(() => {});
@@ -137,12 +140,14 @@
     <p class="sr" aria-live="polite">{summary}</p>
     <div class="body" bind:this={body}>
       {#if hud.state === "listening"}
-        <p class="status"><span class="mic" aria-hidden="true"></span>Listening…</p>
-      {:else if hud.state === "thinking"}
+        <p class="status"><span class="mic live" aria-hidden="true"></span>{hud.partial ? "Listening" : "Listening…"}</p>
+        {#if hud.partial}<p class="said live" aria-label="Heard so far">“{hud.partial}”</p>{/if}
+      {/if}
+      {#if under.state === "thinking"}
         <p class="status"><span class="pulse" aria-hidden="true"></span>Thinking</p>
-        <p class="said">“{hud.transcript}”</p>
-      {:else if hud.state === "confirm" || hud.state === "countdown" || hud.state === "sending"}
-        {@const p = hud.proposal}
+        <p class="said">“{under.transcript}”</p>
+      {:else if under.state === "confirm" || under.state === "countdown" || under.state === "sending"}
+        {@const p = under.proposal}
         <header class="target">
           <span class="agent">{p.target.agent}</span>
           <span class="machine" class:off-screen={p.target.off_screen}>@ {p.target.machine}</span>
@@ -153,16 +158,16 @@
         {#if p.question}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block" tabindex="0" aria-label="Request">{p.question}</pre>{/if}
         {#if p.rule}<p class="label">Always allow, from now on:</p><!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block rule" tabindex="0" aria-label="Rule to remember">{p.rule}</pre>{/if}
         {#if p.text}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block payload" tabindex="0" aria-label="Text to send">{p.text}</pre>{/if}
-        {#if hud.state === "sending"}
-          <p class="status">{hud.too_late_to_cancel ? "Already sent. It can't be undone." : "Sent. Waiting for the result."}</p>
+        {#if under.state === "sending"}
+          <p class="status">{under.too_late_to_cancel ? "Already sent. It can't be undone." : "Sent. Waiting for the result."}</p>
         {/if}
-      {:else if hud.state === "which_one"}
-        {@const choiceId = hud.choice_id}
+      {:else if under.state === "which_one"}
+        {@const choiceId = under.choice_id}
         <p class="what">Which one?</p>
         <ol class="candidates">
-          {#each hud.candidates as c, i (c.card)}
+          {#each under.candidates as c, i (c.card)}
             <li>
-              <button onclick={() => choose(choiceId, i)}>
+              <button disabled={listening} onclick={() => choose(choiceId, i)}>
                 <kbd>{i + 1}</kbd>
                 <span class="agent">{c.agent}</span>
                 <span class="machine" class:off-screen={c.off_screen}>@ {c.machine}</span>
@@ -173,13 +178,15 @@
             </li>
           {/each}
         </ol>
-      {:else if hud.state === "done"}
-        <p class="status" aria-live="polite" data-outcome={hud.outcome.kind}>{outcomeText(hud.outcome)}</p>
-      {:else if hud.state === "error"}
-        <p class="status error" aria-live="polite">{refusalText[hud.refusal]}</p>
-        {#if hud.transcript}<p class="said">“{hud.transcript}”</p>{/if}
-      {:else if hud.state === "speaking"}
-        <p class="speech" aria-live="polite">{hud.text}</p>
+      {:else if under.state === "done"}
+        <p class="status" aria-live="polite" data-outcome={under.outcome.kind}>{outcomeText(under.outcome)}</p>
+      {:else if under.state === "error"}
+        {@const pane = privacyPane(under.refusal)}
+        <p class="status error" aria-live="polite">{refusalText[under.refusal]}</p>
+        {#if under.transcript}<p class="said">“{under.transcript}”</p>{/if}
+        {#if pane}<button class="link" onclick={() => quiet(api.openVoicePrivacy(pane))}>Open System Settings</button>{/if}
+      {:else if under.state === "speaking"}
+        <p class="speech" aria-live="polite">{under.text}</p>
       {/if}
     </div>
     {#if hud.state === "confirm"}
@@ -197,6 +204,8 @@
       {#if hud.action_id !== null}
         <span class="track" aria-hidden="true"><span class="bar" style:width="{fraction * 100}%"></span></span>
       {/if}
+    {:else if hud.state === "listening"}
+      <div class="buttons"><button onclick={cancel}>Cancel <kbd>Esc</kbd></button></div>
     {:else if hud.state === "which_one" || hud.state === "thinking"}
       <div class="buttons"><button onclick={cancel}>Cancel <kbd>Esc</kbd></button></div>
     {/if}
@@ -399,6 +408,15 @@
     border-radius: 50%;
     background: var(--cyan);
     animation: pulse 1.6s ease-in-out infinite;
+  }
+  .mic.live {
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .said.live {
+    color: var(--text-dim);
+  }
+  .link {
+    align-self: flex-start;
   }
   @keyframes pulse {
     50% {

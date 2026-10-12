@@ -134,6 +134,9 @@ pub struct Executor {
     snapshot: Option<Snapshot>,
     transcript: Option<VoiceText>,
     prior: Prior,
+    /// The trigger cancelled a countdown (spec §4.4). Read by the next
+    /// `begin`, so that utterance's "cancel" reports it, or by `resume`.
+    trigger_cancelled: bool,
 }
 
 impl Executor {
@@ -160,7 +163,7 @@ impl Executor {
         transcript: VoiceText,
         locale: Locale,
     ) -> Result<(u64, Reaction), Box<Reaction>> {
-        self.prior = Prior::Nothing;
+        self.prior = if std::mem::take(&mut self.trigger_cancelled) { Prior::Cancelled } else { Prior::Nothing };
         match std::mem::take(&mut self.state) {
             State::Counting { action_id, .. } if port.cancel(&action_id) => self.prior = Prior::Cancelled,
             // A fired step waits for its result: refuse the utterance and
@@ -282,6 +285,60 @@ impl Executor {
         }
     }
 
+    /// The trigger was pressed (spec §4.4, step-2 plan S7). A voice
+    /// countdown, or a countdown step not yet shown, is cancelled at once.
+    /// A step still thinking is dropped. A step that waits for input
+    /// (confirm, which-one) stays and is returned, to show under the
+    /// Listening state. A fired step keeps waiting for its outcome.
+    ///
+    /// Returns the recording's id, from the counter every HUD input id
+    /// comes from, so the HUD's Cancel can name it.
+    pub fn listen(&mut self, port: &dyn InboxPort) -> (u64, Option<Hud>) {
+        match std::mem::take(&mut self.state) {
+            State::Counting { action_id, .. } if port.cancel(&action_id) => self.trigger_cancelled = true,
+            State::Counting { proposal, action_id, .. } | State::Sending { proposal, action_id } => {
+                self.state = State::Sending { proposal, action_id };
+            }
+            State::Presenting { .. } => self.trigger_cancelled = true,
+            State::Thinking(_) => self.utterance += 1,
+            other => self.state = other,
+        }
+        let over = match &self.state {
+            State::Confirm { .. } | State::WhichOne(..) => Some(self.waiting().hud),
+            _ => None,
+        };
+        (self.next_proposal(), over)
+    }
+
+    /// The recording ended with nothing to route: too short, silent,
+    /// empty, or cancelled (plan S8).
+    pub fn resume(&mut self) -> Reaction {
+        if std::mem::take(&mut self.trigger_cancelled) {
+            return self.done(None, OutcomeView::Cancelled);
+        }
+        match &self.state {
+            State::Counting { proposal, .. } | State::Sending { proposal, .. } => {
+                show(Hud::Sending { proposal: self.view(proposal), too_late_to_cancel: false })
+            }
+            _ => self.waiting(),
+        }
+    }
+
+    /// Whether no step is active and a notice may take the HUD.
+    pub fn is_idle(&self) -> bool {
+        matches!(self.state, State::Idle | State::Shown)
+    }
+
+    /// The recording failed. A waiting step ends; a fired step keeps
+    /// waiting for its outcome.
+    pub fn listen_failed(&mut self, refusal: Refusal) -> Reaction {
+        self.trigger_cancelled = false;
+        if matches!(self.state, State::Counting { .. } | State::Sending { .. }) {
+            return show(Hud::Error { refusal, transcript: None });
+        }
+        self.error(refusal)
+    }
+
     /// Esc or a click on Cancel. A countdown is cancelled by its id (spec
     /// §5.6); a step already sent cannot be undone.
     ///
@@ -359,6 +416,7 @@ impl Executor {
         self.snapshot = None;
         self.transcript = None;
         self.prior = Prior::Nothing;
+        self.trigger_cancelled = false;
         self.utterance += 1;
     }
 

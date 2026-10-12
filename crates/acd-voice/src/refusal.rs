@@ -53,4 +53,41 @@ pub enum Refusal {
     /// A fired step still waits for its result; the new utterance is
     /// refused so that result is still shown (final review B4).
     StillSending,
+    /// Microphone access is off for Agent Caller (System Settings).
+    MicrophoneDenied,
+    /// No microphone, or it went away during the recording.
+    MicrophoneUnavailable,
+    /// Speech Recognition is off for Agent Caller (step-2 plan S14).
+    SpeechDenied,
+    /// On-device speech recognition is not available, failed, or did not
+    /// finish in time.
+    SpeechUnavailable,
+    /// The speech model for the language is not installed (plan S21).
+    SpeechAssetsMissing,
+    /// The recording reached 60 s and was discarded (plan S9).
+    RecordingTooLong,
+    /// The hold key stopped working: the system disabled the event tap.
+    HoldKeyOff,
+}
+
+impl From<crate::listen::ListenError> for Refusal {
+    fn from(e: crate::listen::ListenError) -> Self {
+        use crate::listen::ListenError as E;
+        match e {
+            E::MicrophoneDenied => Refusal::MicrophoneDenied,
+            E::MicrophoneUnavailable => Refusal::MicrophoneUnavailable,
+            E::SpeechDenied => Refusal::SpeechDenied,
+            E::AssetsMissing => Refusal::SpeechAssetsMissing,
+            E::SpeechUnavailable | E::Failed => Refusal::SpeechUnavailable,
+        }
+    }
+}
+
+impl From<crate::listen::Unavailable> for Refusal {
+    fn from(u: crate::listen::Unavailable) -> Self {
+        match u {
+            crate::listen::Unavailable::AssetsMissing => Refusal::SpeechAssetsMissing,
+            _ => Refusal::SpeechUnavailable,
+        }
+    }
 }

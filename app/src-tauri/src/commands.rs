@@ -60,11 +60,12 @@ pub fn cancel_action(state: State<'_, AppState>, action_id: String) -> bool {
     state.inbox.cancel(&action_id)
 }
 
-/// Esc in the inbox panel: undoes the newest countdown, else cancels a
-/// voice step that is still thinking. False when neither ran.
+/// Esc in the inbox panel: cancels a recording first (plan S25), else
+/// undoes the newest countdown, else cancels a voice step that is still
+/// thinking. False when none ran.
 #[tauri::command]
 pub fn escape(state: State<'_, AppState>, voice: State<'_, crate::voice::VoiceState>) -> bool {
-    state.inbox.escape() || voice.controller.cancel_thinking()
+    voice.controller.escape_listening() || state.inbox.escape() || voice.controller.cancel_thinking()
 }
 
 #[tauri::command]
@@ -127,7 +128,12 @@ pub fn set_hotkey(
     app: AppHandle,
     state: State<'_, AppState>,
     hotkey: String,
+    voice: State<'_, crate::voice::VoiceState>,
 ) -> Result<(), String> {
+    let saved = voice.settings.lock().unwrap().toggle_shortcut.clone();
+    if crate::hotkey::conflicts_with_voice(&hotkey, saved.as_deref()) {
+        return Err("That is the voice shortcut. Choose another inbox hotkey.".into());
+    }
     let previous = crate::hotkey::current_shortcut();
     crate::hotkey::apply(&app, &hotkey)?;
     if let Err(error) = state.inbox.set_hotkey(&hotkey) {

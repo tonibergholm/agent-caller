@@ -7,26 +7,64 @@ use super::settings::VoiceSettings;
 
 #[tauri::command]
 pub fn voice_get_settings(voice: State<'_, VoiceState>) -> VoiceSettings {
-    *voice.settings.lock().unwrap()
+    voice.settings.lock().unwrap().clone()
 }
 
 #[tauri::command]
 pub fn voice_set_settings(
     app: AppHandle,
     voice: State<'_, VoiceState>,
-    enabled: bool,
-    debug_input: bool,
+    settings: VoiceSettings,
 ) -> Result<VoiceSettings, String> {
-    let next = VoiceSettings { enabled, debug_input };
-    if let Some(path) = &voice.path {
-        next.save(path).map_err(|_| "Could not save the voice settings".to_owned())?;
+    // Turning voice off must work even when the saved shortcut conflicts.
+    if settings.enabled
+        && let Some(toggle) = &settings.toggle_shortcut
+    {
+        crate::hotkey::check_voice(toggle, crate::hotkey::current_shortcut())?;
     }
-    *voice.settings.lock().unwrap() = next;
-    voice.controller.set_enabled(enabled);
-    if let Err(error) = app.emit("voice://settings", next) {
+    if let Some(path) = &voice.path {
+        settings.save(path).map_err(|_| "Could not save the voice settings".to_owned())?;
+    }
+    let prev = std::mem::replace(&mut *voice.settings.lock().unwrap(), settings.clone());
+    let was_on = prev.enabled;
+    voice.controller.set_enabled(settings.enabled);
+    #[cfg(target_os = "macos")]
+    {
+        use super::permissions;
+        use super::settings::HoldKey;
+        // Spec §6.4: ask when voice is turned on.
+        if settings.enabled && !was_on {
+            for p in permissions::to_request(settings.hold_key != HoldKey::Off, permissions::status) {
+                permissions::request(p);
+            }
+        }
+        let error = super::trigger::apply(&app, &settings, &prev);
+        // A shortcut that cannot be registered is not kept: after a restart
+        // it would leave the toggle dead while Settings promised the old one.
+        if let Some(message) = &error
+            && settings.toggle_shortcut != prev.toggle_shortcut
+        {
+            let restored = VoiceSettings { toggle_shortcut: prev.toggle_shortcut.clone(), ..settings.clone() };
+            if let Some(path) = &voice.path {
+                let _ = restored.save(path);
+            }
+            *voice.settings.lock().unwrap() = restored.clone();
+            *voice.trigger_error.lock().unwrap() = super::trigger::apply(&app, &restored, &settings);
+            super::emit_status(&app);
+            if let Err(error) = app.emit("voice://settings", &restored) {
+                tracing::error!(%error, "could not emit the voice settings");
+            }
+            return Err(message.clone());
+        }
+        *voice.trigger_error.lock().unwrap() = error;
+        super::emit_status(&app);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = was_on;
+    if let Err(error) = app.emit("voice://settings", &settings) {
         tracing::error!(%error, "could not emit the voice settings");
     }
-    Ok(next)
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -100,4 +138,79 @@ pub fn voice_hud_fit(window: WebviewWindow, seq: u64, height: f64) {
     if let Err(error) = window.run_on_main_thread(move || hud::fit_state(&app, seq, height)) {
         tracing::error!(%error, "could not dispatch the HUD resize");
     }
+}
+
+/// Spike probe step `step` (plan Task 1A, S20). Settings window only, and
+/// only while voice and the debug setting are both on.
+#[tauri::command]
+pub fn voice_probe(window: WebviewWindow, voice: State<'_, VoiceState>, step: u32) {
+    let allowed = {
+        let s = voice.settings.lock().unwrap();
+        s.enabled && s.debug_input
+    };
+    if window.label() != "settings" || !allowed {
+        tracing::debug!(label = window.label(), allowed, "ignored a probe request");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    super::bridge::probe(step);
+    #[cfg(not(target_os = "macos"))]
+    let _ = step;
+}
+
+/// Opens one of three fixed System Settings panes (plan S19). Settings and
+/// HUD windows only.
+#[tauri::command]
+pub fn voice_open_privacy(window: WebviewWindow, kind: super::permissions::Permission) -> Result<(), String> {
+    if window.label() != "settings" && !hud::is_hud(window.label()) {
+        tracing::debug!(label = window.label(), "ignored a System Settings request from another window");
+        return Ok(());
+    }
+    let mut child = std::process::Command::new("/usr/bin/open")
+        .arg(kind.privacy_url())
+        .spawn()
+        .map_err(|_| "Could not open System Settings".to_owned())?;
+    // Reaped off the main thread; a failed exit is logged by class only.
+    std::thread::spawn(move || match child.wait() {
+        Ok(status) if status.success() => {}
+        Ok(_) => tracing::warn!("open exited with a failure opening System Settings"),
+        Err(_) => tracing::warn!("could not wait for open"),
+    });
+    Ok(())
+}
+
+/// Settings' view of voice. On macOS it also retries the hold key, so a
+/// grant made in System Settings takes effect when Settings regains focus
+/// (plan S17).
+#[tauri::command]
+pub fn voice_status(app: AppHandle) -> super::status::VoiceStatus {
+    #[cfg(target_os = "macos")]
+    super::trigger::refresh(&app);
+    super::status::current(&app)
+}
+
+/// "Ask" next to a permission that was never asked. Settings window only.
+#[tauri::command]
+pub fn voice_request_permission(window: WebviewWindow, kind: super::permissions::Permission) {
+    if window.label() != "settings" {
+        tracing::debug!(label = window.label(), "ignored a permission request from another window");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    super::permissions::request(kind);
+    #[cfg(not(target_os = "macos"))]
+    let _ = kind;
+}
+
+/// "Download speech model" (plan S21). Settings window only.
+#[tauri::command]
+pub fn voice_install_assets(window: WebviewWindow, voice: State<'_, VoiceState>) {
+    if window.label() != "settings" {
+        tracing::debug!(label = window.label(), "ignored an asset request from another window");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    voice.speech.install_assets();
+    #[cfg(not(target_os = "macos"))]
+    let _ = voice;
 }

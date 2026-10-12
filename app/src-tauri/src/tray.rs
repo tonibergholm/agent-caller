@@ -1,12 +1,23 @@
 //! Menu bar icon: one dot colored by the most urgent state, with the
 //! number of needs_you agents as the title (spec §8).
 use acd_client::view::{TrayColor, TraySummary};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::AppHandle;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 pub const SIZE: u32 = 36;
+
+/// The live-microphone dot (spec §6.2, plan S18).
+pub const MIC: [u8; 4] = [255, 59, 48, 255];
+
+/// The last summary, so the microphone dot and the summary are always
+/// drawn together and a view update never erases the dot.
+static LAST: Mutex<Option<TraySummary>> = Mutex::new(None);
+static LISTENING: AtomicBool = AtomicBool::new(false);
 
 fn rgba(color: TrayColor) -> [u8; 4] {
     match color {
@@ -17,14 +28,19 @@ fn rgba(color: TrayColor) -> [u8; 4] {
     }
 }
 
-pub fn summary_icon(color: TrayColor) -> Vec<u8> {
+pub fn summary_icon(color: TrayColor, listening: bool) -> Vec<u8> {
     let c = rgba(color);
     let (mid, r) = (SIZE as f32 / 2.0, SIZE as f32 * 0.32);
+    let (mic_x, mic_y, mic_r) = (SIZE as f32 * 0.82, SIZE as f32 * 0.18, SIZE as f32 * 0.16);
     let mut out = Vec::with_capacity((SIZE * SIZE * 4) as usize);
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let (dx, dy) = (x as f32 + 0.5 - mid, y as f32 + 0.5 - mid);
-            if dx * dx + dy * dy <= r * r {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let (dx, dy) = (px - mid, py - mid);
+            let (mx, my) = (px - mic_x, py - mic_y);
+            if listening && mx * mx + my * my <= mic_r * mic_r {
+                out.extend_from_slice(&MIC);
+            } else if dx * dx + dy * dy <= r * r {
                 out.extend_from_slice(&c);
             } else {
                 out.extend_from_slice(&[0, 0, 0, 0]);
@@ -44,7 +60,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayIcon> {
     let quit = MenuItem::with_id(app, "quit", "Quit Agent Caller", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&settings, &quit])?;
     TrayIconBuilder::with_id("main")
-        .icon(Image::new_owned(summary_icon(TrayColor::Grey), SIZE, SIZE))
+        .icon(Image::new_owned(summary_icon(TrayColor::Grey, false), SIZE, SIZE))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, e| match e.id().as_ref() {
@@ -66,17 +82,39 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayIcon> {
 }
 
 pub fn update(app: &AppHandle, summary: &TraySummary) {
-    let (handle, summary) = (app.clone(), summary.clone());
+    *LAST.lock().unwrap() = Some(summary.clone());
+    render(app);
+}
+
+/// The microphone went on or off (spec §6.2).
+pub fn set_listening(app: &AppHandle, on: bool) {
+    LISTENING.store(on, Ordering::SeqCst);
+    render(app);
+}
+
+/// What the icon shows, read at draw time so the last closure to run on
+/// the main thread always draws the newest state, whichever thread queued it.
+fn draw_state() -> (TrayColor, Option<String>, bool) {
+    let summary = LAST.lock().unwrap().clone().unwrap_or(TraySummary {
+        color: TrayColor::Grey,
+        needs_you: 0,
+    });
+    (summary.color, title(summary.needs_you), LISTENING.load(Ordering::SeqCst))
+}
+
+fn render(app: &AppHandle) {
+    let handle = app.clone();
     if let Err(error) = app.run_on_main_thread(move || {
+        let (color, title, listening) = draw_state();
         if let Some(tray) = handle.tray_by_id("main") {
             if let Err(error) = tray.set_icon(Some(Image::new_owned(
-                summary_icon(summary.color),
+                summary_icon(color, listening),
                 SIZE,
                 SIZE,
             ))) {
                 tracing::warn!(%error, "could not update tray icon");
             }
-            if let Err(error) = tray.set_title(title(summary.needs_you)) {
+            if let Err(error) = tray.set_title(title) {
                 tracing::warn!(%error, "could not update tray title");
             }
         }
@@ -91,15 +129,42 @@ mod tests {
 
     #[test]
     fn icon_is_a_filled_dot_in_the_state_color() {
-        let px = summary_icon(TrayColor::Amber);
+        let px = summary_icon(TrayColor::Amber, false);
         assert_eq!(px.len(), (SIZE * SIZE * 4) as usize);
         let center = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
         assert_eq!(&px[center..center + 4], &[245, 166, 35, 255]);
         assert_eq!(&px[0..4], &[0, 0, 0, 0], "corner is transparent");
         assert_ne!(
-            summary_icon(TrayColor::Blue),
-            summary_icon(TrayColor::Green)
+            summary_icon(TrayColor::Blue, false),
+            summary_icon(TrayColor::Green, false)
         );
+    }
+
+    /// Spec §6.2: a live microphone indicator in the menu bar icon (S18).
+    #[test]
+    fn the_microphone_dot_shows_only_while_listening() {
+        let at = |px: &[u8], x: u32, y: u32| {
+            let i = ((y * SIZE + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        let (corner_x, corner_y) = ((SIZE as f32 * 0.82) as u32, (SIZE as f32 * 0.18) as u32);
+        let on = summary_icon(TrayColor::Amber, true);
+        let off = summary_icon(TrayColor::Amber, false);
+        assert_eq!(at(&on, corner_x, corner_y), MIC);
+        assert_eq!(at(&off, corner_x, corner_y), [0, 0, 0, 0]);
+        assert_eq!(at(&on, SIZE / 2, SIZE / 2), [245, 166, 35, 255], "the state colour stays");
+    }
+
+    /// The state is read when the icon is drawn, so a closure queued before
+    /// a newer update still draws the newest state (privacy indicator).
+    #[test]
+    fn draw_state_reads_the_newest_summary_and_microphone() {
+        *LAST.lock().unwrap() = Some(TraySummary { color: TrayColor::Blue, needs_you: 2 });
+        LISTENING.store(true, Ordering::SeqCst);
+        assert_eq!(draw_state(), (TrayColor::Blue, Some("2".to_owned()), true));
+        *LAST.lock().unwrap() = Some(TraySummary { color: TrayColor::Green, needs_you: 0 });
+        LISTENING.store(false, Ordering::SeqCst);
+        assert_eq!(draw_state(), (TrayColor::Green, None, false));
     }
 
     #[test]

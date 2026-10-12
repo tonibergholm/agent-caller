@@ -3,7 +3,19 @@ import type { CardView } from "./bindings/CardView";
 import type { InboxView } from "./bindings/InboxView";
 import type { MachineEntryView } from "./bindings/MachineEntryView";
 import type { HudEvent } from "./hud";
-import { VOICE_OFF, type Presentation, type VoiceSettings } from "./voice";
+import { VOICE_OFF, type Presentation, type VoiceSettings, type VoiceStatus } from "./voice";
+
+export const STATUS_OK: VoiceStatus = {
+  unavailable: null,
+  streams_partials: true,
+  locale: "en_US",
+  microphone: "granted",
+  speech: null,
+  input_monitoring: "granted",
+  hold_key_active: true,
+  relaunch_for_hold_key: false,
+  toggle_error: null,
+};
 
 export function card(overrides: Partial<CardView> = {}): CardView {
   const key = overrides.key ?? "m/a";
@@ -98,13 +110,16 @@ export type FakeApi = Api & {
   /** HUD state seqs sent to `voiceHudFit`, also kept out of `calls`. */
   fits: number[];
   voiceSelect?: (cardKey: string) => void;
+  voiceProbeReport?: (report: string) => void;
   voiceSettings?: (s: VoiceSettings) => void;
+  status: VoiceStatus;
+  voiceStatusChanged?: () => void;
   hud?: (e: HudEvent) => void;
   hudClear?: (seq: number) => void;
 };
 
 export function fakeApi(
-  opts: { machines?: MachineEntryView[]; escapeReturns?: boolean; voice?: VoiceSettings } = {},
+  opts: { machines?: MachineEntryView[]; escapeReturns?: boolean; voice?: VoiceSettings; status?: VoiceStatus } = {},
 ): FakeApi {
   const calls: unknown[][] = [];
   const presentations: Presentation[] = [];
@@ -176,6 +191,20 @@ export function fakeApi(
     // Kept out of `calls`: sizing is not an action.
     voiceHudFit: async (seq: number) => {
       api.fits.push(seq);
+    },
+    voiceProbe: rec("voiceProbe", undefined),
+    openVoicePrivacy: rec("openVoicePrivacy", undefined),
+    status: opts.status ?? STATUS_OK,
+    getVoiceStatus: async () => api.status,
+    onVoiceStatus: async (cb: () => void) => {
+      api.voiceStatusChanged = cb;
+      return () => {};
+    },
+    requestVoicePermission: rec("requestVoicePermission", undefined),
+    installSpeechAssets: rec("installSpeechAssets", undefined),
+    onVoiceProbe: async (cb: (report: string) => void) => {
+      api.voiceProbeReport = cb;
+      return () => {};
     },
     fits: [] as number[],
   } as FakeApi;

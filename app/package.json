@@ -9,7 +9,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "test": "vitest run",
     "tauri": "tauri",
-    "verify": "npm run check && npm test && npm run build && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml --locked && tauri build --bundles app --ci"
+    "verify": "npm run check && npm test && swift test --package-path src-tauri/swift --skip LiveTests && npm run build && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml --locked && tauri build --bundles app --ci"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
