@@ -123,10 +123,13 @@ dependencies = [
  "acd-inbox",
  "acd-protocol",
  "acd-securefs",
+ "anyhow",
  "async-trait",
+ "clap",
  "futures-util",
  "gethostname",
  "libc",
+ "log",
  "secret-service",
  "serde",
  "serde_json",
@@ -134,6 +137,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "zbus",
 ]
 
