@@ -256,7 +256,7 @@ Machine {
 SourceStatus { state: "ok"|"degraded"|"disabled"|"unconfigured", message?: string }
 
 Agent {
-  id: string               // "herdr:<socket_hash>:<pane_id>" | "t3:<thread_id>" | "claude:<session_id>"
+  id: string               // source-prefixed opaque id, at most 128 bytes; long native ids are hashed
   machine_id: string
   source: "herdr" | "t3" | "hooks"
   kind: "claude" | "codex" | "other"
@@ -301,7 +301,11 @@ A request is **answerable** when all three conditions hold:
 - if it is a question, there is exactly one question and it is
   single-select.
 
-Anything else is shown read-only, with the label "answer in terminal".
+Anything else is shown read-only: "answer in T3" for T3 agents,
+"answer in terminal" for other sources. A T3 question with no options
+can still be answered when `free_text` is true. Typed answers are
+supported only on the T3 path; other providers require an explicit
+`allowCustomAnswer: true`, while Claude defaults to enabled when absent.
 
 ### 6.1 Request lifecycle and identity
 
@@ -360,12 +364,16 @@ enough. The evidence per answer path:
     answer and no `PostToolUse`, `Stop` or new request arrives within 30 s,
     the request resolves `by: "uncertain"`.
 - **`keys`.** After sending the key, acd polls the detection snapshot for
-  up to 3 s.
-  - If the fingerprint disappears in two consecutive reads, the result is
-    `by: "inbox"`.
-  - Otherwise the request resolves as `by: "uncertain"`. Clients show
-    "check the terminal", and acd sends nothing further.
-  - Codex's transient `working` state while hooks run is not evidence.
+  up to 3 s. If the dialog disappears in two consecutive reads, it then
+  waits up to 35 s for correlated outcome evidence. Evidence consistent
+  with the selected option resolves `by: "inbox"`; contradictory evidence
+  resolves `by: "terminal"`; missing evidence resolves `by: "uncertain"`.
+  Codex cancellation-tail text for the tracked command also counts as
+  evidence. A dialog still present after the observation window, or a
+  detected stray key, resolves `uncertain`. acd sends nothing further.
+  Codex's transient `working` state while hooks run is not evidence.
+  The timing defaults live in `KeysTiming` in
+  [`herdr/keys.rs`](../acd-adapters/src/herdr/keys.rs).
 - **`t3`.** The T3 command is acknowledged and the thread's request
   disappears from its projection.
 - **Terminal answer.**
@@ -394,7 +402,8 @@ enough. The evidence per answer path:
     sends `agent.mark_seen`.
 - An agent is removed when:
   - its pane closes;
-  - its T3 thread is archived or deleted;
+  - its T3 thread is archived, deleted or hidden by the adapter's visibility
+    rules (including settled/snoozed threads and background-only threads);
   - for a hooks-only agent, 10 minutes after `SessionEnd`, or after 24 hours
     with no event.
 

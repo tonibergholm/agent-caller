@@ -8,6 +8,12 @@ Research: `docs/research/2026-10-07-landscape.md`, which includes the spike
 log; `docs/research/2026-10-09-p3-gates-claude.md` (gates 2, 5, 7) and
 `docs/research/2026-10-09-p3-gate4-codex.md` (gate 4).
 
+> **Reading this document.** Sections describe the design and contracts;
+> §15 retains historical amendments, including superseded decisions. For
+> shipped behavior, verify the current implementation and the
+> [protocol guide](../../../crates/acd-protocol/PROTOCOL.md). Current gaps
+> are tracked in [the follow-ups](../plans/2026-10-07-p1-followups.md).
+
 ## 1. Purpose
 
 agent-caller is an open-source alternative to One (getone.one). It gives one
@@ -648,9 +654,10 @@ header, so these rules apply:
   token is retired, each rejected session is counted and shown as "N Claude
   session(s) use a retired hook token; restart them or run /clear in them".
   Those sessions show `hook error / HTTP 401` on lifecycle hooks, and their
-  permission requests fall back to the terminal. The grace is an assumption
-  until live check 14 (§11) measures how long Claude takes to write its
-  registry entry; an underestimate can retire the previous token early.
+  permission requests fall back to the terminal. Live check 14 measured a worst registry
+  entry delay of 3.06 s against the 5 s grace (§11). This is measured
+  margin, not a guarantee for every load; an underestimate can retire the
+  previous token early.
 
 Claude may rewrite `.claude/settings*.json` formatting when it persists a
 rule (it replaces the file atomically, re-indents it and keeps its mode), so
@@ -1618,7 +1625,7 @@ react to events, such as notifications.
 **Decided in P5** (docs/superpowers/plans/2026-10-08-p5-mac-app.md):
 - Pair with `acd pair` and clipboard import; remote machines use pinned TLS (D1, D6).
 - The local machine connects over `acd.sock` (D2).
-- `⏎` submits only the reply field, with IME and modifier guards (D10).
+- `⏎` submits the focused reply or typed-answer field, with IME and modifier guards (D10).
 - The countdown policy uses atomic `Esc` and connection generations (D9).
 - Readiness and liveness are distinct; cards are actionable only when ready (D11).
 - Notifications contain only the tool name (D12).
@@ -1649,8 +1656,8 @@ card or row carries a "subagent" badge and "↳ <parent title>" in the meta line
 agent (`source: "hooks"`: a Claude session known only through acd's
 hooks, bound to no herdr pane and owned by no T3 thread) cannot be messaged
 and has no pane to open. The app therefore hides it unless it has a pending
-request, which is answerable through the held hook and shows and notifies as
-for any agent. The setting "Show hook-only agents", off by default and stored
+request, which shows and notifies as for any agent. Held permissions are
+answerable through the hook; questions without a keys target are read-only. The setting "Show hook-only agents", off by default and stored
 in `settings.json` (`show_hook_only`), shows them all the time. While a
 hook-only agent is hidden it is left out of cards, the summary and filter
 counts, the tray colour and badge. A card with a running countdown stays
@@ -1680,11 +1687,8 @@ stays visible and counted, with the read-only "Answer in terminal" card.
 - Opened by a global hotkey, by default ⌃⌥Space (Control+Option+Space). ⌥Space
   is commonly taken by launchers such as Raycast and Alfred. It is a non-activating
   `tauri-nspanel`, so focus stays where it was.
-- Cards are ordered:
-  1. requests, oldest first;
-  2. `done`;
-  3. `working`;
-  4. `idle`, hidden behind a toggle.
+- Sections are ordered: needs-you requests (oldest first), working,
+  then done (collapsed by default). Idle agents are hidden unless enabled.
 - Each card's meta line shows the machine, a small badge for where the agent
   runs (`herdr`, `T3`, `hooks` or `unknown`, from the agent's `source`), then
   the project and working directory. The badge uses the text colour, so it
@@ -1918,23 +1922,18 @@ had been checked and the spec updated.
    retention rule of §6.1.
 8. **Upstream ask, not blocking.** Propose a conditional-input method to
    herdr, so the `keys` path becomes atomic.
-9. **Live checks of P3 (open).** The results go into
-   `docs/research/2026-10-09-p3-live.md` when they are run.
-   - *Live check 10.* A `Tip:` line rotating under a visible dialog would
-     make the target watch publish a false `terminal`.
-   - *Live check 11.* Whether `~/.codex/hooks.json` needs a one-time review
-     in Codex.
-   - *Live check 12.* How Claude and Codex render a command that wraps or
-     spans lines. Until measured, such commands never bind to a screen
-     (§6.2 M4, D26); a width-aware rule would be a separate, reviewed
-     change.
-   - *Live check 13.* Whether Claude fires several `PermissionRequest`
-     hooks before the first dialog ends (O1).
-   - *Live check 14, a release gate.* How long after a Claude process
-     starts its registry entry appears, including sessions started during a
-     rotation and under load. `REGISTRY_GRACE_MS` (5 s) must exceed the
-     worst delay; an underestimate can retire the previous hook token while
-     a live old-token session exists. P3 is not released until it passes.
+9. **Live checks of P3: run 2026-10-10.** Evidence is in
+   [the P3 live record](../../research/2026-10-09-p3-live.md).
+   - Check 10: no `Tip:` rotation in 140 s. Rotation in other sessions
+     remains unverified; identity retains tips to avoid resize ambiguity.
+   - Check 11: project-level Codex hook review observed; user-level review
+     was not tested in this run.
+   - Check 12: wrapped commands observed and remain unsupported for screen
+     binding (M4, D26); a width-aware rule needs a separate review.
+   - Check 13: Claude requested permissions one at a time in the run;
+     parallel held permissions remain unverified.
+   - Check 14 (registry delay release gate): passed, worst 3.06 s against
+     `REGISTRY_GRACE_MS = 5000`.
 
 ## 12. Error handling
 

@@ -127,6 +127,11 @@ spacing:
   space-xl: 1.5rem
 ---
 
+> **Design reference.** The implemented panel uses the tokens in
+> `app/src/styles/tokens.css` and the components in `app/src/components/`.
+> Sidebar, voice and telemetry concepts below are outside the current app;
+> this reference is not a feature inventory.
+
 ## Brand & Style
 
 The design system establishes a hyper-focused, precision-engineered developer environment built for orchestration across distributed machines. It bridges high-density terminal efficiency with modern operating system vibrancy, evoking instantaneous feedback, total machine visibility, and low-latency control.

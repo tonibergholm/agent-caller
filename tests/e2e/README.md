@@ -50,6 +50,11 @@ default `w1:p1`), `Q` (Claude pane, default `w2:p1`), `ESC_DELAY=<s>` (60-esc-di
 before pressing Esc), `E2E_CLIENT_PORT` / `E2E_HOOK_PORT` / `E2E_T3_PORT` (never 47800, 47801, 3773), `ACD_BIN`,
 `RUST_LOG`. `E2E_ROOT` is fixed at `/tmp/ace2e`; the scripts refuse to run if it is a symlink or not owned by you.
 
+The default `run-all.sh` runs scenarios 10, 20, 30, 31, 40, 41 and 50.
+Scenario 51 (T3 typed answers) and diagnostics 60/61 are opt-in, via
+`just e2e-one <name>` after `just e2e-up`; they are not covered merely by
+running `just e2e`. Read each scenario before invoking it.
+
 ## Recovery after an interrupted run
 
 `run-all.sh` cleans up on Ctrl-C, but a killed terminal, `kill -9` or a reboot skips the trap. Then:

@@ -1,5 +1,10 @@
 # Cloud session batch (credit expires 2026-11-05)
 
+> **Historical dispatch brief (2026-10-11).** PR #11 and P6 have merged.
+> Branch exclusions, sequencing and proposed tasks below describe that
+> snapshot, not current work assignments. Re-check each task against code
+> and [known gaps](2026-10-07-p1-followups.md) before using a prompt.
+
 Prompts for Claude Code cloud sessions, which run on Linux. Each prompt
 is one session, one branch and one PR. Paste the common preamble first,
 then the task. Merge PR #11 (this doc and CLAUDE.md) before launching:
