@@ -4,6 +4,7 @@
   import type { MachineStatus } from "../lib/bindings/MachineStatus";
   import type { Api, NotificationAuthorization } from "../lib/ipc";
   import { statusText } from "../lib/format";
+  import { isMobile } from "../lib/platform";
   import {
     HOLD_KEYS,
     VOICE_OFF,
@@ -15,9 +16,14 @@
     type VoiceStatus,
   } from "../lib/voice";
 
-  let { api }: { api: Api } = $props();
+  let { api, onback }: { api: Api; onback?: () => void } = $props();
+
+  // Touch layout (iOS build): the phone has no local daemon and no macOS-only settings.
+  const mobile = isMobile();
+  let backButton = $state<HTMLButtonElement>();
 
   let machines = $state<MachineEntryView[]>([]);
+  const listed = $derived(mobile ? machines.filter((m) => m.endpoint.kind !== "local") : machines);
   let statuses = $state<Record<string, MachineStatus>>({});
   let showIdle = $state(false);
   let showSubagents = $state(false);
@@ -159,15 +165,19 @@
   }
 
   onMount(() => {
+    // Touch: focus moves to Back when this view opens, so the change is announced.
+    if (mobile && onback) backButton?.focus();
     let off: (() => void) | undefined;
     let offProbe: (() => void) | undefined;
     let offStatus: (() => void) | undefined;
     let closed = false;
-    void act(async () => {
-      const stored = await api.getHotkey();
-      if (!hotkeyEdited) hotkey = stored;
-    }, "Could not read the hotkey");
-    api.getVoiceSettings().then(
+    // Touch layout: no hotkey, voice, or notification permission to read.
+    if (!mobile)
+      void act(async () => {
+        const stored = await api.getHotkey();
+        if (!hotkeyEdited) hotkey = stored;
+      }, "Could not read the hotkey");
+    if (!mobile) api.getVoiceSettings().then(
       (s) => {
         voice = s;
         voiceLoaded = true;
@@ -175,16 +185,18 @@
       },
       (e) => (error ??= `Could not read the voice settings: ${message(e)}`),
     );
-    // Listen first, then load, so a status change in between is not lost.
-    void api
-      .onVoiceStatus(loadStatus)
-      .then((un) => (closed ? un() : (offStatus = un)))
-      .finally(() => void loadStatus());
-    // A grant made in System Settings shows when this window regains focus.
-    window.addEventListener("focus", loadStatus);
-    void loadNotifications();
-    window.addEventListener("focus", loadNotifications);
-    void api.onVoiceProbe((r) => (probeReports = [...probeReports, r])).then((un) => (closed ? un() : (offProbe = un)));
+    if (!mobile) {
+      // Listen first, then load, so a status change in between is not lost.
+      void api
+        .onVoiceStatus(loadStatus)
+        .then((un) => (closed ? un() : (offStatus = un)))
+        .finally(() => void loadStatus());
+      // A grant made in System Settings shows when this window regains focus.
+      window.addEventListener("focus", loadStatus);
+      void loadNotifications();
+      window.addEventListener("focus", loadNotifications);
+      void api.onVoiceProbe((r) => (probeReports = [...probeReports, r])).then((un) => (closed ? un() : (offProbe = un)));
+    }
     void (async () => {
       try {
         const un = await api.onView(applyView);
@@ -313,7 +325,11 @@
     }, "Could not change hook-only agents");
 </script>
 
-<main class="settings">
+<main class="settings" class:mobile>
+  {#if mobile && onback}
+    <!-- Touch: Settings is a view inside the inbox window, not a second window. -->
+    <button class="back" type="button" bind:this={backButton} onclick={onback}><span aria-hidden="true">‹</span> Inbox</button>
+  {/if}
   <h1>Settings</h1>
 
   {#if error}
@@ -325,7 +341,7 @@
 
   <section aria-label="Machines">
     <ul>
-      {#each machines as m (m.key)}
+      {#each listed as m (m.key)}
         <li class="machine" data-key={m.key}>
           <div class="name">{m.name}</div>
           <div class="endpoint">{endpointText(m)}</div>
@@ -364,28 +380,30 @@
     <button onclick={importPairing}>Add from clipboard</button>
   </section>
 
-  <section aria-label="Shortcut">
-    <label>
-      Hotkey
-      <input bind:value={hotkey} oninput={() => (hotkeyEdited = true)} />
-    </label>
-    <button onclick={saveHotkey}>Save hotkey</button>
-  </section>
+  {#if !mobile}
+    <section aria-label="Shortcut">
+      <label>
+        Hotkey
+        <input bind:value={hotkey} oninput={() => (hotkeyEdited = true)} />
+      </label>
+      <button onclick={saveHotkey}>Save hotkey</button>
+    </section>
 
-  <section aria-label="Notifications">
-    {#if notifications === "granted"}
-      <p class="note" role="status">Notifications are on for agent-caller.</p>
-    {:else if notifications === "denied"}
-      <p class="note" role="status">Notifications are off for agent-caller. Turn them on in System Settings, then Notifications.</p>
-    {:else if notifications === "not_determined"}
-      <p class="note" role="status">macOS has not asked for notification permission yet.</p>
-      <button onclick={requestNotifications} disabled={asking}>
-        {asking ? "Waiting for your answer…" : "Allow notifications"}
-      </button>
-    {:else if notifications === "unavailable"}
-      <p class="note" role="status">Notification permission is not available in this build.</p>
-    {/if}
-  </section>
+    <section aria-label="Notifications">
+      {#if notifications === "granted"}
+        <p class="note" role="status">Notifications are on for agent-caller.</p>
+      {:else if notifications === "denied"}
+        <p class="note" role="status">Notifications are off for agent-caller. Turn them on in System Settings, then Notifications.</p>
+      {:else if notifications === "not_determined"}
+        <p class="note" role="status">macOS has not asked for notification permission yet.</p>
+        <button onclick={requestNotifications} disabled={asking}>
+          {asking ? "Waiting for your answer…" : "Allow notifications"}
+        </button>
+      {:else if notifications === "unavailable"}
+        <p class="note" role="status">Notification permission is not available in this build.</p>
+      {/if}
+    </section>
+  {/if}
 
   <section aria-label="Idle agents">
     <label>
@@ -402,6 +420,7 @@
     <p class="note">Threads another agent started usually cannot be answered here. They are hidden, with their requests, counts and notifications, unless this is on.</p>
   </section>
 
+  {#if !mobile}
   <section aria-label="Voice">
     <label>
       <input type="checkbox" checked={voice.enabled} disabled={!voiceLoaded} onchange={(e) => setVoice(e.currentTarget, "enabled")} />
@@ -492,6 +511,8 @@
     {/if}
   </section>
 
+  {/if}
+
   <section aria-label="Hook-only agents">
     <label>
       <input type="checkbox" checked={showHookOnly} onchange={(e) => toggleHookOnly(e.currentTarget)} />
@@ -511,6 +532,35 @@
     font: 13px var(--font-sans);
     color: var(--text);
     background: var(--canvas);
+  }
+  /* Touch layout (iOS build): inside the safe area, 44 pt targets, 16 px fields. */
+  .settings.mobile {
+    min-height: 100dvh;
+    padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+  }
+  .settings.mobile :global(button:not(.dot)),
+  .settings.mobile input:not([type="checkbox"]) {
+    min-height: 44px;
+  }
+  .settings.mobile input:not([type="checkbox"]) {
+    font-size: 16px;
+  }
+  .settings.mobile .back {
+    align-self: flex-start;
+    min-height: 44px;
+    padding: 0 12px;
+    font: 500 14px var(--font-sans);
+    color: var(--cyan-bright);
+    background: none;
+    border: 0;
+    cursor: pointer;
+  }
+  /* A checkbox is tapped through its label: the label is the 44 pt row. */
+  .settings.mobile section label:has(input[type="checkbox"]) {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    min-height: 44px;
   }
   h1 {
     margin: 0;

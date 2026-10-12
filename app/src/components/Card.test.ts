@@ -168,6 +168,25 @@ test("an offline card still shows the request but no options, countdown or termi
   expect(container.textContent).not.toMatch(/answer in terminal/i);
 });
 
+test.each([
+  ["herdr", "Answer in terminal"],
+  ["t3", "Answer in T3"],
+] as const)("a needs-you %s card with no request still says where to answer", (source, hint) => {
+  const c = card({ key: "m/x", answerable: false });
+  c.agent.source = source;
+  c.agent.pending = null;
+  const { container } = render(Card, props(c));
+  expect(screen.getByText(hint)).toBeTruthy();
+  expect(container.querySelectorAll("button").length).toBe(0);
+});
+
+test("an offline needs-you card with no request shows no answer hint", () => {
+  const c = card({ key: "m/x", live: false, offline_since_ms: 0, answerable: false });
+  c.agent.pending = null;
+  const { container } = render(Card, props(c, 1000));
+  expect(container.textContent).not.toMatch(/answer in/i);
+});
+
 test("answer in terminal is not shown while busy or answering", () => {
   const busy = render(Card, props(card({ key: "m/x", busy: true })));
   expect(busy.container.textContent).not.toMatch(/answer in terminal/i);

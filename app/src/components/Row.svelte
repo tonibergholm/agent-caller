@@ -1,8 +1,12 @@
 <script lang="ts">
   import type { CardView } from "../lib/bindings/CardView";
   import { since } from "../lib/format";
+  import { isMobile } from "../lib/platform";
   import { age } from "../lib/panel";
   import UndoBar from "./UndoBar.svelte";
+
+  // Touch layout (iOS build): no hover, no keyboard selection to reveal actions.
+  const mobile = isMobile();
 
   let {
     card,
@@ -27,13 +31,13 @@
   const changed = $derived(age(card.agent.state_since, now));
 </script>
 
-<div class="row" class:selected class:offline={!card.live} class:dim={card.group === "done" || card.group === "idle"} data-key={card.key} aria-busy={card.busy}>
+<div class="row" class:selected class:mobile class:offline={!card.live} class:dim={card.group === "done" || card.group === "idle"} data-key={card.key} aria-busy={card.busy}>
   <div class="line">
     <span class="dot" data-state={state} aria-hidden="true"></span>
-    <span class="title" title={card.agent.cwd ?? undefined}>{card.agent.title}</span>
+    <span class="title" title={mobile ? undefined : (card.agent.cwd ?? undefined)}>{card.agent.title}</span>
     {#if card.agent.role === "subagent"}
       <span class="subagent">subagent</span>
-      {#if card.agent.parent_title}<span class="parent" title={card.agent.parent_title}>↳ {card.agent.parent_title}</span>{/if}
+      {#if card.agent.parent_title}<span class="parent" title={mobile ? undefined : card.agent.parent_title}>↳ {card.agent.parent_title}</span>{/if}
     {/if}
     {#if card.agent.last_message}<span class="last">{card.agent.last_message}</span>{/if}
     <span class="machine">{card.machine_name}</span>
@@ -44,7 +48,8 @@
       {:else if changed}{changed}{/if}
     </span>
   </div>
-  {#if card.live && selected && (card.can_reply || card.can_mark_seen)}
+  {#if mobile && card.agent.cwd}<div class="path">{card.agent.cwd}</div>{/if}
+  {#if card.live && (selected || mobile) && (card.can_reply || card.can_mark_seen)}
     <div class="more-actions">
       {#if card.can_reply}<button class="ghost" onclick={onreply}><kbd>R</kbd> Reply</button>{/if}
       {#if card.can_mark_seen}<button class="ghost" onclick={onmarkseen}><kbd>E</kbd> Mark seen</button>{/if}
@@ -216,5 +221,29 @@
   }
   .notice.warning {
     color: var(--amber-text);
+  }
+  /* Touch layout (iOS build): text wraps, and every button is a 44 pt target. */
+  .path {
+    font: 400 11px/1.3 var(--font-mono);
+    color: var(--text-dim);
+    overflow-wrap: anywhere;
+  }
+  .row.mobile .line {
+    flex-wrap: wrap;
+  }
+  .row.mobile .title,
+  .row.mobile .last {
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .row.mobile .parent {
+    max-width: none;
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .row.mobile :global(button) {
+    min-height: 44px;
   }
 </style>
