@@ -717,3 +717,74 @@ async fn an_unavailable_backend_still_cancels_a_running_countdown() {
     assert!(speech.calls().is_empty());
     assert!(frames(&r.f, "request.answer").is_empty());
 }
+
+/// Final review: an outcome that lands during a recording must not take the
+/// HUD from Listening (the microphone indicator is on it, spec §6.2). The
+/// result shows when the recording ends with nothing to route.
+#[tokio::test]
+async fn an_outcome_during_a_recording_waits_for_the_recording_to_end() {
+    let (r, speech) = speech_rig(vec![pending_agent()]).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.text_input("approve".into(), true).await.unwrap();
+    let sent = frame(&r.f, "request.answer").await;
+    hud_until(&r.sink, "sending", |h| matches!(h, Hud::Sending { .. })).await;
+    r.voice.hold(true, true);
+    let g = speech.last_start().unwrap();
+    r.c.send(json!({"type":"result","id":sent["id"],"ok":false,"error":{"code":"request_gone","message":"gone"}})).await;
+    tokio::time::sleep(ms(150)).await;
+    assert_eq!(r.sink.last(), Some(Hud::Listening { id: g, partial: None, over: None }), "the result did not take the HUD");
+    r.voice.hold(false, true);
+    r.voice.speech_event(ListenEvent::Final { generation: g, text: VoiceText::new("uh"), audio: ms(200), voiced: ms(200) });
+    assert!(
+        matches!(r.sink.last(), Some(Hud::Done { outcome: OutcomeView::Rejected { .. }, .. })),
+        "the result shows once the recording ended: {:?}",
+        r.sink.last()
+    );
+}
+
+/// Final review: Esc or Cancel after the final left the recorder, before
+/// admission, must still stop the command. The HUD shows Listening then.
+#[tokio::test]
+async fn esc_between_the_final_and_admission_sends_nothing() {
+    let (r, speech) = speech_rig(vec![pending_agent()]).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.hold(true, true);
+    let g = speech.last_start().unwrap();
+    r.voice.hold(false, true);
+    let esc = Arc::new(AtomicBool::new(false));
+    let seen = esc.clone();
+    let fired = at_next_admission(&r.voice, move |v| seen.store(v.escape_listening(), Ordering::SeqCst));
+    r.voice.speech_event(final_(g, "approve"));
+    until("the barrier", || fired.load(Ordering::SeqCst)).await;
+    assert!(esc.load(Ordering::SeqCst), "Esc found something to cancel");
+    tokio::time::sleep(ms(400)).await;
+    assert!(frames(&r.f, "request.answer").is_empty());
+    assert_eq!(r.sink.last(), Some(Hud::Hidden));
+}
+
+#[tokio::test]
+async fn hud_cancel_between_the_final_and_admission_sends_nothing() {
+    let (r, speech) = speech_rig(vec![pending_agent()]).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.hold(true, true);
+    let g = speech.last_start().unwrap();
+    r.voice.hold(false, true);
+    let fired = at_next_admission(&r.voice, move |v| v.cancel(Some(g)));
+    r.voice.speech_event(final_(g, "approve"));
+    until("the barrier", || fired.load(Ordering::SeqCst)).await;
+    tokio::time::sleep(ms(400)).await;
+    assert!(frames(&r.f, "request.answer").is_empty());
+}
+
+/// Esc with nothing in flight still goes to the inbox.
+#[tokio::test]
+async fn esc_with_nothing_to_cancel_is_left_to_the_inbox() {
+    let (r, speech) = speech_rig(vec![pending_agent()]).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.hold(true, true);
+    let g = speech.last_start().unwrap();
+    r.voice.hold(false, true);
+    r.voice.speech_event(final_(g, "approve"));
+    hud_until(&r.sink, "countdown", countdown_started).await;
+    assert!(!r.voice.escape_listening(), "admission cleared the marker");
+}

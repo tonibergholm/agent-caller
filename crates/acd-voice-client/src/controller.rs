@@ -82,6 +82,15 @@ struct Core {
     hold: Hold,
     frozen: Option<Snapshot>,
     over: Option<Hud>,
+    /// What an outcome or a display timeout would have shown while a
+    /// recording had the HUD. The Listening state keeps the screen (spec
+    /// §6.2: the microphone indicator stays); this is shown when the
+    /// recording ends with nothing to route.
+    deferred: Option<Reaction>,
+    /// The recording whose transcript left the recorder and is not yet
+    /// admitted. The HUD still shows Listening, so Esc and Cancel must
+    /// reach it: they bump `epoch`, which drops the transcript (S23).
+    unadmitted: Option<u64>,
     /// The recording whose capture Swift reports running (S18).
     mic: Option<u64>,
     /// The highest generation Swift reported stopped (S18).
@@ -132,6 +141,8 @@ impl Controller {
                 hold: Hold::default(),
                 frozen: None,
                 over: None,
+                deferred: None,
+                unadmitted: None,
                 mic: None,
                 mic_off: 0,
             }),
@@ -220,6 +231,9 @@ impl Controller {
             {
                 tracing::info!(target: "acd_voice", source = source.tag(), "stale transcript dropped");
                 return Ok(());
+            }
+            if token.is_some() {
+                core.unadmitted = None;
             }
             let session = core.session;
             let changes = self.session_tx.subscribe();
@@ -326,7 +340,7 @@ impl Controller {
     pub fn escape_listening(&self) -> bool {
         let mut core = self.core.lock().unwrap();
         if core.recorder.active().is_none() {
-            return false;
+            return self.cancel_unadmitted(&mut core, None);
         }
         self.cancel_listening(&mut core);
         true
@@ -419,7 +433,7 @@ impl Controller {
                 {
                     input.cancel(id);
                 }
-                self.heard(&mut core, heard);
+                self.heard(&mut core, id, heard);
             }
         }
     }
@@ -440,6 +454,8 @@ impl Controller {
         }
         core.frozen = None;
         core.over = None;
+        core.deferred = None;
+        core.unadmitted = None;
         core.epoch += 1;
         core.session += 1;
         self.session_tx.send_replace(core.session);
@@ -472,6 +488,7 @@ impl Controller {
         // §4.4), whether or not anything can listen.
         let (id, over) = core.exec.listen(&self.port);
         core.epoch += 1;
+        core.unadmitted = None;
         let (Some(input), None) = (input, unavailable) else {
             let refusal = unavailable.unwrap_or(Refusal::SpeechUnavailable);
             tracing::info!(target: "acd_voice", refusal = ?refusal, "voice cannot listen");
@@ -511,7 +528,7 @@ impl Controller {
                 if let Some(input) = self.input() {
                     input.cancel(generation);
                 }
-                self.heard(core, Heard::TooLong);
+                self.heard(core, generation, Heard::TooLong);
             }
         }
     }
@@ -527,20 +544,41 @@ impl Controller {
         core.over = None;
         tracing::info!(target: "acd_voice", "recording cancelled");
         let r = core.exec.resume();
+        let r = core.deferred.take().unwrap_or(r);
         self.emit(&mut core.exec, r);
+    }
+
+    /// Esc or Cancel after the final left the recorder and before admission:
+    /// the new epoch makes admission drop it. `id` is the recording the HUD
+    /// showed (`None`: whatever is current). True if there was one.
+    fn cancel_unadmitted(&self, core: &mut Core, id: Option<u64>) -> bool {
+        let Some(generation) = core.unadmitted else {
+            return false;
+        };
+        if id.is_some_and(|i| i != generation) {
+            return false;
+        }
+        core.unadmitted = None;
+        core.epoch += 1;
+        tracing::info!(target: "acd_voice", "transcript cancelled before admission");
+        let r = core.exec.resume();
+        self.emit(&mut core.exec, r);
+        true
     }
 
     /// How the recording ended (plan S8, S9). A transcript is routed on its
     /// own task with the admission token taken here, under the lock (S23).
-    fn heard(&self, core: &mut Core, heard: Heard) {
+    fn heard(&self, core: &mut Core, generation: u64, heard: Heard) {
         let snapshot = core.frozen.take();
         core.over = None;
+        let deferred = core.deferred.take();
         let refusal = match heard {
             Heard::Transcript(text) => {
                 let token = Admission { session: core.session, epoch: core.epoch };
                 let (Some(snapshot), Some(me)) = (snapshot, self.me.upgrade()) else {
                     return;
                 };
+                core.unadmitted = Some(generation);
                 self.runtime.spawn(async move {
                     let _ = me.utterance(text, snapshot, Source::Speech, Some(token)).await;
                 });
@@ -549,7 +587,7 @@ impl Controller {
             Heard::Ignored(why) => {
                 tracing::info!(target: "acd_voice", ignored = ?why, "recording ignored");
                 let r = core.exec.resume();
-                self.emit(&mut core.exec, r);
+                self.emit(&mut core.exec, deferred.unwrap_or(r));
                 return;
             }
             Heard::Failed(e) => Refusal::from(e),
@@ -580,7 +618,7 @@ impl Controller {
         if let Some(input) = self.input() {
             input.cancel(generation);
         }
-        self.heard(&mut core, heard);
+        self.heard(&mut core, generation, heard);
     }
 
     /// The HUD rendered proposal `id` (D22).
@@ -609,6 +647,9 @@ impl Controller {
             self.cancel_listening(&mut core);
             return;
         }
+        if self.cancel_unadmitted(&mut core, id) {
+            return;
+        }
         if let Some(reaction) = core.exec.cancel(&self.port, id) {
             self.emit(&mut core.exec, reaction);
         }
@@ -633,6 +674,21 @@ impl Controller {
     fn act(&self, f: impl FnOnce(&mut Executor, &AcdPort) -> Option<Reaction>) {
         let mut core = self.core.lock().unwrap();
         if let Some(reaction) = f(&mut core.exec, &self.port) {
+            self.emit(&mut core.exec, reaction);
+        }
+    }
+
+    /// Like `act`, for what happens while no one asked: an outcome or a
+    /// display timeout. During a recording the executor still moves on but
+    /// the HUD keeps showing Listening; the reaction waits in `deferred`.
+    fn act_quiet(&self, f: impl FnOnce(&mut Executor, &AcdPort) -> Option<Reaction>) {
+        let mut core = self.core.lock().unwrap();
+        let Some(reaction) = f(&mut core.exec, &self.port) else {
+            return;
+        };
+        if core.recorder.active().is_some() {
+            core.deferred = Some(reaction);
+        } else {
             self.emit(&mut core.exec, reaction);
         }
     }
@@ -664,7 +720,7 @@ impl Controller {
         self.runtime.spawn(async move {
             tokio::time::sleep(DISPLAY_TIMEOUT).await;
             if let Some(this) = me.upgrade() {
-                this.act(|exec, _| exec.display_failed(id));
+                this.act_quiet(|exec, _| exec.display_failed(id));
             }
         });
     }
@@ -693,14 +749,14 @@ async fn forward_outcomes(this: Weak<Controller>, mut rx: broadcast::Receiver<Ac
             return;
         };
         match event {
-            Ok(e) => this.act(|exec, _| {
+            Ok(e) => this.act_quiet(|exec, _| {
                 let r = exec.outcome(&e.action_id, voice_outcome(e.outcome));
                 if r.is_some() {
                     tracing::info!(target: "acd_voice", outcome = outcome_tag(e.outcome), "voice action outcome");
                 }
                 r
             }),
-            Err(broadcast::error::RecvError::Lagged(_)) => this.act(|exec, port| exec.outcomes_lost(port)),
+            Err(broadcast::error::RecvError::Lagged(_)) => this.act_quiet(|exec, port| exec.outcomes_lost(port)),
             Err(broadcast::error::RecvError::Closed) => return,
         }
     }

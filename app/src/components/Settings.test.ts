@@ -281,6 +281,17 @@ test("the Voice section turns voice and the typed command field on", async () =>
   expect(api.calls).toContainEqual(["setVoiceSettings", { ...VOICE_OFF, enabled: true, debug_input: true }]);
 });
 
+test("the Voice box cannot be used before the stored settings load", async () => {
+  const api = fakeApi();
+  let release!: (v: typeof VOICE_OFF) => void;
+  api.getVoiceSettings = () => new Promise<typeof VOICE_OFF>((r) => (release = r));
+  render(Settings, { api });
+  const voice = (await screen.findByRole("checkbox", { name: "Voice control" })) as HTMLInputElement;
+  expect(voice.disabled).toBe(true);
+  release({ ...VOICE_OFF, hold_key: "left_option" });
+  await vi.waitFor(() => expect(voice.disabled).toBe(false));
+});
+
 test("a failed voice change puts the box back and says why", async () => {
   const api = fakeApi();
   api.setVoiceSettings = async () => {

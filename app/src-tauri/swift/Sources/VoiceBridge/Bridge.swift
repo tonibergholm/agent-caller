@@ -133,6 +133,10 @@ final class Bridge: @unchecked Sendable {
             if let code = system {
                 batch.append(Event(kind: VB_EV_SYSTEM, code: code))
                 system = nil
+                // The lock goes first, so a key press queued before it would
+                // start a recording after it. A release still passes: Rust
+                // needs it to forget the held key.
+                fifo.removeAll { $0.kind == VB_EV_HOLD && $0.value != 0 }
             }
             if let c = capture {
                 batch.append(c)

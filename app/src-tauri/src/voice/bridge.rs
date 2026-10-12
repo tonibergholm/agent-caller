@@ -234,6 +234,9 @@ pub struct Link {
     tx: mpsc::Sender<BridgeEvent>,
     overflow: AtomicBool,
     wake: tokio::sync::Notify,
+    /// The latest capture report that did not fit. The indicator must learn
+    /// every stop (S18), so the pump delivers it right after the overflow.
+    capture: Mutex<Option<BridgeEvent>>,
 }
 
 impl Link {
@@ -243,7 +246,7 @@ impl Link {
 
     pub fn with_capacity(n: usize) -> (Arc<Link>, mpsc::Receiver<BridgeEvent>) {
         let (tx, rx) = mpsc::channel(n);
-        (Arc::new(Link { tx, overflow: AtomicBool::new(false), wake: tokio::sync::Notify::new() }), rx)
+        (Arc::new(Link { tx, overflow: AtomicBool::new(false), wake: tokio::sync::Notify::new(), capture: Mutex::new(None) }), rx)
     }
 }
 
@@ -252,7 +255,12 @@ static LINK: OnceLock<Arc<Link>> = OnceLock::new();
 /// Queues `ev` without waiting. A full queue latches an overflow and wakes
 /// the pump (S5).
 pub fn offer(link: &Link, ev: BridgeEvent) -> bool {
-    if link.tx.try_send(ev).is_ok() {
+    if let Err(e) = link.tx.try_send(ev) {
+        let ev = e.into_inner();
+        if matches!(ev, BridgeEvent::Capture { .. }) {
+            *link.capture.lock().unwrap() = Some(ev);
+        }
+    } else {
         return true;
     }
     link.overflow.store(true, Ordering::SeqCst);
@@ -269,12 +277,18 @@ pub async fn pump(link: Arc<Link>, mut rx: mpsc::Receiver<BridgeEvent>, mut f: i
             _ = link.wake.notified() => {
                 if link.overflow.swap(false, Ordering::SeqCst) {
                     f(BridgeEvent::Overflow);
+                    if let Some(c) = link.capture.lock().unwrap().take() {
+                        f(c);
+                    }
                 }
                 continue;
             }
         };
         if link.overflow.swap(false, Ordering::SeqCst) {
             f(BridgeEvent::Overflow);
+            if let Some(c) = link.capture.lock().unwrap().take() {
+                f(c);
+            }
         }
         match next {
             Some(ev) => f(ev),
@@ -528,6 +542,32 @@ mod tests {
         .expect("the pump delivers");
         task.abort();
         assert_eq!(*got.lock().unwrap(), [BridgeEvent::Overflow, BridgeEvent::OtherKey { tap: 1 }]);
+    }
+
+    /// Final review: a capture report that does not fit is kept, so the
+    /// microphone indicator learns the stop after the overflow.
+    #[tokio::test]
+    async fn a_dropped_capture_report_still_arrives_after_the_overflow() {
+        use std::sync::{Arc, Mutex};
+        let (link, rx) = Link::with_capacity(1);
+        assert!(offer(&link, BridgeEvent::OtherKey { tap: 1 }));
+        assert!(!offer(&link, BridgeEvent::Capture { generation: 3, on: true }));
+        assert!(!offer(&link, BridgeEvent::Capture { generation: 3, on: false }));
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = got.clone();
+        let task = tokio::spawn(pump(link.clone(), rx, move |ev| sink.lock().unwrap().push(ev)));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while got.lock().unwrap().len() < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the pump delivers");
+        task.abort();
+        assert_eq!(
+            *got.lock().unwrap(),
+            [BridgeEvent::Overflow, BridgeEvent::Capture { generation: 3, on: false }, BridgeEvent::OtherKey { tap: 1 }]
+        );
     }
 
     /// A partial can follow its own final in one outbox batch. The pump

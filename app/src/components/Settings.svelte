@@ -354,7 +354,7 @@
 
   <section aria-label="Voice">
     <label>
-      <input type="checkbox" checked={voice.enabled} onchange={(e) => setVoice(e.currentTarget, "enabled")} />
+      <input type="checkbox" checked={voice.enabled} disabled={!voiceLoaded} onchange={(e) => setVoice(e.currentTarget, "enabled")} />
       Voice control
     </label>
 

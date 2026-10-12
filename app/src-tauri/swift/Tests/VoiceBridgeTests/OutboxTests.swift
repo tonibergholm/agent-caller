@@ -88,6 +88,20 @@ final class OutboxTests: XCTestCase {
         XCTAssertEqual(box.all.prefix(2).map(\.kind), [VB_EV_OVERFLOW, VB_EV_SYSTEM])
     }
 
+    /// Final review: a hold-key press queued before the lock must not start
+    /// a recording after it; the release still arrives.
+    func testAPressQueuedBeforeALockIsDropped() {
+        let (bridge, box) = bridge()
+        bridge.events.suspend()
+        bridge.emit(Event(generation: 1, kind: VB_EV_HOLD, value: 1))
+        bridge.emit(Event(generation: 1, kind: VB_EV_HOLD, value: 0))
+        bridge.emitSystem(VB_SYS_SCREEN_LOCKED)
+        bridge.events.resume()
+        bridge.events.sync {}
+        XCTAssertEqual(box.all.map(\.kind), [VB_EV_SYSTEM, VB_EV_HOLD])
+        XCTAssertEqual(box.all.last?.value, 0)
+    }
+
     /// Spec §4.2: one drain block at a time, however many events arrive.
     func testOneDrainBlockAtATime() {
         let (bridge, _) = bridge()
