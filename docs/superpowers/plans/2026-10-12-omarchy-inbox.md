@@ -35,7 +35,7 @@ Task text refers to these by number.
 - **D3. An edit lock.** `Inbox` gains an `EditLock` (a mutex plus a waiter count for tests). It is held for the whole of every change to machines or to the saved settings: `pair_machine`, `rename_machine`, `remove_machine_checked`, `reconnect_machine`, `set_hotkey`, `set_show_subagents` and `set_show_hook_only`. So no writer can save over another's result (a rename during a re-pairing is kept; a settings write during a removal cannot bring the machine back), and `remove_machine_checked` needs no corrective save. `SecretStore` calls may run under it, never under `inner`. Timers, `cancel`, `escape`, views, `machines()` and `settings()` never take it.
 - **D4. Typed errors.**
   - `SecretError` stays `pub struct SecretError(pub String)` (the Mac Keychain code builds it).
-  - It gains `SecretError::locked()`, `SecretError::timeout()` and `kind() -> SecretErrorKind { Locked, Timeout, Other }`. The two constructors use fixed texts that no Keychain message equals.
+  - It gains `SecretError::locked()`, `SecretError::timeout()`, `SecretError::unknown()` and `kind() -> SecretErrorKind { Locked, Timeout, Unknown, Other }`. The three constructors use fixed texts that no Keychain message equals. `Unknown` means a change to the item may or may not have happened (D36).
   - `acd_client::inbox::MachineError` is the typed error of `pair_machine`, `remove_machine_checked` and `reconnect_machine`. Its `Display` reproduces today's strings exactly, so `import_pairing` and `remove_machine` (now thin wrappers) return the same texts.
 - **D5. `MachineEntryView.secret: SecretStatus` is `#[cfg_attr(feature = "ts", ts(skip))]`.** The Mac bindings do not change (S3). `SecretStatus` is `ok | locked | missing | unreadable`. `SecretStore` gains a default method `status(key)`, derived from `get`; a `Locked`-kind error gives `locked`. `pairing` keeps its values: `locked` maps to `unreadable` there, as today any read error does.
 - **D6. `reconnect_machine(key)`.** A machine with a handle gets `retry_now()` (a no-op while online). A machine without one has its secret read outside `inner`, then a handle is created and watched. Errors: `UnknownMachine`, `NotPaired` (no secret), `SecretRead(e)` (locked, timeout, unreadable). `retry_machine` stays as it is for the Mac app.
@@ -49,7 +49,7 @@ Task text refers to these by number.
 - **D8. Error codes**, all fixed snake_case strings:
   - Picks and answers: `stale`, `unknown_card`, `not_answerable`, `unknown_option`, `already_counting`, `bad_text`, `cannot_reply`, `cannot_mark_seen`, `hidden`.
   - Machines: `unknown_machine`, `not_paired`, `bad_name`, `bad_pairing`.
-  - Keyring and settings: `secret_store_locked`, `secret_store_timeout`, `secret_store_failed`, `settings_failed`.
+  - Keyring and settings: `secret_store_locked`, `secret_store_timeout`, `secret_store_unknown` (D36), `secret_store_failed`, `settings_failed`.
   - Protocol: `bad_request` (a field is missing or has the wrong type), `duplicate_id`, `unsupported`.
   - `PickError::ConnectionChanged` (guarded paths only) maps to `stale`.
 - **D9. Oversized views** (orchestrator decision, 2026-10-12; Task 4 amends spec §5). `protocol::view_line(view, max)` returns a line under `max` bytes, newline included, or `None`.
@@ -57,7 +57,7 @@ Task text refers to these by number.
   2. Agent text cut, longest first, down to no less than 256 characters plus the marker `"…[truncated]"`. A binary search finds the largest common cap that fits. Keys that hold ids, enums or times are never cut: `id`, `machine_id`, `agent_id`, `source`, `kind`, `state`, `status`, `answer_path`, `effect`, `state_since`, `opened_at`, `role`. Cuts fall on character boundaries.
   3. Then Done and idle cards are left out, then Working and unknown ones, never a card with a countdown. They are counted in `omitted`, and the panel shows "N not shown".
   4. Needs-you cards are never left out. If they alone do not fit, their text is cut further, down to 32 characters per field.
-  5. If even that does not fit, `None`: the service logs it and keeps sending the previous view.
+  5. If even that does not fit, `None`. The service then sends `{"type":"view_overflow","needs_you":n}` instead of a view (orchestrator decision, 2026-10-12). The panel shows an explicit error state with the count until a view fits again.
   `settings_line` is bounded the same way, leaving machines out from the end.
 - **D10. Envelope.**
   - A line must be a JSON object with a string `type` and a string `id` of 1 to 64 bytes. Anything else is malformed and closes the connection (§11).
@@ -80,15 +80,16 @@ Task text refers to these by number.
   - A job that reaches the front of the queue after its deadline is answered `Expired` and never runs. So a write queued behind a prompt cannot happen after its caller reported a timeout.
   - A started job runs only until the deadline, and its future is then dropped, so a stuck prompt never blocks later jobs.
   - A write or delete cut off mid-call is `Ambiguous`, because D-Bus may have applied it. Read and unlock time-outs are plain `Timeout`.
-  - Reads, writes and deletes check `Collection::is_locked` and `Item::is_locked` first and return `Locked` without prompting. Only `unlock` prompts.
+  - Reads check `Collection::is_locked` and `Item::is_locked` and return `Locked` without prompting. A lock check cannot stop the service from asking for a prompt on a write or delete (the Secret Service spec allows one per operation), so writes and deletes call `CreateItem` and `Item.Delete` directly and dismiss any returned prompt, reporting `Locked`. Only `unlock` runs a prompt. The fake models this with `prompts`.
   - secret-service 5.2 cannot dismiss its prompt. After an unlock time-out the prompt can stay on screen. A late unlock only unlocks the collection, and the next refresh picks that up; a late dismiss changes nothing.
 - **D14. `WorkerStore`, not `CachedSecrets`.**
   - Per key, the cache holds the outcome of the last read: a value, `Locked`, `Unavailable`, `TimedOut`, or `Unknown` (an ambiguous change that could not be read back). A cached error is answered from memory.
   - Only `refresh(keys)`, on unlock and on `retry_machine`, reads a key again.
   - `prefill(keys)` runs on the blocking pool before `Inbox::start`. So `start`, `Service::new` and every settings snapshot are served from memory; no async thread waits on the keyring.
   - A read of a key with no entry (a machine being paired) goes to the worker. That only happens in `pair_machine`, which runs on the blocking pool.
-  - An `Ambiguous` write or delete is reconciled before the call returns: the item is read back. The call succeeds only if the item shows the intended state. So acd-client's pairing rollback decides on the item's real state.
-  - `TimedOut`, `Unavailable` and `Unknown` show as `secret: unreadable`.
+  - An `Ambiguous` write or delete is reconciled before the call returns: the item is read back. The call succeeds only if the item shows the intended state; otherwise the key becomes `Unknown` (D36).
+  - Read results are published under per-key generations (D37).
+  - `TimedOut` and `Unavailable` show as `secret: unreadable`; `Unknown` as `secret: unknown`.
 - **D15. Notification text.**
   - Summary: `"<agent title> on <machine> needs you"`. Body: the request label, using the panel's rule (`toolName`): `"bash approval"`, `"approval"`, `"question"`, `"blocked"` or `"request"`.
   - Agent text is cleaned (whitespace, control, bidi and separator characters become single spaces) and cut to 60 characters with `…`.
@@ -138,6 +139,24 @@ Task text refers to these by number.
 - **D34. Typed answers and keys in QML.**
   - Opening a typed-answer editor records the card, request id and revision (`Model.answerEditor`). The answer goes to that request. When the view no longer shows it (`answerEditorValid`), the editor closes with "The request changed. Your answer was not sent." and the text is dropped.
   - Every key, in the panel or in a text field, goes through `Model.onKey`, with the field's kind and its `inputMethodComposing`.
+- **D35. Drafts outside delegates** (Sol re-review, adopted). Repeater delegates are recreated whenever a new view replaces the model array, so text fields cannot own their text.
+  - Typed-answer, reply and rename texts live in `Model.Drafts`, held by the panel. Keys: `answer:<card>:<request>:<revision>`, `reply:<card>:<request or ->` and `rename:<machine>`.
+  - Each field reads its draft on creation and writes it on every change. A draft is cleared on a successful send, and pruned when its card or machine is gone or its request changed.
+  - The pairing field is never drafted.
+- **D36. Unconfirmed keyring changes** (orchestrator decision, 2026-10-12). A write or delete whose outcome cannot be established (cut off, and the read-back fails or shows another state) puts the machine's secret into `SecretStatus::Unknown`.
+  - acd-client stops the machine's handle and ends its countdowns: fail closed, with no connection on uncertain credentials. No rollback guesses.
+  - Recovery is only a successful read (the user's `retry_machine`) or a re-pairing.
+  - A change that lands late is harmless: the next successful read is authoritative, and the status stays `unknown` until then.
+  - The reply code is `secret_store_unknown`, and the panel chip says "Keyring state unknown. Retry".
+  - The fake models a change that lands after cancellation (`Hang::AppliesLater`) and a failed read-back (`fail_reads`).
+- **D37. Per-key generations** (orchestrator decision, 2026-10-12).
+  - Every write or delete raises the key's generation when it starts. These run only under acd-client's edit lock (pair, remove).
+  - A read (prefill, refresh, miss) remembers the generation it started under. It publishes its result only if that generation is still current, compared and stored under the cache lock.
+  - A refresh that read old credentials before a re-pairing therefore cannot overwrite the new ones. A hook between the worker's reply and publication makes this testable with a barrier (Task 12).
+- **D38. Writes use a plain Secret Service session.** secret-service 5.2 keeps its encrypted (DH) session private, and its `create_item` would run prompts. So `write_in` opens its own "plain" session for `CreateItem`.
+  - The secret crosses the user's session bus unencrypted. Only processes of the same user can see it, and they can already read the keyring.
+  - Reads keep the crate's DH session.
+  - If that trade-off is not acceptable, the alternative is to implement DH (hkdf, aes, cbc) in `linux::keyring`. That is a separate change.
 
 ## Review answers
 
@@ -159,6 +178,19 @@ Non-blocking points adopted:
 - The lock file is validated (D23).
 - Race tests force both orderings and assert exactly one terminal outcome, with no fixed sleeps; blocked fakes are released by guards (Tasks 1, 2, 8, 10).
 - Tasks 8, 10 and 15 are split.
+
+Sol re-reviewed `f95da10` (`/tmp/sol-omarchy/findings4.md`). The orchestrator decided the two blockers; the plan implements them:
+
+1. **Ambiguous mutations without safe recovery.** D36: an unconfirmed write or delete makes the secret `unknown`. The machine's handle is stopped, nothing rolls back on a guess, and only a successful read or a re-pairing recovers. Tests:
+   - Task 3: `an_unconfirmed_secret_change_stops_the_machine_until_a_read_succeeds`.
+   - Task 11: `a_cut_off_write_can_still_land_after_its_caller_gave_up`.
+   - Task 12: `an_ambiguous_write_is_confirmed_only_by_its_read_back`, `a_change_landing_late_keeps_the_key_unknown_until_a_successful_read`, `pairing_rollback_decides_on_the_read_back_state`.
+2. **Refresh overwriting newer credentials.** D37: per-key generations with compare-and-publish. Task 12 tests it with a barrier: `a_refresh_that_read_old_credentials_never_overwrites_a_re_pairing`.
+
+Important points adopted:
+- **Prompts on create and delete.** These are now refused: the prompt is dismissed and the change reported `Locked` (D13, D38). The "only unlock prompts" claim is corrected. Tests: Task 11 `a_change_that_needs_a_prompt_is_dismissed_and_reported_locked`, Task 12 `a_change_that_needs_a_prompt_is_refused_as_locked`, Task 14 `only_the_no_prompt_path_lets_a_change_through`.
+- **Drafts.** They are kept outside the delegates (D35). Tests: Task 17 "drafts survive an unrelated new snapshot", Task 19 checks.
+- **Structural overflow.** It sends `view_overflow` with the Needs-you count, and the panel shows an error state (D9). Tests: Task 4 `needs_you_text_is_cut_further_but_no_request_is_dropped`, Task 9 `a_view_that_cannot_fit_is_reported_and_recovers`.
 
 ## Global Constraints
 
@@ -1457,10 +1489,10 @@ git commit -m "acd-client: no secret store calls under the inbox lock; typed mac
 **Interfaces:**
 - Consumes: Task 2's `MachineError`, `connect_info`, `tcp_info`, `spawn_with`, `edits`.
 - Produces (in `acd_client::settings`):
-  - `pub const SECRET_LOCKED: &str` and `pub const SECRET_TIMEOUT: &str`.
-  - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum SecretErrorKind { Locked, Timeout, Other }`.
+  - `pub const SECRET_LOCKED: &str`, `pub const SECRET_TIMEOUT: &str` and `pub const SECRET_UNKNOWN: &str`.
+  - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum SecretErrorKind { Locked, Timeout, Unknown, Other }`.
   - `impl SecretError { pub fn locked() -> Self; pub fn timeout() -> Self; pub fn kind(&self) -> SecretErrorKind }`.
-  - `#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)] #[serde(rename_all = "snake_case")] pub enum SecretStatus { Ok, Locked, Missing, Unreadable }`.
+  - `#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)] #[serde(rename_all = "snake_case")] pub enum SecretStatus { Ok, Locked, Missing, Unreadable, Unknown }`.
   - `trait SecretStore { … fn status(&self, key: &str) -> SecretStatus { /* default from get */ } }`.
 - Produces (in `acd_client::view`): `MachineEntryView.secret: SecretStatus`, skipped by ts-rs (D5); JSON `"secret":"ok"|"locked"|"missing"|"unreadable"`.
 - Produces (on `Inbox`): `reconnect_machine(self: &Arc<Self>, key: &str) -> Result<(), MachineError>` (D6).
@@ -1500,6 +1532,8 @@ Append to `mod tests` in `crates/acd-client/src/settings.rs`:
         assert_eq!(Locked.status("k"), SecretStatus::Locked);
         assert_eq!(CachedSecrets::new(Locked).status("k"), SecretStatus::Locked);
         assert_eq!(serde_json::to_value(SecretStatus::Unreadable).unwrap(), "unreadable");
+        assert_eq!(SecretError::unknown().kind(), SecretErrorKind::Unknown);
+        assert_eq!(serde_json::to_value(SecretStatus::Unknown).unwrap(), "unknown");
     }
 ```
 
@@ -1569,6 +1603,58 @@ async fn reconnect_keeps_an_online_handle_and_rejects_unknown_or_unpaired_machin
     assert_eq!(empty.machines()[0].secret, SecretStatus::Missing);
 }
 
+/// A keyring whose writes and deletes may or may not have happened.
+struct Uncertain {
+    inner: MemorySecrets,
+    unknown: AtomicBool,
+}
+
+impl SecretStore for Uncertain {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        if self.unknown.load(SeqCst) {
+            return Err(SecretError::unknown());
+        }
+        self.inner.get(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        if self.unknown.load(SeqCst) {
+            return Err(SecretError::unknown());
+        }
+        self.inner.set(key, value)
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        if self.unknown.load(SeqCst) {
+            return Err(SecretError::unknown());
+        }
+        self.inner.delete(key)
+    }
+}
+
+#[tokio::test]
+async fn an_unconfirmed_secret_change_stops_the_machine_until_a_read_succeeds() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let store = Arc::new(Uncertain { inner: MemorySecrets::default(), unknown: AtomicBool::new(false) });
+    store.inner.set("m1", &box_secret(&f)).unwrap();
+    let ib = Inbox::new(box_settings(&f), store.clone(), options(held()));
+    ib.start();
+    let c = f.next_connection().await;
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
+    view_until(&ib, "answerable", |v| v.cards.iter().any(|c| c.answerable)).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    store.unknown.store(true, SeqCst);
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
+    let e = ib.pair_machine(&line).unwrap_err();
+    assert!(matches!(&e, MachineError::SecretRead(s) | MachineError::SecretWrite(s) if s.kind() == SecretErrorKind::Unknown), "{e:?}");
+    assert!(ib.conn_stamp("m1").is_none(), "no connection with uncertain credentials");
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+    assert_eq!(ib.machines()[0].secret, SecretStatus::Unknown);
+    assert!(matches!(ib.reconnect_machine("m1"), Err(MachineError::SecretRead(_))));
+    store.unknown.store(false, SeqCst);
+    ib.reconnect_machine("m1").unwrap();
+    f.next_connection().await;
+}
+
 #[test]
 fn the_secret_status_is_json_but_not_in_the_mac_bindings() {
     let view = MachineEntryView {
@@ -1598,11 +1684,15 @@ Below `pub struct SecretError(pub String);` add:
 pub const SECRET_LOCKED: &str = "the keyring is locked";
 /// The text of `SecretError::timeout()`.
 pub const SECRET_TIMEOUT: &str = "the keyring did not answer in time";
+/// The text of `SecretError::unknown()`.
+pub const SECRET_UNKNOWN: &str = "the keyring state is unknown";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecretErrorKind {
     Locked,
     Timeout,
+    /// A write or delete may or may not have happened (omarchy plan D36).
+    Unknown,
     Other,
 }
 
@@ -1613,10 +1703,14 @@ impl SecretError {
     pub fn timeout() -> Self {
         SecretError(SECRET_TIMEOUT.into())
     }
+    pub fn unknown() -> Self {
+        SecretError(SECRET_UNKNOWN.into())
+    }
     pub fn kind(&self) -> SecretErrorKind {
         match self.0.as_str() {
             SECRET_LOCKED => SecretErrorKind::Locked,
             SECRET_TIMEOUT => SecretErrorKind::Timeout,
+            SECRET_UNKNOWN => SecretErrorKind::Unknown,
             _ => SecretErrorKind::Other,
         }
     }
@@ -1631,6 +1725,9 @@ pub enum SecretStatus {
     Locked,
     Missing,
     Unreadable,
+    /// A change to the item could not be confirmed; the machine stays
+    /// disconnected until a successful read (retry or re-pairing).
+    Unknown,
 }
 ```
 
@@ -1648,6 +1745,7 @@ pub trait SecretStore: Send + Sync {
             Ok(Some(raw)) if MachineSecret::from_json(&raw).is_ok() => SecretStatus::Ok,
             Ok(Some(_)) => SecretStatus::Unreadable,
             Err(e) if e.kind() == SecretErrorKind::Locked => SecretStatus::Locked,
+            Err(e) if e.kind() == SecretErrorKind::Unknown => SecretStatus::Unknown,
             Err(_) => SecretStatus::Unreadable,
         }
     }
@@ -1732,7 +1830,7 @@ In `inbox.rs`, replace the `.map(|entry| { … })` body of `machines` with:
                 let pairing = match secret {
                     SecretStatus::Ok => PairingState::Paired,
                     SecretStatus::Missing => PairingState::NotPaired,
-                    SecretStatus::Locked | SecretStatus::Unreadable => PairingState::Unreadable,
+                    SecretStatus::Locked | SecretStatus::Unreadable | SecretStatus::Unknown => PairingState::Unreadable,
                 };
                 MachineEntryView {
                     key: entry.key.clone(),
@@ -1798,6 +1896,40 @@ After `retry_machine` in `inbox.rs`:
     }
 ```
 
+- [ ] **Step 6b: Fail closed on an unconfirmed change (D36)**
+
+Add to `impl Inbox`:
+
+```rust
+    /// After a SecretStore error of kind `Unknown`, the machine's credentials
+    /// are uncertain: stop its handle and end its countdowns (fail closed).
+    /// Only a successful read (`reconnect_machine`) or a re-pairing brings
+    /// it back.
+    fn fail_closed(&self, key: &str, e: &SecretError) {
+        if e.kind() != SecretErrorKind::Unknown {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(machine) = inner.machines.iter_mut().find(|m| m.entry.key == key)
+            && let Some(handle) = machine.handle.take()
+        {
+            handle.cancel();
+        }
+        for action in inner.actions.end_machine(key) {
+            self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+        }
+        drop(inner);
+        self.wake();
+    }
+```
+
+Call it on every SecretStore error path that touches a machine's item:
+- In `pair_machine`, map the two calls as `.map_err(|e| { self.fail_closed(&entry.key, &e); MachineError::SecretRead(e) })?` and `.map_err(|e| { self.fail_closed(&entry.key, &e); MachineError::SecretWrite(e) })?`.
+- In `remove_machine_checked`, call `self.fail_closed(key, &error)` first in the `if let Err(error) = self.secrets.delete(key)` branch.
+- The rollback branch already stops the handle when recovery fails.
+
+`reconnect_machine` needs no change: its read returns the `Unknown` error, so it creates no handle until a read succeeds.
+
 - [ ] **Step 7: Update the app's exhaustive destructure**
 
 In `app/src-tauri/src/pairing.rs`, `view_has_only_public_fields`, add `secret: _,` after `pairing: _,`.
@@ -1848,7 +1980,8 @@ git commit -m "acd-client: secret status per machine and reconnect_machine for a
   - Line builders (no trailing newline):
     - `hello_line(version: &str) -> String`
     - `settings_line(&SettingsSnapshot, max: usize) -> String` (machines beyond the bound are left out and counted in `omitted_machines`)
-    - `view_line(&InboxView, max: usize) -> Option<String>` (D9; `None`: send nothing, keep the previous view)
+    - `view_line(&InboxView, max: usize) -> Option<String>` (D9)
+    - `view_overflow_line(needs_you: usize) -> String` and `view_or_overflow_line(&InboxView, max) -> String`: the view, or `{"type":"view_overflow","needs_you":n}` when it cannot fit
   - `pub struct Omitted { pub done: usize, pub working: usize }`, serialized in every `view` line.
     - `outcome_line(&ActionEvent) -> String`
     - `outcomes_lost_line() -> String`
@@ -1982,7 +2115,8 @@ mod tests {
         for code in [
             Stale, UnknownCard, NotAnswerable, UnknownOption, AlreadyCounting, BadText, CannotReply,
             CannotMarkSeen, Hidden, UnknownMachine, NotPaired, BadName, BadPairing, BadRequest,
-            SecretStoreLocked, SecretStoreTimeout, SecretStoreFailed, SettingsFailed, DuplicateId, Unsupported,
+            SecretStoreLocked, SecretStoreTimeout, SecretStoreUnknown, SecretStoreFailed, SettingsFailed, DuplicateId,
+            Unsupported,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }
@@ -2127,6 +2261,7 @@ mod tests {
         let title = out["view"]["cards"][0]["agent"]["title"].as_str().unwrap();
         assert!(title.ends_with(TRUNCATED) && title.chars().count() <= 100 + TRUNCATED.chars().count());
         assert!(view_line(&v, 200).is_none(), "nothing is sent rather than dropping a request");
+        assert_eq!(parse(&view_or_overflow_line(&v, 200)), json!({"type":"view_overflow","needs_you":50}));
     }
 
     #[test]
@@ -2212,6 +2347,7 @@ pub enum ErrorCode {
     BadRequest,
     SecretStoreLocked,
     SecretStoreTimeout,
+    SecretStoreUnknown,
     SecretStoreFailed,
     SettingsFailed,
     DuplicateId,
@@ -2237,6 +2373,7 @@ impl ErrorCode {
             ErrorCode::BadRequest => "bad_request",
             ErrorCode::SecretStoreLocked => "secret_store_locked",
             ErrorCode::SecretStoreTimeout => "secret_store_timeout",
+            ErrorCode::SecretStoreUnknown => "secret_store_unknown",
             ErrorCode::SecretStoreFailed => "secret_store_failed",
             ErrorCode::SettingsFailed => "settings_failed",
             ErrorCode::DuplicateId => "duplicate_id",
@@ -2358,6 +2495,19 @@ pub fn outcome_line(e: &ActionEvent) -> String {
     .to_string()
 }
 
+/// Sent instead of a view that cannot fit even with Needs-you cards only
+/// (plan D9): the panel shows an error state with the count.
+pub fn view_overflow_line(needs_you: usize) -> String {
+    json!({"type": "view_overflow", "needs_you": needs_you}).to_string()
+}
+
+/// The view line, or the overflow line when the view cannot fit.
+pub fn view_or_overflow_line(view: &InboxView, max: usize) -> String {
+    view_line(view, max).unwrap_or_else(|| {
+        view_overflow_line(view.cards.iter().filter(|c| c.group == CardGroup::Request).count())
+    })
+}
+
 pub fn outcomes_lost_line() -> String {
     json!({"type": "outcomes_lost"}).to_string()
 }
@@ -2395,8 +2545,8 @@ pub struct Omitted {
 ///    except cards with a countdown, counted in `omitted`;
 /// 4. then the remaining (Needs-you) text cut down to `MIN_CAP`.
 ///
-/// `None` when even that does not fit: the caller sends nothing and keeps
-/// the previous view. Needs-you cards are never left out.
+/// `None` when even that does not fit: the caller sends `view_overflow`
+/// instead. Needs-you cards are never left out.
 pub fn view_line(view: &InboxView, max: usize) -> Option<String> {
     let encode = |v: &InboxView, o: Omitted| json!({"type": "view", "view": v, "omitted": o});
     let whole = encode(view, Omitted::default()).to_string();
@@ -2519,6 +2669,9 @@ out Done cards, then Working cards (never a card with a countdown), and
 reports them as `"omitted":{"done":n,"working":m}` so the panel shows
 "N not shown"; Needs-you cards are never left out, and if they alone do
 not fit, their text is truncated further down to a minimum per field.
+If even that does not fit, the service sends
+`{"type":"view_overflow","needs_you":n}` instead of a view and the panel
+shows an error state with the count until a view fits again.
 `settings` is bounded the same way (machines left out are counted in
 `omitted_machines`).
 ```
@@ -3930,7 +4083,7 @@ impl Service {
         opts: ServerOptions,
     ) -> Arc<Service> {
         let settings = protocol::settings_line(&prefs::snapshot(&inbox, prefs), opts.max_line);
-        let view = protocol::view_line(&inbox.view().borrow().clone(), opts.max_line).unwrap_or_default();
+        let view = protocol::view_or_overflow_line(&inbox.view().borrow().clone(), opts.max_line);
         Arc::new(Service {
             inbox,
             secrets,
@@ -4487,6 +4640,33 @@ async fn an_unknown_type_is_unsupported_and_a_repeated_id_is_refused() {
 }
 
 #[tokio::test]
+async fn a_view_that_cannot_fit_is_reported_and_recovers() {
+    let agents: Vec<serde_json::Value> = (1..=5)
+        .map(|i| {
+            let mut a = pending_agent(&format!("a{i}"), &format!("r{i}"));
+            a["title"] = "t".repeat(400).into();
+            a
+        })
+        .collect();
+    let rig = rig_with(RigOptions {
+        agents,
+        server: ServerOptions { max_line: 3000, ..Default::default() },
+        ..Default::default()
+    })
+    .await;
+    let mut v = View::connect(&rig.socket).await;
+    assert_eq!(v.recv().await.unwrap()["type"], "hello");
+    assert_eq!(v.recv().await.unwrap()["type"], "settings");
+    assert_eq!(v.recv().await.unwrap(), json!({"type":"view_overflow","needs_you":5}));
+    let c = rig.c.as_ref().unwrap();
+    for (seq, id) in [(2, "a2"), (3, "a3"), (4, "a4"), (5, "a5")] {
+        c.send(json!({"type":"agent.removed","epoch":"e1","seq":seq,"agent_id":id})).await;
+    }
+    let view = v.recv_until(|m| m["type"] == "view").await;
+    assert_eq!(view["view"]["cards"].as_array().unwrap().len(), 1, "the inbox shows again once it fits");
+}
+
+#[tokio::test]
 async fn a_lagged_outcome_stream_tells_every_view() {
     let rig = rig(vec![pending_agent("a1", "r1")], fast()).await;
     let mut a = View::connect(&rig.socket).await;
@@ -4633,13 +4813,15 @@ Add to `impl Service`:
         let mut rx = self.inbox.view();
         loop {
             let view = rx.borrow_and_update().clone();
-            if let Some(line) = protocol::view_line(&view, self.opts.max_line) {
-                let mut reg = self.registry.lock().unwrap();
-                reg.view = line.clone();
-                for c in reg.conns.values() {
-                    c.outbox.set_view(line.clone());
-                }
+            // A view that cannot fit becomes `view_overflow`, which replaces
+            // the previous view: the panel never shows a stale inbox (D9).
+            let line = protocol::view_or_overflow_line(&view, self.opts.max_line);
+            let mut reg = self.registry.lock().unwrap();
+            reg.view = line.clone();
+            for c in reg.conns.values() {
+                c.outbox.set_view(line.clone());
             }
+            drop(reg);
             if rx.changed().await.is_err() {
                 return;
             }
@@ -5160,6 +5342,7 @@ pub fn secret_code(e: &SecretError) -> ErrorCode {
     match e.kind() {
         SecretErrorKind::Locked => ErrorCode::SecretStoreLocked,
         SecretErrorKind::Timeout => ErrorCode::SecretStoreTimeout,
+        SecretErrorKind::Unknown => ErrorCode::SecretStoreUnknown,
         SecretErrorKind::Other => ErrorCode::SecretStoreFailed,
     }
 }
@@ -5221,9 +5404,9 @@ git commit -m "acd-inbox: command table with owned actions, error codes and slow
     - `unlock(&self) -> Result<(), WorkerError>`
     All four block, at most until their deadline plus 1 s.
   - Under `cfg(any(test, feature = "testing"))`: `pub mod fake` with:
-    - `FakeKeyring { pub items, pub locked, pub unavailable, pub unlock: UnlockBehaviour, pub hang_writes: Hang, pub hang_deletes: Hang, pub calls: Vec<String> }`
+    - `FakeKeyring { pub items, pub locked, pub unavailable, pub fail_reads, pub prompts, pub unlock: UnlockBehaviour, pub hang_writes: Hang, pub hang_deletes: Hang, pub late: Vec<(String, Option<String>)>, pub calls: Vec<String> }`, with `FakeBackend::apply_late(&self)`
     - `pub enum UnlockBehaviour { Succeed, Dismiss, Hang }`
-    - `pub enum Hang { No, BeforeApplying, AfterApplying }`, for writes and deletes
+    - `pub enum Hang { No, BeforeApplying, AfterApplying, AppliesLater }`, for writes and deletes. `AppliesLater` hangs and queues the change in `late`; `apply_late` applies it, as a Secret Service that completes a call after its caller gave up. `fail_reads` makes reads fail (a failed read-back). `prompts` makes writes and deletes answer with a prompt, which the backend dismisses (`dismiss <op> <key>`) and reports as `Locked`.
     - `#[derive(Clone, Default)] pub struct FakeBackend(pub Arc<Mutex<FakeKeyring>>)`
 - Rules (D13):
   - Every job carries the caller's deadline. A job that reaches the front of the queue after its deadline is answered `Expired` and never runs, so a caller that gave up can never have its write happen later.
@@ -5291,6 +5474,28 @@ fn a_write_cut_off_mid_call_is_ambiguous_whether_or_not_it_applied() {
         assert_eq!(w.delete("k"), Err(WorkerError::Ambiguous));
         assert!(w.read("k").unwrap().is_none(), "{hang:?}");
     }
+}
+
+#[test]
+fn a_cut_off_write_can_still_land_after_its_caller_gave_up() {
+    let b = FakeBackend::default();
+    b.0.lock().unwrap().hang_writes = Hang::AppliesLater;
+    let w = SecretWorker::spawn(b.clone(), QUICK);
+    assert_eq!(w.write("k", "v"), Err(WorkerError::Ambiguous));
+    assert_eq!(w.read("k").unwrap(), None, "not yet");
+    b.apply_late();
+    assert_eq!(w.read("k").unwrap().as_deref(), Some("v"), "the service completed it afterwards");
+}
+
+#[test]
+fn a_change_that_needs_a_prompt_is_dismissed_and_reported_locked() {
+    let b = FakeBackend::default();
+    b.0.lock().unwrap().prompts = true;
+    let w = SecretWorker::spawn(b.clone(), QUICK);
+    assert_eq!(w.write("k", "v"), Err(WorkerError::Backend(BackendError::Locked)));
+    assert_eq!(w.delete("k"), Err(WorkerError::Backend(BackendError::Locked)));
+    assert!(calls(&b).contains(&"dismiss write k".to_owned()) && calls(&b).contains(&"dismiss delete k".to_owned()));
+    assert!(b.0.lock().unwrap().items.is_empty());
 }
 
 #[test]
@@ -5505,6 +5710,8 @@ pub mod fake {
         No,
         BeforeApplying,
         AfterApplying,
+        /// Hangs; the change is queued in `late` and lands on `apply_late`.
+        AppliesLater,
     }
 
     /// An in-memory keyring. `calls` records operations and keys, never values.
@@ -5513,9 +5720,15 @@ pub mod fake {
         pub items: HashMap<String, String>,
         pub locked: bool,
         pub unavailable: bool,
+        /// Reads fail with `Unavailable`; writes and deletes do not.
+        pub fail_reads: bool,
+        /// Writes and deletes answer with a prompt, which is dismissed.
+        pub prompts: bool,
         pub unlock: UnlockBehaviour,
         pub hang_writes: Hang,
         pub hang_deletes: Hang,
+        /// Changes of `AppliesLater` calls, in order.
+        pub late: Vec<(String, Option<String>)>,
         pub calls: Vec<String>,
     }
 
@@ -5523,6 +5736,17 @@ pub mod fake {
     pub struct FakeBackend(pub Arc<Mutex<FakeKeyring>>);
 
     impl FakeBackend {
+        /// Lands every change a cut-off `AppliesLater` call left behind.
+        pub fn apply_late(&self) {
+            let mut k = self.0.lock().unwrap();
+            for (key, value) in std::mem::take(&mut k.late) {
+                match value {
+                    Some(v) => k.items.insert(key, v),
+                    None => k.items.remove(&key),
+                };
+            }
+        }
+
         /// Records the call; the error the keyring's state forces, if any;
         /// else how a write (`deleting == false`) or delete misbehaves.
         fn enter(&self, call: String, deleting: bool) -> Result<Hang, BackendError> {
@@ -5534,7 +5758,19 @@ pub mod fake {
             if k.locked {
                 return Err(BackendError::Locked);
             }
+            if k.prompts {
+                // What the real backend does with a returned prompt (D13).
+                let call = k.calls.last().cloned().unwrap_or_default();
+                k.calls.push(format!("dismiss {call}"));
+                return Err(BackendError::Locked);
+            }
             Ok(if deleting { k.hang_deletes } else { k.hang_writes })
+        }
+
+        /// Queues a change for `apply_late`, then hangs.
+        async fn later(&self, key: String, value: Option<String>) {
+            self.0.lock().unwrap().late.push((key, value));
+            std::future::pending::<()>().await;
         }
 
         async fn mutate(&self, hang: Hang, f: impl FnOnce(&mut HashMap<String, String>)) {
@@ -5551,12 +5787,25 @@ pub mod fake {
     #[async_trait::async_trait]
     impl SecretBackend for FakeBackend {
         async fn read(&mut self, key: &str) -> Result<Option<String>, BackendError> {
-            self.enter(format!("read {key}"), false)?;
+            let fail = {
+                let mut k = self.0.lock().unwrap();
+                k.calls.push(format!("read {key}"));
+                k.fail_reads || k.unavailable
+            };
+            if fail {
+                return Err(BackendError::Unavailable);
+            }
+            if self.0.lock().unwrap().locked {
+                return Err(BackendError::Locked);
+            }
             Ok(self.0.lock().unwrap().items.get(key).cloned())
         }
 
         async fn write(&mut self, key: &str, value: &str) -> Result<(), BackendError> {
             let hang = self.enter(format!("write {key}"), false)?;
+            if hang == Hang::AppliesLater {
+                self.later(key.to_owned(), Some(value.to_owned())).await;
+            }
             let (key, value) = (key.to_owned(), value.to_owned());
             self.mutate(hang, move |items| {
                 items.insert(key, value);
@@ -5567,6 +5816,9 @@ pub mod fake {
 
         async fn delete(&mut self, key: &str) -> Result<(), BackendError> {
             let hang = self.enter(format!("delete {key}"), true)?;
+            if hang == Hang::AppliesLater {
+                self.later(key.to_owned(), None).await;
+            }
             let key = key.to_owned();
             self.mutate(hang, move |items| {
                 items.remove(&key);
@@ -5623,13 +5875,14 @@ git commit -m "acd-inbox: secret worker with job deadlines and ambiguous-write d
 
 **Interfaces:**
 - Consumes: Task 11's `SecretWorker`, `WorkerError` and `fake`; Task 8's `SecretControl`; `acd_client::settings::{SecretError, SecretStore}`.
-- Produces (in `acd_inbox::secrets`): `pub struct WorkerStore`, with `new(worker: SecretWorker)` and `prefill(&self, keys: &[String])`. It implements `SecretStore` (its `status` is the trait default) and `SecretControl`.
+- Produces (in `acd_inbox::secrets`): `pub struct WorkerStore`, with `new(worker: SecretWorker)` and `prefill(&self, keys: &[String])`, and under `cfg(any(test, feature = "testing"))` `set_read_hook(&self, hook: Arc<dyn Fn() + Send + Sync>)`. It implements `SecretStore` (its `status` is the trait default, so `Unknown` reads as `SecretStatus::Unknown`) and `SecretControl`.
 - Rules (D14):
   - The cache holds an outcome per key: a value, `Locked`, `Unavailable`, `TimedOut` or `Unknown`, where `Unknown` is an ambiguous write that could not be read back.
   - A cached error is returned without calling the worker. Only `refresh` (on unlock and on `retry_machine`) reads a key again.
   - `prefill` runs on the blocking pool before `Inbox::start` (Task 15). Every key in `settings.json` then has an entry, so `start`, `Service::new` and every settings snapshot are served from memory.
   - A read for a key with no entry (a machine being paired) goes to the worker; that only happens in `pair_machine`, which runs on the blocking pool.
-  - An `Ambiguous` write or delete is reconciled before the call returns: the item is read back. If it shows the intended state, the call succeeds; otherwise it fails with a timeout, and the cache records what was read (or `Unknown`). So acd-client's pairing rollback (Task 2) decides on the item's real state.
+  - An `Ambiguous` write or delete is reconciled before the call returns: the item is read back. Only a read that shows the intended state confirms it. Anything else (another state, or a failed read) makes the key `Unknown` and the call fails with `SecretError::unknown()`. acd-client then stops the machine's handle (Task 3, D36), and no rollback relies on the guess. A change that lands late is harmless: the key stays `Unknown` until a successful read (`retry_machine`) or a confirmed re-pairing.
+  - Generations (D37): each key's generation goes up at the start of every write or delete, and those run only under acd-client's edit lock. A read publishes its result only if its generation is still current, compared under the cache lock. So a refresh that read the old credentials cannot overwrite a re-pairing's new ones.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5720,18 +5973,79 @@ fn a_locked_keyring_at_start_is_noted_and_never_prompted() {
 }
 
 #[test]
-fn an_ambiguous_write_is_read_back_before_it_is_reported() {
+fn an_ambiguous_write_is_confirmed_only_by_its_read_back() {
     let backend = FakeBackend::default();
     backend.0.lock().unwrap().hang_writes = Hang::AfterApplying;
     let s = store(&backend, QUICK);
     assert!(s.set("k", "v").is_ok(), "the write had applied, as the read-back shows");
     assert_eq!(s.get("k").unwrap().as_deref(), Some("v"));
 
+    for (hang, fail_reads) in [(Hang::BeforeApplying, false), (Hang::AfterApplying, true)] {
+        let backend = FakeBackend::default();
+        {
+            let mut k = backend.0.lock().unwrap();
+            (k.hang_writes, k.fail_reads) = (hang, fail_reads);
+        }
+        let s = store(&backend, QUICK);
+        assert_eq!(s.set("k", "v").unwrap_err().kind(), SecretErrorKind::Unknown, "{hang:?}, reads fail: {fail_reads}");
+        assert_eq!(s.status("k"), SecretStatus::Unknown);
+    }
+}
+
+#[test]
+fn a_change_landing_late_keeps_the_key_unknown_until_a_successful_read() {
     let backend = FakeBackend::default();
-    backend.0.lock().unwrap().hang_writes = Hang::BeforeApplying;
+    backend.0.lock().unwrap().hang_writes = Hang::AppliesLater;
     let s = store(&backend, QUICK);
-    assert_eq!(s.set("k", "v").unwrap_err().kind(), SecretErrorKind::Timeout);
-    assert_eq!(s.get("k").unwrap(), None, "the read-back found nothing, and the cache says so");
+    assert_eq!(s.set("k", "v").unwrap_err().kind(), SecretErrorKind::Unknown, "the read-back found nothing yet");
+    backend.apply_late();
+    assert_eq!(s.status("k"), SecretStatus::Unknown, "no cached guess replaces the unknown state");
+    s.refresh(&["k".into()]);
+    assert_eq!(s.get("k").unwrap().as_deref(), Some("v"), "a successful read is authoritative");
+}
+
+#[test]
+fn a_refresh_that_read_old_credentials_never_overwrites_a_re_pairing() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let backend = FakeBackend::default();
+    backend.0.lock().unwrap().items.insert("m1".into(), "old".into());
+    let s = store(&backend, WorkerTimeouts::LIVE);
+    s.prefill(&["m1".into()]);
+    let (inside, released) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (i, r) = (inside.clone(), released.clone());
+    s.set_read_hook(Arc::new(move || {
+        i.store(true, SeqCst);
+        while !r.load(SeqCst) {
+            std::thread::yield_now();
+        }
+    }));
+    struct Release(Arc<AtomicBool>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.store(true, SeqCst);
+        }
+    }
+    let release = Release(released);
+    let refreshing = {
+        let s = s.clone();
+        std::thread::spawn(move || s.refresh(&["m1".into()]))
+    };
+    while !inside.load(SeqCst) {
+        std::thread::yield_now();
+    }
+    s.set("m1", "new").unwrap();
+    drop(release);
+    refreshing.join().unwrap();
+    assert_eq!(s.get("m1").unwrap().as_deref(), Some("new"), "the refresh's old value was dropped");
+}
+
+#[test]
+fn a_change_that_needs_a_prompt_is_refused_as_locked() {
+    let backend = FakeBackend::default();
+    backend.0.lock().unwrap().prompts = true;
+    let s = store(&backend, QUICK);
+    assert_eq!(s.set("k", "v").unwrap_err().kind(), SecretErrorKind::Locked);
+    assert!(backend.0.lock().unwrap().items.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5756,7 +6070,7 @@ async fn pairing_rollback_decides_on_the_read_back_state() {
             assert!(matches!(result, Err(MachineError::Settings(_))), "the delete had applied: the rollback succeeded");
             assert!(backend.0.lock().unwrap().items.is_empty());
         } else {
-            assert!(matches!(result, Err(MachineError::PairRecoveryFailed)), "the secret is still there: reported");
+            assert!(matches!(result, Err(MachineError::PairRecoveryFailed)), "the delete is unconfirmed: reported, no guess");
         }
     }
 }
@@ -5897,7 +6211,7 @@ async fn retry_reads_a_cached_failure_again() {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p acd-inbox --locked --test secrets`
-Expected: compile error, `cannot find struct WorkerStore`.
+Expected: compile error, `cannot find struct WorkerStore`. After implementing, remove the generation check from `publish` as a check: `a_refresh_that_read_old_credentials_never_overwrites_a_re_pairing` must fail. Restore it.
 
 - [ ] **Step 3: Implement `WorkerStore`**
 
@@ -5911,14 +6225,15 @@ use acd_client::settings::{SecretError, SecretStore};
 
 use crate::server::SecretControl;
 
-/// What the store knows about a key (plan D14).
+/// What the store knows about a key (plan D14, D36).
 #[derive(Clone)]
 enum Cached {
     Value(Option<String>),
     Locked,
     Unavailable,
     TimedOut,
-    /// An ambiguous write or delete that could not be read back.
+    /// A write or delete whose outcome could not be established. Cleared
+    /// only by a successful read (`refresh`) or a confirmed change.
     Unknown,
 }
 
@@ -5936,21 +6251,45 @@ impl Cached {
         match self {
             Cached::Value(_) => None,
             Cached::Locked => Some(SecretError::locked()),
-            Cached::TimedOut | Cached::Unknown => Some(SecretError::timeout()),
+            Cached::TimedOut => Some(SecretError::timeout()),
+            Cached::Unknown => Some(SecretError::unknown()),
             Cached::Unavailable => Some(SecretError("keyring unavailable".into())),
         }
     }
 }
 
+/// Entries and their generations (plan D37). A key's generation goes up at
+/// the start of every write or delete; a read publishes its result only if
+/// the generation it started under is still current.
+#[derive(Default)]
+struct Cache {
+    entries: HashMap<String, Cached>,
+    generations: HashMap<String, u64>,
+}
+
 /// The inbox's `SecretStore`: a per-key cache in front of the worker.
 pub struct WorkerStore {
     worker: SecretWorker,
-    cache: Mutex<HashMap<String, Cached>>,
+    cache: Mutex<Cache>,
+    #[cfg(any(test, feature = "testing"))]
+    read_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl WorkerStore {
     pub fn new(worker: SecretWorker) -> WorkerStore {
-        WorkerStore { worker, cache: Mutex::new(HashMap::new()) }
+        WorkerStore {
+            worker,
+            cache: Mutex::new(Cache::default()),
+            #[cfg(any(test, feature = "testing"))]
+            read_hook: Mutex::new(None),
+        }
+    }
+
+    /// Test hook: runs after a read returns from the worker and before its
+    /// result is published.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_read_hook(&self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        *self.read_hook.lock().unwrap() = Some(hook);
     }
 
     /// Reads `keys` now and caches each outcome, errors included. Run on
@@ -5961,50 +6300,84 @@ impl WorkerStore {
         }
     }
 
-    fn remember(&self, key: &str, c: Cached) {
-        self.cache.lock().unwrap().insert(key.to_owned(), c);
+    fn generation(&self, key: &str) -> u64 {
+        self.cache.lock().unwrap().generations.get(key).copied().unwrap_or(0)
+    }
+
+    /// Starts a change: a read already in flight for `key` will not publish.
+    fn bump(&self, key: &str) -> u64 {
+        let mut c = self.cache.lock().unwrap();
+        let g = c.generations.entry(key.to_owned()).or_insert(0);
+        *g += 1;
+        *g
+    }
+
+    /// Compare-and-publish under the cache lock (plan D37). False when a
+    /// change started since `generation` was taken.
+    fn publish(&self, key: &str, generation: u64, entry: Cached) -> bool {
+        let mut c = self.cache.lock().unwrap();
+        if c.generations.get(key).copied().unwrap_or(0) != generation {
+            return false;
+        }
+        c.entries.insert(key.to_owned(), entry);
+        true
     }
 
     fn read_through(&self, key: &str) -> Result<Option<String>, SecretError> {
-        match self.worker.read(key) {
-            Ok(value) => {
-                self.remember(key, Cached::Value(value.clone()));
-                Ok(value)
-            }
+        let generation = self.generation(key);
+        let result = self.worker.read(key);
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(hook) = self.read_hook.lock().unwrap().clone() {
+            hook();
+        }
+        let entry = match &result {
+            Ok(value) => Cached::Value(value.clone()),
             Err(e) => {
                 tracing::warn!(error = e.tag(), "keyring read failed");
-                let c = Cached::of(e);
-                let err = c.error().expect("an error state");
-                self.remember(key, c);
-                Err(err)
+                Cached::of(*e)
             }
+        };
+        if !self.publish(key, generation, entry.clone()) {
+            tracing::debug!("a keyring read finished after a change; its result was dropped");
+            // Answer from what the change left in the cache.
+            let current = self.cache.lock().unwrap().entries.get(key).cloned();
+            return match current {
+                Some(Cached::Value(v)) => Ok(v),
+                Some(other) => Err(other.error().expect("an error state")),
+                None => Err(SecretError::unknown()),
+            };
+        }
+        match entry {
+            Cached::Value(v) => Ok(v),
+            other => Err(other.error().expect("an error state")),
         }
     }
 
-    /// After an ambiguous write or delete: read the item back, so callers
-    /// (pairing rollback) decide on its real state (plan D14).
-    fn reconcile(&self, key: &str, want: Option<&str>) -> Result<(), SecretError> {
+    /// After an ambiguous write or delete (plan D36): read the item back.
+    /// Only a read showing the intended state confirms the change. Anything
+    /// else (another state, a failed read) leaves the key `Unknown`: the
+    /// change may still land later, so no rollback may rely on it.
+    fn reconcile(&self, key: &str, generation: u64, want: Option<&str>) -> Result<(), SecretError> {
         match self.worker.read(key) {
-            Ok(now) => {
-                let applied = now.as_deref() == want;
-                self.remember(key, Cached::Value(now));
-                if applied { Ok(()) } else { Err(SecretError::timeout()) }
-            }
-            Err(e) => {
-                tracing::warn!(error = e.tag(), "keyring read-back failed");
-                self.remember(key, Cached::Unknown);
-                Err(SecretError::timeout())
-            }
-        }
-    }
-
-    fn after_change(&self, key: &str, want: Option<&str>, r: Result<(), WorkerError>) -> Result<(), SecretError> {
-        match r {
-            Ok(()) => {
-                self.remember(key, Cached::Value(want.map(str::to_owned)));
+            Ok(now) if now.as_deref() == want => {
+                self.publish(key, generation, Cached::Value(now));
                 Ok(())
             }
-            Err(WorkerError::Ambiguous) => self.reconcile(key, want),
+            Ok(_) | Err(_) => {
+                tracing::warn!("keyring change unconfirmed; the machine's secret is unknown");
+                self.publish(key, generation, Cached::Unknown);
+                Err(SecretError::unknown())
+            }
+        }
+    }
+
+    fn after_change(&self, key: &str, generation: u64, want: Option<&str>, r: Result<(), WorkerError>) -> Result<(), SecretError> {
+        match r {
+            Ok(()) => {
+                self.publish(key, generation, Cached::Value(want.map(str::to_owned)));
+                Ok(())
+            }
+            Err(WorkerError::Ambiguous) => self.reconcile(key, generation, want),
             // Expired or refused: nothing changed. The cached entry stands.
             Err(e) => {
                 tracing::warn!(error = e.tag(), "keyring change failed");
@@ -6016,7 +6389,7 @@ impl WorkerStore {
 
 impl SecretStore for WorkerStore {
     fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
-        let hit = self.cache.lock().unwrap().get(key).cloned();
+        let hit = self.cache.lock().unwrap().entries.get(key).cloned();
         match hit {
             Some(Cached::Value(v)) => Ok(v),
             Some(other) => Err(other.error().expect("an error state")),
@@ -6024,14 +6397,18 @@ impl SecretStore for WorkerStore {
         }
     }
 
+    /// Called only under acd-client's edit lock, so changes to one key never
+    /// overlap.
     fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        let generation = self.bump(key);
         let r = self.worker.write(key, value);
-        self.after_change(key, Some(value), r)
+        self.after_change(key, generation, Some(value), r)
     }
 
     fn delete(&self, key: &str) -> Result<(), SecretError> {
+        let generation = self.bump(key);
         let r = self.worker.delete(key);
-        self.after_change(key, None, r)
+        self.after_change(key, generation, None, r)
     }
 }
 
@@ -6043,13 +6420,9 @@ impl SecretControl for WorkerStore {
         })
     }
 
+    /// Reads `keys` again; the authoritative way out of `Unknown` and of a
+    /// cached error. Entries are replaced only through `publish`.
     fn refresh(&self, keys: &[String]) {
-        {
-            let mut cache = self.cache.lock().unwrap();
-            for key in keys {
-                cache.remove(key);
-            }
-        }
         self.prefill(keys);
     }
 }
@@ -6689,6 +7062,7 @@ git commit -m "acd-inbox: notification reconciliation, trusted open action and a
 - Produces (in `acd_inbox::linux::keyring`):
   - `pub struct SecretServiceBackend`, with `new() -> Self`; it implements `SecretBackend`.
   - `pub fn attributes(key: &str) -> HashMap<&str, &str>` and `pub fn map_error(e: &secret_service::Error) -> BackendError`.
+  - `pub fn needs_prompt(prompt: &str) -> bool`. Writes and deletes dismiss a returned prompt and report `Locked` (D13).
 - Produces (in `acd_inbox::linux::dbus`):
   - `pub struct DbusNotify`, with `connect() -> zbus::Result<(DbusNotify, mpsc::Receiver<ActionSignal>)>` (async); it implements `NotifyBackend`.
   - `pub fn actions(open: bool) -> Vec<&'static str>` and `pub fn error_class(e: &zbus::Error) -> &'static str`.
@@ -6737,6 +7111,12 @@ mod tests {
         assert_eq!(a.get("service"), Some(&"agent-caller"));
         assert_eq!(a.get("machine"), Some(&"11111111-1111-4111-8111-111111111111"));
         assert_eq!(a.len(), 2);
+    }
+
+    #[test]
+    fn only_the_no_prompt_path_lets_a_change_through() {
+        assert!(!needs_prompt("/"));
+        assert!(needs_prompt("/org/freedesktop/secrets/prompt/u1"));
     }
 
     #[test]
@@ -6799,11 +7179,14 @@ Above its tests:
 ```rust
 //! Remote secrets in the Secret Service (omarchy spec §9): items in the
 //! default collection with attributes `service=agent-caller`,
-//! `machine=<key>`. Reads, writes and deletes check the collection and
-//! item lock first and never prompt; only `unlock` does (plan D13).
+//! `machine=<key>`. Reads check the collection and item lock first.
+//! Writes and deletes call `CreateItem` and `Item.Delete` directly and
+//! dismiss any prompt the service returns (reported `Locked`). Only
+//! `unlock` runs a prompt (plan D13).
 use std::collections::HashMap;
 
 use secret_service::{EncryptionType, Error, SecretService};
+use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::secrets::{BackendError, SecretBackend};
 
@@ -6868,29 +7251,87 @@ async fn read_in(ss: &SecretService<'_>, key: &str) -> Result<Option<String>, Ba
     String::from_utf8(bytes).map(Some).map_err(|_| BackendError::Failed)
 }
 
+const SECRETS: &str = "org.freedesktop.secrets";
+
+/// Whether a Secret Service reply asks for a prompt: any path but "/".
+pub fn needs_prompt(prompt: &str) -> bool {
+    prompt != "/"
+}
+
+fn bus(e: zbus::Error) -> BackendError {
+    match e {
+        zbus::Error::InputOutput(_) | zbus::Error::Connection(..) => BackendError::Unavailable,
+        _ => BackendError::Failed,
+    }
+}
+
+/// A returned prompt is never run: it is dismissed, and the change is
+/// reported as `Locked` (plan D13). The user unlocks from the panel.
+async fn refuse_prompt(conn: &zbus::Connection, prompt: &OwnedObjectPath) -> Result<(), BackendError> {
+    if !needs_prompt(prompt.as_str()) {
+        return Ok(());
+    }
+    let _ = conn
+        .call_method(Some(SECRETS), prompt.as_str(), Some("org.freedesktop.Secret.Prompt"), "Dismiss", &())
+        .await;
+    Err(BackendError::Locked)
+}
+
+/// `CreateItem` called directly, so its prompt can be refused; the crate's
+/// `create_item` would run it. The secret travels in a "plain" session
+/// (plan D38): secret-service 5.2 keeps its encrypted session private.
 async fn write_in(ss: &SecretService<'_>, key: &str, value: &str) -> Result<(), BackendError> {
     let col = ss.get_default_collection().await.map_err(class)?;
     if col.is_locked().await.map_err(class)? {
         return Err(BackendError::Locked);
     }
-    col.create_item(&format!("agent-caller machine {key}"), attributes(key), value.as_bytes(), true, CONTENT_TYPE)
+    let conn = zbus::Connection::session().await.map_err(bus)?;
+    let reply = conn
+        .call_method(
+            Some(SECRETS),
+            "/org/freedesktop/secrets",
+            Some("org.freedesktop.Secret.Service"),
+            "OpenSession",
+            &("plain", Value::from("")),
+        )
         .await
-        .map_err(class)?;
-    Ok(())
+        .map_err(bus)?;
+    let (_, session): (OwnedValue, OwnedObjectPath) = reply.body().deserialize().map_err(|_| BackendError::Failed)?;
+    let mut props: HashMap<&str, Value<'_>> = HashMap::new();
+    props.insert("org.freedesktop.Secret.Item.Label", Value::from(format!("agent-caller machine {key}")));
+    props.insert("org.freedesktop.Secret.Item.Attributes", Value::from(attributes(key)));
+    let secret = (session.clone(), Vec::<u8>::new(), value.as_bytes().to_vec(), CONTENT_TYPE);
+    let result = conn
+        .call_method(
+            Some(SECRETS),
+            col.collection_path.as_str(),
+            Some("org.freedesktop.Secret.Collection"),
+            "CreateItem",
+            &(props, secret, true),
+        )
+        .await;
+    let _ = conn
+        .call_method(Some(SECRETS), session.as_str(), Some("org.freedesktop.Secret.Session"), "Close", &())
+        .await;
+    let (_item, prompt): (OwnedObjectPath, OwnedObjectPath) =
+        result.map_err(bus)?.body().deserialize().map_err(|_| BackendError::Failed)?;
+    refuse_prompt(&conn, &prompt).await
 }
 
+/// `Item.Delete` called directly, so its prompt can be refused.
 async fn delete_in(ss: &SecretService<'_>, key: &str) -> Result<(), BackendError> {
     let col = ss.get_default_collection().await.map_err(class)?;
     if col.is_locked().await.map_err(class)? {
         return Err(BackendError::Locked);
     }
+    let conn = zbus::Connection::session().await.map_err(bus)?;
     for item in col.search_items(attributes(key)).await.map_err(class)? {
-        // `Item::delete` runs a prompt when the service asks for one; a
-        // locked item would ask, so it is refused here instead.
-        if item.is_locked().await.map_err(class)? {
-            return Err(BackendError::Locked);
-        }
-        item.delete().await.map_err(class)?;
+        let reply = conn
+            .call_method(Some(SECRETS), item.item_path.as_str(), Some("org.freedesktop.Secret.Item"), "Delete", &())
+            .await
+            .map_err(bus)?;
+        let prompt: OwnedObjectPath = reply.body().deserialize().map_err(|_| BackendError::Failed)?;
+        refuse_prompt(&conn, &prompt).await?;
     }
     Ok(())
 }
@@ -7611,6 +8052,7 @@ git commit -m "Research: the Omarchy shell plugin API as installed"
   - `class Tracker { started(actionId, cardKey); outcome(msg); lost() -> cardKeys }`.
   - `answerEditor(card) -> {cardKey, requestId, revision} | null`, `answerEditorValid(editor, cards)` and `EDITOR_CLOSED_TEXT` (D34).
   - `omittedText(omitted)` (D9).
+  - `overflowText(needsYou)` (D9), the chip status `unknown` with "Keyring state unknown. Retry" (D36), and `class Drafts { get, set, clear, prune(view, settings) }` with `draftKey.{answer, reply, rename}` (D35).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -7709,6 +8151,8 @@ test("a locked keyring is not shown as not paired", () => {
   assert.equal(M.keyringLocked(settings), true);
   settings.machines[0].secret = "missing";
   assert.equal(M.machineChips(v, settings)[0].status, "not_paired");
+  settings.machines[0].secret = "unknown";
+  assert.equal(M.machineChips(v, settings)[0].label, "Keyring state unknown. Retry");
   settings.machines[0].secret = "ok";
   assert.equal(M.machineChips(v, settings)[0].status, "error");
   assert.equal(M.keyringLocked(settings), false);
@@ -7786,7 +8230,7 @@ test("typed answers and replies are checked as acd-client checks them", () => {
 test("every service error code has text, and unknown codes fall back", () => {
   for (const code of ["stale", "unknown_card", "not_answerable", "unknown_option", "already_counting", "bad_text",
     "cannot_reply", "cannot_mark_seen", "hidden", "unknown_machine", "not_paired", "bad_name", "bad_pairing",
-    "bad_request", "secret_store_locked", "secret_store_timeout", "secret_store_failed", "settings_failed",
+    "bad_request", "secret_store_locked", "secret_store_timeout", "secret_store_unknown", "secret_store_failed", "settings_failed",
     "duplicate_id", "unsupported", "unreachable"]) {
     assert.ok(M.errorText(code).length > 0, code);
     assert.notEqual(M.errorText(code), M.errorText("never-heard-of-it"), code);
@@ -7834,6 +8278,31 @@ test("omitted cards are counted for the panel", () => {
   assert.equal(M.omittedText({ done: 3, working: 0 }), "3 done not shown");
   assert.equal(M.omittedText({ done: 3, working: 2 }), "3 done and 2 working not shown");
   assert.equal(M.omittedText(undefined), "");
+});
+
+test("drafts survive an unrelated new snapshot and go with their request", () => {
+  const drafts = new M.Drafts();
+  const c = card("m1/a", "request", { free_text_answerable: true });
+  const answerKey = M.draftKey.answer(M.answerEditor(c));
+  drafts.set(answerKey, "half an answer");
+  drafts.set(M.draftKey.reply(c), "half a reply");
+  drafts.set(M.draftKey.rename("m1"), "New na");
+  const settings = { machines: [{ key: "m1" }] };
+  // An unrelated change: another card appears; the view is a new object.
+  const next = view([card("m1/a", "request", { free_text_answerable: true }), card("m1/b", "working")]);
+  drafts.prune(next, settings);
+  assert.equal(drafts.get(M.draftKey.answer(M.answerEditor(next.cards[0]))), "half an answer");
+  assert.equal(drafts.get(M.draftKey.reply(next.cards[0])), "half a reply");
+  assert.equal(drafts.get(M.draftKey.rename("m1")), "New na");
+  const changed = card("m1/a", "request", { free_text_answerable: true });
+  changed.agent.pending = pending({ id: "r2" });
+  drafts.prune(view([changed]), { machines: [] });
+  assert.equal(drafts.get(answerKey), "", "a new request drops the old answer draft");
+  assert.equal(drafts.get(M.draftKey.rename("m1")), "", "a removed machine drops its rename draft");
+});
+
+test("an overflowing view has its own text", () => {
+  assert.equal(M.overflowText(7), "Too many requests to show here (7 need you). Answer some in the terminal.");
 });
 
 test("card meta and the countdown bar", () => {
@@ -7992,6 +8461,7 @@ const CHIP_TEXT = {
   locked: "Keyring locked",
   not_paired: "Not paired",
   unreadable: "Pair again",
+  unknown: "Keyring state unknown. Retry",
 };
 
 /** Machine chips: connection status from the view, joined by key with secret status from settings (plan S1, S6). */
@@ -8006,6 +8476,7 @@ export function machineChips(view, settings) {
         if (e.secret === "locked") status = "locked";
         else if (e.secret === "missing") status = "not_paired";
         else if (e.secret === "unreadable") status = "unreadable";
+        else if (e.secret === "unknown") status = "unknown";
       }
       return { key: m.key, name: m.name, status, label: CHIP_TEXT[status] };
     });
@@ -8072,6 +8543,53 @@ export function answerEditorValid(editor, cards) {
 }
 
 export const EDITOR_CLOSED_TEXT = "The request changed. Your answer was not sent.";
+
+/** The error state for a view the service could not fit (plan D9). */
+export function overflowText(needsYou) {
+  return `Too many requests to show here (${needsYou} need you). Answer some in the terminal.`;
+}
+
+/** Draft keys (plan D35): a draft belongs to a card and its request, or to a machine. */
+export const draftKey = {
+  answer: (editor) => `answer:${editor.cardKey}:${editor.requestId}:${editor.revision}`,
+  reply: (card) => `reply:${card.key}:${card.agent.pending ? card.agent.pending.id : "-"}`,
+  rename: (machineKey) => `rename:${machineKey}`,
+};
+
+/**
+ * Typed text kept outside QML delegates, which a new view recreates
+ * (plan D35). The pairing line is never stored here.
+ */
+export class Drafts {
+  constructor() {
+    this.texts = new Map();
+  }
+
+  get(key) {
+    return this.texts.get(key) ?? "";
+  }
+
+  set(key, text) {
+    if (text === "") this.texts.delete(key);
+    else this.texts.set(key, text);
+  }
+
+  clear(key) {
+    this.texts.delete(key);
+  }
+
+  /** Drops drafts whose card, request or machine is gone. */
+  prune(view, settings) {
+    const live = new Set();
+    for (const c of view?.cards ?? []) {
+      live.add(draftKey.reply(c));
+      const e = answerEditor(c);
+      if (e) live.add(draftKey.answer(e));
+    }
+    for (const m of settings?.machines ?? []) live.add(draftKey.rename(m.key));
+    for (const key of [...this.texts.keys()]) if (!live.has(key)) this.texts.delete(key);
+  }
+}
 
 /** "N not shown" for the cards a large view left out (plan D9). */
 export function omittedText(omitted) {
@@ -8201,6 +8719,7 @@ const ERRORS = {
   bad_request: UPDATE,
   secret_store_locked: "The keyring is locked. Unlock it and try again.",
   secret_store_timeout: "The keyring did not answer. Try again.",
+  secret_store_unknown: "The keyring state is unknown. Press Retry on the machine.",
   secret_store_failed: "The keyring could not be used.",
   settings_failed: "Could not save the settings.",
   duplicate_id: "That was already sent.",
@@ -8238,7 +8757,7 @@ export class Tracker {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test 'clients/omarchy/tests/*.test.mjs'`
-Expected: PASS, 19 tests in two files.
+Expected: PASS, 21 tests in two files.
 
 - [ ] **Step 4b: Only if Task 16 found `.mjs` imports unsupported**
 
@@ -8251,7 +8770,7 @@ import vm from "node:vm";
 const src = readFileSync(new URL("../model.js", import.meta.url), "utf8").replace(/^\.pragma library\n/, "");
 const ctx = vm.createContext({});
 vm.runInContext(
-  `${src}\nglobalThis.M = { MAX_LINE, ANSWER_MAX_BYTES, REPLY_MAX_BYTES, UNDO_MS, UNCERTAIN_TEXT, EDITOR_CLOSED_TEXT, QT, utf8Length, LineReader, parseMessage, Ids, sections, headerText, barState, machineChips, keyringLocked, requestTag, cardMeta, optionRows, answerEditor, answerEditorValid, omittedText, countdownFraction, fromQt, onKey, validateAnswer, validateReply, reasonText, errorText, Tracker };`,
+  `${src}\nglobalThis.M = { MAX_LINE, ANSWER_MAX_BYTES, REPLY_MAX_BYTES, UNDO_MS, UNCERTAIN_TEXT, EDITOR_CLOSED_TEXT, QT, utf8Length, LineReader, parseMessage, Ids, sections, headerText, barState, machineChips, keyringLocked, requestTag, cardMeta, optionRows, answerEditor, answerEditorValid, omittedText, overflowText, draftKey, Drafts, countdownFraction, fromQt, onKey, validateAnswer, validateReply, reasonText, errorText, Tracker };`,
   ctx,
 );
 const M = ctx.M;
@@ -8288,7 +8807,7 @@ git commit -m "Omarchy plugin: view model with node tests"
 **Interfaces:**
 - Consumes: Task 17's `model.mjs` (as `Model`); Task 16's research note; the protocol of Tasks 4, 9 and 10.
 - Produces:
-  - `Service.qml` properties: `view`, `settings`, `omitted`, `connected` and `tracker`.
+  - `Service.qml` properties: `view`, `settings`, `omitted`, `overflow` (the `needs_you` of a `view_overflow`, else -1), `connected` and `tracker`.
   - Its signals: `outcome(msg)`, `outcomesLost(cards)` and `ready()`.
   - Its function `send(type, fields, done)`.
   - `BarWidget.qml` owns `Service` and `Panel` (Task 19) and declares the IPC target `tonibergholm.agentcaller`.
@@ -8380,6 +8899,8 @@ Item {
     property var settings: null
     // Cards the service left out of a large view (plan D9).
     property var omitted: ({ done: 0, working: 0 })
+    // `needs_you` of a `view_overflow` message; -1 while views fit (plan D9).
+    property int overflow: -1
     property bool connected: false
     property var tracker: new Model.Tracker()
     property var ids: new Model.Ids("omarchy")
@@ -8419,6 +8940,11 @@ Item {
         case "view":
             root.view = msg.view;
             root.omitted = msg.omitted;
+            root.overflow = -1;
+            break;
+        case "view_overflow":
+            root.view = null;
+            root.overflow = msg.needs_you;
             break;
         case "outcome":
             root.tracker.outcome(msg);
@@ -8583,7 +9109,8 @@ git commit -m "Omarchy plugin: manifest, socket client and bar widget"
 - Rules (spec §7, D34):
   - Every key, in the panel or in a text field, goes through `Model.onKey` with the field's kind and its `inputMethodComposing`. So letters and digits typed into a field stay text, Enter submits, and IME composition is never a shortcut.
   - A typed answer remembers the request id and revision it was opened for and sends those. When the view shows that request changed or went away, the editor closes with "The request changed. Your answer was not sent.", and the text is dropped.
-  - "N not shown" appears when the service left cards out (D9).
+  - "N not shown" appears when the service left cards out. An explicit error state with the Needs-you count appears when it sent `view_overflow`; the next fitting view clears it (D9).
+  - Reply, typed-answer and rename texts are kept in `Model.Drafts`, outside the delegates, so an unrelated new view does not erase them (D35). The pairing line is never drafted.
   - The pairing field is masked, cleared before each send, and never logged.
 
 - [ ] **Step 1: Write the failing checks**
@@ -8618,6 +9145,20 @@ test("a typed answer goes to the request its editor was opened for", () => {
   assert.doesNotMatch(body, /pending\.(id|revision)/);
   assert.match(panel, /onViewChanged:[\s\S]*answerEditorValid/);
 });
+
+test("drafts live outside the delegates; the pairing line never does", () => {
+  const panel = read("Panel.qml");
+  assert.match(panel, /property var drafts: new Model\.Drafts\(\)/);
+  for (const kind of ["reply", "answer", "rename"]) assert.match(panel, new RegExp(`Model\\.draftKey\\.${kind}\\(`), kind);
+  assert.ok((panel.match(/panel\.drafts\.set\(/g) ?? []).length >= 3);
+  const pairing = panel.slice(panel.indexOf("id: pairingField"), panel.indexOf("}", panel.indexOf("id: pairingField")));
+  assert.doesNotMatch(pairing, /drafts/);
+});
+
+test("an overflowing view is shown as an error with its count", () => {
+  assert.match(read("Service.qml"), /case "view_overflow":[\s\S]*root\.overflow = msg\.needs_you;/);
+  assert.match(read("Panel.qml"), /Model\.overflowText\(panel\.service\.overflow\)/);
+});
 ```
 
 - [ ] **Step 2: Run the checks to verify they fail**
@@ -8646,6 +9187,8 @@ Ui.Panel {
     property var keyState: ({ selected: null, replyFor: null })
     // The request a typed answer was opened for (plan D34).
     property var answerEditor: null
+    // Typed text outside the delegates, which every new view recreates (plan D35).
+    property var drafts: new Model.Drafts()
     property string machineFilter: ""
     property bool settingsOpen: false
     property bool doneOpen: false
@@ -8737,6 +9280,8 @@ Ui.Panel {
             return false;
         }
         service.send("reply", { card: cardKey, text: r.text }, started(cardKey));
+        const card = cardFor(cardKey);
+        if (card) drafts.clear(Model.draftKey.reply(card));
         keyState = Object.assign({}, keyState, { replyFor: null });
         return true;
     }
@@ -8756,6 +9301,7 @@ Ui.Panel {
             return false;
         }
         service.send("answer_text", { card: editor.cardKey, request: editor.requestId, revision: editor.revision, text: r.text }, started(editor.cardKey));
+        drafts.clear(Model.draftKey.answer(editor));
         answerEditor = null;
         return true;
     }
@@ -8777,6 +9323,8 @@ Ui.Panel {
             answerEditor = null;
             message = Model.EDITOR_CLOSED_TEXT;
         }
+        // No view (disconnected, overflow) is not a reason to drop drafts.
+        if (view !== null) drafts.prune(view, service.settings);
     }
 
     // The pairing line is a secret: cleared before it is sent, after every
@@ -8911,19 +9459,26 @@ Ui.Panel {
 
             TextField {
                 id: replyField
+                readonly property string draft: Model.draftKey.reply(cardItem.card)
                 visible: panel.keyState.replyFor === cardItem.card.key
                 Layout.fillWidth: true
                 placeholderText: "Reply"
                 focus: visible
+                Component.onCompleted: text = panel.drafts.get(draft)
+                onTextChanged: panel.drafts.set(draft, text)
                 Keys.onPressed: event => panel.keyEvent(event, { kind: "reply", cardKey: cardItem.card.key }, inputMethodComposing, replyField)
             }
 
             TextField {
                 id: answerField
+                readonly property string draft: panel.answerEditor !== null ? Model.draftKey.answer(panel.answerEditor) : ""
                 visible: panel.answerEditor !== null && panel.answerEditor.cardKey === cardItem.card.key
                 Layout.fillWidth: true
                 placeholderText: "Answer"
                 focus: visible
+                Component.onCompleted: if (visible) text = panel.drafts.get(draft)
+                onVisibleChanged: if (visible) text = panel.drafts.get(draft)
+                onTextChanged: if (visible && draft !== "") panel.drafts.set(draft, text)
                 Keys.onPressed: event => panel.keyEvent(event, { kind: "answer", cardKey: cardItem.card.key }, inputMethodComposing, answerField)
             }
         }
@@ -8969,6 +9524,15 @@ Ui.Panel {
             wrapMode: Text.Wrap
             color: Commons.Color.urgent
             text: panel.message
+        }
+
+        // The service could not fit even the Needs-you cards (plan D9).
+        Text {
+            visible: !panel.settingsOpen && panel.service.overflow >= 0
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            color: Commons.Color.urgent
+            text: Model.overflowText(panel.service.overflow)
         }
 
         Text {
@@ -9045,10 +9609,15 @@ Ui.Panel {
 
                     TextField {
                         id: nameField
+                        readonly property string draft: Model.draftKey.rename(modelData.key)
                         Layout.fillWidth: true
-                        text: modelData.name
+                        Component.onCompleted: text = panel.drafts.get(draft) || modelData.name
+                        onTextChanged: panel.drafts.set(draft, text === modelData.name ? "" : text)
                         Keys.onPressed: event => panel.keyEvent(event, { kind: "rename", cardKey: null }, inputMethodComposing, nameField)
-                        onAccepted: panel.service.send("rename_machine", { machine: modelData.key, name: text }, panel.report)
+                        onAccepted: {
+                            panel.drafts.clear(draft);
+                            panel.service.send("rename_machine", { machine: modelData.key, name: text }, panel.report);
+                        }
                     }
 
                     Text {
