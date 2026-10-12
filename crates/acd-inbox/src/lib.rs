@@ -6,3 +6,4 @@ pub mod startup;
 pub mod outbox;
 pub mod commands;
 pub mod server;
+pub mod secrets;

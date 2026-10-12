@@ -123,6 +123,7 @@ dependencies = [
  "acd-inbox",
  "acd-protocol",
  "acd-securefs",
+ "async-trait",
  "gethostname",
  "libc",
  "serde",
