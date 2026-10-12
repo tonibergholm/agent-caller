@@ -430,9 +430,13 @@ export class Tracker {
   constructor() {
     this.actions = new Map();
     this.fired = new Set();
+    // Ended actions whose reply may still be in flight: the outcome can be
+    // written before the `ok` that names the action.
+    this.ended = new Set();
   }
 
   started(actionId, cardKey) {
+    if (this.ended.has(actionId)) return;
     this.actions.set(actionId, cardKey);
   }
 
@@ -441,6 +445,9 @@ export class Tracker {
     else {
       this.actions.delete(msg.action);
       this.fired.delete(msg.action);
+      this.ended.add(msg.action);
+      // Action ids are unique; a long run must not grow this without bound.
+      if (this.ended.size > 256) this.ended.delete(this.ended.values().next().value);
     }
   }
 

@@ -185,6 +185,7 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Unavailable keyring reads as damaged.** With no Secret Service running at prefill, `Cached::Unavailable` maps to `Unreadable`: the chip says "Pair again", `acd-inbox status` says the secret is damaged, and re-pairing fails. The spec does not define this state.
 - **Unknown write leaves an orphan.** If the write of a new machine's secret ends `Unknown`, the keyring item may stay under a UUID no machine uses.
 - **Uninstall removes a binary it did not write.** `acd-inbox uninstall` deletes `~/.local/bin/acd-inbox` even when install found it in place (`same`).
+- **Uninstall provenance.** `acd-inbox uninstall` disables the plugin and removes its named files without checking they came from install; a foreign directory under the same id is not protected (the install side refuses foreign units and symlinks).
 - **Rename racing remove** returns `settings_failed`, not `unknown_machine`.
 - **Keyring deadline.** Mutating Secret Service calls have no deadline; check whether zbus applies a reply timeout, or a hung service blocks the worker until restart.
 - **One owner per panel.** Each `Service.qml` is its own connection and owner. If Omarchy creates a bar widget per monitor, Esc in one panel does not undo a countdown started from another's.

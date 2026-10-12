@@ -97,6 +97,23 @@ fn install_copies_the_binary_writes_the_unit_and_plugin_and_runs_the_steps_in_or
     assert!(asked.is_empty(), "no bindings file, so nothing to ask");
 }
 
+/// Final review: the staging file next to the binary is never followed if it
+/// is a symlink, so install cannot write outside its own paths.
+#[test]
+fn a_symlink_planted_at_the_staging_name_is_not_followed() {
+    let home = tempfile::tempdir().unwrap();
+    let l = layout(home.path());
+    let victim = home.path().join("victim");
+    std::fs::write(&victim, "precious").unwrap();
+    std::fs::create_dir_all(l.bin().parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&victim, l.bin().with_extension("acd-inbox-new")).unwrap();
+    let mut out = Vec::new();
+    install(&l, &build(home.path()), &Recorder::default(), &mut |_| false, &mut out).unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+
+    assert_eq!(std::fs::read_to_string(l.bin()).unwrap(), "binary");
+}
+
 #[test]
 fn a_unit_install_did_not_write_is_never_replaced() {
     let home = tempfile::tempdir().unwrap();

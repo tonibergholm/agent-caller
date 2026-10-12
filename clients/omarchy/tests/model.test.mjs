@@ -210,6 +210,13 @@ test("a dropped connection leaves only fired actions uncertain", () => {
   assert.deepEqual(t.disconnected(), []);
 });
 
+test("an outcome that arrives before the reply naming its action is not resurrected", () => {
+  const t = new M.Tracker();
+  t.outcome({ type: "outcome", action: "x1", card: "m1/a", result: { kind: "cancelled" } });
+  t.started("x1", "m1/a");
+  assert.deepEqual(t.lost(), []);
+});
+
 test("ids are unique and short", () => {
   const ids = new M.Ids("bar");
   const a = ids.next();

@@ -1,6 +1,6 @@
 //! `acd-inbox install | uninstall | status` (omarchy spec §10).
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -176,8 +176,23 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let dir = path.parent().context("the path has no parent")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let tmp = path.with_extension("acd-inbox-new");
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+    // A leftover, or a symlink planted there, is removed (never followed),
+    // and the new file is created exclusively, so the write cannot land
+    // outside the installer's own paths.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("clearing {}", tmp.display())),
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    file.write_all(bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    // The mode given at creation is cut by the umask; set it exactly.
+    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
 }
 
