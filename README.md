@@ -9,15 +9,18 @@ waits on a question, or an agent in herdr or T3 Code finishes, the request
 shows up in one place, on whichever machine the agent runs. You answer it
 there, with a 2-second undo, without hunting for the terminal.
 
-agent-caller has two parts:
+agent-caller has three parts:
 
 - **`acd`**, a Rust daemon that runs on every machine with agents. It
   collects requests from Claude Code and Codex hooks, from herdr, and from
   T3 Code, and serves them over a documented WebSocket protocol, `acd/1`.
 - **Agent Caller**, a macOS menu bar app built with Tauri. It connects to
-  the local daemon and to remote daemons over Tailscale.
+  the local daemon and to remote daemons over Tailscale, and takes spoken
+  commands.
+- **The Omarchy inbox**, a bar icon and panel for the Omarchy shell on
+  Linux, served by a small user service, `acd-inbox`.
 
-The app is the reference client. Any other client (a CLI, a phone app)
+The Mac app is the reference client. Any other client (a CLI, a phone app)
 can speak `acd/1` to the same daemon. The protocol is in
 [`crates/acd-protocol/PROTOCOL.md`](crates/acd-protocol/PROTOCOL.md).
 
@@ -49,6 +52,10 @@ preview. These screenshots contain fixture data, not live sessions.
   preview when it is blocked. These agents are read-only.
 - Reaches remote machines over Tailscale, with a pinned TLS certificate
   per machine.
+- On the Mac, takes spoken commands: hold a key and say "approve",
+  "deny" or "yes always". See [Voice](#voice-macos).
+- On Omarchy, shows the same inbox in the shell bar. See
+  [Omarchy](#install-the-inbox-on-omarchy).
 
 | Source | Agents | How acd answers |
 |---|---|---|
@@ -98,7 +105,10 @@ spec §9, "Hook endpoint trust", for details.
 - Rust 1.90 or newer.
 - macOS or Linux for the daemon. Service install uses launchd on macOS and
   a systemd user unit on Linux.
-- macOS and Node.js 24.15 or newer for the app. CI builds with Node 24.
+- macOS 13 or newer and Node.js 24.15 or newer for the app. CI builds
+  with Node 24. Voice needs macOS 26 (on-device speech recognition).
+- Omarchy 4 on x86_64 Linux for the Omarchy inbox. Docker builds it from
+  a Mac.
 - [Tailscale](https://tailscale.com) for remote machines.
 - Optional sources: [herdr](https://github.com/herdrdev/herdr)
   0.9.3 or newer (below 0.10), and T3 Code.
@@ -224,6 +234,60 @@ Notifications appear for new requests while the panel is closed. If macOS
 does not show them, enable Agent Caller in System Settings → Notifications;
 the app does not yet request authorization or display its permission state.
 
+### Voice (macOS)
+
+Voice is off by default. Turn on **Voice control** in the app's settings;
+the app then asks for Microphone, Speech Recognition and Input Monitoring
+(the last one only for the hold key).
+
+- Hold **Right Option** and speak, then release. Or press
+  **Control+Option+V** to start and again to stop. Both can be changed in
+  settings. Esc cancels a recording while the inbox or the voice HUD has
+  focus; otherwise just release the key (a very short recording is
+  ignored).
+- Say "approve", "deny", "yes always", "option 2", "cancel", "next" or
+  "previous". There is no intent model yet (a later step), so any other
+  phrasing shows "Model unavailable".
+- Speech is recognised on the Mac. Only English is supported. A recording
+  stops at 60 seconds, and one under 0.3 seconds or without speech is
+  ignored.
+- A spoken answer goes through the same path as a typed one: the HUD shows
+  what it understood, some answers (for example "yes always") are
+  confirmed first, and the 2-second undo applies. Pressing the key again
+  cancels a running countdown. Locking the screen or sleeping stops the
+  microphone.
+
+If the hold key does nothing, check System Settings → Privacy & Security
+→ Input Monitoring. The toggle shortcut does not need it.
+
+## Install the inbox on Omarchy
+
+From a Mac with Docker, on the repository root:
+
+```sh
+just inbox-install you@omarchy
+```
+
+This builds `acd-inbox`, copies it to `~/.local/bin`, installs and starts
+the user service, and installs the shell plugin. It never restarts the
+shell: run `omarchy-restart-shell` once so the bar icon appears. To
+install on the machine itself, run `acd-inbox install` there.
+`acd-inbox status` shows the service, the socket, the keyring and the
+plugin. `acd-inbox uninstall` removes the service, the plugin and the
+binary; it leaves a keybinding you added and prints how to remove it.
+
+The bar icon opens the panel, which shows the same cards and has the same
+2-second undo as the Mac app. It reads the local `acd` and any remote machines you
+pair in its settings. Remote tokens go to the Secret Service keyring.
+New requests raise a desktop notification while the panel is closed.
+
+To open it with a key, add this line to `~/.config/hypr/bindings.lua`
+yourself (the installer prints it and only adds it when you say yes):
+
+```lua
+o.bind("SUPER + ALT + A", "Agent inbox", "omarchy-shell tonibergholm.agentcaller toggle")
+```
+
 ## Configuration
 
 `~/.config/acd/config.toml`. Set `ACD_CONFIG_DIR` to use another
@@ -255,10 +319,14 @@ Other commands:
 | `crates/acd-protocol` | `acd/1` wire types, JSON schema, pairing strings, `PROTOCOL.md` |
 | `crates/acd-core` | Request engine, agent registry, server, TLS, idempotency |
 | `crates/acd-adapters` | Sources: `hooks/` (Claude Code, Codex), `herdr/`, `t3/` |
-| `crates/acd-client` | Client library used by the app |
+| `crates/acd-client` | Client library used by the clients |
+| `crates/acd-voice` | Voice command rules: routing, safety, recording, HUD states |
+| `crates/acd-voice-client` | Voice controller that connects those rules to the inbox |
+| `crates/acd-inbox` | The Omarchy `acd-inbox` service and installer |
 | `crates/acd-securefs` | Owner-only file access |
 | `crates/acd` | The `acd` binary: daemon, CLI, hook shim, service install |
-| `app/` | Svelte frontend and Tauri backend (`app/src-tauri`) |
+| `app/` | Svelte frontend and Tauri backend (`app/src-tauri`), including the Swift speech bridge |
+| `clients/omarchy/` | Omarchy shell plugin (Quickshell QML) |
 | `tests/` | Recorded fixtures and the live end-to-end harness |
 | `docs/` | Design spec, plans, research and live check records |
 
@@ -298,9 +366,9 @@ it, and the workspace is not run through `cargo fmt` yet.
 
 ## Not in v1
 
-Voice input, a phone client and push notifications, a self-hosted relay,
-starting new agents, transcript browsing, multi-select answers, and
-desktop clients for Windows and Linux. The protocol advertises
+Voice on Linux and Windows, spoken replies, a phone client and push
+notifications, a self-hosted relay, starting new agents, transcript
+browsing, multi-select answers, and a Windows desktop client. The protocol advertises
 `capabilities` so these can arrive without breaking clients.
 
 ## License

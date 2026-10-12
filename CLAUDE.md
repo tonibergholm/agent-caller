@@ -11,12 +11,21 @@ protocol. The reference client is a Tauri menubar app for macOS.
 - `crates/acd-core`: request engine, registry, server, TLS, idempotency.
 - `crates/acd-adapters`: sources. `herdr/` (screen and keys), `t3/` (T3
   Code), `hooks/` (Claude Code and Codex hooks).
-- `crates/acd-client`: client library used by the app.
+- `crates/acd-client`: client library used by the app and `acd-inbox`.
+- `crates/acd-voice`: voice command rules (routing, safety, recording,
+  HUD states). No platform code.
+- `crates/acd-voice-client`: the voice controller that ties those rules to
+  `acd-client`.
+- `crates/acd-inbox`: the Omarchy `acd-inbox` service, socket protocol and
+  installer. Linux only at runtime.
+- `clients/omarchy/`: the Omarchy shell plugin (Quickshell QML) and its
+  Node tests.
 - `crates/acd-securefs`: owner-only file access.
 - `crates/acd`: the `acd` binary: daemon, CLI, hook shim, service
   install, secrets and the hook token store.
-- `app/`: Svelte frontend and `app/src-tauri` backend. It is excluded
-  from the Cargo workspace.
+- `app/`: Svelte frontend and `app/src-tauri` backend, with the Swift
+  speech bridge in `app/src-tauri/swift`. It is excluded from the Cargo
+  workspace.
 - `tests/fixtures/`: recorded herdr screens and other fixtures.
 
 ## Docs
@@ -46,6 +55,16 @@ App, from `app/` (macOS only, because it builds the bundle):
 ```sh
 npm ci && npm run verify
 ```
+
+Plugin tests, from `clients/omarchy/`: `node --test tests/*.test.mjs`.
+Swift bridge tests, from `app/src-tauri/swift/`: `swift test`.
+`npm run verify` runs them with `--skip LiveTests`; the live tests need a
+granted microphone and the speech model, so run them by hand. On a Mac,
+Linux-only code builds and tests in Docker: run
+`docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w rust:1-bookworm`
+with `libdbus-1-dev` and `pkg-config` installed (`apt-get`), then
+`cargo test -p acd-inbox`. The `inbox-linux` recipe in the `justfile` only
+builds the release binary.
 
 CI runs the workspace tests and clippy on Ubuntu and macOS, and the app
 on macOS. A workspace change is ready when both workspace commands pass.
