@@ -1,4 +1,5 @@
 mod common;
+use acd_client::actions::ActionOwner;
 use acd_client::{fake::*, inbox::*, settings::*, view::*, voice::*};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -1752,4 +1753,144 @@ async fn the_stamped_view_applies_the_hook_only_filter_like_the_published_view()
     ib.set_show_hook_only(true).unwrap();
     view_until(&ib, "shown", |v| v.cards.iter().any(|c| c.key == "m1/a3")).await;
     assert_eq!(ib.stamped_view().view, *ib.view().borrow());
+}
+
+fn second_pending_agent() -> Value {
+    let mut a = pending_agent();
+    a["id"] = "a2".into();
+    a["pending"]["id"] = "r2".into();
+    a["pending"]["agent_id"] = "a2".into();
+    a
+}
+
+/// Two answerable cards, `m1/a1` (request `r1`) and `m1/a2` (request `r2`).
+async fn setup_two(timing: acd_client::Timing) -> (FakeServer, FakeConn, Arc<Inbox>) {
+    let (f, c, ib) = setup_with(timing).await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":second_pending_agent()}))
+        .await;
+    view_until(&ib, "two answerable cards", |v| v.cards.iter().filter(|c| c.answerable).count() == 2).await;
+    (f, c, ib)
+}
+
+/// Starts and cancels a sentinel action on `m1/a2`, then reads outcomes up
+/// to the sentinel's: none of them may belong to `id`.
+async fn no_more_outcomes_for(ib: &Arc<Inbox>, rx: &mut tokio::sync::broadcast::Receiver<ActionEvent>, id: &str) {
+    let sentinel = ib.pick("m1/a2", "r2", "deny", 1).unwrap();
+    assert!(ib.cancel(&sentinel));
+    loop {
+        let e = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        assert_ne!(e.action_id, id, "a second outcome for one action: {:?}", e.outcome);
+        if e.action_id == sentinel {
+            return;
+        }
+    }
+}
+
+async fn deliver(f: &FakeServer, c: &FakeConn) {
+    let frame = answer_frame(f).await;
+    c.send(serde_json::json!({"type":"result","id":frame["id"],"ok":true,"outcome":"delivered"})).await;
+}
+
+#[tokio::test]
+async fn escape_owned_cancels_only_that_owners_newest() {
+    let (_f, _c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let (one, two) = (ActionOwner(1), ActionOwner(2));
+    let a = ib.pick_owned(one, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let b = ib.pick_owned(two, "m1/a2", "r2", "allow", 1).unwrap();
+    assert!(ib.escape_owned(one));
+    assert_eq!(next_outcome(&mut rx, &a).await, ActionOutcome::Cancelled);
+    assert!(!ib.escape_owned(one), "owner one has nothing left; two's countdown is not one's");
+    view_until(&ib, "one countdown left", |v| v.actions.len() == 1 && v.actions[0].id == b).await;
+    assert!(ib.cancel(&b), "a card's cancel control cancels any owner's action");
+    assert_eq!(next_outcome(&mut rx, &b).await, ActionOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn cancel_owned_ends_every_countdown_of_that_owner_and_nothing_fires() {
+    let (f, _c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let a = ib.pick_owned(ActionOwner(7), "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let b = ib.pick_owned(ActionOwner(7), "m1/a2", "r2", "deny", 1).unwrap();
+    assert_eq!(ib.cancel_owned(ActionOwner(7)), 2);
+    assert_eq!(ib.cancel_owned(ActionOwner(7)), 0);
+    assert_eq!(next_outcome(&mut rx, &a).await, ActionOutcome::Cancelled);
+    assert_eq!(next_outcome(&mut rx, &b).await, ActionOutcome::Cancelled);
+    ib.expire_countdowns_for_test();
+    view_until(&ib, "no countdowns", |v| v.actions.is_empty()).await;
+    assert_eq!(answers(&f), 0);
+}
+
+#[tokio::test]
+async fn escape_without_an_owner_still_takes_the_newest_of_any_owner() {
+    let (_f, _c, ib) = setup_two(held()).await;
+    ib.pick_owned(ActionOwner(1), "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let newest = ib.pick_owned(ActionOwner(2), "m1/a2", "r2", "allow", 1).unwrap();
+    let mut rx = ib.action_outcomes();
+    assert!(ib.escape());
+    assert_eq!(next_outcome(&mut rx, &newest).await, ActionOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn outcomes_name_the_card() {
+    let (_f, _c, ib) = setup_with(held()).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert!(ib.cancel(&id));
+    let event = rx.recv().await.unwrap();
+    assert_eq!((event.action_id.as_str(), event.card_key.as_str()), (id.as_str(), "m1/a1"));
+}
+
+#[tokio::test]
+async fn escape_owned_before_expiry_cancels_once_and_sends_nothing() {
+    let (f, _c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let owner = ActionOwner(3);
+    let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert!(ib.escape_owned(owner));
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Cancelled);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
+    assert_eq!(answers(&f), 0);
+}
+
+#[tokio::test]
+async fn escape_owned_after_expiry_is_refused_and_the_send_ends_once() {
+    let (f, c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let owner = ActionOwner(3);
+    let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    assert!(!ib.escape_owned(owner), "too late once fired");
+    deliver(&f, &c).await;
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Delivered);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
+}
+
+#[tokio::test]
+async fn cancel_owned_before_expiry_cancels_once_and_sends_nothing() {
+    let (f, _c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let owner = ActionOwner(4);
+    let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert_eq!(ib.cancel_owned(owner), 1);
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Cancelled);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
+    assert_eq!(answers(&f), 0);
+}
+
+#[tokio::test]
+async fn cancel_owned_after_expiry_cancels_nothing_and_the_send_ends_once() {
+    let (f, c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let owner = ActionOwner(4);
+    let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    assert_eq!(ib.cancel_owned(owner), 0, "a disconnect after the countdown cannot stop it");
+    deliver(&f, &c).await;
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Delivered);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
 }

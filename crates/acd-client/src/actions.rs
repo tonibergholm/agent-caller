@@ -104,9 +104,19 @@ impl fmt::Debug for ActionKind {
         }
     }
 }
+/// Who started an action (omarchy spec §6). The Mac app and voice use
+/// `DEFAULT`; acd-inbox gives each socket connection its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ActionOwner(pub u64);
+
+impl ActionOwner {
+    pub const DEFAULT: ActionOwner = ActionOwner(0);
+}
+
 #[derive(Clone, Debug)]
 pub struct Action {
     pub id: String,
+    pub owner: ActionOwner,
     pub card_key: String,
     pub machine_key: String,
     pub agent_id: String,
@@ -136,6 +146,15 @@ impl Actions {
     }
     pub fn cancel_latest(&mut self) -> Option<Action> {
         self.items.pop()
+    }
+    /// The newest unsent action of `owner`.
+    pub fn cancel_latest_of(&mut self, owner: ActionOwner) -> Option<Action> {
+        let i = self.items.iter().rposition(|a| a.owner == owner)?;
+        Some(self.items.remove(i))
+    }
+    /// Every unsent action of `owner`, oldest first.
+    pub fn cancel_owned(&mut self, owner: ActionOwner) -> Vec<Action> {
+        self.remove_where(|a| a.owner == owner)
     }
     pub fn due(&mut self, now: Instant) -> Vec<Action> {
         let mut due = Vec::new();
@@ -284,6 +303,7 @@ mod tests {
     fn action(id: &str, card: &str, generation: u64, fires_at: Instant) -> Action {
         Action {
             id: id.into(),
+            owner: ActionOwner::DEFAULT,
             card_key: card.into(),
             machine_key: "m".into(),
             agent_id: "a".into(),
@@ -438,5 +458,24 @@ mod tests {
                 "The request changed. Nothing was sent."
             );
         }
+    }
+    #[test]
+    fn owners_cancel_only_their_own() {
+        let t = Instant::now();
+        let mut a = Actions::default();
+        let mut x = action("x", "m/a", 1, t);
+        x.owner = ActionOwner(1);
+        let mut y = action("y", "m/b", 1, t);
+        y.owner = ActionOwner(2);
+        let mut z = action("z", "m/c", 1, t);
+        z.owner = ActionOwner(1);
+        a.add(x).unwrap();
+        a.add(y).unwrap();
+        a.add(z).unwrap();
+        assert_eq!(a.cancel_latest_of(ActionOwner(2)).unwrap().id, "y");
+        assert!(a.cancel_latest_of(ActionOwner(2)).is_none());
+        let ids: Vec<String> = a.cancel_owned(ActionOwner(1)).into_iter().map(|x| x.id).collect();
+        assert_eq!(ids, ["x", "z"]);
+        assert!(a.views().is_empty());
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
     Timing,
-    actions::{Action, ActionKind, Actions, Semantics, TextSemantics, check_reason, notice_for},
+    actions::{Action, ActionKind, ActionOwner, Actions, Semantics, TextSemantics, check_reason, notice_for},
     commands::Command,
     conn::{self, MachineHandle, MachineState, now_ms},
     endpoint::Endpoint,
@@ -119,6 +119,20 @@ pub struct Inbox {
     next_instance: AtomicU64,
     started: std::sync::atomic::AtomicBool,
 }
+/// Who asks for an action, and what it was planned on (voice guards).
+#[derive(Clone, Copy)]
+struct Origin<'a> {
+    owner: ActionOwner,
+    expect: Option<&'a Guard>,
+}
+
+impl Origin<'_> {
+    const KEYS: Origin<'static> = Origin { owner: ActionOwner::DEFAULT, expect: None };
+    fn owned(owner: ActionOwner) -> Origin<'static> {
+        Origin { owner, expect: None }
+    }
+}
+
 impl Inbox {
     pub fn new(settings: Settings, secrets: Arc<dyn SecretStore>, opts: InboxOptions) -> Arc<Self> {
         let initial = InboxView {
@@ -184,8 +198,12 @@ impl Inbox {
         self.outcomes_tx.subscribe()
     }
 
-    fn emit(&self, action_id: &str, outcome: ActionOutcome) {
-        let _ = self.outcomes_tx.send(ActionEvent { action_id: action_id.to_owned(), outcome });
+    fn emit(&self, action: &Action, outcome: ActionOutcome) {
+        let _ = self.outcomes_tx.send(ActionEvent {
+            action_id: action.id.clone(),
+            card_key: action.card_key.clone(),
+            outcome,
+        });
     }
 
     /// The view, the idle cards it hides, and the stamps of the machine
@@ -296,7 +314,7 @@ impl Inbox {
         inner.settings = candidate;
         if let Some(old) = inner.machines.iter().position(|m| m.entry.key == entry.key) {
             for action in inner.actions.end_machine(&entry.key) {
-                    self.emit(&action.id, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+                    self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
                 inner.notices.insert(
                     action.card_key,
                     (
@@ -391,7 +409,7 @@ impl Inbox {
         }
         inner.machines.retain(|m| m.entry.key != key);
         for action in inner.actions.end_machine(key) {
-                self.emit(&action.id, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+                self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
             inner.notices.insert(
                 action.card_key,
                 (
@@ -444,7 +462,7 @@ impl Inbox {
         }
         inner.settings = candidate;
         for a in drop_hidden_actions(&mut inner) {
-            self.emit(&a.id, ActionOutcome::NotSent { reason: NotSentReason::Hidden });
+            self.emit(&a, ActionOutcome::NotSent { reason: NotSentReason::Hidden });
         }
         drop(inner);
         self.wake();
@@ -461,7 +479,7 @@ impl Inbox {
         }
         inner.settings = candidate;
         for a in drop_hidden_actions(&mut inner) {
-            self.emit(&a.id, ActionOutcome::NotSent { reason: NotSentReason::Hidden });
+            self.emit(&a, ActionOutcome::NotSent { reason: NotSentReason::Hidden });
         }
         drop(inner);
         self.wake();
@@ -560,7 +578,7 @@ impl Inbox {
         for (key, state) in &states {
             let invalid = inner.actions.remove_invalid(key, |a| check_reason(a, state).err());
             for (action, reason) in invalid {
-                self.emit(&action.id, ActionOutcome::NotSent { reason });
+                self.emit(&action, ActionOutcome::NotSent { reason });
                 inner
                     .notices
                     .insert(action.card_key, (notice_for(reason), now + self.opts.timing.notice_ttl));
@@ -613,7 +631,7 @@ impl Inbox {
         let due = { self.inner.lock().unwrap().actions.due(Instant::now()) };
         for action in due {
             // The countdown ended: `cancel(id)` can no longer stop it.
-            self.emit(&action.id, ActionOutcome::Fired);
+            self.emit(&action, ActionOutcome::Fired);
             let data = {
                 let inner = self.inner.lock().unwrap();
                 let m = inner
@@ -665,7 +683,7 @@ impl Inbox {
                 let out = match check_reason(&validation_action, &latest) {
                     Ok(()) => Some(handle.submit(cmd, Some(action.conn_gen)).await),
                     Err(reason) => {
-                        ib.emit(&validation_action.id, ActionOutcome::NotSent { reason });
+                        ib.emit(&validation_action, ActionOutcome::NotSent { reason });
                         let mut inner = ib.inner.lock().unwrap();
                         inner.notices.insert(
                             validation_action.card_key.clone(),
@@ -675,7 +693,7 @@ impl Inbox {
                     }
                 };
                 if let Some(out) = &out {
-                    ib.emit(&validation_action.id, ActionOutcome::from_submit(out));
+                    ib.emit(&validation_action, ActionOutcome::from_submit(out));
                 }
                 let mut inner = ib.inner.lock().unwrap();
                 inner.busy.remove(&action.card_key);
@@ -695,7 +713,7 @@ impl Inbox {
 
     /// An action that ended without being sent: notice and outcome (D1).
     async fn not_sent(&self, action: &Action, reason: NotSentReason) {
-        self.emit(&action.id, ActionOutcome::NotSent { reason });
+        self.emit(action, ActionOutcome::NotSent { reason });
         self.set_notice(&action.card_key, notice_for(reason)).await;
     }
     async fn set_notice(&self, key: &str, n: Notice) {
@@ -717,7 +735,7 @@ impl Inbox {
         match event {
             conn::MachineEvent::ConnectionEnded { generation } => {
                 for a in inner.actions.end_generation(key, generation) {
-                self.emit(&a.id, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+                self.emit(&a, ActionOutcome::NotSent { reason: NotSentReason::Offline });
                     inner.notices.insert(
                         a.card_key,
                         (
@@ -782,7 +800,7 @@ impl Inbox {
             return;
         }
         for a in inner.actions.end_machine(key) {
-                self.emit(&a.id, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+                self.emit(&a, ActionOutcome::NotSent { reason: NotSentReason::Offline });
             inner.notices.insert(
                 a.card_key,
                 (
@@ -796,16 +814,16 @@ impl Inbox {
     }
     fn pick_with(
         self: &Arc<Self>,
+        origin: Origin<'_>,
         card_key: &str,
         request_id: &str,
         option_id: &str,
         revision: u64,
-        expect: Option<&Guard>,
     ) -> Result<String, PickError> {
         let mut inner = self.inner.lock().unwrap();
         let (machine_key, handle, entry) = find_card(&inner, card_key)?;
         let state = handle.state().borrow().clone();
-        guard(&inner.settings, &state, card_key, expect)?;
+        guard(&inner.settings, &state, card_key, origin.expect)?;
         let current_view = self.view_tx.borrow().clone();
         let card = current_view
             .cards
@@ -850,6 +868,7 @@ impl Inbox {
         let id = uuid::Uuid::new_v4().to_string();
         let a = Action {
             id: id.clone(),
+            owner: origin.owner,
             card_key: card_key.into(),
             machine_key,
             agent_id: agent.id.clone(),
@@ -873,11 +892,11 @@ impl Inbox {
     }
     fn answer_text_with(
         self: &Arc<Self>,
+        origin: Origin<'_>,
         card_key: &str,
         request_id: &str,
         revision: u64,
         text: String,
-        expect: Option<&Guard>,
     ) -> Result<String, PickError> {
         let text = text.replace("\r\n", "\n").trim().to_owned();
         if text.is_empty()
@@ -889,7 +908,7 @@ impl Inbox {
         let mut inner = self.inner.lock().unwrap();
         let (machine_key, handle, _) = find_card(&inner, card_key)?;
         let state = handle.state().borrow().clone();
-        guard(&inner.settings, &state, card_key, expect)?;
+        guard(&inner.settings, &state, card_key, origin.expect)?;
         if state.status != conn::MachineStatus::Online || !state.session.has("answer") {
             return Err(PickError::NotAnswerable);
         }
@@ -915,6 +934,7 @@ impl Inbox {
         let detail: String = text.chars().take(80).collect();
         inner.actions.add(Action {
             id: id.clone(),
+            owner: origin.owner,
             card_key: card_key.into(),
             machine_key,
             agent_id: agent.id.clone(),
@@ -934,15 +954,15 @@ impl Inbox {
         self.wake();
         Ok(id)
     }
-    fn reply_with(self: &Arc<Self>, card_key: &str, text: String, expect: Option<&Guard>) -> Result<String, PickError> {
+    fn reply_with(self: &Arc<Self>, origin: Origin<'_>, card_key: &str, text: String) -> Result<String, PickError> {
         if text.trim().is_empty() || text.len() > 64 * 1024 {
             return Err(PickError::BadText);
         }
         let mut inner = self.inner.lock().unwrap();
         let (machine_key, handle, _) = find_card(&inner, card_key)?;
         let state = handle.state().borrow().clone();
-        guard(&inner.settings, &state, card_key, expect)?;
-        let agent_id = match expect {
+        guard(&inner.settings, &state, card_key, origin.expect)?;
+        let agent_id = match origin.expect {
             // Voice: live state only; no published card is needed (D7, B2).
             Some(g) => {
                 let live = state.status == conn::MachineStatus::Online
@@ -972,6 +992,7 @@ impl Inbox {
         let detail: String = text.chars().take(80).collect();
         inner.actions.add(Action {
             id: id.clone(),
+            owner: origin.owner,
             card_key: card_key.into(),
             machine_key,
             agent_id,
@@ -993,7 +1014,11 @@ impl Inbox {
     }
 
     pub fn pick(self: &Arc<Self>, card_key: &str, request_id: &str, option_id: &str, revision: u64) -> Result<String, PickError> {
-        self.pick_with(card_key, request_id, option_id, revision, None)
+        self.pick_with(Origin::KEYS, card_key, request_id, option_id, revision)
+    }
+    /// `pick` for one owner (omarchy spec §6).
+    pub fn pick_owned(self: &Arc<Self>, owner: ActionOwner, card_key: &str, request_id: &str, option_id: &str, revision: u64) -> Result<String, PickError> {
+        self.pick_with(Origin::owned(owner), card_key, request_id, option_id, revision)
     }
     /// `pick` on the request `guard` names, refused unless connection,
     /// agent and request still match (voice spec §5.6).
@@ -1001,45 +1026,76 @@ impl Inbox {
         let Some((request_id, revision)) = guard.request.clone() else {
             return Err(PickError::StaleRequest);
         };
-        self.pick_with(card_key, &request_id, option_id, revision, Some(guard))
+        self.pick_with(Origin { owner: ActionOwner::DEFAULT, expect: Some(guard) }, card_key, &request_id, option_id, revision)
     }
     /// A typed answer to a free-text request, with the same undo countdown as
     /// `pick`. The text is trimmed; blank, oversize (16 KiB) or control-char
     /// text is `BadAnswerText`.
     pub fn answer_text(self: &Arc<Self>, card_key: &str, request_id: &str, revision: u64, text: String) -> Result<String, PickError> {
-        self.answer_text_with(card_key, request_id, revision, text, None)
+        self.answer_text_with(Origin::KEYS, card_key, request_id, revision, text)
+    }
+    /// `answer_text` for one owner.
+    pub fn answer_text_owned(self: &Arc<Self>, owner: ActionOwner, card_key: &str, request_id: &str, revision: u64, text: String) -> Result<String, PickError> {
+        self.answer_text_with(Origin::owned(owner), card_key, request_id, revision, text)
     }
     pub fn answer_text_guarded(self: &Arc<Self>, card_key: &str, text: String, guard: &Guard) -> Result<String, PickError> {
         let Some((request_id, revision)) = guard.request.clone() else {
             return Err(PickError::StaleRequest);
         };
-        self.answer_text_with(card_key, &request_id, revision, text, Some(guard))
+        self.answer_text_with(Origin { owner: ActionOwner::DEFAULT, expect: Some(guard) }, card_key, &request_id, revision, text)
     }
     pub fn reply(self: &Arc<Self>, card_key: &str, text: String) -> Result<String, PickError> {
-        self.reply_with(card_key, text, None)
+        self.reply_with(Origin::KEYS, card_key, text)
+    }
+    /// `reply` for one owner.
+    pub fn reply_owned(self: &Arc<Self>, owner: ActionOwner, card_key: &str, text: String) -> Result<String, PickError> {
+        self.reply_with(Origin::owned(owner), card_key, text)
     }
     /// `reply`, refused unless connection, agent and request (including
     /// "no request") still match what the step was planned on.
     pub fn reply_guarded(self: &Arc<Self>, card_key: &str, text: String, guard: &Guard) -> Result<String, PickError> {
-        self.reply_with(card_key, text, Some(guard))
+        self.reply_with(Origin { owner: ActionOwner::DEFAULT, expect: Some(guard) }, card_key, text)
     }
     pub fn cancel(&self, id: &str) -> bool {
         let removed = self.inner.lock().unwrap().actions.cancel(id);
         let Some(action) = removed else {
             return false;
         };
-        self.emit(&action.id, ActionOutcome::Cancelled);
+        self.emit(&action, ActionOutcome::Cancelled);
         self.wake();
         true
     }
+    /// Cancels the newest unsent action of any owner (the Mac panel's Esc).
     pub fn escape(&self) -> bool {
         let removed = self.inner.lock().unwrap().actions.cancel_latest();
         let Some(action) = removed else {
             return false;
         };
-        self.emit(&action.id, ActionOutcome::Cancelled);
+        self.emit(&action, ActionOutcome::Cancelled);
         self.wake();
         true
+    }
+    /// Cancels `owner`'s newest unsent action (Esc in one view).
+    pub fn escape_owned(&self, owner: ActionOwner) -> bool {
+        let removed = self.inner.lock().unwrap().actions.cancel_latest_of(owner);
+        let Some(action) = removed else {
+            return false;
+        };
+        self.emit(&action, ActionOutcome::Cancelled);
+        self.wake();
+        true
+    }
+    /// Cancels every unsent action of `owner` (a view disconnected); each
+    /// ends `Cancelled`. Returns how many.
+    pub fn cancel_owned(&self, owner: ActionOwner) -> usize {
+        let removed = self.inner.lock().unwrap().actions.cancel_owned(owner);
+        for action in &removed {
+            self.emit(action, ActionOutcome::Cancelled);
+        }
+        if !removed.is_empty() {
+            self.wake();
+        }
+        removed.len()
     }
     pub fn mark_seen(self: &Arc<Self>, card_key: &str) -> Result<(), PickError> {
         let inner = self.inner.lock().unwrap();
@@ -1075,7 +1131,7 @@ impl Inbox {
         let mut inner = self.inner.lock().unwrap();
         inner.settings.show_idle = on;
         for a in drop_hidden_actions(&mut inner) {
-            self.emit(&a.id, ActionOutcome::NotSent { reason: NotSentReason::Hidden });
+            self.emit(&a, ActionOutcome::NotSent { reason: NotSentReason::Hidden });
         }
         drop(inner);
         self.wake();
