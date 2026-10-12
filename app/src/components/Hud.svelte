@@ -65,6 +65,18 @@
   const remaining = $derived(action ? Math.max(0, action.fires_at_ms - now) : 0);
   const fraction = $derived(Math.min(1, remaining / WINDOW_MS));
 
+  // The panel follows the content's height: the HUD's own height, less
+  // the scrolling body's visible part, plus all of the body's content.
+  let main = $state<HTMLElement | null>(null);
+  let body = $state<HTMLElement | null>(null);
+  $effect(() => {
+    void hud;
+    void tick().then(() => {
+      if (!main || !body) return;
+      quiet(api.voiceHudFit(main.offsetHeight - body.clientHeight + body.scrollHeight));
+    });
+  });
+
   const confirmStep = (id: number) => quiet(api.voiceConfirm(id));
   // A state without an input id has nothing to cancel: send nothing.
   const cancel = () => {
@@ -119,9 +131,9 @@
 <svelte:window onkeydown={key} />
 
 {#if hud.state !== "hidden"}
-  <main class="hud" data-state={hud.state} aria-label="Voice step">
+  <main class="hud" data-state={hud.state} aria-label="Voice step" bind:this={main}>
     <p class="sr" aria-live="polite">{summary}</p>
-    <div class="body">
+    <div class="body" bind:this={body}>
       {#if hud.state === "listening"}
         <p class="status"><span class="mic" aria-hidden="true"></span>Listening…</p>
       {:else if hud.state === "thinking"}
@@ -195,7 +207,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    height: 100vh;
+    max-height: 100vh;
     box-sizing: border-box;
     padding: 14px 16px 18px;
     overflow: hidden;

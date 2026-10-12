@@ -301,3 +301,11 @@ test("a stale clear is ignored and the current clear hides the state", async () 
   await tick();
   expect(screen.queryByText("kept")).toBeNull();
 });
+
+test("each state asks the panel to fit its content", async () => {
+  const api = await show({ state: "error", refusal: "did_not_understand", transcript: "x" });
+  await tick();
+  await tick();
+  expect(api.fits.length).toBeGreaterThan(0);
+  expect(api.calls).toEqual([]);
+});

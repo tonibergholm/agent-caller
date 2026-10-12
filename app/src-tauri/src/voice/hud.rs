@@ -4,14 +4,21 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use acd_voice::hud::{Hud, HudEvent};
+use acd_voice::hud::{Hud, HudEvent, OutcomeView};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Size, WebviewUrl, WebviewWindow};
 use tauri_nspanel::{CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask, tauri_panel};
 
 use crate::frame::Frame;
 
 pub const LABEL: &str = "hud";
+/// The width, and the height before the HUD measured its content.
 pub const SIZE: (f64, f64) = (560.0, 260.0);
+/// The HUD's height follows its content (`fit_height`), within these.
+pub const MIN_HEIGHT: f64 = 48.0;
+pub const MAX_HEIGHT: f64 = 420.0;
+/// Thinking shows only if the step is still thinking after this, so a
+/// step that finishes at once does not flash it.
+pub const THINKING_AFTER: Duration = Duration::from_millis(150);
 /// Spec §4.4: the HUD fades 1.5 s after the step fires or speech ends.
 pub const FADE_AFTER: Duration = Duration::from_millis(1500);
 
@@ -89,6 +96,8 @@ pub fn holds_key() -> bool {
 /// could not be dispatched at all. Any thread; never blocks.
 pub fn present(app: &AppHandle, seq: u64, hud: &Hud) -> bool {
     LAST_SEQ.store(seq, Ordering::SeqCst);
+    let nothing = Hud::Hidden;
+    let hud = if shows_nothing(hud, crate::panel::is_visible()) { &nothing } else { hud };
     let (hidden, wants_key) = (matches!(hud, Hud::Hidden), hud.wants_key());
     let event = match serde_json::to_value(HudEvent::new(seq, hud)) {
         Ok(v) => v,
@@ -98,7 +107,7 @@ pub fn present(app: &AppHandle, seq: u64, hud: &Hud) -> bool {
         }
     };
     let handle = app.clone();
-    let dispatched = app.run_on_main_thread(move || {
+    let show = move || {
         let presented = apply(&handle, hidden, wants_key);
         if !should_emit(hidden, presented) {
             tracing::error!("the HUD panel is not on screen; the step is not shown");
@@ -108,8 +117,24 @@ pub fn present(app: &AppHandle, seq: u64, hud: &Hud) -> bool {
         if let Err(error) = handle.emit("voice://hud", event) {
             tracing::error!(%error, "could not emit the HUD state");
         }
-    });
-    if let Err(error) = dispatched {
+    };
+    if let Some(after) = show_after(hud) {
+        // Thinking needs no acknowledgement: shown later, and only if no
+        // newer state arrived by then (checked in order on the main thread).
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(after).await;
+            if let Err(error) = handle.run_on_main_thread(move || {
+                if fade_applies(LAST_SEQ.load(Ordering::SeqCst), seq) {
+                    show();
+                }
+            }) {
+                tracing::error!(%error, "could not dispatch the HUD update");
+            }
+        });
+        return true;
+    }
+    if let Err(error) = app.run_on_main_thread(show) {
         tracing::error!(%error, "could not dispatch the HUD update");
         return false;
     }
@@ -143,6 +168,31 @@ pub fn fade_delay(hud: &Hud) -> Duration {
         Hud::Speaking { text } => Duration::from_millis(1500 + 50 * text.char_len() as u64)
             .clamp(Duration::from_secs(3), Duration::from_secs(15)),
         _ => FADE_AFTER,
+    }
+}
+
+/// A selection needs no HUD while the inbox panel is open: the inbox
+/// shows it.
+fn shows_nothing(hud: &Hud, inbox_open: bool) -> bool {
+    inbox_open && matches!(hud, Hud::Done { outcome: OutcomeView::Selected, .. })
+}
+
+/// How long to wait before showing `hud`, if at all.
+fn show_after(hud: &Hud) -> Option<Duration> {
+    matches!(hud, Hud::Thinking { .. }).then_some(THINKING_AFTER)
+}
+
+/// The HUD panel's height for content `measured` px tall.
+pub fn fit_height(measured: f64) -> f64 {
+    if measured.is_finite() { measured.ceil().clamp(MIN_HEIGHT, MAX_HEIGHT) } else { SIZE.1 }
+}
+
+/// Main thread. Resizes the HUD to `height`, keeping its top edge.
+pub fn fit(app: &AppHandle, height: f64) {
+    if let Some(window) = app.get_webview_window(LABEL)
+        && let Err(error) = window.set_size(Size::Logical(LogicalSize::new(SIZE.0, fit_height(height))))
+    {
+        tracing::warn!(%error, "could not resize the HUD");
     }
 }
 
@@ -255,7 +305,6 @@ fn position(window: &WebviewWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acd_voice::hud::OutcomeView;
     use acd_voice::text::VoiceText;
 
     #[test]
@@ -283,6 +332,29 @@ mod tests {
     fn the_hud_sits_top_centre_18_percent_down() {
         let f = place_on(Frame { x: 100.0, y: 0.0, w: 1600.0, h: 1000.0 }, (560.0, 260.0));
         assert_eq!(f, Frame { x: 620.0, y: 180.0, w: 560.0, h: 260.0 });
+    }
+
+    #[test]
+    fn a_selection_shows_nothing_while_the_inbox_shows_it() {
+        let selected = Hud::Done { proposal: None, outcome: OutcomeView::Selected };
+        assert!(shows_nothing(&selected, true));
+        assert!(!shows_nothing(&selected, false), "with the inbox closed the HUD says what was selected");
+        assert!(!shows_nothing(&Hud::Done { proposal: None, outcome: OutcomeView::Cancelled }, true));
+    }
+
+    #[test]
+    fn thinking_waits_so_quick_steps_do_not_flash_it() {
+        assert_eq!(show_after(&Hud::Thinking { transcript: VoiceText::new("x"), id: 1 }), Some(THINKING_AFTER));
+        assert_eq!(show_after(&Hud::Done { proposal: None, outcome: OutcomeView::Cancelled }), None);
+        assert_eq!(show_after(&Hud::Hidden), None);
+    }
+
+    #[test]
+    fn the_hud_fits_its_content_within_bounds() {
+        assert_eq!(fit_height(20.0), MIN_HEIGHT);
+        assert_eq!(fit_height(90.5), 91.0);
+        assert_eq!(fit_height(5000.0), MAX_HEIGHT);
+        assert_eq!(fit_height(f64::NAN), SIZE.1, "a bad measurement keeps the default");
     }
 
     #[test]

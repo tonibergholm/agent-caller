@@ -95,6 +95,8 @@ export type FakeApi = Api & {
   calls: unknown[][];
   /** Presentation publishes, kept out of `calls` so exact-call assertions stay valid. */
   presentations: Presentation[];
+  /** HUD heights sent to `voiceHudFit`, also kept out of `calls`. */
+  fits: number[];
   voiceSelect?: (cardKey: string) => void;
   voiceSettings?: (s: VoiceSettings) => void;
   hud?: (e: HudEvent) => void;
@@ -171,6 +173,11 @@ export function fakeApi(
     voiceConfirm: rec("voiceConfirm", undefined),
     voiceChoose: rec("voiceChoose", undefined),
     voiceCancel: rec("voiceCancel", undefined),
+    // Kept out of `calls`: sizing is not an action.
+    voiceHudFit: async (height: number) => {
+      api.fits.push(height);
+    },
+    fits: [] as number[],
   } as FakeApi;
   return api;
 }

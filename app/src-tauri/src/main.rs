@@ -63,6 +63,7 @@ fn main() {
             voice::commands::voice_confirm,
             voice::commands::voice_choose,
             voice::commands::voice_cancel,
+            voice::commands::voice_hud_fit,
         ])
         .setup(|app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

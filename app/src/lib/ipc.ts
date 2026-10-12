@@ -46,6 +46,8 @@ export interface Api {
   voiceChoose(choiceId: number, index: number): Promise<void>;
   /** `id` is the `id` of the shown state; states without one send no cancel. */
   voiceCancel(id: number): Promise<void>;
+  /** The HUD's content height in CSS px; the panel fits it. */
+  voiceHudFit(height: number): Promise<void>;
 }
 
 export const tauriApi: Api = {
@@ -84,4 +86,5 @@ export const tauriApi: Api = {
   voiceConfirm: (proposalId) => invoke("voice_confirm", { proposalId }),
   voiceChoose: (choiceId, index) => invoke("voice_choose", { choiceId, index }),
   voiceCancel: (id) => invoke("voice_cancel", { id }),
+  voiceHudFit: (height) => invoke("voice_hud_fit", { height }),
 };
