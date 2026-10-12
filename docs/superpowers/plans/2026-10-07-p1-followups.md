@@ -180,6 +180,15 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Panel frame.** No unit test for `save_now`; the order of the screen-parameters notification and macOS's refit moves needs a runtime check with a display unplugged.
 - **Countdowns.** Turning idle agents off cancels a countdown on an Idle card that the view would now keep; the Done header count includes an out-of-filter card kept for its countdown; no panel test for J/K and Esc on a counting Done row while Done is collapsed.
 
+### Omarchy inbox (from the final review)
+
+- **Unavailable keyring reads as damaged.** With no Secret Service running at prefill, `Cached::Unavailable` maps to `Unreadable`: the chip says "Pair again", `acd-inbox status` says the secret is damaged, and re-pairing fails. The spec does not define this state.
+- **Unknown write leaves an orphan.** If the write of a new machine's secret ends `Unknown`, the keyring item may stay under a UUID no machine uses.
+- **Uninstall removes a binary it did not write.** `acd-inbox uninstall` deletes `~/.local/bin/acd-inbox` even when install found it in place (`same`).
+- **Rename racing remove** returns `settings_failed`, not `unknown_machine`.
+- **Keyring deadline.** Mutating Secret Service calls have no deadline; check whether zbus applies a reply timeout, or a hung service blocks the worker until restart.
+- **One owner per panel.** Each `Service.qml` is its own connection and owner. If Omarchy creates a bar widget per monitor, Esc in one panel does not undo a countdown started from another's.
+
 ### Harness (`just e2e`)
 
 - `run.lock` has two millisecond races, and `just e2e-down` ignores the lock.
