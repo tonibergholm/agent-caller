@@ -136,6 +136,12 @@ impl Outbox {
         }
     }
 
+    /// Test hook: the next due line without waiting.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn try_next_for_test(&self) -> Option<String> {
+        self.take().flatten()
+    }
+
     /// `Some(None)`: closed. `None`: nothing due yet.
     fn take(&self) -> Option<Option<String>> {
         let mut s = self.state.lock().unwrap();
