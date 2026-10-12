@@ -3,3 +3,4 @@
 pub mod protocol;
 pub mod prefs;
 pub mod startup;
+pub mod outbox;
