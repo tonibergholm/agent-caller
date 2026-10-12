@@ -21,7 +21,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream},
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
     task::JoinSet,
     time::{Instant, Sleep},
 };
@@ -367,6 +367,7 @@ impl Drop for AbortOnDrop {
 
 pub struct TlsListener {
     rx: mpsc::Receiver<(TlsIo, SocketAddr)>,
+    ended: Option<oneshot::Receiver<()>>,
     _task: AbortOnDrop,
     local: SocketAddr,
     kill: KillSwitch,
@@ -380,10 +381,14 @@ impl TlsListener {
     ) -> TlsListener {
         let local = tcp.local_addr().expect("bound TCP listener");
         let (tx, rx) = mpsc::channel(16);
+        let (ended_tx, ended_rx) = oneshot::channel::<()>();
         let (kill_tx, _) = watch::channel(false);
         let kill = KillSwitch { tx: kill_tx };
         let kill_rx = kill.tx.subscribe();
         let task = tokio::spawn(async move {
+            // Dropped when this task ends, however it ends, which is what
+            // `ended` observes.
+            let _ended_tx = ended_tx;
             let mut handshakes = JoinSet::new();
             let tcp = tcp;
             let mut config = config;
@@ -414,6 +419,7 @@ impl TlsListener {
         });
         TlsListener {
             rx,
+            ended: Some(ended_rx),
             _task: AbortOnDrop(task),
             local,
             kill,
@@ -422,12 +428,31 @@ impl TlsListener {
     pub fn kill_switch(&self) -> KillSwitch {
         self.kill.clone()
     }
+    /// Resolves once the accept task has ended. A server selects on it so a
+    /// dead listener stops that server instead of leaving it waiting. Only
+    /// the first call gets the signal; later futures never resolve.
+    pub fn ended(&mut self) -> impl Future<Output = ()> + Send + 'static {
+        let ended = self.ended.take();
+        async move {
+            match ended {
+                Some(rx) => {
+                    let _ = rx.await;
+                }
+                None => std::future::pending().await,
+            }
+        }
+    }
 }
 impl Listener for TlsListener {
     type Io = TlsIo;
     type Addr = SocketAddr;
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        self.rx.recv().await.expect("TLS listener task ended")
+        match self.rx.recv().await {
+            Some(conn) => conn,
+            // The accept task ended. Never invent a connection; `ended`
+            // tells the server, so this future only waits.
+            None => std::future::pending().await,
+        }
     }
     fn local_addr(&self) -> io::Result<Self::Addr> {
         Ok(self.local)
@@ -455,6 +480,34 @@ mod io_tests {
         pki_types::{CertificateDer, ServerName, UnixTime},
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// The accept task ends when it is aborted, as it does when the runtime
+    /// shuts down while a server still polls the listener. Accept must wait
+    /// then, not panic.
+    #[tokio::test]
+    async fn accept_after_the_accept_task_ended_waits_instead_of_panicking() {
+        let config = server_config(&generate("task-ended")).unwrap();
+        let (_tx, rx) = watch::channel(config);
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut listener = TlsListener::new(tcp, rx, Admission::new(4), Limits::default());
+        listener._task.0.abort();
+        let polled = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(polled.is_err(), "accept returned from a dead listener");
+    }
+
+    /// A server that selects on `ended` learns that the accept task stopped.
+    #[tokio::test]
+    async fn ended_resolves_when_the_accept_task_ends() {
+        let config = server_config(&generate("ended")).unwrap();
+        let (_tx, rx) = watch::channel(config);
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut listener = TlsListener::new(tcp, rx, Admission::new(4), Limits::default());
+        let ended = listener.ended();
+        listener._task.0.abort();
+        tokio::time::timeout(Duration::from_secs(5), ended)
+            .await
+            .expect("ended resolves once the task is gone");
+    }
 
     #[derive(Debug)]
     struct AcceptAnyCert;

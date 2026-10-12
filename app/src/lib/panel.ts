@@ -1,4 +1,5 @@
 import type { CardView } from "./bindings/CardView";
+import type { InboxView } from "./bindings/InboxView";
 import type { MachineStatus } from "./bindings/MachineStatus";
 import type { MachineView } from "./bindings/MachineView";
 
@@ -82,3 +83,23 @@ export function dotKind(s: MachineStatus): DotKind {
 /** Machines to list: duplicates of another entry are suppressed. */
 export const listedMachines = (machines: MachineView[]): MachineView[] =>
   machines.filter((m) => m.duplicate_of === null);
+
+/**
+ * The view without the local machine and its cards (mobile: the phone has
+ * no local daemon, so "This Mac" and its banner never apply).
+ */
+export function hideLocal(view: InboxView): InboxView {
+  const local = view.machines.filter((m) => m.is_local).map((m) => m.key);
+  if (local.length === 0) return view;
+  const localCards = new Set(view.cards.filter((c) => local.includes(c.machine_key)).map((c) => c.key));
+  return {
+    ...view,
+    machines: view.machines.filter((m) => !m.is_local),
+    cards: view.cards.filter((c) => !localCards.has(c.key)),
+    // Countdowns of local cards would otherwise run with no card to show them.
+    actions: view.actions.filter((a) => !localCards.has(a.card_key)),
+    // hidden_idle and tray are daemon-wide counts that the view does not split
+    // per machine, so they are left as sent. hidden_idle can therefore still
+    // count idle agents of the local machine; the tray is not shown on mobile.
+  };
+}

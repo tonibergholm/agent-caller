@@ -55,9 +55,10 @@ pub fn agent_obs(socket_hash: &str, info: &wire::AgentInfo) -> Option<AgentObs> 
         (&info.terminal_title_stripped, true),
     ]
     .into_iter()
-    .filter_map(|(s, terminal)| s.as_ref().map(|s| (clean_display(s, TITLE_CHARS), terminal)))
+    // Check the marker on the whole title: capping first could cut it off.
+    .filter_map(|(s, terminal)| s.as_ref().map(|s| (clean_display(s, usize::MAX), terminal)))
     .find(|(s, terminal)| !s.is_empty() && !(*terminal && kind == AgentKind::Codex && is_codex_context(s)))
-    .map(|(s, _)| s)
+    .map(|(s, _)| clean_display(&s, TITLE_CHARS))
     .unwrap_or_else(|| clean_display(&info.pane_id, TITLE_CHARS));
     let cwd = info
         .cwd
@@ -182,6 +183,11 @@ mod tests {
             agent_obs("abc", &info(tagged)).unwrap().title,
             "Fix <environment_context> parsing"
         );
+        // The marker is found even when it sits past the display cap.
+        let mut far = agent.clone();
+        let padding = "x".repeat(TITLE_CHARS + 20);
+        far["terminal_title_stripped"] = format!("{padding} <environment_context>").into();
+        assert_eq!(agent_obs("abc", &info(far)).unwrap().title, "w1:p1");
         // Only Codex echoes the block; another agent's terminal title is kept.
         let mut other = agent.clone();
         other["agent"] = "claude".into();
