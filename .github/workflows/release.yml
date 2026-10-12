@@ -2,8 +2,12 @@ name: Release
 
 # Tag push (v*): run the CI gate, build every artifact, and create a DRAFT
 # pre-release. The owner reviews the draft and publishes it by hand.
-# workflow_dispatch: the same build without publishing (dry run). Artifacts
-# are uploaded to the run; no release is created.
+# workflow_dispatch: the same build without publishing. The run uploads a
+# dist-all artifact with SHA256SUMS, so the dry run can be tested with
+# scripts/install.sh --from-dir. No release is created.
+#
+# Secrets: each APPLE_* secret is passed only to the step that uses it, never
+# at job level. Steps that build Rust or install npm packages get no secrets.
 #
 # Docs: docs/release.md.
 
@@ -27,7 +31,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Check version fields and CHANGELOG
         id: version
         env:
@@ -73,19 +77,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
             linux: true
-    env:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
       - name: Build acd
@@ -97,11 +94,38 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --target "$TARGET" -p acd-inbox
+      - name: Decide signing mode
+        id: signing
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "developer_id=false" >> "$GITHUB_OUTPUT"
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Ad-hoc signing. No Developer ID certificate is configured."
+          elif [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "developer_id=true" >> "$GITHUB_OUTPUT"
+            echo "notarize=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Developer ID signing and notarization enabled."
+          else
+            echo "developer_id=true" >> "$GITHUB_OUTPUT"
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID are not all set. Signing without notarization."
+          fi
       - name: Import Developer ID certificate
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        if: runner.os == 'macOS' && steps.signing.outputs.developer_id == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: scripts/apple-keychain.sh
       - name: Sign acd with Developer ID
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        if: runner.os == 'macOS' && steps.signing.outputs.developer_id == 'true'
         env:
           TARGET: ${{ matrix.target }}
         run: |
@@ -111,7 +135,7 @@ jobs:
             "target/$TARGET/release/acd"
           codesign --verify --strict --verbose=2 "target/$TARGET/release/acd"
       - name: Ad-hoc sign acd
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE == ''
+        if: runner.os == 'macOS' && steps.signing.outputs.developer_id != 'true'
         env:
           TARGET: ${{ matrix.target }}
         run: |
@@ -119,19 +143,33 @@ jobs:
           codesign --force --sign - "target/$TARGET/release/acd"
           echo "acd is ad-hoc signed (no Developer ID certificate configured)."
       - name: Notarize acd
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != '' && env.APPLE_ID != '' && env.APPLE_PASSWORD != '' && env.APPLE_TEAM_ID != ''
+        if: runner.os == 'macOS' && steps.signing.outputs.notarize == 'true'
         env:
           TARGET: ${{ matrix.target }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           # A bare Mach-O cannot be stapled. Gatekeeper checks the notary service instead.
           zip_path="$RUNNER_TEMP/acd-notarize.zip"
+          notary_json="$RUNNER_TEMP/notary.json"
           /usr/bin/ditto -c -k "target/$TARGET/release/acd" "$zip_path"
-          xcrun notarytool submit "$zip_path" --wait \
-            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
+          xcrun notarytool submit "$zip_path" --wait --output-format json \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+            > "$notary_json"
+          status=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("status", ""))' "$notary_json")
+          echo "Notarization status: $status"
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::Notarization of acd did not return Accepted (status: ${status:-none})."
+            exit 1
+          fi
       - name: Remove temporary keychain
-        if: always() && runner.os == 'macOS' && env.APPLE_CERTIFICATE != '' && env.APPLE_KEYCHAIN != ''
-        run: security delete-keychain "$APPLE_KEYCHAIN" || true
+        if: always() && runner.os == 'macOS' && steps.signing.outputs.developer_id == 'true'
+        run: |
+          if [ -n "${APPLE_KEYCHAIN:-}" ]; then
+            security delete-keychain "$APPLE_KEYCHAIN" || true
+          fi
       - name: Package tarball
         env:
           TARGET: ${{ matrix.target }}
@@ -149,7 +187,7 @@ jobs:
           cp LICENSE "$stage/"
           tar -czf "dist/acd-$VERSION-$TARGET.tar.gz" -C "$stage" .
           tar -tzf "dist/acd-$VERSION-$TARGET.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-cli-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -159,20 +197,13 @@ jobs:
     name: Mac app (aarch64 dmg)
     needs: [prepare, ci]
     runs-on: macos-latest
-    env:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: app/src-tauri -> target
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
@@ -180,11 +211,23 @@ jobs:
       - name: Install app dependencies
         working-directory: app
         run: npm ci
-      - name: Build dmg
+      - name: Build the app binary (no signing secrets)
+        # Compiles Rust and the frontend. Signing happens in the next step, so
+        # this step and its build scripts never see the Apple secrets.
+        working-directory: app
+        run: npx tauri build --no-bundle --ci
+      - name: Bundle and sign the dmg
         # Tauri reads each Apple variable when it is set, even when empty, so
         # unset the empty ones in this shell. Without a certificate, sign ad hoc
         # with the pseudo identity "-", so an empty secret never disables signing.
         working-directory: app
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
@@ -207,7 +250,7 @@ jobs:
               unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
             fi
           fi
-          npx tauri build --bundles dmg --ci
+          npx tauri bundle --bundles dmg --ci
       - name: Verify the bundle
         working-directory: app
         env:
@@ -215,7 +258,13 @@ jobs:
         run: |
           set -euo pipefail
           # Tauri deletes the .app after it packages the dmg, so check the app inside the image.
-          dmg=$(ls src-tauri/target/release/bundle/dmg/*.dmg)
+          shopt -s nullglob
+          dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one dmg in src-tauri/target/release/bundle/dmg, found ${#dmgs[@]}."
+            exit 1
+          fi
+          dmg="${dmgs[0]}"
           hdiutil verify "$dmg" >/dev/null
           mnt="$RUNNER_TEMP/dmg-mount"
           mkdir -p "$mnt"
@@ -231,24 +280,18 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/dist"
           cp "$dmg" "$GITHUB_WORKSPACE/dist/agent-caller-$VERSION-aarch64-apple-darwin.dmg"
           ls -l "$GITHUB_WORKSPACE/dist"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-app-aarch64-apple-darwin
           path: dist/*.dmg
           if-no-files-found: error
 
-  publish:
-    name: Draft release
+  checksums:
+    name: SHA256SUMS and dry-run bundle
     needs: [prepare, cli, app]
-    if: github.ref_type == 'tag' && github.event_name == 'push'
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: release-*
           path: dist
@@ -259,16 +302,57 @@ jobs:
           set -euo pipefail
           sha256sum -- *.tar.gz *.dmg > SHA256SUMS
           cat SHA256SUMS
+      - name: Upload the complete set
+        # One artifact with every file, so a dry run can be tested with
+        # scripts/install.sh --from-dir. The publish job also downloads it.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-all
+          path: dist
+          if-no-files-found: error
+
+  publish:
+    name: Draft release
+    needs: [prepare, checksums]
+    if: github.ref_type == 'tag' && github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist-all
+          path: dist
       - name: Write release notes from CHANGELOG
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: scripts/release-notes.sh "$VERSION" > "$RUNNER_TEMP/notes.md"
-      - name: Create draft pre-release
+      - name: Create or replace the draft pre-release
+        # Re-running after a partial failure must work. A published release is
+        # never touched. An existing draft for this tag is deleted and recreated
+        # with the same files. Deleting a draft does not remove the tag.
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          releases=$(gh api --paginate "repos/$REPO/releases")
+          published=$(printf '%s' "$releases" | jq -r --arg tag "$TAG" \
+            '.[] | select(.tag_name == $tag and (.draft | not)) | .id')
+          if [ -n "$published" ]; then
+            echo "::error::Release $TAG is already published. Refusing to change it."
+            exit 1
+          fi
+          printf '%s' "$releases" | jq -r --arg tag "$TAG" \
+            '.[] | select(.tag_name == $tag and .draft) | .id' |
+            while read -r draft_id; do
+              echo "Deleting earlier draft release $draft_id for $TAG"
+              gh api -X DELETE "repos/$REPO/releases/$draft_id" >/dev/null
+            done
           gh release create "$TAG" dist/* \
             --draft --prerelease --verify-tag \
             --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"

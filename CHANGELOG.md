@@ -39,7 +39,8 @@ for users.
   Control+Option+V, then say "approve", "deny", "yes always", "option N",
   "cancel", "next" or "previous". Speech is recognized on the Mac, in English
   only.
-- `acd-inbox` for Omarchy on x86_64 Linux, with a user service, an installer
+- `acd-inbox` for Linux on x86_64 and aarch64, built for the Omarchy inbox
+  (Omarchy 4 on x86_64 is the tested platform), with a user service, an installer
   and a shell plugin that shows the same inbox in the shell bar.
 
 ### Known limits

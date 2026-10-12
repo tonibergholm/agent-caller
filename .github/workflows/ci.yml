@@ -1,11 +1,16 @@
 name: CI
 
 on:
+  # Branch pushes only. Tag pushes run this workflow through release.yml.
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
   # release.yml calls this workflow as its test gate.
   workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -15,15 +20,17 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - if: matrix.os == 'ubuntu-latest'
         run: node --test 'clients/omarchy/tests/*.test.mjs'
+      - if: matrix.os == 'ubuntu-latest'
+        run: scripts/tests/run.sh
 
   app:
     runs-on: macos-latest
@@ -31,14 +38,14 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: app/src-tauri -> target
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm

@@ -53,3 +53,7 @@ inbox-install host="toni@omarchy": inbox-linux
 # Check that every version field, the crates and CHANGELOG agree (docs/release.md).
 check-version:
     scripts/check-version.sh
+
+# Runs the release script tests (scripts/tests; also run in CI on ubuntu).
+test-scripts:
+    scripts/tests/run.sh

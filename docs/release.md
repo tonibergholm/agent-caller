@@ -38,6 +38,9 @@ Notes on the choices:
 2. Choose the version `X.Y.Z`. Set it in these files, which
    `scripts/check-version.sh` reads:
    - `Cargo.toml`, `[workspace.package] version`
+   - `Cargo.lock` (root): the `version` of every `acd*` crate. Run
+     `cargo build --locked` after the bump, or `cargo update -w`, and commit
+     the lock file. The check script fails when a crate entry is stale.
    - `app/src-tauri/Cargo.toml`, `[package] version`, and the
      `agent-caller-app` entry in `app/src-tauri/Cargo.lock`
    - `app/package.json` and the two `version` fields in
@@ -46,10 +49,19 @@ Notes on the choices:
 3. In `CHANGELOG.md`, add a `## [X.Y.Z] - YYYY-MM-DD` section above the
    entries in `[Unreleased]`, and move those entries into it.
 4. Run `scripts/check-version.sh vX.Y.Z`. It prints the version when every
-   file agrees, the tag matches and the CHANGELOG has the section.
+   file agrees, the tag matches and the CHANGELOG has the section. Run
+   `scripts/tests/run.sh` for the installer, version and notes tests. CI runs
+   them too.
 5. Dry run: in the Actions tab, run the Release workflow from `main` with
-   **Run workflow**. Download one tarball and the dmg from the run, then
-   test `scripts/install.sh` against them (see [Install](#installing-a-release)).
+   **Run workflow**. Download the `dist-all` artifact from the run and unzip
+   it into an empty folder. That folder holds every archive, the dmg and
+   `SHA256SUMS`. Then test the installer against it:
+
+   ```sh
+   sh scripts/install.sh --version X.Y.Z --from-dir /path/to/dist-all
+   ```
+
+   See [Installing a release](#installing-a-release) for what the script checks.
 6. Tag the tested commit and push the tag:
 
    ```sh
@@ -59,7 +71,9 @@ Notes on the choices:
 
 7. The `ci` job runs first. A failing test stops the release. The build
    jobs run next, and the publish job creates a **draft** pre-release with
-   the artifacts, `SHA256SUMS` and the CHANGELOG section as notes.
+   the artifacts, `SHA256SUMS` and the CHANGELOG section as notes. If a run
+   fails part way, re-run it. The publish job replaces an existing draft for
+   the tag. It refuses to touch a published release.
 8. Review the draft: the asset list, the checksums and the notes. Then
    publish it from the GitHub release page. Keep the pre-release flag.
 9. Install from the published release on a Mac and on a Linux machine.
@@ -77,7 +91,7 @@ repository. None is needed for an ad-hoc build.
 |---|---|
 | `APPLE_CERTIFICATE` | Base64 `.p12` export of a Developer ID Application certificate. Setting it turns on Developer ID signing. |
 | `APPLE_CERTIFICATE_PASSWORD` | Password of the `.p12` file. |
-| `APPLE_SIGNING_IDENTITY` | Identity name, for example `Developer ID Application: Name (TEAMID)`. Optional. Without it, the identity is taken from the certificate. |
+| `APPLE_SIGNING_IDENTITY` | Identity name, for example `Developer ID Application: Name (TEAMID)`. Optional. When it is unset, the identity comes from the certificate: Tauri 2.12 reads it from `APPLE_CERTIFICATE` (`crates/tauri-bundler/src/bundle/macos/sign.rs`, tag `tauri-v2.12.1`), and `scripts/apple-keychain.sh` reads it for `acd`. |
 | `APPLE_ID` | Apple ID email used for notarization. |
 | `APPLE_PASSWORD` | App-specific password for that Apple ID. |
 | `APPLE_TEAM_ID` | The 10-character team ID. |
@@ -93,10 +107,16 @@ The pipeline chooses a mode from these values:
   notarization ticket to the app. The `acd` binary is notarized as a zip,
   and a bare binary cannot be stapled.
 
-The Tauri bundler reads the certificate variables itself. For `acd`,
-`scripts/apple-keychain.sh` imports the certificate into a temporary
-keychain, and the job deletes that keychain at the end. The pipeline never
-prints a secret. Linux jobs use no secrets.
+Each secret is set only on the steps that use it: the certificate import,
+the signing and notarization steps, and the step that bundles the dmg. No
+job sets secrets at job level. The Rust build, the npm install and the
+Linux jobs get no Apple secrets. The app binary is compiled in a separate
+step (`tauri build --no-bundle`) before the bundle step runs, so Cargo build
+scripts never see them. The Tauri bundler reads the certificate variables
+itself. For `acd`, `scripts/apple-keychain.sh` imports the certificate into a
+temporary keychain, and the job deletes that keychain at the end. The
+workflow does not echo secret values. The notary command receives the
+password as an argument, and the runner masks it in the log.
 
 ## What ad-hoc signing means for users
 

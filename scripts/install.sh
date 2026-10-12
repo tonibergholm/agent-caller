@@ -77,15 +77,20 @@ if [ -n "$from_dir" ] && [ ! -d "$from_dir" ]; then
 	die "--from-dir is not a directory: $from_dir"
 fi
 
-os=$(uname -s)
-arch=$(uname -m)
-case "$os/$arch" in
-Darwin/arm64) target="aarch64-apple-darwin" ;;
-Darwin/x86_64) target="x86_64-apple-darwin" ;;
-Linux/x86_64) target="x86_64-unknown-linux-gnu" ;;
-Linux/aarch64 | Linux/arm64) target="aarch64-unknown-linux-gnu" ;;
-*) die "no release build for $os/$arch" ;;
-esac
+# ACD_INSTALL_TARGET replaces the detected target. The tests in scripts/tests use it.
+if [ -n "${ACD_INSTALL_TARGET:-}" ]; then
+	target="$ACD_INSTALL_TARGET"
+else
+	os=$(uname -s)
+	arch=$(uname -m)
+	case "$os/$arch" in
+	Darwin/arm64) target="aarch64-apple-darwin" ;;
+	Darwin/x86_64) target="x86_64-apple-darwin" ;;
+	Linux/x86_64) target="x86_64-unknown-linux-gnu" ;;
+	Linux/aarch64 | Linux/arm64) target="aarch64-unknown-linux-gnu" ;;
+	*) die "no release build for $os/$arch" ;;
+	esac
+fi
 
 archive="acd-$version-$target.tar.gz"
 

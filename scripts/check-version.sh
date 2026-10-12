@@ -4,7 +4,7 @@
 # Usage: scripts/check-version.sh [TAG]
 #   TAG is optional, for example v0.1.0. When given, it must equal v<version>.
 # On success, prints the version to stdout and exits 0. Errors go to stderr.
-# ACD_REPO_ROOT overrides the repository root (used by the tests).
+# ACD_REPO_ROOT overrides the repository root (used by scripts/tests).
 set -eu
 
 root="${ACD_REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -16,23 +16,31 @@ die() {
 	fail=1
 }
 
-# First `version = "..."` inside a TOML table. $1 is the table header, $2 the file.
-toml_table_version() {
-	awk -v table="$1" '
+# toml_value TABLE KEY FILE: prints the first KEY = "value" inside TABLE.
+toml_value() {
+	awk -v table="$1" -v key="$2" '
 		/^\[/ { in_table = ($0 == table) }
-		in_table && /^version[ \t]*=/ {
+		in_table && index($0, key) == 1 && $0 ~ "^" key "[ \t]*=" {
 			gsub(/^[^"]*"|"[^"]*$/, "")
 			print
 			exit
 		}
-	' "$2"
+	' "$3"
+}
+
+# lock_version NAME: prints the version of package NAME in the root Cargo.lock.
+lock_version() {
+	awk -v n="$1" '
+		/^name = / { cur = $0; sub(/^name = "/, "", cur); sub(/"$/, "", cur); next }
+		/^version = / && cur == n { v = $0; sub(/^version = "/, "", v); sub(/"$/, "", v); print v; exit }
+	' Cargo.lock
 }
 
 json_field() {
 	python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"
 }
 
-workspace=$(toml_table_version "[workspace.package]" Cargo.toml)
+workspace=$(toml_value "[workspace.package]" version Cargo.toml)
 [ -n "$workspace" ] || die "no version under [workspace.package] in Cargo.toml"
 
 check() {
@@ -42,7 +50,7 @@ check() {
 	fi
 }
 
-check "app/src-tauri/Cargo.toml [package]" "$(toml_table_version "[package]" app/src-tauri/Cargo.toml)"
+check "app/src-tauri/Cargo.toml [package]" "$(toml_value "[package]" version app/src-tauri/Cargo.toml)"
 check "app/package.json" "$(json_field app/package.json version)"
 check "app/package-lock.json (root)" "$(json_field app/package-lock.json version)"
 check "app/package-lock.json (packages[\"\"])" \
@@ -55,6 +63,8 @@ for manifest in crates/*/Cargo.toml; do
 	if ! grep -q '^version\.workspace = true' "$manifest"; then
 		die "$manifest does not inherit the version (expected 'version.workspace = true')"
 	fi
+	name=$(toml_value "[package]" name "$manifest")
+	check "Cargo.lock ($name)" "$(lock_version "$name")"
 done
 
 if ! grep -q "^## \[$workspace\]" CHANGELOG.md; then
