@@ -113,12 +113,6 @@ pub struct Controller {
     /// lock, so a receiver made under that lock sees every later change.
     session_tx: watch::Sender<u64>,
     seq: AtomicU64,
-    /// Test hook: whether a result is held back until the recording ends.
-    #[doc(hidden)]
-    pub fn has_deferred_for_test(&self) -> bool {
-        self.core.lock().unwrap().deferred.is_some()
-    }
-
     /// Test hook: runs with no lock held, just before admission.
     admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// The platform's capture and transcription; `None` until attached.
@@ -190,6 +184,12 @@ impl Controller {
         }
         core.enabled = on;
         self.invalidate(&mut core);
+    }
+
+    /// Test hook: whether a result is held back until the recording ends.
+    #[doc(hidden)]
+    pub fn has_deferred_for_test(&self) -> bool {
+        self.core.lock().unwrap().deferred.is_some()
     }
 
     /// Test hook: `hook` runs just before admission, with no lock held, so
