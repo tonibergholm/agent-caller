@@ -13,8 +13,11 @@ final class SystemEvents {
     func start() {
         guard tokens.isEmpty else { return }
         let report: @Sendable (UInt32) -> Void = { code in
-            Sessions.shared.cancelAll()
+            // Latch for Rust first: while sessions are cancelled, a queued
+            // press must already be behind the system event (it is dropped
+            // with it), not free to open a new session.
             Bridge.shared.emitSystem(code)
+            Sessions.shared.cancelAll()
         }
         let workspace = NSWorkspace.shared.notificationCenter
         tokens.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in

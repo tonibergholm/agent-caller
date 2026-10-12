@@ -32,7 +32,13 @@ final class Capture: AudioCapture, @unchecked Sendable {
         }
         let (stream, sink) = AsyncStream.makeStream(of: Chunk.self, bufferingPolicy: .bufferingNewest(64))
         input.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { buffer, _ in
-            if let chunk = Chunk.make(buffer, converter: converter, to: format) { sink.yield(chunk) }
+            if let chunk = Chunk.make(buffer, converter: converter, to: format),
+               case .dropped = sink.yield(chunk) {
+                // The transcriber fell behind and a chunk was lost: words
+                // would silently go missing. End the session instead of
+                // transcribing audio with a gap in it.
+                DispatchQueue.global().async { onLost() }
+            }
         }
         // The device went away or changed (spec §9: "Microphone unavailable").
         observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { _ in

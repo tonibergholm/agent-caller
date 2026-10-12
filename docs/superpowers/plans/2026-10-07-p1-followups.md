@@ -181,6 +181,9 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Pump stalls.** `dispatch` runs `trigger::refresh` and the tap restart (up to about 3 s) inline, so the event pump can stall behind a permission answer.
 - **Settings.** Download-speech-model gives no progress and does not report a failed install (the `ok` of `VB_EV_ASSETS` is dropped in `dispatch`); the first rejected status read hides the permission section.
 - **Press cancels a countdown, then listening fails.** `Executor::listen_failed` clears `trigger_cancelled`, so the HUD shows only the microphone or speech error, not that the countdown was cancelled (nothing was sent).
+- **Confirm nested under Listening.** If the user starts recording after a Confirm HUD was emitted but before `voiceShown` arrived, the unacknowledged Confirm is carried inside `Listening` (`over`), the frontend does not acknowledge it, and the display watcher invalidates it; the spoken answer is then routed as a new command. Fails closed.
+- **Stale voice shortcut.** If unregistering the previous voice shortcut fails, `hotkey::apply_voice` has already replaced `VOICE_SHORTCUT`, so the old chord is routed as the inbox hotkey until restart.
+- **Dropped audio chunk** now ends the session as "microphone unavailable" (no test: needs the live engine); a dedicated refusal text would be clearer.
 - **Plan deviations not yet approved:** Space as a hold key in the open inbox, English only and the system microphone, no "English until installed" fallback.
 
 ### Harness (`just e2e`)
