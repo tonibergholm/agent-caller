@@ -4,7 +4,7 @@ use crate::{
     commands::Command,
     conn::{self, MachineHandle, MachineState, now_ms},
     endpoint::Endpoint,
-    settings::{EndpointConfig, MachineEntry, MachineSecret, SecretError, SecretStore, Settings},
+    settings::{EndpointConfig, MachineEntry, MachineSecret, SecretError, SecretErrorKind, SecretStatus, SecretStore, Settings},
     view::{
         self, ActionView, InboxView, MachineEntryView, MachineInput, Notice, NoticeTone,
         PairingState,
@@ -292,25 +292,21 @@ impl Inbox {
         entries
             .iter()
             .map(|entry| {
-                let pairing = match &entry.endpoint {
-                    EndpointConfig::Local => PairingState::Paired,
-                    EndpointConfig::Tcp { .. } => match self.secrets.get(&entry.key) {
-                        Ok(None) => PairingState::NotPaired,
-                        Err(_) => PairingState::Unreadable,
-                        Ok(Some(raw)) => {
-                            if MachineSecret::from_json(&raw).is_ok() {
-                                PairingState::Paired
-                            } else {
-                                PairingState::Unreadable
-                            }
-                        }
-                    },
+                let secret = match &entry.endpoint {
+                    EndpointConfig::Local => SecretStatus::Ok,
+                    EndpointConfig::Tcp { .. } => self.secrets.status(&entry.key),
+                };
+                let pairing = match secret {
+                    SecretStatus::Ok => PairingState::Paired,
+                    SecretStatus::Missing => PairingState::NotPaired,
+                    SecretStatus::Locked | SecretStatus::Unreadable | SecretStatus::Unknown => PairingState::Unreadable,
                 };
                 MachineEntryView {
                     key: entry.key.clone(),
                     name: entry.name.clone(),
                     endpoint: entry.endpoint.clone(),
                     pairing,
+                    secret,
                 }
             })
             .collect()
@@ -341,10 +337,15 @@ impl Inbox {
             endpoint: EndpointConfig::Tcp { host: pairing.host.clone(), port: pairing.port },
         });
         let secret = MachineSecret { token: pairing.token, pin: pairing.pin };
-        let previous_secret = self.secrets.get(&entry.key).map_err(MachineError::SecretRead)?;
+        enum Restore { Previous(Option<String>), Nothing }
+        let restore = match self.secrets.get(&entry.key) {
+            Ok(previous) => Restore::Previous(previous),
+            Err(e) if e.kind() == SecretErrorKind::Unknown => Restore::Nothing,
+            Err(e) => { self.fail_closed(&entry.key, &e); return Err(MachineError::SecretRead(e)); }
+        };
         self.secrets
             .set(&entry.key, &secret.to_json())
-            .map_err(MachineError::SecretWrite)?;
+            .map_err(|e| { self.fail_closed(&entry.key, &e); MachineError::SecretWrite(e) })?;
         let info = tcp_info(&pairing.host, pairing.port, &secret);
         let mut inner = self.inner.lock().unwrap();
         let mut candidate = inner.settings.clone();
@@ -354,9 +355,14 @@ impl Inbox {
             && let Err(error) = candidate.save(path)
         {
             drop(inner);
-            let recovery = match previous_secret {
-                Some(value) => self.secrets.set(&entry.key, &value),
-                None => self.secrets.delete(&entry.key),
+            let recovery = match restore {
+                Restore::Previous(Some(value)) => self.secrets.set(&entry.key, &value),
+                Restore::Previous(None) => self.secrets.delete(&entry.key),
+                Restore::Nothing => {
+                    self.secrets.mark_unknown(&entry.key);
+                    self.fail_closed(&entry.key, &SecretError::unknown());
+                    return Err(MachineError::Settings(error.to_string()));
+                }
             };
             if recovery.is_err() {
                 let mut inner = self.inner.lock().unwrap();
@@ -447,6 +453,7 @@ impl Inbox {
             }
         }
         if let Err(error) = self.secrets.delete(key) {
+            self.fail_closed(key, &error);
             let mut inner = self.inner.lock().unwrap();
             // `inner.settings` still lists the machine: it is the old file.
             if let Some(path) = &self.opts.settings_path
@@ -498,6 +505,48 @@ impl Inbox {
         {
             handle.retry_now();
         }
+    }
+    /// Retries a machine's connection, creating its handle if needed.
+    pub fn reconnect_machine(self: &Arc<Self>, key: &str) -> Result<(), MachineError> {
+        let _edit = self.edits.lock();
+        let (entry, handle) = {
+            let inner = self.inner.lock().unwrap();
+            let m = inner.machines.iter().find(|m| m.entry.key == key).ok_or(MachineError::UnknownMachine)?;
+            (m.entry.clone(), m.handle.clone())
+        };
+        if let Some(handle) = handle { handle.retry_now(); return Ok(()); }
+        let info = match &entry.endpoint {
+            EndpointConfig::Local => connect_info(&entry, &self.secrets).ok_or(MachineError::NotPaired)?,
+            EndpointConfig::Tcp { host, port } => {
+                let raw = self.secrets.get(&entry.key).map_err(MachineError::SecretRead)?.ok_or(MachineError::NotPaired)?;
+                let secret = MachineSecret::from_json(&raw).map_err(MachineError::SecretRead)?;
+                tcp_info(host, *port, &secret)
+            }
+        };
+        let handle = {
+            let mut inner = self.inner.lock().unwrap();
+            let client_id = inner.settings.client_id.clone();
+            let instance = self.next_instance.fetch_add(1, Ordering::Relaxed);
+            let Some(machine) = inner.machines.iter_mut().find(|m| m.entry == entry) else { return Err(MachineError::UnknownMachine); };
+            if let Some(existing) = &machine.handle { existing.retry_now(); return Ok(()); }
+            let handle = spawn_with(&entry, info, &self.opts, instance, &client_id);
+            machine.handle = Some(handle.clone());
+            handle
+        };
+        self.watch_machine(entry.key.clone(), handle);
+        self.wake();
+        Ok(())
+    }
+    fn fail_closed(&self, key: &str, e: &SecretError) {
+        if e.kind() != SecretErrorKind::Unknown { return; }
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(machine) = inner.machines.iter_mut().find(|m| m.entry.key == key)
+            && let Some(handle) = machine.handle.take() { handle.cancel(); }
+        for action in inner.actions.end_machine(key) {
+            self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+        }
+        drop(inner);
+        self.wake();
     }
     pub fn settings(&self) -> Settings {
         self.inner.lock().unwrap().settings.clone()

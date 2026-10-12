@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::{
     commands::{NotSent, Outcome},
     conn::{MachineState, MachineStatus},
-    settings::{EndpointConfig, MachineEntry, MachineSecret, SecretStore},
+    settings::{EndpointConfig, MachineEntry, MachineSecret, SecretStatus, SecretStore},
 };
 
 pub const NOTICE_ANSWERED_ELSEWHERE: &str = "Answered elsewhere";
@@ -165,6 +165,9 @@ pub struct MachineEntryView {
     pub name: String,
     pub endpoint: EndpointConfig,
     pub pairing: PairingState,
+    /// For inbox views; omitted from Mac app TypeScript bindings.
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub secret: SecretStatus,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,15 +181,17 @@ pub enum PairingState {
 
 impl MachineEntryView {
     pub fn from_entry(entry: &MachineEntry, secret: Option<&MachineSecret>) -> Self {
+        let paired = matches!(entry.endpoint, EndpointConfig::Local) || secret.is_some();
         Self {
             key: entry.key.clone(),
             name: entry.name.clone(),
             endpoint: entry.endpoint.clone(),
-            pairing: if matches!(entry.endpoint, EndpointConfig::Local) || secret.is_some() {
+            pairing: if paired {
                 PairingState::Paired
             } else {
                 PairingState::NotPaired
             },
+            secret: if paired { SecretStatus::Ok } else { SecretStatus::Missing },
         }
     }
 }
@@ -198,14 +203,14 @@ pub fn machine_entry_views(
     entries
         .iter()
         .map(|entry| {
-            let pairing = match entry.endpoint {
-                EndpointConfig::Local => PairingState::Paired,
+            let (pairing, secret) = match entry.endpoint {
+                EndpointConfig::Local => (PairingState::Paired, SecretStatus::Ok),
                 EndpointConfig::Tcp { .. } => match secrets.get(&entry.key) {
                     Err(_) => return Err("Could not read saved machine credentials".into()),
-                    Ok(None) => PairingState::NotPaired,
+                    Ok(None) => (PairingState::NotPaired, SecretStatus::Missing),
                     Ok(Some(raw)) => match MachineSecret::from_json(&raw) {
-                        Ok(_) => PairingState::Paired,
-                        Err(_) => PairingState::Unreadable,
+                        Ok(_) => (PairingState::Paired, SecretStatus::Ok),
+                        Err(_) => (PairingState::Unreadable, SecretStatus::Unreadable),
                     },
                 },
             };
@@ -214,6 +219,7 @@ pub fn machine_entry_views(
                 name: entry.name.clone(),
                 endpoint: entry.endpoint.clone(),
                 pairing,
+                secret,
             })
         })
         .collect()

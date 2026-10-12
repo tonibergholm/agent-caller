@@ -65,6 +65,41 @@ pub enum SettingsError {
 #[error("secret store: {0}")]
 pub struct SecretError(pub String);
 
+/// The text of `SecretError::locked()`; no Keychain message equals it.
+pub const SECRET_LOCKED: &str = "the keyring is locked";
+/// The text of `SecretError::timeout()`.
+pub const SECRET_TIMEOUT: &str = "the keyring did not answer in time";
+/// The text of `SecretError::unknown()`.
+pub const SECRET_UNKNOWN: &str = "the keyring state is unknown";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretErrorKind {
+    Locked,
+    Timeout,
+    /// A write or delete may or may not have happened (omarchy plan D36).
+    Unknown,
+    Other,
+}
+
+impl SecretError {
+    pub fn locked() -> Self { SecretError(SECRET_LOCKED.into()) }
+    pub fn timeout() -> Self { SecretError(SECRET_TIMEOUT.into()) }
+    pub fn unknown() -> Self { SecretError(SECRET_UNKNOWN.into()) }
+    pub fn kind(&self) -> SecretErrorKind {
+        match self.0.as_str() {
+            SECRET_LOCKED => SecretErrorKind::Locked,
+            SECRET_TIMEOUT => SecretErrorKind::Timeout,
+            SECRET_UNKNOWN => SecretErrorKind::Unknown,
+            _ => SecretErrorKind::Other,
+        }
+    }
+}
+
+/// What a machine's stored secret looks like right now.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretStatus { Ok, Locked, Missing, Unreadable, Unknown }
+
 /// Canonical base64url without padding, decoding to exactly 32 bytes: the
 /// same rule as acd's `parse_token` (non-zero trailing bits are rejected).
 pub fn valid_token(s: &str) -> bool {
@@ -232,6 +267,19 @@ pub trait SecretStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<String>, SecretError>;
     fn set(&self, key: &str, value: &str) -> Result<(), SecretError>;
     fn delete(&self, key: &str) -> Result<(), SecretError>;
+    /// The secret's status, from `get` unless a store knows better.
+    fn status(&self, key: &str) -> SecretStatus {
+        match self.get(key) {
+            Ok(None) => SecretStatus::Missing,
+            Ok(Some(raw)) if MachineSecret::from_json(&raw).is_ok() => SecretStatus::Ok,
+            Ok(Some(_)) => SecretStatus::Unreadable,
+            Err(e) if e.kind() == SecretErrorKind::Locked => SecretStatus::Locked,
+            Err(e) if matches!(e.kind(), SecretErrorKind::Unknown | SecretErrorKind::Timeout) => SecretStatus::Unknown,
+            Err(_) => SecretStatus::Unreadable,
+        }
+    }
+    /// Forget what is known about `key` until a successful read.
+    fn mark_unknown(&self, _key: &str) {}
 }
 
 #[derive(Default)]
@@ -297,6 +345,34 @@ impl<S: SecretStore> SecretStore for CachedSecrets<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_errors_carry_a_kind_and_status_follows_get() {
+        assert_eq!(SecretError::locked().kind(), SecretErrorKind::Locked);
+        assert_eq!(SecretError::timeout().kind(), SecretErrorKind::Timeout);
+        assert_eq!(SecretError("denied".into()).kind(), SecretErrorKind::Other);
+        let m = MemorySecrets::default();
+        assert_eq!(m.status("k"), SecretStatus::Missing);
+        m.set("k", "not-json").unwrap();
+        assert_eq!(m.status("k"), SecretStatus::Unreadable);
+        let ok = MachineSecret {
+            token: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8".into(),
+            pin: "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+        };
+        m.set("k", &ok.to_json()).unwrap();
+        assert_eq!(m.status("k"), SecretStatus::Ok);
+        struct Locked;
+        impl SecretStore for Locked {
+            fn get(&self, _: &str) -> Result<Option<String>, SecretError> { Err(SecretError::locked()) }
+            fn set(&self, _: &str, _: &str) -> Result<(), SecretError> { Err(SecretError::locked()) }
+            fn delete(&self, _: &str) -> Result<(), SecretError> { Err(SecretError::locked()) }
+        }
+        assert_eq!(Locked.status("k"), SecretStatus::Locked);
+        assert_eq!(CachedSecrets::new(Locked).status("k"), SecretStatus::Locked);
+        assert_eq!(serde_json::to_value(SecretStatus::Unreadable).unwrap(), "unreadable");
+        assert_eq!(SecretError::unknown().kind(), SecretErrorKind::Unknown);
+        assert_eq!(serde_json::to_value(SecretStatus::Unknown).unwrap(), "unknown");
+    }
 
     #[test]
     fn first_run_adds_the_local_machine_and_a_client_id() {

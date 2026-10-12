@@ -2,7 +2,7 @@ mod common;
 use acd_client::actions::ActionOwner;
 use acd_client::{fake::*, inbox::*, settings::*, view::*, voice::*};
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst}}, time::Duration};
 const ANSWER_REQ: &str = "r1";
 fn pending_agent() -> Value {
     serde_json::json!({"id":"a1","machine_id":"m","source":"herdr","kind":"claude","title":"agent","cwd":null,"project":null,"state":"needs_you","state_since":"2026-10-08T00:00:00.000Z","failed":false,"last_message":null,"can_send":true,"pending":{"id":ANSWER_REQ,"revision":1,"agent_id":"a1","kind":"permission","status":"open","answer_path":"hook","title":"Bash","detail":"npm test","options":[{"id":"allow","label":"Yes","description":null,"effect":"allow"},{"id":"deny","label":"No","description":null,"effect":"deny"},{"id":"always","label":"Yes, always","description":"Bash(npm test:*)","effect":"allow_always"}],"questions":null,"free_text":false,"raw_screen":null,"opened_at":"2026-10-08T00:00:00.000Z"}})
@@ -1895,7 +1895,6 @@ async fn cancel_owned_after_expiry_cancels_nothing_and_the_send_ends_once() {
     no_more_outcomes_for(&ib, &mut rx, &id).await;
 }
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 
 /// A secret store whose reads, writes or deletes wait while held, as a
 /// keyring prompt does.
@@ -2147,7 +2146,7 @@ async fn a_rename_during_a_re_pairing_is_kept() {
     assert_eq!(pairing.await.unwrap().unwrap(), KEY);
     rename.await.unwrap().unwrap();
     assert_eq!(ib.settings().machines[0].name, "Renamed");
-    // Task 3: ib.reconnect_machine(KEY).unwrap();
+    ib.reconnect_machine(KEY).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2252,4 +2251,108 @@ async fn machine_errors_are_typed_and_keep_the_old_texts() {
     );
     assert!(matches!(ib.remove_machine_checked("nope"), Err(MachineError::UnknownMachine)));
     assert_eq!(ib.remove_machine("nope").unwrap_err(), "Unknown machine");
+}
+
+/// A keyring that refuses every call while locked.
+struct Lockable { inner: MemorySecrets, unlocked: AtomicBool }
+impl SecretStore for Lockable {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> { if !self.unlocked.load(SeqCst) { Err(SecretError::locked()) } else { self.inner.get(key) } }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> { if !self.unlocked.load(SeqCst) { Err(SecretError::locked()) } else { self.inner.set(key, value) } }
+    fn delete(&self, key: &str) -> Result<(), SecretError> { if !self.unlocked.load(SeqCst) { Err(SecretError::locked()) } else { self.inner.delete(key) } }
+}
+
+#[tokio::test]
+async fn a_locked_secret_is_shown_as_locked_and_reconnect_creates_the_handle() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let store = Arc::new(Lockable { inner: MemorySecrets::default(), unlocked: AtomicBool::new(false) });
+    store.inner.set("m1", &box_secret(&f)).unwrap();
+    let ib = Inbox::new(box_settings(&f), store.clone(), options(common::fast()));
+    ib.start();
+    let m = ib.machines().remove(0);
+    assert_eq!((m.secret, m.pairing), (SecretStatus::Locked, PairingState::Unreadable));
+    assert!(ib.conn_stamp("m1").is_none(), "no handle without a secret");
+    assert!(matches!(ib.reconnect_machine("m1"), Err(MachineError::SecretRead(e)) if e.kind() == SecretErrorKind::Locked));
+    store.unlocked.store(true, SeqCst);
+    ib.reconnect_machine("m1").unwrap();
+    let c = f.next_connection().await;
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
+    view_until(&ib, "answerable after reconnect", |v| v.cards.iter().any(|c| c.answerable)).await;
+    assert_eq!(ib.machines()[0].secret, SecretStatus::Ok);
+}
+
+#[tokio::test]
+async fn reconnect_keeps_an_online_handle_and_rejects_unknown_or_unpaired_machines() {
+    let (f, _c, ib) = setup().await;
+    let before = ib.conn_stamp("m1");
+    ib.reconnect_machine("m1").unwrap();
+    assert_eq!(ib.conn_stamp("m1"), before);
+    assert!(matches!(ib.reconnect_machine("nope"), Err(MachineError::UnknownMachine)));
+    let empty = Inbox::new(box_settings(&f), Arc::new(MemorySecrets::default()), options(common::fast()));
+    assert!(matches!(empty.reconnect_machine("m1"), Err(MachineError::NotPaired)));
+    assert_eq!(empty.machines()[0].secret, SecretStatus::Missing);
+}
+
+#[derive(Default)]
+struct Uncertain { inner: MemorySecrets, unknown_reads: AtomicBool, unknown_writes: AtomicBool, marked: AtomicBool, restores: AtomicUsize }
+impl SecretStore for Uncertain {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> { if self.unknown_reads.load(SeqCst) { Err(SecretError::unknown()) } else { self.inner.get(key) } }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        if self.unknown_writes.load(SeqCst) { return Err(SecretError::unknown()); }
+        if self.inner.get(key).unwrap().is_some() && !self.unknown_reads.load(SeqCst) { self.restores.fetch_add(1, SeqCst); }
+        self.unknown_reads.store(false, SeqCst); self.inner.set(key, value)
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretError> { if self.unknown_writes.load(SeqCst) { return Err(SecretError::unknown()); } self.restores.fetch_add(1, SeqCst); self.inner.delete(key) }
+    fn mark_unknown(&self, _key: &str) { self.marked.store(true, SeqCst); self.unknown_reads.store(true, SeqCst); }
+}
+
+async fn uncertain_setup(store: Arc<Uncertain>, settings_path: Option<std::path::PathBuf>) -> (FakeServer, Arc<Inbox>) {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    store.inner.set("m1", &box_secret(&f)).unwrap();
+    let ib = Inbox::new(box_settings(&f), store, InboxOptions { settings_path, ..options(held()) });
+    ib.start(); (f, ib)
+}
+
+#[tokio::test]
+async fn an_unconfirmed_secret_change_stops_the_machine_until_a_read_succeeds() {
+    let store = Arc::new(Uncertain::default()); let (f, ib) = uncertain_setup(store.clone(), None).await;
+    let c = f.next_connection().await; c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
+    view_until(&ib, "answerable", |v| v.cards.iter().any(|c| c.answerable)).await;
+    let mut rx = ib.action_outcomes(); let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    store.unknown_writes.store(true, SeqCst);
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
+    let e = ib.pair_machine(&line).unwrap_err();
+    assert!(matches!(&e, MachineError::SecretWrite(s) if s.kind() == SecretErrorKind::Unknown), "{e:?}");
+    assert!(ib.conn_stamp("m1").is_none());
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+    store.unknown_writes.store(false, SeqCst); store.unknown_reads.store(true, SeqCst);
+    assert_eq!(ib.machines()[0].secret, SecretStatus::Unknown);
+    assert!(matches!(ib.reconnect_machine("m1"), Err(MachineError::SecretRead(_))));
+    store.unknown_reads.store(false, SeqCst); ib.reconnect_machine("m1").unwrap(); f.next_connection().await;
+}
+
+#[tokio::test]
+async fn re_pairing_from_unknown_writes_the_new_secret_and_connects() {
+    let store = Arc::new(Uncertain::default()); store.unknown_reads.store(true, SeqCst);
+    let (f, ib) = uncertain_setup(store.clone(), None).await;
+    assert!(ib.conn_stamp("m1").is_none());
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
+    assert_eq!(ib.pair_machine(&line).unwrap().key, "m1"); f.next_connection().await;
+    assert_eq!(ib.machines()[0].secret, SecretStatus::Ok);
+}
+
+#[tokio::test]
+async fn re_pairing_from_unknown_that_cannot_commit_stays_unknown_and_stopped() {
+    let d = tempfile::tempdir().unwrap(); let blocker = d.path().join("file"); std::fs::write(&blocker, "block").unwrap();
+    let store = Arc::new(Uncertain::default()); store.unknown_reads.store(true, SeqCst);
+    let (f, ib) = uncertain_setup(store.clone(), Some(blocker.join("settings.json"))).await;
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
+    assert!(matches!(ib.pair_machine(&line), Err(MachineError::Settings(_))));
+    assert!(store.marked.load(SeqCst)); assert_eq!(store.restores.load(SeqCst), 0);
+    assert!(ib.conn_stamp("m1").is_none()); assert_eq!(ib.machines()[0].secret, SecretStatus::Unknown);
+}
+
+#[test]
+fn the_secret_status_is_json_but_not_in_the_mac_bindings() {
+    let view = MachineEntryView { key: "local".into(), name: "Here".into(), endpoint: EndpointConfig::Local, pairing: PairingState::Paired, secret: SecretStatus::Ok };
+    assert_eq!(serde_json::to_value(&view).unwrap()["secret"], "ok");
 }
