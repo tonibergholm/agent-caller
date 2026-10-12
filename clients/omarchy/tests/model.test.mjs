@@ -264,6 +264,7 @@ test("a filter on a removed machine no longer hides the inbox", () => {
   assert.equal(M.activeFilter("m2", settings), "m2");
   assert.equal(M.activeFilter("gone", settings), null);
   assert.equal(M.activeFilter("m2", null), "m2", "no settings yet: keep it");
+  assert.equal(M.activeFilter("gone", { machines: [{ key: "m1" }], omitted_machines: 3 }), "gone", "the list is cut: keep it");
 });
 
 test("ids are unique and short", () => {

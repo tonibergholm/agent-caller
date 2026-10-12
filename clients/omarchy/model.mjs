@@ -579,7 +579,8 @@ export function clearUncertain(marks, outcome) {
 /** The machine filter in force: none when its machine was removed (the inbox must not look empty). */
 export function activeFilter(filter, settings) {
   if (filter === "") return null;
-  if (settings && !settings.machines.some((m) => m.key === filter)) return null;
+  // A bounded settings list may leave machines out: then absence proves nothing.
+  if (settings && !(settings.omitted_machines > 0) && !settings.machines.some((m) => m.key === filter)) return null;
   return filter;
 }
 
