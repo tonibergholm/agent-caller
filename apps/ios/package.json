@@ -1,0 +1,13 @@
+{
+  "name": "agent-caller-ios",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "tauri": "tauri",
+    "ios:init": "tauri ios init",
+    "ios:build": "tauri ios build --debug --target aarch64-sim"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.1"
+  }
+}

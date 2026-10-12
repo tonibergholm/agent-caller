@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "main",
+  "description": "The single iOS window: inbox events, and reading the clipboard for pairing",
+  "windows": ["main"],
+  "permissions": ["core:event:default", "clipboard-manager:allow-read-text"]
+}

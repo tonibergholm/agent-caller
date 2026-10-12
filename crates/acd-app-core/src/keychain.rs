@@ -1,5 +1,8 @@
-//! Remote machine secrets in the login Keychain (decision D7).
-use acd_client::settings::{SecretError, SecretStore};
+//! Remote machine secrets in the login Keychain (decision D7) on macOS, and in
+//! the app's Keychain on iOS. The same service name on both platforms.
+use std::sync::Arc;
+
+use acd_client::settings::{CachedSecrets, SecretError, SecretStore};
 use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
 };
@@ -17,6 +20,13 @@ impl KeychainSecrets {
             service: service.into(),
         }
     }
+}
+
+/// The store both apps hand to `setup::open_inbox`. Reads are cached per
+/// process: the Keychain can ask the user for every read, so listings must not
+/// go back to it.
+pub fn cached_secrets() -> Arc<dyn SecretStore> {
+    Arc::new(CachedSecrets::new(KeychainSecrets::new(SERVICE_NAME)))
 }
 
 // GATE (Task 13): remove in Task 16.
