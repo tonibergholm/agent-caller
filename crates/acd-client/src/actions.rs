@@ -1,3 +1,4 @@
+use std::fmt;
 use std::time::Instant;
 
 use acd_protocol::{AnswerPath, Effect, Request, RequestKind, RequestOption, RequestStatus};
@@ -6,9 +7,11 @@ use crate::{
     conn::{MachineState, MachineStatus},
     inbox::PickError,
     view::{ActionView, Notice, NoticeTone},
+    voice::NotSentReason,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Request text is the agent's (voice spec §3.7): `Debug` shows lengths.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Semantics {
     pub request_id: String,
     pub revision: u64,
@@ -36,7 +39,7 @@ impl Semantics {
 }
 /// What a typed answer was made against; `check` re-reads the request and
 /// refuses to send if any of it changed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TextSemantics {
     pub request_id: String,
     pub revision: u64,
@@ -59,11 +62,47 @@ impl TextSemantics {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ActionKind {
     Answer(Semantics),
     AnswerText(TextSemantics),
     Reply { text: String },
+}
+impl fmt::Debug for Semantics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Semantics")
+            .field("request_id", &self.request_id)
+            .field("revision", &self.revision)
+            .field("kind", &self.kind)
+            .field("answer_path", &self.answer_path)
+            .field("title_bytes", &self.title.len())
+            .field("detail_bytes", &self.detail.len())
+            .field("option_id", &self.option.id)
+            .field("option_effect", &self.option.effect)
+            .field("option_ids", &self.option_ids)
+            .finish_non_exhaustive()
+    }
+}
+/// Typed text is the user's (voice spec §3.7): `Debug` shows its length.
+impl fmt::Debug for TextSemantics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextSemantics")
+            .field("request_id", &self.request_id)
+            .field("revision", &self.revision)
+            .field("kind", &self.kind)
+            .field("text_bytes", &self.text.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ActionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ActionKind::Answer(s) => f.debug_tuple("Answer").field(s).finish(),
+            ActionKind::AnswerText(s) => f.debug_tuple("AnswerText").field(s).finish(),
+            ActionKind::Reply { text } => f.debug_struct("Reply").field("text_bytes", &text.len()).finish(),
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Action {
@@ -131,21 +170,28 @@ impl Actions {
     pub(crate) fn remove_invalid(
         &mut self,
         machine_key: &str,
-        mut invalid: impl FnMut(&Action) -> Option<Notice>,
-    ) -> Vec<(String, Notice)> {
+        mut invalid: impl FnMut(&Action) -> Option<NotSentReason>,
+    ) -> Vec<(Action, NotSentReason)> {
         let mut removed = Vec::new();
         let mut i = 0;
         while i < self.items.len() {
             if self.items[i].machine_key == machine_key
-                && let Some(n) = invalid(&self.items[i])
+                && let Some(reason) = invalid(&self.items[i])
             {
-                let a = self.items.remove(i);
-                removed.push((a.card_key, n));
+                removed.push((self.items.remove(i), reason));
                 continue;
             }
             i += 1;
         }
         removed
+    }
+
+    /// Test hook: every countdown ends now.
+    #[cfg(feature = "testing")]
+    pub(crate) fn expire_all(&mut self, now: Instant) {
+        for a in &mut self.items {
+            a.fires_at = now;
+        }
     }
     pub fn views(&self) -> Vec<ActionView> {
         self.items.iter().map(|a| a.view.clone()).collect()
@@ -161,60 +207,68 @@ fn notice(text: &str, tone: NoticeTone) -> Notice {
         tone,
     }
 }
+/// The card notice for an action that ended without being sent.
+pub fn notice_for(reason: NotSentReason) -> Notice {
+    match reason {
+        NotSentReason::Offline => notice("Offline. Nothing was sent.", NoticeTone::Warning),
+        NotSentReason::NotSupported => notice("Not supported for this agent", NoticeTone::Info),
+        NotSentReason::AgentGone => notice("The agent is gone", NoticeTone::Info),
+        NotSentReason::AnsweredElsewhere => notice("Answered elsewhere", NoticeTone::Info),
+        NotSentReason::Changed => notice("The request changed. Nothing was sent.", NoticeTone::Warning),
+        NotSentReason::AgentBusy => notice("The agent is busy. Try again when it is idle.", NoticeTone::Warning),
+        NotSentReason::Hidden => notice("Hidden. Nothing was sent.", NoticeTone::Info),
+    }
+}
+
 pub fn check(a: &Action, state: &MachineState) -> Result<(), Notice> {
+    check_reason(a, state).map_err(notice_for)
+}
+
+pub fn check_reason(a: &Action, state: &MachineState) -> Result<(), NotSentReason> {
     if state.instance != a.instance
         || state.conn_gen != a.conn_gen
         || state.status != MachineStatus::Online
     {
-        return Err(notice("Offline. Nothing was sent.", NoticeTone::Warning));
+        return Err(NotSentReason::Offline);
     }
     let cap = match a.kind {
         ActionKind::Answer(_) | ActionKind::AnswerText(_) => "answer",
         ActionKind::Reply { .. } => "send",
     };
     if !state.session.has(cap) {
-        return Err(notice("Not supported for this agent", NoticeTone::Info));
+        return Err(NotSentReason::NotSupported);
     }
     let Some(agent) = state.session.agents.get(&a.agent_id) else {
-        return Err(notice("The agent is gone", NoticeTone::Info));
+        return Err(NotSentReason::AgentGone);
     };
     match &a.kind {
         ActionKind::Answer(sem) => {
             let Some(req) = agent.pending.as_ref() else {
-                return Err(notice("Answered elsewhere", NoticeTone::Info));
+                return Err(NotSentReason::AnsweredElsewhere);
             };
             if req.id != sem.request_id || req.status != RequestStatus::Open {
-                return Err(notice("Answered elsewhere", NoticeTone::Info));
+                return Err(NotSentReason::AnsweredElsewhere);
             }
             if !req.is_answerable()
                 || Semantics::of(req, &sem.option.id).as_ref() != Some(sem)
                 || sem.option.effect == Effect::Unknown
             {
-                return Err(notice(
-                    "The request changed. Nothing was sent.",
-                    NoticeTone::Warning,
-                ));
+                return Err(NotSentReason::Changed);
             }
         }
         ActionKind::AnswerText(sem) => {
             let Some(req) = agent.pending.as_ref() else {
-                return Err(notice("Answered elsewhere", NoticeTone::Info));
+                return Err(NotSentReason::AnsweredElsewhere);
             };
             if req.id != sem.request_id || req.status != RequestStatus::Open {
-                return Err(notice("Answered elsewhere", NoticeTone::Info));
+                return Err(NotSentReason::AnsweredElsewhere);
             }
             if !req.is_answerable() || !req.free_text || TextSemantics::of(req, &sem.text) != *sem {
-                return Err(notice(
-                    "The request changed. Nothing was sent.",
-                    NoticeTone::Warning,
-                ));
+                return Err(NotSentReason::Changed);
             }
         }
         ActionKind::Reply { .. } if !agent.can_send => {
-            return Err(notice(
-                "The agent is busy. Try again when it is idle.",
-                NoticeTone::Warning,
-            ));
+            return Err(NotSentReason::AgentBusy);
         }
         _ => {}
     }

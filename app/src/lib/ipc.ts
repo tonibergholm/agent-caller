@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { InboxView } from "./bindings/InboxView";
 import type { MachineEntryView } from "./bindings/MachineEntryView";
+import type { HudEvent } from "./hud";
+import type { Presentation, VoiceSettings } from "./voice";
 
 export interface Api {
   pick(cardKey: string, requestId: string, optionId: string, revision: number): Promise<void>;
@@ -27,6 +29,25 @@ export interface Api {
   getView(): Promise<InboxView>;
   onView(cb: (v: InboxView) => void): Promise<() => void>;
   onShown(cb: () => void): Promise<() => void>;
+  /** The panel's presentation state for voice (spec §4.3). */
+  publishPresentation(p: Presentation): Promise<void>;
+  /** The step-1 stand-in for speech: typed text as a transcript. */
+  voiceTextInput(text: string): Promise<void>;
+  getVoiceSettings(): Promise<VoiceSettings>;
+  setVoiceSettings(s: VoiceSettings): Promise<VoiceSettings>;
+  onVoiceSettings(cb: (s: VoiceSettings) => void): Promise<() => void>;
+  onVoiceSelect(cb: (cardKey: string) => void): Promise<() => void>;
+  onHud(cb: (e: HudEvent) => void): Promise<() => void>;
+  onHudClear(cb: (seq: number) => void): Promise<() => void>;
+  /** The HUD rendered this proposal (D22). */
+  voiceShown(proposalId: number): Promise<void>;
+  voiceConfirm(proposalId: number): Promise<void>;
+  /** `choiceId` is the `id` of the which-one state the digit or click was for. */
+  voiceChoose(choiceId: number, index: number): Promise<void>;
+  /** `id` is the `id` of the shown state; states without one send no cancel. */
+  voiceCancel(id: number): Promise<void>;
+  /** The content height in CSS px of HUD state `seq`; the panel fits it. */
+  voiceHudFit(seq: number, height: number): Promise<void>;
 }
 
 export const tauriApi: Api = {
@@ -53,4 +74,17 @@ export const tauriApi: Api = {
   getView: () => invoke("get_view"),
   onView: (cb) => listen<InboxView>("inbox://view", (e) => cb(e.payload)),
   onShown: (cb) => listen("panel://shown", () => cb()),
+  publishPresentation: (presentation) => invoke("voice_publish_presentation", { presentation }),
+  voiceTextInput: (text) => invoke("voice_text_input", { text }),
+  getVoiceSettings: () => invoke("voice_get_settings"),
+  setVoiceSettings: (s) => invoke("voice_set_settings", { enabled: s.enabled, debugInput: s.debug_input }),
+  onVoiceSettings: (cb) => listen<VoiceSettings>("voice://settings", (e) => cb(e.payload)),
+  onVoiceSelect: (cb) => listen<string>("voice://select", (e) => cb(e.payload)),
+  onHud: (cb) => listen<HudEvent>("voice://hud", (e) => cb(e.payload)),
+  onHudClear: (cb) => listen<number>("voice://hud-clear", (e) => cb(e.payload)),
+  voiceShown: (proposalId) => invoke("voice_shown", { proposalId }),
+  voiceConfirm: (proposalId) => invoke("voice_confirm", { proposalId }),
+  voiceChoose: (choiceId, index) => invoke("voice_choose", { choiceId, index }),
+  voiceCancel: (id) => invoke("voice_cancel", { id }),
+  voiceHudFit: (seq, height) => invoke("voice_hud_fit", { seq, height }),
 };

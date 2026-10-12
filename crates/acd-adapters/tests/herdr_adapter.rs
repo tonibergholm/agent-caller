@@ -1191,6 +1191,41 @@ async fn unknown_send_keys_error_is_uncertain() {
     );
 }
 
+/// Final review B3: herdr's error text never reaches the core's log of an
+/// uncertain delivery; only its code does. Current-thread runtime:
+/// `set_default` is per thread.
+#[tokio::test(flavor = "current_thread")]
+async fn a_herdr_error_message_never_reaches_the_logs() {
+    use std::sync::Mutex as StdMutex;
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<StdMutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (r, rid) = keys_rig("claude-idle-detection.txt", "claude-idle-prompt.txt").await;
+    r.fake.fail_next_with_message("agent.send_keys", "internal_error", "SECRET-HERDR echo of the screen");
+    r.adapter.set_evidence(Arc::new(Fixed(Verdict::Consistent)));
+    assert!(delivered(&answer(&r, "a1", &rid, "allow").await));
+    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("answer delivery uncertain"), "the capture works: {logs}");
+    assert!(logs.contains("internal_error"), "the code is kept: {logs}");
+    assert!(!logs.contains("SECRET"), "{logs}");
+}
+
 #[tokio::test]
 async fn a_target_for_the_current_incarnation_works() {
     let (r, rid) = bound_keys_rig(0).await;

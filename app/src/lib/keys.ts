@@ -10,8 +10,10 @@ export type KeyInput = {
   composing: boolean;
   keyCode: number;
   inField: boolean;
-  /** Which text field has focus: the reply box or a card's typed-answer input. */
-  field?: { kind: "reply" | "answer"; cardKey: string | null };
+  /** Which text field has focus: the reply box, a card's typed-answer input, or the voice command field. */
+  field?: { kind: "reply" | "answer" | "voice"; cardKey: string | null };
+  /** The typed voice command field is on screen. */
+  voiceField?: boolean;
 };
 export type Effect =
   | { kind: "none" }
@@ -29,6 +31,8 @@ export type Effect =
   | { kind: "submitAnswer"; cardKey: string }
   | { kind: "focusAnswer"; cardKey: string }
   | { kind: "markSeen"; cardKey: string }
+  | { kind: "submitVoice" }
+  | { kind: "focusVoice" }
   | { kind: "escape" };
 
 const NONE: Effect = { kind: "none" };
@@ -46,9 +50,10 @@ export function fromEvent(e: KeyboardEvent): KeyInput {
     keyCode: e.keyCode,
     inField: target?.tagName === "TEXTAREA",
     field:
-      kind === "reply" || kind === "answer"
+      kind === "reply" || kind === "answer" || kind === "voice"
         ? { kind, cardKey: target?.closest<HTMLElement>("[data-key]")?.dataset.key ?? null }
         : undefined,
+    voiceField: document.querySelector("[data-field=voice]") !== null,
   };
 }
 
@@ -74,6 +79,9 @@ export function onKey(
   if (ev.key === "Escape") return { state: st, effect: { kind: "escape" } };
 
   if (ev.inField) {
+    if (ev.key === "Enter" && !ev.shift && ev.field?.kind === "voice") {
+      return { state: st, effect: { kind: "submitVoice" } };
+    }
     if (ev.key === "Enter" && !ev.shift && ev.field?.kind === "answer" && ev.field.cardKey !== null) {
       return { state: st, effect: { kind: "submitAnswer", cardKey: ev.field.cardKey } };
     }
@@ -82,6 +90,8 @@ export function onKey(
     }
     return none;
   }
+
+  if (ev.key === "/" && ev.voiceField) return { state: st, effect: { kind: "focusVoice" } };
 
   const key = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
   const idx = view.cards.findIndex((c) => c.key === st.selected);

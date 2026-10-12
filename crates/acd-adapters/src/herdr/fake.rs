@@ -19,8 +19,8 @@ type KeysHook = Arc<dyn Fn(&FakeHerdr, &str, &[String]) + Send + Sync>;
 enum Hook {
     /// Apply the request, record it, never reply, hold the connection.
     Hang,
-    /// Reply with an error and apply nothing.
-    Fail(String),
+    /// Reply with an error (code, message) and apply nothing.
+    Fail(String, String),
 }
 
 /// Server side of a `Gate`.
@@ -313,7 +313,16 @@ impl FakeHerdr {
             .hooks
             .entry(method.to_owned())
             .or_default()
-            .push_back(Hook::Fail(code.to_owned()));
+            .push_back(Hook::Fail(code.to_owned(), "injected failure".to_owned()));
+    }
+
+    /// `fail_next` with this error message, e.g. one that echoes input.
+    pub fn fail_next_with_message(&self, method: &str, code: &str, message: &str) {
+        self.st()
+            .hooks
+            .entry(method.to_owned())
+            .or_default()
+            .push_back(Hook::Fail(code.to_owned(), message.to_owned()));
     }
 
     pub fn push_event(&self, frame: Value) {
@@ -474,7 +483,7 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
         )
     };
     let outcome = match hook {
-        Some(Hook::Fail(code)) => Outcome::Error(code, "injected failure".into()),
+        Some(Hook::Fail(code, message)) => Outcome::Error(code, message),
         hook => {
             let outcome = handle(&shared, &method, &params);
             if matches!(hook, Some(Hook::Hang)) {

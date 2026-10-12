@@ -1,12 +1,12 @@
 mod common;
-use acd_client::{fake::*, inbox::*, settings::*, view::*};
+use acd_client::{fake::*, inbox::*, settings::*, view::*, voice::*};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 const ANSWER_REQ: &str = "r1";
 fn pending_agent() -> Value {
     serde_json::json!({"id":"a1","machine_id":"m","source":"herdr","kind":"claude","title":"agent","cwd":null,"project":null,"state":"needs_you","state_since":"2026-10-08T00:00:00.000Z","failed":false,"last_message":null,"can_send":true,"pending":{"id":ANSWER_REQ,"revision":1,"agent_id":"a1","kind":"permission","status":"open","answer_path":"hook","title":"Bash","detail":"npm test","options":[{"id":"allow","label":"Yes","description":null,"effect":"allow"},{"id":"deny","label":"No","description":null,"effect":"deny"},{"id":"always","label":"Yes, always","description":"Bash(npm test:*)","effect":"allow_always"}],"questions":null,"free_text":false,"raw_screen":null,"opened_at":"2026-10-08T00:00:00.000Z"}})
 }
-async fn setup() -> (FakeServer, FakeConn, Arc<Inbox>) {
+async fn setup_with(timing: acd_client::Timing) -> (FakeServer, FakeConn, Arc<Inbox>) {
     let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
     let secrets = Arc::new(MemorySecrets::default());
     secrets
@@ -38,7 +38,7 @@ async fn setup() -> (FakeServer, FakeConn, Arc<Inbox>) {
         settings,
         secrets,
         InboxOptions {
-            timing: common::fast(),
+            timing,
             settings_path: None,
             client_name: "t".into(),
             client_version: "0".into(),
@@ -60,6 +60,9 @@ async fn setup() -> (FakeServer, FakeConn, Arc<Inbox>) {
 }
 fn settings_client_id() -> &'static str {
     "00000000-0000-4000-8000-000000000001"
+}
+async fn setup() -> (FakeServer, FakeConn, Arc<Inbox>) {
+    setup_with(common::fast()).await
 }
 async fn view_until(ib: &Inbox, what: &str, pred: impl Fn(&InboxView) -> bool) {
     let mut rx = ib.view();
@@ -1091,6 +1094,470 @@ async fn a_reply_countdown_survives_the_agent_turning_idle_with_idle_hidden() {
     view_until(&ib, "hidden once done", |v| v.cards.is_empty() && v.hidden_idle == 1).await;
 }
 
+/// Countdowns that never end on their own; tests end them with
+/// `expire_countdowns_for_test`, so ordering is decided by the test.
+fn held() -> acd_client::Timing {
+    acd_client::Timing { undo: Duration::from_secs(3600), ..common::fast() }
+}
+
+fn working_agent(id: &str) -> Value {
+    let mut a = pending_agent();
+    a["id"] = id.into();
+    a["state"] = "working".into();
+    a["pending"] = Value::Null;
+    a
+}
+
+async fn next_outcome(rx: &mut tokio::sync::broadcast::Receiver<ActionEvent>, id: &str) -> ActionOutcome {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = rx.recv().await.expect("the outcome stream is open");
+            if event.action_id == id {
+                return event.outcome;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for an action outcome")
+}
+
+/// The first frame of this type the fake daemon received.
+async fn frame_of_type(f: &FakeServer, ty: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(v) = f.received().into_iter().find(|v| v["type"] == ty) {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {ty} frame"))
+}
+
+async fn answer_frame(f: &FakeServer) -> Value {
+    frame_of_type(f, "request.answer").await
+}
+
+fn guard_for(ib: &Inbox, card: &str) -> Guard {
+    let (machine, agent) = card.split_once('/').unwrap();
+    let request = ib
+        .view()
+        .borrow()
+        .cards
+        .iter()
+        .find(|c| c.key == card)
+        .and_then(|c| c.agent.pending.as_ref().map(|r| (r.id.clone(), r.revision)));
+    Guard { conn: ib.conn_stamp(machine).unwrap(), agent_id: agent.into(), request, named_send_only: false }
+}
+
+#[tokio::test]
+async fn a_delivered_answer_reports_fired_then_delivered() {
+    let (f, c, ib) = setup().await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    let frame = answer_frame(&f).await;
+    c.send(serde_json::json!({"type":"result","id":frame["id"],"ok":true,"outcome":"delivered"})).await;
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Delivered);
+}
+
+#[tokio::test]
+async fn a_rejected_answer_reports_its_code() {
+    let (f, c, ib) = setup().await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    let frame = answer_frame(&f).await;
+    c.send(serde_json::json!({"type":"result","id":frame["id"],"ok":false,"error":{"code":"request_gone","message":"gone"}})).await;
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Rejected { code: acd_protocol::ErrorCode::RequestGone });
+}
+
+#[tokio::test]
+async fn an_answer_lost_across_a_daemon_restart_is_uncertain() {
+    let (f, c, ib) = setup().await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    answer_frame(&f).await;
+    // A new epoch revokes every in-flight command (commands.rs on_welcome).
+    f.set_epoch("e2");
+    c.close(1001).await;
+    let c2 = f.next_connection().await;
+    c2.send(serde_json::json!({"type":"snapshot","epoch":"e2","seq":1,"agents":[]})).await;
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Uncertain);
+}
+
+#[tokio::test]
+async fn cancel_and_escape_report_cancelled() {
+    let (_f, _c, ib) = setup_with(held()).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert!(ib.cancel(&id));
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Cancelled);
+    let id = ib.pick("m1/a1", ANSWER_REQ, "deny", 1).unwrap();
+    assert!(ib.escape());
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn dropped_countdowns_report_why_nothing_was_sent() {
+    // The request changed.
+    let (_f, c, ib) = setup_with(held()).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let mut agent = pending_agent();
+    agent["pending"]["revision"] = serde_json::json!(2);
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":agent})).await;
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::NotSent { reason: NotSentReason::Changed });
+    // The connection ended.
+    let (_f, _c, ib) = setup_with(held()).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.drop_connections_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+    // The user hid the card.
+    let (_f, c, ib) = setup_with(held()).await;
+    ib.set_show_subagents(true).unwrap();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), subagent_agent()]})).await;
+    view_until(&ib, "subagent shown", |v| v.cards.len() == 2).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a2", "r2", "allow", 1).unwrap();
+    ib.set_show_subagents(false).unwrap();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::NotSent { reason: NotSentReason::Hidden });
+}
+
+/// Review Focus 5, deterministic half one: a cancelled countdown never
+/// fires. A sentinel on the same card proves the timer ran after the cancel.
+#[tokio::test]
+async fn a_cancelled_countdown_never_fires() {
+    let (f, _c, ib) = setup_with(held()).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert!(ib.cancel(&id));
+    ib.expire_countdowns_for_test();
+    let sentinel = ib.pick("m1/a1", ANSWER_REQ, "deny", 1).unwrap();
+    ib.expire_countdowns_for_test();
+    let mut seen = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let e = rx.recv().await.unwrap();
+            let done = e.action_id == sentinel && e.outcome == ActionOutcome::Fired;
+            seen.push(e);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the sentinel fired");
+    let mine: Vec<ActionOutcome> = seen.iter().filter(|e| e.action_id == id).map(|e| e.outcome).collect();
+    assert_eq!(mine, [ActionOutcome::Cancelled]);
+    assert_eq!(answer_frame(&f).await["option_id"], "deny", "only the sentinel was sent");
+}
+
+/// Review Focus 5, half two: once `Fired` is out, cancel is refused.
+#[tokio::test]
+async fn a_fired_countdown_cannot_be_cancelled() {
+    let (f, _c, ib) = setup_with(held()).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    assert!(!ib.cancel(&id), "the countdown ended");
+    assert_eq!(answer_frame(&f).await["option_id"], "allow");
+}
+
+#[tokio::test]
+async fn actions_work_with_no_outcome_subscriber() {
+    let (f, _c, ib) = setup_with(held()).await;
+    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
+    assert_eq!(answer_frame(&f).await["option_id"], "allow");
+}
+
+#[tokio::test]
+async fn a_slow_subscriber_is_told_it_lagged_and_the_stream_goes_on() {
+    let (_f, _c, ib) = setup_with(held()).await;
+    let mut rx = ib.action_outcomes();
+    for _ in 0..300 {
+        let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+        assert!(ib.cancel(&id));
+    }
+    assert!(matches!(rx.recv().await, Err(tokio::sync::broadcast::error::RecvError::Lagged(_))));
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert!(ib.cancel(&id));
+    // The queue is still full of old events, so the new one may push more out
+    // before it is read: more `Lagged` is fine, the stream must still reach it.
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(e) if e.action_id == id => return e.outcome,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(e) => panic!("the outcome stream closed: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("the stream goes on after a lag");
+    assert_eq!(outcome, ActionOutcome::Cancelled);
+}
+
+/// B1: with `rebuild` held across a reconnect, the stamped view keeps the
+/// stamps of the cards it shows; a step planned on it is then refused by
+/// the live connection. Released, both move together.
+#[tokio::test]
+async fn the_stamped_view_never_pairs_new_stamps_with_old_cards() {
+    let (f, c, ib) = setup().await;
+    let before = ib.stamped_view();
+    assert_eq!(before.stamps.get("m1").copied(), ib.conn_stamp("m1"));
+    ib.hold_rebuild_for_test(true);
+    c.close(4408).await;
+    let c2 = f.next_connection().await;
+    c2.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while ib.conn_stamp("m1") == before.stamps.get("m1").copied() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the live connection moved on");
+    let held = ib.stamped_view();
+    assert_eq!(held, before, "stamps stay with the cards they were published with");
+    let planned = Guard {
+        conn: held.stamps["m1"],
+        agent_id: "a1".into(),
+        request: Some((ANSWER_REQ.into(), 1)),
+        named_send_only: false,
+    };
+    assert_eq!(ib.pick_guarded("m1/a1", "allow", &planned), Err(PickError::ConnectionChanged));
+    ib.hold_rebuild_for_test(false);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let now = ib.stamped_view();
+            if now.stamps.get("m1").copied() == ib.conn_stamp("m1") && now.view.cards.iter().any(|c| c.answerable) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("released: view and stamps move together");
+}
+
+#[tokio::test]
+async fn the_stamped_view_carries_the_idle_cards_the_view_hides() {
+    let (_f, c, ib) = setup().await;
+    let mut idle = working_agent("a3");
+    idle["state"] = "idle".into();
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":idle})).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ib.stamped_view().hidden_idle_cards.iter().any(|c| c.key == "m1/a3") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the hidden idle card");
+    assert!(!ib.view().borrow().cards.iter().any(|c| c.key == "m1/a3"), "the panel still hides it");
+}
+
+/// B2: the full guard. Connection, request appearing, disappearing and
+/// changing revision are each refused; the current guard passes.
+#[tokio::test]
+async fn guarded_operations_check_connection_agent_and_request() {
+    let (f, c, ib) = setup_with(held()).await;
+    // The connection changed.
+    let old = guard_for(&ib, "m1/a1");
+    c.close(4408).await;
+    let c = f.next_connection().await;
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent(), working_agent("a2")]})).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while ib.conn_stamp("m1") == Some(old.conn) || ib.view().borrow().cards.len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("reconnected");
+    assert_eq!(ib.pick_guarded("m1/a1", "allow", &old), Err(PickError::ConnectionChanged));
+    // A request appeared on an agent planned without one.
+    let quiet = guard_for(&ib, "m1/a2");
+    assert_eq!(quiet.request, None);
+    let mut busy = pending_agent();
+    busy["id"] = "a2".into();
+    busy["pending"]["id"] = "r9".into();
+    busy["pending"]["agent_id"] = "a2".into();
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":busy})).await;
+    view_until(&ib, "a2 needs you", |v| v.cards.iter().any(|c| c.key == "m1/a2" && c.agent.pending.is_some())).await;
+    assert_eq!(ib.reply_guarded("m1/a2", "go on".into(), &quiet), Err(PickError::StaleRequest));
+    // The revision changed.
+    let planned = guard_for(&ib, "m1/a1");
+    let mut bumped = pending_agent();
+    bumped["pending"]["revision"] = serde_json::json!(2);
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":bumped})).await;
+    view_until(&ib, "revision 2", |v| v.cards.iter().any(|c| c.agent.pending.as_ref().is_some_and(|p| p.revision == 2))).await;
+    assert_eq!(ib.pick_guarded("m1/a1", "allow", &planned), Err(PickError::StaleRequest));
+    assert_eq!(ib.answer_text_guarded("m1/a1", "x".into(), &planned), Err(PickError::StaleRequest));
+    // The request disappeared.
+    let planned = guard_for(&ib, "m1/a1");
+    let mut gone = pending_agent();
+    gone["pending"] = Value::Null;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":4,"agent":gone})).await;
+    view_until(&ib, "answered", |v| v.cards.iter().any(|c| c.key == "m1/a1" && c.agent.pending.is_none())).await;
+    assert_eq!(ib.pick_guarded("m1/a1", "allow", &planned), Err(PickError::StaleRequest));
+    assert!(ib.view().borrow().actions.is_empty());
+    // The current guard passes.
+    let now = guard_for(&ib, "m1/a2");
+    ib.pick_guarded("m1/a2", "allow", &now).unwrap();
+}
+
+/// D7 at the client: a guarded send reaches an idle agent the panel hides
+/// (no published card); the keyboard path still needs a card on screen.
+#[tokio::test]
+async fn a_guarded_send_reaches_a_hidden_idle_agent() {
+    let (f, c, ib) = setup().await;
+    let mut idle = working_agent("a3");
+    idle["state"] = "idle".into();
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":idle})).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ib.stamped_view().hidden_idle_cards.iter().any(|c| c.key == "m1/a3") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the hidden idle card");
+    assert_eq!(ib.reply("m1/a3", "x".into()), Err(PickError::UnknownCard), "keyboard path unchanged");
+    // Only a send that named it while it was out of view reaches it (D7).
+    let unnamed = Guard { conn: ib.conn_stamp("m1").unwrap(), agent_id: "a3".into(), request: None, named_send_only: false };
+    assert_eq!(ib.reply_guarded("m1/a3", "rebase".into(), &unnamed), Err(PickError::Hidden));
+    let guard = Guard { named_send_only: true, ..unnamed };
+    ib.reply_guarded("m1/a3", "rebase".into(), &guard).unwrap();
+    let sent = frame_of_type(&f, "agent.send").await;
+    assert_eq!((sent["agent_id"].as_str(), sent["text"].as_str()), (Some("a3"), Some("rebase")));
+}
+
+/// The frozen plan passed its identity guard, but the user hid the agent
+/// while the step waited for Confirm. Every guarded operation checks the
+/// live settings under the action lock and sends nothing (final review B1).
+#[tokio::test]
+async fn a_guarded_step_on_a_subagent_hidden_since_the_freeze_is_refused() {
+    let (f, c, ib) = setup_with(held()).await;
+    ib.set_show_subagents(true).unwrap();
+    let mut sub = subagent_agent();
+    sub["can_send"] = true.into();
+    sub["pending"]["free_text"] = true.into();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), sub]})).await;
+    view_until(&ib, "subagent shown", |v| v.cards.len() == 2).await;
+    let frozen = guard_for(&ib, "m1/a2");
+    // Keep the published card, so only the live check can refuse.
+    ib.hold_rebuild_for_test(true);
+    ib.set_show_subagents(false).unwrap();
+    assert_eq!(ib.pick_guarded("m1/a2", "allow", &frozen), Err(PickError::Hidden));
+    assert_eq!(ib.answer_text_guarded("m1/a2", "SECRET".into(), &frozen), Err(PickError::Hidden));
+    let named = Guard { named_send_only: true, ..frozen.clone() };
+    assert_eq!(ib.reply_guarded("m1/a2", "go on".into(), &named), Err(PickError::Hidden), "D7 does not reach a hidden subagent");
+    ib.hold_rebuild_for_test(false);
+    ib.expire_countdowns_for_test();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let ops = f.received().iter().filter(|v| v["type"] == "request.answer" || v["type"] == "agent.send").count();
+    assert_eq!(ops, 0, "no daemon operation");
+}
+
+#[tokio::test]
+async fn a_guarded_send_to_a_hook_only_agent_hidden_since_the_freeze_is_refused() {
+    let (f, c, ib) = setup_with(held()).await;
+    ib.set_show_hook_only(true).unwrap();
+    let mut quiet = quiet_hook_only_agent();
+    quiet["can_send"] = true.into();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), quiet]})).await;
+    view_until(&ib, "hook-only shown", |v| v.cards.iter().any(|c| c.key == "m1/a3")).await;
+    let frozen = guard_for(&ib, "m1/a3");
+    ib.hold_rebuild_for_test(true);
+    ib.set_show_hook_only(false).unwrap();
+    assert_eq!(ib.reply_guarded("m1/a3", "go on".into(), &frozen), Err(PickError::Hidden));
+    let named = Guard { named_send_only: true, ..frozen };
+    assert_eq!(ib.reply_guarded("m1/a3", "go on".into(), &named), Err(PickError::Hidden), "D7 covers idle agents only");
+    ib.hold_rebuild_for_test(false);
+    ib.expire_countdowns_for_test();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!f.received().iter().any(|v| v["type"] == "agent.send"), "no daemon operation");
+}
+
+#[test]
+fn debug_output_shows_text_lengths_only() {
+    use acd_client::actions::{ActionKind, TextSemantics};
+    use acd_client::commands::{Command, Outcome};
+    let shown = [
+        format!("{:?}", Command::Send { agent_id: "a".into(), text: "SECRET-1".into() }),
+        format!("{:?}", Command::AnswerText { request_id: "r".into(), revision: 1, text: "SECRET-2".into() }),
+        format!("{:?}", Outcome::Failed { code: acd_protocol::ErrorCode::BadRequest, message: "SECRET-3".into() }),
+        format!("{:?}", ActionKind::Reply { text: "SECRET-4".into() }),
+    ];
+    for s in shown {
+        assert!(!s.contains("SECRET"), "{s}");
+    }
+    let req: acd_protocol::Request = serde_json::from_value(pending_agent()["pending"].clone()).unwrap();
+    assert!(!format!("{:?}", TextSemantics::of(&req, "SECRET-5")).contains("SECRET"));
+}
+
+/// B5 through the real transport: a daemon error frame's message never
+/// reaches the logs. Current-thread runtime: `set_default` is per thread.
+#[tokio::test(flavor = "current_thread")]
+async fn daemon_error_messages_never_reach_the_logs() {
+    use std::sync::Mutex as StdMutex;
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<StdMutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (f, c, ib) = setup().await;
+    c.send(serde_json::json!({"type":"error","code":"bad_request","message":"SECRET-DAEMON echo of run the tests"})).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.reply("m1/a1", "SECRET-REPLY".into()).unwrap();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    let sent = frame_of_type(&f, "agent.send").await;
+    c.send(serde_json::json!({"type":"result","id":sent["id"],"ok":false,"error":{"code":"agent_busy","message":"SECRET-RESULT"}})).await;
+    next_outcome(&mut rx, &id).await;
+    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("daemon error"), "the capture works: {logs}");
+    assert!(!logs.contains("SECRET"), "{logs}");
+}
+
+/// F3: a countdown's reply text must not leak through the derived `Debug`
+/// of the views and actions that carry it.
+#[tokio::test]
+async fn debug_of_views_with_a_running_countdown_hides_the_text() {
+    let (_f, _c, ib) = setup_with(held()).await;
+    ib.reply("m1/a1", "SECRET-REPLY typed by the user".into()).unwrap();
+    view_until(&ib, "countdown shown", |v| v.actions.len() == 1).await;
+    let stamped = ib.stamped_view();
+    assert_eq!(stamped.view.actions.len(), 1);
+    let shown = [
+        format!("{:?}", stamped.view.actions[0]),
+        format!("{:?}", stamped.view),
+        format!("{:?}", stamped),
+        format!("{:?}", ib.view().borrow().cards),
+    ];
+    for s in &shown {
+        assert!(!s.contains("SECRET"), "{s}");
+    }
+    assert!(shown[0].contains("detail_bytes"), "{}", shown[0]);
+}
+
+
 fn hook_only_agent() -> Value {
     let mut a = pending_agent();
     a["id"] = "a3".into();
@@ -1240,4 +1707,49 @@ async fn a_hook_only_subagent_request_stays_hidden_and_silent() {
         events.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
+}
+
+/// Merge check: the hook-only drop path ends a countdown with exactly one
+/// terminal outcome, `NotSent { Hidden }`. Rebuild is held so the request
+/// going away is not turned into `AnsweredElsewhere` first.
+#[tokio::test]
+async fn hiding_hook_only_agents_reports_hidden_for_their_countdowns() {
+    let (_f, c, ib) = setup_with(held()).await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":hook_only_agent()})).await;
+    view_until(&ib, "hook-only card with a request", |v| v.cards.iter().any(|c| c.key == "m1/a3")).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a3", "r3", "allow", 1).unwrap();
+    ib.hold_rebuild_for_test(true);
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":quiet_hook_only_agent()})).await;
+    // Retry until the machine state has the quiet agent; each early try drops nothing.
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            ib.set_show_hook_only(false).unwrap();
+            if let Ok(e) = rx.try_recv() {
+                assert_eq!(e.action_id, id);
+                return e.outcome;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the countdown was dropped");
+    assert_eq!(outcome, ActionOutcome::NotSent { reason: NotSentReason::Hidden });
+    assert!(!ib.cancel(&id), "one terminal outcome only");
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn the_stamped_view_applies_the_hook_only_filter_like_the_published_view() {
+    let (_f, c, ib) = setup().await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":quiet_hook_only_agent()})).await;
+    ib.set_show_hook_only(false).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let stamped = ib.stamped_view();
+    assert!(!stamped.view.cards.iter().any(|c| c.key == "m1/a3"));
+    assert!(!stamped.hidden_idle_cards.iter().any(|c| c.key == "m1/a3"));
+    assert_eq!(stamped.view, *ib.view().borrow());
+    ib.set_show_hook_only(true).unwrap();
+    view_until(&ib, "shown", |v| v.cards.iter().any(|c| c.key == "m1/a3")).await;
+    assert_eq!(ib.stamped_view().view, *ib.view().borrow());
 }

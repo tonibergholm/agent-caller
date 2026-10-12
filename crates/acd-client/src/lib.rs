@@ -15,6 +15,7 @@ pub mod session;
 pub mod settings;
 pub mod tls;
 pub mod view;
+pub mod voice;
 
 /// Every timing rule in one place; tests shrink these.
 #[derive(Clone, Debug)]

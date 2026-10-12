@@ -2,6 +2,8 @@ import type { Api } from "./ipc";
 import type { CardView } from "./bindings/CardView";
 import type { InboxView } from "./bindings/InboxView";
 import type { MachineEntryView } from "./bindings/MachineEntryView";
+import type { HudEvent } from "./hud";
+import { VOICE_OFF, type Presentation, type VoiceSettings } from "./voice";
 
 export function card(overrides: Partial<CardView> = {}): CardView {
   const key = overrides.key ?? "m/a";
@@ -89,12 +91,23 @@ export function view(overrides: Partial<InboxView> = {}): InboxView {
   };
 }
 
-export type FakeApi = Api & { calls: unknown[][] };
+export type FakeApi = Api & {
+  calls: unknown[][];
+  /** Presentation publishes, kept out of `calls` so exact-call assertions stay valid. */
+  presentations: Presentation[];
+  /** HUD state seqs sent to `voiceHudFit`, also kept out of `calls`. */
+  fits: number[];
+  voiceSelect?: (cardKey: string) => void;
+  voiceSettings?: (s: VoiceSettings) => void;
+  hud?: (e: HudEvent) => void;
+  hudClear?: (seq: number) => void;
+};
 
 export function fakeApi(
-  opts: { machines?: MachineEntryView[]; escapeReturns?: boolean } = {},
+  opts: { machines?: MachineEntryView[]; escapeReturns?: boolean; voice?: VoiceSettings } = {},
 ): FakeApi {
   const calls: unknown[][] = [];
+  const presentations: Presentation[] = [];
   const rec =
     <T>(name: string, result: T) =>
     async (...args: unknown[]): Promise<T> => {
@@ -107,7 +120,7 @@ export function fakeApi(
     endpoint: { kind: "local" },
     pairing: "paired",
   };
-  return {
+  const api = {
     calls,
     pick: rec("pick", undefined),
     reply: rec("reply", "action-2"),
@@ -130,5 +143,41 @@ export function fakeApi(
     getView: rec("getView", view()),
     onView: async () => () => {},
     onShown: async () => () => {},
+    presentations,
+    publishPresentation: async (p: Presentation) => {
+      presentations.push(p);
+    },
+    voiceTextInput: rec("voiceTextInput", undefined),
+    getVoiceSettings: async () => opts.voice ?? VOICE_OFF,
+    setVoiceSettings: async (s: VoiceSettings) => {
+      calls.push(["setVoiceSettings", s]);
+      return s;
+    },
+    onVoiceSettings: async (cb: (s: VoiceSettings) => void) => {
+      api.voiceSettings = cb;
+      return () => {};
+    },
+    onVoiceSelect: async (cb: (cardKey: string) => void) => {
+      api.voiceSelect = cb;
+      return () => {};
+    },
+    onHud: async (cb: (e: HudEvent) => void) => {
+      api.hud = cb;
+      return () => {};
+    },
+    onHudClear: async (cb: (seq: number) => void) => {
+      api.hudClear = cb;
+      return () => {};
+    },
+    voiceShown: rec("voiceShown", undefined),
+    voiceConfirm: rec("voiceConfirm", undefined),
+    voiceChoose: rec("voiceChoose", undefined),
+    voiceCancel: rec("voiceCancel", undefined),
+    // Kept out of `calls`: sizing is not an action.
+    voiceHudFit: async (seq: number) => {
+      api.fits.push(seq);
+    },
+    fits: [] as number[],
   } as FakeApi;
+  return api;
 }

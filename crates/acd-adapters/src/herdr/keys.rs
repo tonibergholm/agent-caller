@@ -703,7 +703,8 @@ impl Engine {
             Ok(Err(e)) => (
                 Delivery::Uncertain,
                 Err(DeliverError::Uncertain(format!(
-                    "herdr did not confirm the key: {e}"
+                    "herdr did not confirm the key: {}",
+                    classify(&e)
                 ))),
             ),
             Err(_) => (
@@ -715,6 +716,27 @@ impl Engine {
         };
         let _ = verdict_tx.send(delivery);
         result
+    }
+}
+
+/// A herdr call error as a static class and its code, never herdr's
+/// message or a reply fragment: the core logs it (spec rule: agent text
+/// never reaches logs).
+fn classify(e: &CallError) -> String {
+    match e {
+        CallError::Server { code, .. } => {
+            let plain = !code.is_empty()
+                && code.len() <= 64
+                && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.');
+            if plain {
+                format!("herdr error {code}")
+            } else {
+                "herdr error with an unrecognized code".into()
+            }
+        }
+        CallError::NoReply(_) => "no usable reply".into(),
+        CallError::Connect(_) => "connect failed".into(),
+        CallError::Write(_) => "write failed".into(),
     }
 }
 

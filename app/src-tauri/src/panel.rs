@@ -88,7 +88,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let events = InboxPanelEvents::new();
     let handle = app.clone();
     events.window_did_resign_key(move |_| {
-        hide(&handle);
+        hide_if_key_left(&handle);
         false
     });
     observe_screen_changes();
@@ -105,6 +105,50 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     }
     panel.hide();
     Ok(())
+}
+
+/// `show_and_make_key` makes the panel's content view first responder,
+/// which takes keyboard input away from the webview inside it (keys then
+/// went nowhere after a voice step re-showed the open inbox). Give it back.
+pub fn focus_webview(app: &AppHandle, label: &str) {
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+    if let Err(error) = window.with_webview(|w| {
+        use tauri_nspanel::objc2::{msg_send, runtime::AnyObject};
+        // SAFETY: both pointers come from the live webview on the main
+        // thread; `makeFirstResponder:` takes an NSResponder (WKWebView).
+        unsafe {
+            let window = &*(w.ns_window() as *const AnyObject);
+            let view = &*(w.inner() as *const AnyObject);
+            let took: bool = msg_send![window, makeFirstResponder: view];
+            if !took {
+                tracing::warn!("the webview refused key focus");
+            }
+        }
+    }) {
+        tracing::warn!(%error, "could not give the webview key focus");
+    }
+}
+
+/// Key left one of our panels. Judged once key has settled, on a later
+/// turn of the main loop (`run_on_main_thread` from the main thread runs
+/// inline, mid-transition): the inbox hides unless the HUD holds key on
+/// purpose (D17) or either panel is key (the HUD was clicked, or key came
+/// back).
+pub fn hide_if_key_left(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let inner = handle.clone();
+        if let Err(error) = handle.run_on_main_thread(move || {
+            let key = |label: &str| inner.get_webview_panel(label).is_ok_and(|p| p.as_panel().isKeyWindow());
+            if is_visible() && !crate::voice::hud::holds_key() && !key("panel") && !key(crate::voice::hud::LABEL) {
+                hide_on_main_thread(&inner);
+            }
+        }) {
+            tracing::error!(%error, "could not dispatch the key check");
+        }
+    });
 }
 
 pub fn is_visible() -> bool {
@@ -124,7 +168,6 @@ pub fn toggle(app: &AppHandle) {
     }
 }
 
-#[allow(dead_code)] // Public thread-safe operation; toggle uses its main-thread implementation.
 pub fn show(app: &AppHandle) {
     let handle = app.clone();
     if let Err(error) = app.run_on_main_thread(move || show_on_main_thread(&handle)) {
@@ -160,6 +203,7 @@ fn show_on_main_thread(handle: &AppHandle) {
             place(&window, saved.or_else(|| live_frame(&window)));
         }
         panel.show_and_make_key();
+        focus_webview(handle, "panel");
         VISIBLE.store(true, Ordering::SeqCst);
         tracing::info!("panel shown");
         if let Err(error) = handle.emit("panel://shown", ()) {
@@ -213,7 +257,7 @@ fn logical_frame(pos: tauri::PhysicalPosition<i32>, size: tauri::PhysicalSize<u3
 
 /// Every display in logical points, as (full frame, usable area with menu
 /// bar and Dock excluded), in the same order.
-fn screen_frames(window: &WebviewWindow) -> (Vec<Frame>, Vec<Frame>) {
+pub(crate) fn screen_frames(window: &WebviewWindow) -> (Vec<Frame>, Vec<Frame>) {
     window
         .available_monitors()
         .unwrap_or_default()
@@ -230,7 +274,7 @@ fn screen_frames(window: &WebviewWindow) -> (Vec<Frame>, Vec<Frame>) {
 }
 
 /// Index (into `full`) of the screen under the cursor, else the primary, else 0.
-fn fallback_screen(window: &WebviewWindow, full: &[Frame]) -> usize {
+pub(crate) fn fallback_screen(window: &WebviewWindow, full: &[Frame]) -> usize {
     let primary = window.primary_monitor().ok().flatten();
     let primary_index = primary.as_ref().and_then(|p| {
         let f = logical_frame(*p.position(), *p.size(), p.scale_factor());

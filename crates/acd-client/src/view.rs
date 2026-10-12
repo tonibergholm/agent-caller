@@ -89,7 +89,7 @@ pub enum NoticeTone {
     Warning,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ActionView {
     pub id: String,
@@ -97,6 +97,20 @@ pub struct ActionView {
     pub label: String,
     pub detail: Option<String>,
     pub fires_at_ms: f64,
+}
+
+/// `detail` is the user's typed reply or answer (voice spec §3.7): `Debug`
+/// shows its length, so no derived `Debug` above this type can print it.
+impl std::fmt::Debug for ActionView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionView")
+            .field("id", &self.id)
+            .field("card_key", &self.card_key)
+            .field("label_bytes", &self.label.len())
+            .field("detail_bytes", &self.detail.as_ref().map(String::len))
+            .field("fires_at_ms", &self.fires_at_ms)
+            .finish()
+    }
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -213,7 +227,9 @@ pub fn split_card_key(key: &str) -> Option<(&str, &str)> {
     key.split_once('/')
 }
 
-pub fn notice_for_error(code: ErrorCode, message: &str) -> Notice {
+/// The card notice for a daemon error. Classified by code only: the
+/// daemon's message text never reaches a notice (voice spec §3.7).
+pub fn notice_for_error(code: ErrorCode) -> Notice {
     use ErrorCode::*;
     let (text, tone) = match code {
         RequestGone => (NOTICE_ANSWERED_ELSEWHERE.to_owned(), NoticeTone::Info),
@@ -241,14 +257,14 @@ pub fn notice_for_error(code: ErrorCode, message: &str) -> Notice {
             NoticeTone::Warning,
         ),
         NotSupported => ("Not supported for this agent".into(), NoticeTone::Info),
-        _ => (format!("Could not send: {message}"), NoticeTone::Warning),
+        _ => (format!("Could not send: {}.", code.describe()), NoticeTone::Warning),
     };
     Notice { tone, text }
 }
 
 pub fn notice_for_outcome(outcome: &Outcome) -> Option<Notice> {
     match outcome {
-        Outcome::Failed { code, message } => Some(notice_for_error(*code, message)),
+        Outcome::Failed { code, .. } => Some(notice_for_error(*code)),
         Outcome::Uncertain => Some(Notice {
             tone: NoticeTone::Warning,
             text: NOTICE_CHECK_TERMINAL.into(),
@@ -258,7 +274,7 @@ pub fn notice_for_outcome(outcome: &Outcome) -> Option<Notice> {
             text: NOTICE_OFFLINE_NOT_SENT.into(),
         }),
         Outcome::NotSent(NotSent::NotAdvertised) => {
-            Some(notice_for_error(ErrorCode::NotSupported, ""))
+            Some(notice_for_error(ErrorCode::NotSupported))
         }
         Outcome::Delivered | Outcome::Done => None,
     }
@@ -916,10 +932,21 @@ mod tests {
         assert_eq!(split_card_key(&k), Some(("m1", "herdr:abc:w1:p2")));
         assert_eq!(split_card_key("noslash"), None);
     }
+    /// Final review B3: a daemon's message text never reaches a notice;
+    /// the fallback is classified by code.
+    #[test]
+    fn a_daemon_message_never_reaches_a_notice() {
+        use ErrorCode::*;
+        for code in [BadRequest, DuplicateMismatch, Unauthorized, UnsupportedProtocol, Unknown] {
+            let n = notice_for_outcome(&super::Outcome::Failed { code, message: "SECRET-DAEMON echo of run the tests".into() }).unwrap();
+            assert!(!n.text.contains("SECRET"), "{code:?}: {}", n.text);
+            assert_eq!(n.text, format!("Could not send: {}.", code.describe()));
+        }
+    }
     #[test]
     fn feedback_strings_match_the_table() {
         use ErrorCode::*;
-        let t = |c| notice_for_error(c, "srv").text;
+        let t = |c| notice_for_error(c).text;
         assert_eq!(t(RequestGone), "Answered elsewhere");
         assert_eq!(t(RequestChanged), "The request changed. Nothing was sent.");
         assert_eq!(
@@ -942,11 +969,11 @@ mod tests {
             "The source is unavailable. Nothing was sent."
         );
         assert_eq!(t(NotSupported), "Not supported for this agent");
-        assert_eq!(t(BadRequest), "Could not send: srv");
-        assert_eq!(t(Unknown), "Could not send: srv");
-        assert_eq!(notice_for_error(RequestGone, "").tone, NoticeTone::Info);
+        assert_eq!(t(BadRequest), "Could not send: malformed or invalid message.");
+        assert_eq!(t(Unknown), "Could not send: unknown error.");
+        assert_eq!(notice_for_error(RequestGone).tone, NoticeTone::Info);
         assert_eq!(
-            notice_for_error(RequestChanged, "").tone,
+            notice_for_error(RequestChanged).tone,
             NoticeTone::Warning
         );
         assert_eq!(
@@ -961,7 +988,7 @@ mod tests {
             }
         );
         assert_eq!(
-            notice_for_error(RequestNotReady, "").tone,
+            notice_for_error(RequestNotReady).tone,
             NoticeTone::Warning
         );
         assert_eq!(

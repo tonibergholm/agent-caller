@@ -47,6 +47,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "acd-voice"
+version = "0.1.0"
+dependencies = [
+ "acd-protocol",
+ "async-trait",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "acd-voice-client"
+version = "0.1.0"
+dependencies = [
+ "acd-client",
+ "acd-protocol",
+ "acd-voice",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -58,6 +82,8 @@ version = "0.1.0"
 dependencies = [
  "acd-client",
  "acd-protocol",
+ "acd-voice",
+ "acd-voice-client",
  "anyhow",
  "block2",
  "mac-notification-sys",

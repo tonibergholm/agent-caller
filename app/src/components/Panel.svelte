@@ -6,6 +6,7 @@
   import { statusKind, statusReason, statusText } from "../lib/format";
   import { fromEvent, normalize, onKey, type Effect, type KeyState } from "../lib/keys";
   import { dotKind, listedMachines, sections } from "../lib/panel";
+  import type { Presentation } from "../lib/voice";
   import Card from "./Card.svelte";
   import ReplyBox from "./ReplyBox.svelte";
   import Row from "./Row.svelte";
@@ -16,7 +17,8 @@
     view,
     api,
     hotkey = "Control+Option+Space",
-  }: { view: InboxView; api: Api; hotkey?: string } = $props();
+    voiceInput = false,
+  }: { view: InboxView; api: Api; hotkey?: string; voiceInput?: boolean } = $props();
 
   // svelte-ignore state_referenced_locally
   let st = $state<KeyState>(normalize(view, { selected: null, replyFor: null }));
@@ -32,6 +34,7 @@
   // Session state: the machine filter (null = All) and whether Done is open.
   let machineFilter = $state<string | null>(null);
   let doneOpen = $state(false);
+  let voiceText = $state("");
 
   // The error is cleared only by the next user key or click, never by a
   // view push, so a rejection stays visible until the user acts again.
@@ -60,6 +63,11 @@
     if (st.replyFor === null) replyText = "";
   });
 
+  // A typed command is voice text: drop it when the field goes away.
+  $effect(() => {
+    if (!voiceInput) voiceText = "";
+  });
+
   // Drop drafts whose request is gone (answered, or replaced by a newer one).
   $effect(() => {
     const live = new Set(view.cards.map(draftKey));
@@ -72,6 +80,38 @@
     if (key === null) return;
     const el = [...document.querySelectorAll<HTMLElement>("[data-key]")].find((e) => e.dataset.key === key);
     el?.scrollIntoView?.({ block: "nearest" });
+  });
+
+  // Voice (spec §4.3): what voice may target, published on every change.
+  // The epoch is new per mount, so a reloaded panel starts afresh.
+  const published = { epoch: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`, version: 0 };
+  $effect(() => {
+    published.version += 1;
+    const presentation: Presentation = {
+      epoch: published.epoch,
+      version: published.version,
+      selected: st.selected,
+      visible: visible.map((c) => c.key),
+      machine_filter: filter,
+      done_collapsed: !doneOpen,
+    };
+    api.publishPresentation(presentation).catch(() => {});
+  });
+
+  onMount(() => {
+    let off: (() => void) | undefined;
+    let closed = false;
+    api
+      .onVoiceSelect((key) => {
+        // A card hidden only by the machine filter can be named (spec §5.2): show it.
+        if (!visible.some((c) => c.key === key)) machineFilter = null;
+        st = { ...st, selected: key };
+      })
+      .then((un) => (closed ? un() : (off = un)), () => {});
+    return () => {
+      closed = true;
+      off?.();
+    };
   });
 
   onMount(() => {
@@ -98,6 +138,9 @@
       case "focusAnswer":
         answerField(effect.cardKey)?.focus();
         return;
+      case "focusVoice":
+        document.querySelector<HTMLTextAreaElement>("textarea[data-field=voice]")?.focus();
+        return;
       case "markSeen":
         await api.markSeen(effect.cardKey);
         return;
@@ -122,6 +165,13 @@
         answerField(effect.cardKey)?.blur();
         return;
       }
+      case "submitVoice": {
+        const text = voiceText;
+        if (text.trim() === "") return;
+        voiceText = "";
+        await api.voiceTextInput(text);
+        return;
+      }
       case "escape":
         // The decision never reads view.actions: it may be stale.
         if (await api.escape()) return;
@@ -129,10 +179,13 @@
           st = { ...st, replyFor: null };
           return;
         }
-        // Esc in the answer field leaves the field first; the next one closes.
-        if (document.activeElement instanceof HTMLElement && document.activeElement.dataset.field === "answer") {
-          document.activeElement.blur();
-          return;
+        // Esc in a text field leaves the field first; the next one closes.
+        {
+          const field = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.field : undefined;
+          if (field === "answer" || field === "voice") {
+            (document.activeElement as HTMLElement).blur();
+            return;
+          }
         }
         await api.hide();
         return;
@@ -292,12 +345,27 @@
     </section>
   {/if}
 
+  {#if voiceInput}
+    <!-- The step-1 stand-in for speech (voice plan D13). A textarea, so
+         keys.ts treats it as a field and J/K/digits stay text. -->
+    <textarea
+      class="voice"
+      rows="1"
+      data-field="voice"
+      aria-label="Voice command"
+      placeholder="Type a voice command, then Enter"
+      bind:value={voiceText}
+      onmousedown={(e) => e.button === 0 && e.currentTarget.focus()}
+    ></textarea>
+  {/if}
+
   <footer bind:clientHeight={footH}>
     <span class="keys">
       <span><kbd>J</kbd><kbd>K</kbd> move</span>
       <span><kbd>1</kbd>–<kbd>9</kbd> answer</span>
       <span><kbd>T</kbd> type</span>
       <span><kbd>R</kbd> reply</span>
+      {#if voiceInput}<span><kbd>/</kbd> command</span>{/if}
       <span><kbd>Esc</kbd> close / undo</span>
     </span>
     {#if view.show_idle}
@@ -552,5 +620,20 @@
     border: 1px solid var(--stroke);
     border-radius: var(--r);
     cursor: pointer;
+  }
+  .voice {
+    flex: none;
+    min-height: 32px;
+    padding: 6px 10px;
+    font: 13px var(--font-mono);
+    color: var(--text);
+    background: var(--fill-subtle);
+    border: 1px solid rgba(6, 182, 212, 0.4);
+    border-radius: var(--r);
+    resize: none;
+  }
+  .voice:focus {
+    outline: none;
+    box-shadow: 0 0 0 1px rgba(6, 182, 212, 0.4), var(--glow);
   }
 </style>

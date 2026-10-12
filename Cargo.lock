@@ -84,6 +84,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.30.0",
  "tracing",
+ "tracing-subscriber",
  "ts-rs",
  "uuid",
  "x509-parser",
@@ -136,6 +137,36 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "tempfile",
+]
+
+[[package]]
+name = "acd-voice"
+version = "0.1.0"
+dependencies = [
+ "acd-protocol",
+ "acd-voice",
+ "async-trait",
+ "jsonschema",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "acd-voice-client"
+version = "0.1.0"
+dependencies = [
+ "acd-client",
+ "acd-protocol",
+ "acd-voice",
+ "async-trait",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

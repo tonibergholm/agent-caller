@@ -1,9 +1,11 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
+  import Hud from "./components/Hud.svelte";
   import Panel from "./components/Panel.svelte";
   import Settings from "./components/Settings.svelte";
   import type { InboxView } from "./lib/bindings/InboxView";
+  import type { VoiceSettings } from "./lib/voice";
   import { tauriApi, type Api } from "./lib/ipc";
 
   const windowLabel = () => getCurrentWindow().label;
@@ -15,10 +17,13 @@
 
   let v = $state<InboxView | null>(null);
   let hotkey = $state<string | undefined>(undefined);
+  let voiceInput = $state(false);
+  const applyVoice = (s: VoiceSettings) => (voiceInput = s.enabled && s.debug_input);
   let loadError = $state<string | null>(null);
 
   onMount(() => {
     let off: (() => void) | undefined;
+    let offVoice: (() => void) | undefined;
     let closed = false;
     void (async () => {
       try {
@@ -32,17 +37,42 @@
       }
     })();
     api.getHotkey().then((h) => (hotkey = h), () => {});
+    // Subscribe first, then load; an event after the load started wins.
+    let voiceEvents = 0;
+    void (async () => {
+      try {
+        const un = await api.onVoiceSettings((s) => {
+          voiceEvents += 1;
+          applyVoice(s);
+        });
+        if (closed) un();
+        else offVoice = un;
+      } catch {
+        // No events: the load below still sets the field.
+      }
+      const seen = voiceEvents;
+      try {
+        const s = await api.getVoiceSettings();
+        if (!closed && voiceEvents === seen) applyVoice(s);
+      } catch {
+        // Keep the field off.
+      }
+    })();
     return () => {
       closed = true;
       off?.();
+      offVoice?.();
     };
   });
 </script>
 
 {#if resolvedLabel === "settings"}
   <Settings {api} />
+{:else if resolvedLabel === "hud"}
+  <!-- Never the panel: a second panel would publish its own presentation. -->
+  <Hud {api} view={v} />
 {:else if v}
-  <Panel view={v} {api} {hotkey} />
+  <Panel view={v} {api} {hotkey} {voiceInput} />
 {:else if loadError}
   <main role="alert">{loadError}</main>
 {/if}

@@ -15,7 +15,9 @@ pub struct Cursor {
     pub seq: u64,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+// `Debug` (below) hides the user's text and the token: it shows their
+// lengths. A plain comment, so the JSON schema does not change.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
     #[serde(rename = "hello")]
@@ -47,6 +49,38 @@ pub enum ClientMessage {
     AgentMarkSeen { id: String, agent_id: String },
     #[serde(rename = "ping")]
     Ping { id: String },
+}
+
+impl std::fmt::Debug for ClientMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientMessage::Hello { protocol, token, client, resume } => f
+                .debug_struct("Hello")
+                .field("protocol", protocol)
+                .field("token_bytes", &token.len())
+                .field("client", client)
+                .field("resume", resume)
+                .finish(),
+            ClientMessage::RequestAnswer { id, request_id, revision, option_id, text } => f
+                .debug_struct("RequestAnswer")
+                .field("id", id)
+                .field("request_id", request_id)
+                .field("revision", revision)
+                .field("option_id", option_id)
+                .field("text_bytes", &text.as_ref().map(String::len))
+                .finish(),
+            ClientMessage::AgentSend { id, agent_id, text } => f
+                .debug_struct("AgentSend")
+                .field("id", id)
+                .field("agent_id", agent_id)
+                .field("text_bytes", &text.len())
+                .finish(),
+            ClientMessage::AgentMarkSeen { id, agent_id } => {
+                f.debug_struct("AgentMarkSeen").field("id", id).field("agent_id", agent_id).finish()
+            }
+            ClientMessage::Ping { id } => f.debug_struct("Ping").field("id", id).finish(),
+        }
+    }
 }
 
 impl ClientMessage {
