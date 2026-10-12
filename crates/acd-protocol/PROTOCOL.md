@@ -294,18 +294,24 @@ Question { id: string, header: string | null, text: string, multi_select: bool,
            options: RequestOption[] }
 ```
 
-A request is **answerable** when all three conditions hold:
+A request is **structurally answerable** when all three conditions hold:
 
 - `answer_path` is not `none`;
 - `kind` is not `blocked_unparsed`;
 - if it is a question, there is exactly one question and it is
   single-select.
 
+Clients must also be connected, have the `answer` capability and see an
+open request before offering an action. The daemon validates the request
+ID, revision when supplied, and delivery readiness; structural
+answerability alone does not guarantee delivery.
+
 Anything else is shown read-only: "answer in T3" for T3 agents,
 "answer in terminal" for other sources. A T3 question with no options
 can still be answered when `free_text` is true. Typed answers are
-supported only on the T3 path; other providers require an explicit
-`allowCustomAnswer: true`, while Claude defaults to enabled when absent.
+supported only on the T3 path. Within T3, non-Claude providers require
+an explicit `allowCustomAnswer: true`, while Claude defaults to enabled
+when absent. This T3 field never enables text on hook or terminal paths.
 
 ### 6.1 Request lifecycle and identity
 
@@ -372,6 +378,11 @@ enough. The evidence per answer path:
   evidence. A dialog still present after the observation window, or a
   detected stray key, resolves `uncertain`. acd sends nothing further.
   Codex's transient `working` state while hooks run is not evidence.
+  Correlated hook outcomes require an evidence provider. The shipped
+  daemon installs `hooks.evidence()` with `herdr.set_evidence` before
+  starting the adapters (`crates/acd/src/daemon.rs`). A bare keys engine
+  defaults to `NoEvidence`, which returns immediately and resolves a
+  closed dialog as uncertain without waiting for hook evidence.
   The timing defaults live in `KeysTiming` in
   [`herdr/keys.rs`](../acd-adapters/src/herdr/keys.rs).
 - **`t3`.** The T3 command is acknowledged and the thread's request
@@ -402,8 +413,10 @@ enough. The evidence per answer path:
     sends `agent.mark_seen`.
 - An agent is removed when:
   - its pane closes;
-  - its T3 thread is archived, deleted or hidden by the adapter's visibility
-    rules (including settled and snoozed threads);
+  - its T3 thread is archived or deleted;
+  - its T3 thread is hidden by the adapter's visibility rules (including
+    settled and snoozed threads), once neither an open adapter request
+    nor a pending core request remains;
   - for a hooks-only agent, 10 minutes after `SessionEnd`, or after 24 hours
     with no event.
 
