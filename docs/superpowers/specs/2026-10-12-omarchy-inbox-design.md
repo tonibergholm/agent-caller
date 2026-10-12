@@ -145,9 +145,17 @@ missing, the "Open" action is left out of notifications.
 ## 5. Socket protocol
 
 JSON, one object per line, UTF-8. A line over 4 MiB from a view closes
-that connection. The service keeps its own lines under 4 MiB: agent text
-fields in a view are truncated by the service (with a marker) until the
-view fits, and the panel shows the marker.
+that connection. The service keeps its own lines under 4 MiB. To fit a view it first
+truncates agent text fields (with a marker the panel shows); then leaves
+out Done cards, then Working cards (never a card with a countdown), and
+reports them as `"omitted":{"done":n,"working":m}` so the panel shows
+"N not shown"; Needs-you cards are never left out, and if they alone do
+not fit, their text is truncated further down to a minimum per field.
+If even that does not fit, the service sends
+`{"type":"view_overflow","needs_you":n}` instead of a view and the panel
+shows an error state with the count until a view fits again.
+`settings` is bounded the same way (machines left out are counted in
+`omitted_machines`).
 
 ### 5.1 Connection
 
@@ -440,6 +448,8 @@ The re-review added: pairing rollback restores a re-paired machine's
 secret; upstream outcome lag also sends `outcomes_lost`; connections
 subscribe to outcomes on accept; settings entries join view machines by
 key.
+
+Oversized views (2026-10-12, orchestrator): text first, then Done, then Working cards with counts; Needs-you cards are never left out.
 
 Non-blocking points adopted: pairing-string handling, the socket startup
 contract, snapshot-based notifications with open-panel suppression, the

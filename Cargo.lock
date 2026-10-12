@@ -116,6 +116,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "acd-inbox"
+version = "0.1.0"
+dependencies = [
+ "acd-client",
+ "acd-inbox",
+ "acd-protocol",
+ "acd-securefs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "acd-protocol"
 version = "0.1.0"
 dependencies = [

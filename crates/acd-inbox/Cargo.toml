@@ -1,0 +1,25 @@
+[package]
+name = "acd-inbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Exposes secrets::fake for this crate's integration tests.
+testing = []
+
+[dependencies]
+acd-client.workspace = true
+acd-protocol.workspace = true
+acd-securefs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+acd-client = { workspace = true, features = ["testing"] }
+acd-inbox = { path = ".", features = ["testing"] }
+tempfile.workspace = true

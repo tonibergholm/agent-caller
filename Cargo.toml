@@ -11,6 +11,7 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 acd-client = { path = "crates/acd-client" }
+acd-inbox = { path = "crates/acd-inbox" }
 acd-protocol = { path = "crates/acd-protocol" }
 acd-core = { path = "crates/acd-core" }
 acd-adapters = { path = "crates/acd-adapters" }
