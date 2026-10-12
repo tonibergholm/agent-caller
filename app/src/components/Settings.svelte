@@ -30,8 +30,8 @@
       (s) => (notifications = s),
       () => (notifications = "unavailable"),
     );
-  // The request returns only once the user answers the macOS prompt (up to
-  // two minutes), so the button shows that it is waiting.
+  // The request returns only once the user answers macOS, which can take up
+  // to two minutes, so the button shows that it is waiting.
   let asking = $state(false);
   const requestNotifications = () =>
     act(async () => {
