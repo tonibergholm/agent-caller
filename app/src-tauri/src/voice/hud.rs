@@ -195,6 +195,7 @@ fn apply(app: &AppHandle, hidden: bool, wants_key: bool) -> bool {
         if !HANDOFF.swap(true, Ordering::SeqCst) {
             INBOX_WAS_OPEN.store(crate::panel::is_visible(), Ordering::SeqCst);
             panel.show_and_make_key();
+            crate::panel::focus_webview(app, LABEL);
         }
     } else {
         release_key(app);

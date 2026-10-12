@@ -107,6 +107,27 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// `show_and_make_key` makes the panel's content view first responder,
+/// which takes keyboard input away from the webview inside it (keys then
+/// went nowhere after a voice step re-showed the open inbox). Give it back.
+pub fn focus_webview(app: &AppHandle, label: &str) {
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+    if let Err(error) = window.with_webview(|w| {
+        use tauri_nspanel::objc2::{msg_send, runtime::AnyObject};
+        // SAFETY: both pointers come from the live webview on the main
+        // thread; `makeFirstResponder:` takes an NSResponder (WKWebView).
+        unsafe {
+            let window = &*(w.ns_window() as *const AnyObject);
+            let view = &*(w.inner() as *const AnyObject);
+            let _: bool = msg_send![window, makeFirstResponder: view];
+        }
+    }) {
+        tracing::warn!(%error, "could not give the webview key focus");
+    }
+}
+
 /// Key left one of our panels. Judged once key has settled, on a later
 /// turn of the main loop (`run_on_main_thread` from the main thread runs
 /// inline, mid-transition): the inbox hides unless the HUD holds key on
@@ -179,6 +200,7 @@ fn show_on_main_thread(handle: &AppHandle) {
             place(&window, saved.or_else(|| live_frame(&window)));
         }
         panel.show_and_make_key();
+        focus_webview(handle, "panel");
         VISIBLE.store(true, Ordering::SeqCst);
         tracing::info!("panel shown");
         if let Err(error) = handle.emit("panel://shown", ()) {
