@@ -208,13 +208,20 @@ fn apply(app: &AppHandle, hidden: bool, wants_key: bool) -> bool {
         }
     } else {
         release_key(app);
+        // With the inbox closed nothing took key back, and AppKit has no
+        // reliable resign: order out, so macOS returns key to the frontmost
+        // app, then front again in this same main-thread turn.
+        if panel.as_panel().isKeyWindow() {
+            panel.hide();
+        }
         panel.order_front_regardless();
     }
     panel.is_visible()
 }
 
-/// Ends the handoff: key goes back to the inbox panel if it was open,
-/// else to whatever macOS picks for the frontmost app.
+/// Ends the handoff: key goes back to the inbox panel if it was open.
+/// Otherwise the HUD must order out for macOS to return key to the
+/// frontmost app; `apply` does that.
 fn release_key(app: &AppHandle) {
     if !HANDOFF.swap(false, Ordering::SeqCst) {
         return;

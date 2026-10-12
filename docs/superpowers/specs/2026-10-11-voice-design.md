@@ -147,9 +147,10 @@ active screen, 18% from the top (`DESIGN.md`, floating overlays).
 - It becomes key (takes keyboard focus, without activating the app) only
   while Esc or a choice can act on it: thinking, confirm, which-one, or a
   running countdown. Then Enter confirms, digits pick a candidate, and Esc
-  cancels; Esc while thinking drops the utterance and any model call
-  (user decision 2026-10-12). When that state ends, focus returns to the
-  previous window.
+  cancels; Esc while thinking drops the utterance, and its model reply is
+  ignored when it arrives (user decision 2026-10-12). When that state
+  ends, focus returns to the previous window, or, with the inbox panel
+  closed, to the frontmost app.
 - Every input also has a clickable control in the HUD.
 - Pressing the voice trigger again while a voice countdown runs cancels
   that countdown at once, before any new recognition.
