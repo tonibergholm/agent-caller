@@ -279,6 +279,22 @@ fn uninstall_does_not_disable_a_unit_it_did_not_write() {
     assert!(String::from_utf8(out).unwrap().contains("not written by acd-inbox"));
 }
 
+/// Review: a retained foreign unit may still run the binary, and without
+/// our own unit nothing says the binary is ours.
+#[test]
+fn uninstall_keeps_the_binary_unless_our_unit_was_found() {
+    let home = tempfile::tempdir().unwrap();
+    let l = layout(home.path());
+    std::fs::create_dir_all(l.bin().parent().unwrap()).unwrap();
+    std::fs::write(l.bin(), "someone else's build").unwrap();
+    std::fs::create_dir_all(l.unit().parent().unwrap()).unwrap();
+    std::fs::write(l.unit(), "[Service]\nExecStart=%h/.local/bin/acd-inbox serve\n").unwrap();
+    let mut out = Vec::new();
+    uninstall(&l, &Recorder::default(), &mut out).unwrap();
+    assert_eq!(std::fs::read_to_string(l.bin()).unwrap(), "someone else's build");
+    assert!(String::from_utf8(out).unwrap().contains("left in place"));
+}
+
 #[test]
 fn a_symlinked_plugin_dir_is_neither_installed_into_nor_emptied() {
     let home = tempfile::tempdir().unwrap();

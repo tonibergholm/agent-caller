@@ -110,6 +110,23 @@ test("a typed answer goes to the request its editor was opened for", () => {
   assert.match(panel, /onViewChanged:[\s\S]*editorShouldClose[\s\S]*pruneKeyState/);
 });
 
+test("a reply keeps its draft until the service accepts it", () => {
+  const panel = read("Panel.qml");
+  const body = panel.slice(panel.indexOf("function submitReply"), panel.indexOf("// Sends to the request the editor"));
+  const sent = body.indexOf('service.send("reply"');
+  const cleared = body.indexOf("drafts.clear");
+  assert.ok(sent > 0 && cleared > sent, "cleared after the send");
+  assert.match(body, /if \(reply\.type !== "ok"\) return;[\s\S]*drafts\.clear/);
+});
+
+test("the settings list scrolls and removing a machine asks first", () => {
+  const panel = read("Panel.qml");
+  assert.match(panel, /Flickable \{\s*visible: panel\.settingsOpen[\s\S]*contentHeight: settingsColumn\.implicitHeight/);
+  const removing = panel.slice(panel.indexOf('text: confirming ? "Remove? Click again"'));
+  assert.match(removing, /if \(!confirming\) \{\s*confirming = true;\s*return;/);
+  assert.ok(removing.indexOf('"remove_machine"') > removing.indexOf("confirming = true"));
+});
+
 test("drafts live outside the delegates; the pairing line never does", () => {
   const panel = read("Panel.qml");
   assert.match(panel, /property var drafts: new Model\.Drafts\(\)/);

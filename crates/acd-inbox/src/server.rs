@@ -168,6 +168,9 @@ pub struct Service {
     pub(crate) secrets: Arc<dyn SecretControl>,
     prefs_tx: watch::Sender<Prefs>,
     prefs_path: Option<PathBuf>,
+    /// One preference write at a time: read, save and publish are a unit,
+    /// and two views may ask together.
+    prefs_write: Mutex<()>,
     pub(crate) registry: Mutex<Registry>,
     pub(crate) settings_gen: AtomicU64,
     next_conn: AtomicU64,
@@ -193,6 +196,7 @@ impl Service {
             secrets,
             prefs_tx: watch::Sender::new(prefs),
             prefs_path,
+            prefs_write: Mutex::new(()),
             registry: Mutex::new(Registry { conns: HashMap::new(), settings: (0, settings), view }),
             settings_gen: AtomicU64::new(0),
             next_conn: AtomicU64::new(1),
@@ -283,6 +287,7 @@ impl Service {
     }
 
     pub(crate) fn set_notifications(&self, on: bool) -> std::io::Result<()> {
+        let _one_at_a_time = self.prefs_write.lock().unwrap();
         let mut p = *self.prefs_tx.borrow();
         p.notifications = on;
         if let Some(path) = &self.prefs_path {

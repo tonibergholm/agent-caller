@@ -292,6 +292,9 @@ pub fn offer_keybinding(path: &Path, ask: &mut dyn FnMut(&str) -> bool, out: &mu
 /// A unit or plugin directory it did not create is left alone.
 pub fn uninstall(l: &Layout, runner: &dyn Runner, out: &mut dyn Write) -> Result<()> {
     let unit = l.unit();
+    // The binary goes only with our own unit: a unit install did not write
+    // may still run it, and without our unit nothing says the binary is ours.
+    let own_unit = unit.exists() && ours(&unit);
     if !unit.exists() || ours(&unit) {
         let _ = runner.run("systemctl", &["--user", "disable", "--now", UNIT_NAME]);
         if unit.exists() {
@@ -313,10 +316,14 @@ pub fn uninstall(l: &Layout, runner: &dyn Runner, out: &mut dyn Write) -> Result
     }
     let _ = runner.run("omarchy-shell", &["shell", "rescanPlugins"]);
     let bin = l.bin();
-    if bin.exists() {
-        std::fs::remove_file(&bin)?;
+    if !own_unit {
+        writeln!(out, "Removed the plugin. {} was left in place: no unit written by acd-inbox was found.", bin.display())?;
+    } else {
+        if bin.exists() {
+            std::fs::remove_file(&bin)?;
+        }
+        writeln!(out, "Removed {UNIT_NAME}, the plugin and {}.", bin.display())?;
     }
-    writeln!(out, "Removed {UNIT_NAME}, the plugin and {}.", bin.display())?;
     writeln!(out, "To remove the keybinding, delete this line from {}:\n{KEYBINDING}", l.bindings().display())?;
     Ok(())
 }

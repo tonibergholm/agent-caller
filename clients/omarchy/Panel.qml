@@ -98,10 +98,7 @@ Item {
             answerEditor = Model.answerEditor(cardFor(effect.cardKey));
             break;
         case "submitReply":
-            if (submitReply(effect.cardKey, input.text)) {
-                input.text = "";
-                releaseFocus();
-            }
+            submitReply(effect.cardKey, input.text, input);
             break;
         case "submitAnswer":
             submitAnswer(input.text);
@@ -124,16 +121,24 @@ Item {
         }
     }
 
-    function submitReply(cardKey, text) {
+    // The draft and the box stay until the service accepts the reply, so a
+    // rejected one (another view started a countdown first) loses no text.
+    function submitReply(cardKey, text, field) {
         const r = Model.validateReply(text);
         if (!r.ok) {
             message = Model.reasonText(r.reason);
             return false;
         }
-        service.send("reply", { card: cardKey, text: r.text }, started(cardKey));
-        const card = cardFor(cardKey);
-        if (card) drafts.clear(Model.draftKey.reply(card));
-        keyState = Object.assign({}, keyState, { replyFor: null });
+        const track = started(cardKey);
+        service.send("reply", { card: cardKey, text: r.text }, reply => {
+            track(reply);
+            if (reply.type !== "ok") return;
+            const card = cardFor(cardKey);
+            if (card) drafts.clear(Model.draftKey.reply(card));
+            if (field) field.text = "";
+            if (keyState.replyFor === cardKey) keyState = Object.assign({}, keyState, { replyFor: null });
+            releaseFocus();
+        });
         return true;
     }
 
@@ -516,9 +521,17 @@ Item {
             }
 
             // Settings (spec section 7): machines, the three show toggles, notifications.
-            ColumnLayout {
+            Flickable {
                 visible: panel.settingsOpen
                 Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                contentWidth: width
+                contentHeight: settingsColumn.implicitHeight
+
+            ColumnLayout {
+                id: settingsColumn
+                width: parent.width
                 spacing: Commons.Style.spacing.lg
 
                 Ui.Button {
@@ -569,9 +582,24 @@ Item {
                         }
 
                         Ui.Button {
-                            text: "Remove"
+                            id: removeButton
+                            // The first click asks; a second one within 4 s removes.
+                            property bool confirming: false
+                            text: confirming ? "Remove? Click again" : "Remove"
                             visible: modelData.endpoint.kind === "tcp"
-                            onClicked: panel.service.send("remove_machine", { machine: modelData.key }, panel.report)
+                            onClicked: {
+                                if (!confirming) {
+                                    confirming = true;
+                                    return;
+                                }
+                                confirming = false;
+                                panel.service.send("remove_machine", { machine: modelData.key }, panel.report);
+                            }
+                            Timer {
+                                interval: 4000
+                                running: removeButton.confirming
+                                onTriggered: removeButton.confirming = false
+                            }
                         }
                     }
                 }
@@ -621,6 +649,7 @@ Item {
                     checked: panel.service.settings ? panel.service.settings.notifications : true
                     onClicked: panel.service.send("set_notifications", { on: !checked }, panel.report)
                 }
+            }
             }
         }
     }
