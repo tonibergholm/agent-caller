@@ -277,7 +277,8 @@ pub async fn pump(link: Arc<Link>, mut rx: mpsc::Receiver<BridgeEvent>, mut f: i
             _ = link.wake.notified() => {
                 if link.overflow.swap(false, Ordering::SeqCst) {
                     f(BridgeEvent::Overflow);
-                    if let Some(c) = link.capture.lock().unwrap().take() {
+                    let kept = link.capture.lock().unwrap().take();
+                    if let Some(c) = kept {
                         f(c);
                     }
                 }
@@ -286,7 +287,8 @@ pub async fn pump(link: Arc<Link>, mut rx: mpsc::Receiver<BridgeEvent>, mut f: i
         };
         if link.overflow.swap(false, Ordering::SeqCst) {
             f(BridgeEvent::Overflow);
-            if let Some(c) = link.capture.lock().unwrap().take() {
+            let kept = link.capture.lock().unwrap().take();
+            if let Some(c) = kept {
                 f(c);
             }
         }

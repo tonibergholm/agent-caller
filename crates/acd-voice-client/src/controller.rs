@@ -234,6 +234,11 @@ impl Controller {
             }
             if token.is_some() {
                 core.unadmitted = None;
+                // A result that landed while the HUD showed Listening must
+                // not vanish behind the new step.
+                if let Some(late) = core.deferred.take() {
+                    self.emit(&mut core.exec, late);
+                }
             }
             let session = core.session;
             let changes = self.session_tx.subscribe();
@@ -562,6 +567,7 @@ impl Controller {
         core.epoch += 1;
         tracing::info!(target: "acd_voice", "transcript cancelled before admission");
         let r = core.exec.resume();
+        let r = core.deferred.take().unwrap_or(r);
         self.emit(&mut core.exec, r);
         true
     }
@@ -574,6 +580,9 @@ impl Controller {
         let deferred = core.deferred.take();
         let refusal = match heard {
             Heard::Transcript(text) => {
+                if let Some(late) = deferred {
+                    self.emit(&mut core.exec, late);
+                }
                 let token = Admission { session: core.session, epoch: core.epoch };
                 let (Some(snapshot), Some(me)) = (snapshot, self.me.upgrade()) else {
                     return;
@@ -595,6 +604,9 @@ impl Controller {
             Heard::TimedOut => Refusal::SpeechUnavailable,
         };
         tracing::info!(target: "acd_voice", refusal = ?refusal, "recording failed");
+        if let Some(late) = deferred {
+            self.emit(&mut core.exec, late);
+        }
         let r = core.exec.listen_failed(refusal);
         self.emit(&mut core.exec, r);
     }
@@ -686,7 +698,7 @@ impl Controller {
         let Some(reaction) = f(&mut core.exec, &self.port) else {
             return;
         };
-        if core.recorder.active().is_some() {
+        if core.recorder.active().is_some() || core.unadmitted.is_some() {
             core.deferred = Some(reaction);
         } else {
             self.emit(&mut core.exec, reaction);

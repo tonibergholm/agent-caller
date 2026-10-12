@@ -788,3 +788,29 @@ async fn esc_with_nothing_to_cancel_is_left_to_the_inbox() {
     hud_until(&r.sink, "countdown", countdown_started).await;
     assert!(!r.voice.escape_listening(), "admission cleared the marker");
 }
+
+/// Final re-review: a result held back during a recording still reaches the
+/// HUD when the recording turns into a new command.
+#[tokio::test]
+async fn a_result_held_during_a_recording_is_not_lost_to_the_next_command() {
+    let (r, speech) = speech_rig(vec![pending_agent()]).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.text_input("approve".into(), true).await.unwrap();
+    let sent = frame(&r.f, "request.answer").await;
+    hud_until(&r.sink, "sending", |h| matches!(h, Hud::Sending { .. })).await;
+    r.voice.hold(true, true);
+    let g = speech.last_start().unwrap();
+    r.c.send(json!({"type":"result","id":sent["id"],"ok":false,"error":{"code":"request_gone","message":"gone"}})).await;
+    tokio::time::sleep(ms(150)).await;
+    r.voice.hold(false, true);
+    r.voice.speech_event(final_(g, "deny"));
+    until("the late result reached the HUD", || {
+        r.sink
+            .huds
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, h)| matches!(h, Hud::Done { outcome: OutcomeView::Rejected { .. }, .. }))
+    })
+    .await;
+}
