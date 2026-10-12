@@ -199,6 +199,17 @@ test("after outcomes_lost, this view's unfinished actions are uncertain", () => 
   assert.equal(M.UNCERTAIN_TEXT, "Check the terminal");
 });
 
+test("a dropped connection leaves only fired actions uncertain", () => {
+  const t = new M.Tracker();
+  t.started("x1", "m1/a");
+  t.started("x2", "m1/b");
+  t.outcome({ type: "outcome", action: "x1", card: "m1/a", result: { kind: "fired" } });
+  assert.deepEqual(t.disconnected(), ["m1/a"]);
+  // A later outcomes_lost has nothing left to mark.
+  assert.deepEqual(t.lost(), []);
+  assert.deepEqual(t.disconnected(), []);
+});
+
 test("ids are unique and short", () => {
   const ids = new M.Ids("bar");
   const a = ids.next();

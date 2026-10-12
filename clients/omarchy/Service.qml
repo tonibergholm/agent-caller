@@ -109,6 +109,8 @@ Item {
                 return;
             }
             root.view = null;
+            const unseen = root.tracker.disconnected();
+            if (unseen.length > 0) root.outcomesLost(unseen);
             const pending = root.waiting;
             root.waiting = ({});
             for (const id in pending) pending[id]({ type: "error", code: "unreachable" });

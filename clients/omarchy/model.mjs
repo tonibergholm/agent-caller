@@ -429,6 +429,7 @@ export function errorText(code) {
 export class Tracker {
   constructor() {
     this.actions = new Map();
+    this.fired = new Set();
   }
 
   started(actionId, cardKey) {
@@ -436,13 +437,30 @@ export class Tracker {
   }
 
   outcome(msg) {
-    if (msg.result.kind !== "fired") this.actions.delete(msg.action);
+    if (msg.result.kind === "fired") this.fired.add(msg.action);
+    else {
+      this.actions.delete(msg.action);
+      this.fired.delete(msg.action);
+    }
   }
 
   /** outcomes_lost: every action still open is uncertain; returns their cards. */
   lost() {
     const cards = [...new Set(this.actions.values())];
     this.actions.clear();
+    this.fired.clear();
+    return cards;
+  }
+
+  /**
+   * The connection dropped. The service cancels this view's countdowns when
+   * it closes, so only an action already fired can have a result we never
+   * saw; returns those cards. The rest are forgotten.
+   */
+  disconnected() {
+    const cards = [...new Set([...this.fired].map((id) => this.actions.get(id)))];
+    this.actions.clear();
+    this.fired.clear();
     return cards;
   }
 }
