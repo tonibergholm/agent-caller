@@ -92,3 +92,24 @@ Run by hand: `swift test --package-path app/src-tauri/swift --filter LiveTests`.
 - `testCancelEndsAWaitingFinish`: passed in 0.09 s.
 - `testCaptureStartsAndStops`: skipped, because the microphone is not granted to the test runner. No prompt was triggered.
 - Speech Recognition permission did not block the clip test in this runner.
+
+## Live check (Task 10)
+
+Run by the user on the Mac with the signed build installed in
+`/Applications` (ca5997d, includes the Settings raise fix), 2026-10-12.
+Results are the user's reports ("ok" per batch, or "all seem to work"); no
+rows were reported as differing. Release-to-countdown time was not measured.
+
+| # | Check | Result |
+|---|---|---|
+| 1-5 | Batch 1: hold key with the inbox closed and open, trigger rules, HUD text, mic dot | ok |
+| 6 | Chord: Right Option + "e" types "é", nothing sent, release does nothing | ok |
+| 7 | Countdown running, hold and say "cancel": countdown cancelled on press, HUD "Cancelled" | ok |
+| 8 | "yes always" then hold and say "confirm": confirm stays visible, countdown starts | ok |
+| 9 | Toggle recording, lock the screen, unlock: no recording, no dot, nothing sent | ok |
+| 10 | Toggle recording, Esc with the inbox open: cancelled, inbox stays open | ok |
+
+Not run in this pass (covered by unit tests and the Swift failsafe tests;
+re-check when convenient): the 60 s cap, sleep, permission-denied HUD paths,
+Secure Keyboard Entry, whisper and noise thresholds. `MIN_VOICED` and
+`voicedDBFS` are unchanged: no measurement gave a reason to tune them.
