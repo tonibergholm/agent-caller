@@ -8,20 +8,21 @@
 
 **Tech Stack:** Rust 2024 (workspace `rust-version = "1.90"`), tokio, serde, serde_json, clap 4, tracing, async-trait; Linux only: zbus 5.19.0 (`tokio` feature), secret-service 5.2.0 (`rt-tokio-crypto-rust`). QML on Quickshell (Omarchy 4 shell). Node 24 for `node --test`. Docker `rust:1-bookworm` (`linux/amd64`) for the Omarchy build.
 
-**Spec:** `docs/superpowers/specs/2026-10-12-omarchy-inbox-design.md` (authoritative; §13 records the review decisions). Also `docs/superpowers/specs/2026-10-07-agent-inbox-design.md` §12 (undo and disconnect rule).
+**Spec:** `docs/superpowers/specs/2026-10-12-omarchy-inbox-design.md` at `7994c25` (authoritative; §13 records the review decisions). Task 4 amends its §5 for oversized views, as the orchestrator decided.
+
+**Revision:** this plan answers Sol's review of `034d8d0` (`/tmp/sol-omarchy/findings3.md`); see "Review answers" below. Also `docs/superpowers/specs/2026-10-07-agent-inbox-design.md` §12 (undo and disconnect rule).
 
 ## Spec issues found
 
 These are places where the spec and the code, or two spec sections, disagree, or where the spec cannot be followed literally. The plan's handling is stated; neither the spec nor the code is silently changed to match.
 
-- **S1. Connection status in `settings`.** §5.4 says machine entries "include name, endpoint, connection status and `secret` status". §4.3 and §13 say connection status stays in `InboxView.machines` and views join the two by machine key. The plan follows §4.3/§13: `settings` entries carry `secret` (and the existing `pairing`), not connection status, so `settings` is not re-sent on every reconnect. The panel joins by key (Task 14 `machineChips`).
-- **S2. "The same templates as the Mac app" (§8).** `app/src-tauri/src/notify.rs::text` produces title `"{agent_title} on {machine_name}"` and body `request_title`. It has no "needs you" or request label. The plan uses the spec's text, implemented in `acd-inbox` (D15). `acd-voice` and the Mac app are untouched.
+- **S1 and S2 are resolved in the spec** (`7994c25`): §5.4 now says settings entries join `InboxView.machines` by key, and §8 no longer claims the Mac app's notification wording. The plan follows both (D7, D15).
 - **S3. `MachineEntryView.secret` reaches the app.** Adding a field breaks the exhaustive destructure in `app/src-tauri/src/pairing.rs` (`view_has_only_public_fields`). With a normal field it also changes the ts-rs bindings (`bindings_are_current`) and the TypeScript literals in `app/src/preview.ts`, `app/src/lib/fixtures.ts` and `app/src/components/Settings.test.ts`. The plan marks the field `ts(skip)` (D5), so the bindings and TypeScript do not change, and adds `secret: _` to the one Rust destructure. That is an `app/` change: Task 3 needs `npm run verify` on macOS (pending for CI when run on Linux).
 - **S4. Outcomes have no card.** §5.3's `outcome` carries `"card"`, but `acd_client::voice::ActionEvent` has only `action_id`. Every `emit` call site has the `Action` in hand, so Task 1 adds `card_key` to `ActionEvent` (additive; voice reads only `action_id` and `outcome`).
 - **S5. `node --test clients/omarchy/tests/` fails on Node 24** (checked: a directory argument is treated as a test file and fails). The glob form passes. The plan uses `node --test 'clients/omarchy/tests/*.test.mjs'`.
-- **S6. Mac wording on Linux.** `Settings::fresh()` names the local machine "This Mac", and `NOTICE_NOT_PAIRED` says "Add from clipboard". `acd-inbox` writes its first `settings.json` with the host's name (D18). The panel never shows `NOTICE_NOT_PAIRED`: a machine chip with no handle takes its text from `secret` status (Task 14).
-- **S7. `model.js` cannot be both a QML library and a Node module.** A QML `.js` library (`.pragma library`) cannot `export`, and Node cannot load `.pragma`. The plan names the file `model.mjs` (an ECMAScript module, which Qt 6 QML imports with `import "model.mjs" as Model`). Task 17 checks this on the Omarchy machine and gives the fallback.
-- **S8. The Omarchy plugin API is not in this repository.** `qs.Ui` `Panel`, `Commons.Color`, `Style`, `ShellIpc`, the manifest schema, `omarchy-shell shell rescanPlugins`, `omarchy plugin enable`, and the Hyprland bindings file are named in the spec but not documented here. Quickshell's own IPC type is `IpcHandler` (`Quickshell.Io`). The QML in Task 15 is written against Quickshell's documented types and the spec's names. Task 17 Step 2 reads the installed `omarchy.tailscale` plugin, runs `omarchy-plugin-validate` and `qmllint`, and aligns the files. The research note records what was found.
+- **S6. Mac wording on Linux.** `Settings::fresh()` names the local machine "This Mac", and `NOTICE_NOT_PAIRED` says "Add from clipboard". `acd-inbox` writes its first `settings.json` with the host's name (D18). The panel never shows `NOTICE_NOT_PAIRED`: a machine chip with no handle takes its text from `secret` status (Task 17).
+- **S7. `model.js` cannot be both a QML library and a Node module.** A QML `.js` library (`.pragma library`) cannot `export`, and Node cannot load `.pragma`. The plan names the file `model.mjs` (an ECMAScript module, which Qt 6 QML imports with `import "model.mjs" as Model`). Task 16 checks this on the Omarchy machine; Task 17 has the fallback.
+- **S8. The Omarchy plugin API is not in this repository.** `qs.Ui` `Panel`, `Commons.Color`, `Style`, `ShellIpc`, the manifest schema, `omarchy-shell shell rescanPlugins`, `omarchy plugin enable`, and the Hyprland bindings file are named in the spec but not documented here. Quickshell's own IPC type is `IpcHandler` (`Quickshell.Io`). Task 16, a local task that runs before any QML is written, reads the installed `omarchy.tailscale` plugin and runs a probe plugin. It records the manifest, `Panel`, `ShellIpc`, `Socket` and `SplitParser` behaviour, the JS host globals, notification actions, and plugin enable and placement. Tasks 17 to 20 use those recorded names, and Task 21 only validates.
 - **S9. No `owners` module.** §4.1 lists `owners` ("which connection owns which action"). With owners in `acd-client` (§4.3), each action carries its owner, and a connection's owner is `ActionOwner(connection id)`. No separate table is needed (D1). The module layout differs from §4.1 in two more places. The Secret Service code is `SecretServiceBackend` in `linux::keyring`, behind the `SecretBackend` trait that `secrets` defines (with `SecretWorker` and `WorkerStore`), not a `SecretServiceStore` in `secrets`. The D-Bus notification code is `linux::dbus`, behind `notify::NotifyBackend`. This keeps every Linux-only dependency in one gated module (D13, D14, D26).
 - **S10. `AlreadyCounting` has no code.** §5.2's list omits it; a second view picking a counting card is a real case (Review Focus 2). The plan adds `already_counting` (D8).
 
@@ -31,7 +32,7 @@ Task text refers to these by number.
 
 - **D1. Owners.** `acd_client::actions::ActionOwner(pub u64)`, with `ActionOwner::DEFAULT = ActionOwner(0)`. `pick`, `answer_text`, `reply`, the guarded variants, `cancel` and `escape` keep their signatures and use `DEFAULT`; `escape()` still cancels the newest action of any owner, so the Mac app and voice behave as before. New: `pick_owned`, `answer_text_owned`, `reply_owned`, `cancel_owned(owner) -> usize`, `escape_owned(owner) -> bool`. `acd-inbox` numbers connections from 1 and uses `ActionOwner(id)`.
 - **D2. `ActionEvent` gains `card_key`** (S4). `Inbox::emit` takes the `&Action`.
-- **D3. An edit lock.** `Inbox` gains `edits: Mutex<()>`, held for the whole of `pair_machine`, `remove_machine_checked` and `reconnect_machine`. `SecretStore` calls may run under `edits`, never under `inner`. Timers, `cancel`, `escape`, views, `machines()` and `settings()` never take `edits`. This serializes two pairings of one host and a pairing racing a removal, so the commit needs no second check.
+- **D3. An edit lock.** `Inbox` gains an `EditLock` (a mutex plus a waiter count for tests). It is held for the whole of every change to machines or to the saved settings: `pair_machine`, `rename_machine`, `remove_machine_checked`, `reconnect_machine`, `set_hotkey`, `set_show_subagents` and `set_show_hook_only`. So no writer can save over another's result (a rename during a re-pairing is kept; a settings write during a removal cannot bring the machine back), and `remove_machine_checked` needs no corrective save. `SecretStore` calls may run under it, never under `inner`. Timers, `cancel`, `escape`, views, `machines()` and `settings()` never take it.
 - **D4. Typed errors.**
   - `SecretError` stays `pub struct SecretError(pub String)` (the Mac Keychain code builds it).
   - It gains `SecretError::locked()`, `SecretError::timeout()` and `kind() -> SecretErrorKind { Locked, Timeout, Other }`. The two constructors use fixed texts that no Keychain message equals.
@@ -39,8 +40,8 @@ Task text refers to these by number.
 - **D5. `MachineEntryView.secret: SecretStatus` is `#[cfg_attr(feature = "ts", ts(skip))]`.** The Mac bindings do not change (S3). `SecretStatus` is `ok | locked | missing | unreadable`. `SecretStore` gains a default method `status(key)`, derived from `get`; a `Locked`-kind error gives `locked`. `pairing` keeps its values: `locked` maps to `unreadable` there, as today any read error does.
 - **D6. `reconnect_machine(key)`.** A machine with a handle gets `retry_now()` (a no-op while online). A machine without one has its secret read outside `inner`, then a handle is created and watched. Errors: `UnknownMachine`, `NotPaired` (no secret), `SecretRead(e)` (locked, timeout, unreadable). `retry_machine` stays as it is for the Mac app.
 - **D7. Wire shapes.**
-  - `view` is `{"type":"view","view":<InboxView>}`. Nesting avoids a clash with the `machines` key of `settings`.
-  - `settings` is flat, as §5.4 shows, without connection status (S1).
+  - `view` is `{"type":"view","view":<InboxView>,"omitted":{"done":n,"working":m}}`. Nesting avoids a clash with the `machines` key of `settings`; `omitted` is always present (D9).
+  - `settings` is flat, as §5.4 shows, without connection status; if it ever had to be cut, `omitted_machines` counts the entries left out.
   - `pick`, `answer_text` and `reply` reply `{"type":"ok","id":…,"result":"<action id>"}`.
   - `cancel` and `escape` reply with `result` `true` or `false`.
   - `pair` replies `{"machine":"<key>","name":"<name>"}`.
@@ -51,35 +52,43 @@ Task text refers to these by number.
   - Keyring and settings: `secret_store_locked`, `secret_store_timeout`, `secret_store_failed`, `settings_failed`.
   - Protocol: `bad_request` (a field is missing or has the wrong type), `duplicate_id`, `unsupported`.
   - `PickError::ConnectionChanged` (guarded paths only) maps to `stale`.
-- **D9. View truncation.** `protocol::view_line(view, max)` returns a line under `max` bytes, newline included.
-  1. Serialize `{"type":"view","view":…}`. If it fits, send it.
-  2. Otherwise binary-search the largest cap C, from 64 characters up to the longest string, such that cutting every string under `cards[*].agent` longer than C to C characters plus `"…[truncated]"` fits. Keys that hold ids, enums or times are never cut: `id`, `machine_id`, `agent_id`, `source`, `kind`, `state`, `status`, `answer_path`, `effect`, `state_since`, `opened_at`, `role`. Only strings longer than C are cut, so `raw_screen` and other long text go first. Cuts fall on character boundaries.
-  3. If C = 64 still does not fit, drop cards from the end of the list until it fits. Requests sort first in `build_view`, so they stay.
+- **D9. Oversized views** (orchestrator decision, 2026-10-12; Task 4 amends spec §5). `protocol::view_line(view, max)` returns a line under `max` bytes, newline included, or `None`.
+  1. The whole view, if it fits.
+  2. Agent text cut, longest first, down to no less than 256 characters plus the marker `"…[truncated]"`. A binary search finds the largest common cap that fits. Keys that hold ids, enums or times are never cut: `id`, `machine_id`, `agent_id`, `source`, `kind`, `state`, `status`, `answer_path`, `effect`, `state_since`, `opened_at`, `role`. Cuts fall on character boundaries.
+  3. Then Done and idle cards are left out, then Working and unknown ones, never a card with a countdown. They are counted in `omitted`, and the panel shows "N not shown".
+  4. Needs-you cards are never left out. If they alone do not fit, their text is cut further, down to 32 characters per field.
+  5. If even that does not fit, `None`: the service logs it and keeps sending the previous view.
+  `settings_line` is bounded the same way, leaving machines out from the end.
 - **D10. Envelope.**
   - A line must be a JSON object with a string `type` and a string `id` of 1 to 64 bytes. Anything else is malformed and closes the connection (§11).
   - The service parses the envelope first and dispatches on `type` second, so an unknown `type` with a valid id gets `error unsupported` and the connection stays open.
   - A missing or mistyped field gets `error bad_request`.
-  - Ids are remembered per connection; a repeat gets `error duplicate_id` and nothing runs.
+  - Each connection remembers its last 1024 ids; a repeat among them gets `error duplicate_id` and nothing runs.
 - **D11. Slow commands run off the reader.**
-  - `pair`, `remove_machine`, `retry_machine` and `unlock_secrets` can wait on the keyring (up to 5 s, or 120 s for unlock). They run on `spawn_blocking` and reply when done.
-  - Everything else runs inline in the reader task.
+  - `pair`, `remove_machine`, `retry_machine` and `unlock_secrets` can wait on the keyring (up to 5 s, or 120 s for unlock). `rename_machine` and `set_show` can wait on the edit lock (D3). They run on `spawn_blocking` and reply when done.
+  - `retry_machine` first refreshes that machine's cached secret, so a cached keyring error is retried only when asked (D14).
+  - Everything else runs inline in the reader task, under the admission lock (D31).
   - So the reader always sees EOF promptly, and a disconnect cancels countdowns at once (Review Focus 1).
 - **D12. Outbox order.**
   - Each connection first gets `hello`, then `settings`, then `view`, in that order. Nothing else goes out before them.
-  - After that the writer sends, in priority order: queued replies, a pending `outcomes_lost`, queued outcomes, the newest `settings`, the newest `view`.
-  - Outcomes queue up to 256. On overflow the queue is cleared and one `outcomes_lost` is due.
-  - Upstream `Lagged` does the same on every connection.
+  - After that the writer takes turns over four classes: replies, outcomes (a pending `outcomes_lost` first), the newest `settings`, the newest `view`. It resumes after the class it served last, so no class starves another.
+  - Outcomes queue up to 256. On overflow the queue is cleared and one `outcomes_lost` is due; upstream `Lagged` does the same on every connection.
+  - Replies queue up to 1024. A view that leaves more unread is closed (`reply_overflow`).
 - **D13. The secret worker.**
-  - One `std::thread` owns the backend and runs a current-thread tokio runtime with the async `secret-service` API.
-  - Each operation runs under `tokio::time::timeout`: 5 s for read, write and delete, 120 s for unlock. A timed-out operation's future is dropped, so a stuck prompt never blocks later calls.
-  - Callers wait the limit plus 1 s; a call queued behind a slow unlock times out as `secret_store_timeout`.
-  - Reads check `Collection::is_locked` and `Item::is_locked` first and return `Locked` without a prompt. Only `unlock` prompts.
-  - The blocking `secret-service` API is not used: with zbus's `tokio` feature it runs its own static runtime and panics inside ours.
+  - One `std::thread` owns the backend and runs a current-thread tokio runtime with the async `secret-service` API. The blocking API is not used: with zbus's `tokio` feature it runs its own static runtime and panics inside ours.
+  - Every job carries the caller's deadline: 5 s for read, write and delete, 120 s for unlock.
+  - A job that reaches the front of the queue after its deadline is answered `Expired` and never runs. So a write queued behind a prompt cannot happen after its caller reported a timeout.
+  - A started job runs only until the deadline, and its future is then dropped, so a stuck prompt never blocks later jobs.
+  - A write or delete cut off mid-call is `Ambiguous`, because D-Bus may have applied it. Read and unlock time-outs are plain `Timeout`.
+  - Reads, writes and deletes check `Collection::is_locked` and `Item::is_locked` first and return `Locked` without prompting. Only `unlock` prompts.
+  - secret-service 5.2 cannot dismiss its prompt. After an unlock time-out the prompt can stay on screen. A late unlock only unlocks the collection, and the next refresh picks that up; a late dismiss changes nothing.
 - **D14. `WorkerStore`, not `CachedSecrets`.**
-  - `CachedSecrets` cannot remember "locked" and would send a locked read back to D-Bus on every `get`.
-  - `WorkerStore` caches values and `Locked` per key.
-  - `prefill(keys)` runs once before `Inbox::start`, so `start`, `machines()` and the settings snapshot are served from the cache.
-  - `refresh(keys)` re-reads after an unlock.
+  - Per key, the cache holds the outcome of the last read: a value, `Locked`, `Unavailable`, `TimedOut`, or `Unknown` (an ambiguous change that could not be read back). A cached error is answered from memory.
+  - Only `refresh(keys)`, on unlock and on `retry_machine`, reads a key again.
+  - `prefill(keys)` runs on the blocking pool before `Inbox::start`. So `start`, `Service::new` and every settings snapshot are served from memory; no async thread waits on the keyring.
+  - A read of a key with no entry (a machine being paired) goes to the worker. That only happens in `pair_machine`, which runs on the blocking pool.
+  - An `Ambiguous` write or delete is reconciled before the call returns: the item is read back. The call succeeds only if the item shows the intended state. So acd-client's pairing rollback decides on the item's real state.
+  - `TimedOut`, `Unavailable` and `Unknown` show as `secret: unreadable`.
 - **D15. Notification text.**
   - Summary: `"<agent title> on <machine> needs you"`. Body: the request label, using the panel's rule (`toolName`): `"bash approval"`, `"approval"`, `"question"`, `"blocked"` or `"request"`.
   - Agent text is cleaned (whitespace, control, bidi and separator characters become single spaces) and cut to 60 characters with `…`.
@@ -92,15 +101,16 @@ Task text refers to these by number.
   - After a notification-server restart, old ids are ignored (Review Focus 5).
 - **D18. First run.** If `settings.json` does not exist, `acd-inbox` writes `Settings::fresh()` with the local machine renamed to the host's first DNS label (else "This computer", at most 64 characters), then calls `Settings::load_or_init`.
 - **D19. `model.mjs`** (S7). Node tests use the glob command (S5). CI runs them on the Ubuntu leg.
-- **D20. Line reader.**
-  - `Service.qml` uses `SplitParser` with `splitMarker: "\n"`. Each line goes through `Model.LineReader.push(line + "\n")`, which enforces the 4 MiB limit and handles a final partial line.
-  - `LineReader.pushBytes(Uint8Array)` uses `TextDecoder` with `stream: true`, so a UTF-8 sequence split across chunks decodes correctly. It is used if Task 17 finds that `SplitParser` passes raw chunks.
+- **D20. Line framing.** QML's JavaScript host has no `TextEncoder` or `TextDecoder`, and the plugin uses neither.
+  - `Service.qml` relies on `SplitParser` (`splitMarker: "\n"`), which splits bytes before decoding and hands over whole lines as strings. Task 16 confirms this with a line that ends in a split 4-byte character.
+  - `Model.LineReader.push(line + "\n")` enforces the 4 MiB limit with a pure-JS `utf8Length` and copes with a line given in pieces.
+  - The spec's "split UTF-8" test is therefore Task 16's probe, plus node tests for split surrogate pairs and for loading `model.mjs` with no `TextEncoder`.
 - **D21. Plugin files are embedded** in the binary with `include_str!`, so `acd-inbox install` on the Omarchy machine needs no checkout.
 - **D22. Keybinding.**
   - Line: `bindd = SUPER ALT, A, Agent inbox, exec, omarchy-shell tonibergholm.agentcaller toggle`.
-  - File: `~/.config/hypr/bindings.conf`. Task 17 confirms the file name.
+  - File: `~/.config/hypr/bindings.conf`. Task 16 confirms the file name.
   - It is appended only after an explicit `y`, with a timestamped backup. A non-terminal stdin counts as no.
-- **D23. Runtime directory check.** Uses `acd_securefs::check_private_dir(dir, 0o700)`: a no-follow open, owned by the euid, mode within 0700 (0700 or stricter).
+- **D23. Runtime directory and lock file.** The directory: `acd_securefs::check_private_dir(dir, 0o700)`, a no-follow open, owned by the euid, mode within 0700. The lock file: opened `O_NOFOLLOW`, then its descriptor is checked as `crates/acd/src/writer_lock.rs:17` does (a regular file owned by the euid; a looser mode is repaired to 0600).
 - **D24. Peer check.** Uses `tokio::net::UnixStream::peer_cred()`, which is `SO_PEERCRED` on Linux and `getpeereid` on macOS (tokio `src/net/unix/ucred.rs`). `nix` is not needed. The pure rule is `startup::peer_allowed(peer_uid, own_uid)`; an unreadable credential fails closed.
 - **D25. `acd-inbox serve` runs on Linux only.** On other systems it exits with an error. Its wiring (`serve::start_service`) is tested on both platforms with fakes.
 - **D26. Crates.**
@@ -109,9 +119,46 @@ Task text refers to these by number.
   - Not `oo7`: its current release is `0.7.0-beta`.
   - Both go under `[target.'cfg(target_os = "linux")'.dependencies]`. Versions were checked with `cargo search` and `cargo info` on 2026-10-12.
 - **D27. Install restarts the service.** `systemctl --user enable --now` does not restart a running service, so `install` follows it with `systemctl --user restart acd-inbox.service` to pick up a new binary.
-- **D28. A notification server that fails** (connect at start, or any `Notify` call) turns notifications off for the session. The failure is logged by class. The bar count still updates.
-- **D29. Closing a connection** (EOF, read error, oversize or malformed line, write timeout or error) goes through one idempotent `Service::close`. It calls `cancel_owned` first, then clears that connection's panel-open flag, so a crashed panel cannot suppress notifications forever.
+- **D28. A notification server that fails** (connect at start, or any `Notify` call) turns notifications off for the session, and the rest of that batch is dropped. The failure is logged by class. The bar count still updates.
+- **D29. Closing a connection** (EOF, read error, oversize or malformed line, write timeout or error, reply overflow) goes through one idempotent `Service::close`. Under the admission lock (D31) it marks the connection closed, calls `cancel_owned`, and clears the connection's panel-open flag, so a crashed panel cannot suppress notifications forever.
 - **D30. Always-allow options in the panel.** An `allow_always` option shows its rule (`description`) on the card. If it has no description, the panel does not let it be picked, which is stricter than the Mac panel. Options outside `selectable_options` (unknown effect) and options on a card that is not `answerable` (read-only) are never pickable.
+- **D31. Admission is serialized with close.** Each connection has one admission lock.
+  - Every inline command (one that may create an action or set the panel flag) runs under it, after checking that the connection is still open. `close` takes the same lock to mark the connection closed and call `cancel_owned`.
+  - So an action is either created before the close, and the close cancels it, or it is refused. A `panel(open)` that arrives late is refused too.
+  - Lock order: the admission lock, then the inbox's `inner` or `panels`.
+  - Tests park a command inside the lock with a hook and check that the close waits (Task 8).
+- **D32. Ordered publication.**
+  - Connections, the newest settings line and the newest view line live under one registry lock.
+  - Views have one publisher, the broadcaster task. Settings publications carry a generation, taken before the snapshot is computed, and an older one is dropped.
+  - A new connection is seeded under the same lock, so it never gets an older line after a newer one.
+- **D33. Logging that `RUST_LOG` cannot open.**
+  - `serve::init_logging_to(env, writer)` installs `EnvFilter(env or "info")` AND a fixed deny-list as two filter layers, plus the `log` bridge.
+  - The deny-list: `tungstenite` and `tokio_tungstenite` off; `rustls`, `tokio_rustls`, `hyper`, `hyper_util`, `h2`, `axum`, `zbus`, `zvariant`, `secret_service`, `mio` and `tokio` at most `warn`.
+  - Production calls it with `RUST_LOG`. The capture test calls the same function at `trace` and pushes secret-bearing `log` and `tracing` records through the dependencies' targets.
+- **D34. Typed answers and keys in QML.**
+  - Opening a typed-answer editor records the card, request id and revision (`Model.answerEditor`). The answer goes to that request. When the view no longer shows it (`answerEditorValid`), the editor closes with "The request changed. Your answer was not sent." and the text is dropped.
+  - Every key, in the panel or in a text field, goes through `Model.onKey`, with the field's kind and its `inputMethodComposing`.
+
+## Review answers
+
+Sol reviewed `034d8d0` (`/tmp/sol-omarchy/findings3.md`). The blocking findings and where each is resolved:
+
+1. **Disconnect vs a buffered command.** D31: admission and close share one lock. Tests are in Task 8 (`a_close_during_a_pick_cancels_the_new_action`, `a_command_after_close_is_refused`, `a_late_panel_open_cannot_stick_after_close`).
+2. **Timed-out worker jobs running later.** D13 (deadlines, `Expired`, `Ambiguous`) and D14 (read-back before reporting). Tests are in Task 11 (`a_job_queued_past_its_deadline_never_runs`, `a_write_cut_off_mid_call_is_ambiguous_whether_or_not_it_applied`) and Task 12 (`an_ambiguous_write_is_read_back_before_it_is_reported`, `pairing_rollback_decides_on_the_read_back_state`).
+3. **Keyring waits on async threads.** D14: errors are cached and refreshed only when asked; prefill runs on the blocking pool. Tests are in Task 12 (`errors_are_cached_until_refreshed`, `startup_after_prefill_never_waits_on_the_keyring`, `retry_reads_a_cached_failure_again`).
+4. **Machine edits racing settings writes.** D3: the edit lock covers every machine and settings writer. Tests are in Task 2 (`a_rename_during_a_re_pairing_is_kept`, `a_settings_write_during_a_removal_never_brings_the_machine_back`).
+5. **Missed `Action` literal and Clippy's argument limit.** Task 1 lists every literal (including `crates/acd-voice-client/tests/port.rs:129`) with a grep step, and passes an `Origin` struct instead of more arguments.
+6. **Logging.** D33, and the Task 15 test that uses the production init with the `log` bridge.
+7. **QML assumptions.** D20 (no `TextEncoder` or `TextDecoder`; `SplitParser` strings), D34 (typed answers bound to their request; IME and field state in key dispatch), and Task 16 (installed-shell discovery before any QML).
+
+Non-blocking points adopted:
+- Bounded replies and remembered ids, and fair writer turns (D10, D12).
+- Ordered publication (D32).
+- A notification batch stops at the first failure (D28).
+- No Secret Service call that can prompt outside `unlock`, and the undismissable prompt is documented (D13).
+- The lock file is validated (D23).
+- Race tests force both orderings and assert exactly one terminal outcome, with no fixed sleeps; blocked fakes are released by guards (Tasks 1, 2, 8, 10).
+- Tasks 8, 10 and 15 are split.
 
 ## Global Constraints
 
@@ -144,11 +191,11 @@ Copied from the spec; every task includes them.
 
 ## Review Focus
 
-1. **A view disconnects while a slow command is in flight.** The view sends `unlock_secrets` (a keyring prompt can wait 120 s) or `pair`, then the panel reloads. Its countdowns must end `cancelled` at once and nothing is sent. Pinned in Task 9 (`a_disconnect_during_a_slow_command_still_cancels_countdowns`) and Task 10 (`a_cancel_is_answered_while_an_unlock_prompt_waits`).
-2. **A second view picks a card that is already counting.** The bar and a TUI show the same card. The second pick gets `already_counting`, and the first countdown is untouched. Pinned in Task 9 (`a_second_view_cannot_pick_a_card_that_is_counting`).
-3. **An oversized view.** A 5 MiB `raw_screen`, or thousands of small cards that together pass 4 MiB. The line stays under 4 MiB, cut text carries the marker, and request cards survive. Pinned in Task 4 (`a_5_mib_screen_is_cut_with_a_marker_and_the_request_survives`, `many_cards_fit_by_cutting_every_long_text`, `cards_are_dropped_from_the_end_as_a_last_resort`).
-4. **A locked keyring at start.** `build_view` reports a machine without a handle as `auth_failed` with the "Pair this machine…" text. The panel must say "Keyring locked" and offer "Unlock keyring", not "not paired". Pinned in Task 3 (`a_locked_secret_is_shown_as_locked_and_reconnect_creates_the_handle`), Task 10 (`a_locked_keyring_at_start_unlocks_and_reconnects_without_restart`) and Task 14 (`a_locked_keyring_is_not_shown_as_not_paired`).
-5. **A notification action after the notification server restarts.** An old notification id must not open a card when the sender is a new owner, or when the owner changed since the notification was shown. Pinned in Task 11 (`actions_from_a_new_notification_server_are_ignored`).
+1. **A view disconnects while a slow command is in flight, or between reading a command and running it.** The view sends `unlock_secrets` (a keyring prompt can wait 120 s) or `pair`, or a buffered `pick`, then the panel reloads. Its countdowns must end `cancelled` at once and nothing is sent. Pinned in Task 8 (`a_close_during_a_pick_cancels_the_new_action`), Task 10 (`a_disconnect_during_a_slow_command_still_cancels_countdowns`) and Task 12 (`a_cancel_is_answered_while_an_unlock_prompt_waits`).
+2. **A second view picks a card that is already counting.** The bar and a TUI show the same card. The second pick gets `already_counting`, and the first countdown is untouched. Pinned in Task 10 (`a_second_view_cannot_pick_a_card_that_is_counting`).
+3. **An oversized view.** A 5 MiB `raw_screen`, or many cards that together pass 4 MiB. The line stays under 4 MiB, text is cut first, then Done and Working cards are left out with counts, and no Needs-you card is ever dropped. Pinned in Task 4 (`a_5_mib_screen_is_cut_with_a_marker_and_the_request_survives`, `done_cards_go_first_then_working_cards_and_requests_never`, `needs_you_text_is_cut_further_but_no_request_is_dropped`, `a_card_with_a_countdown_is_never_omitted`).
+4. **A locked keyring at start.** `build_view` reports a machine without a handle as `auth_failed` with the "Pair this machine…" text. The panel must say "Keyring locked" and offer "Unlock keyring", not "not paired". Pinned in Task 3 (`a_locked_secret_is_shown_as_locked_and_reconnect_creates_the_handle`), Task 12 (`a_locked_keyring_at_start_unlocks_and_reconnects_without_restart`) and Task 17 (`a locked keyring is not shown as not paired`).
+5. **A notification action after the notification server restarts.** An old notification id must not open a card when the sender is a new owner, or when the owner changed since the notification was shown. Pinned in Task 13 (`actions_from_a_new_notification_server_are_ignored`).
 
 ## File Structure
 
@@ -160,9 +207,10 @@ Copied from the spec; every task includes them.
 | `crates/acd-client/src/voice.rs` | `ActionEvent.card_key`. |
 | `crates/acd-client/src/settings.rs` | `SecretErrorKind`, `SecretError::{locked, timeout, kind}`, `SecretStatus`, `SecretStore::status`. |
 | `crates/acd-client/src/view.rs` | `MachineEntryView.secret` (ts skip). |
-| `crates/acd-client/src/inbox.rs` | Owned operations, `MachineError`, edit lock, secrets outside `inner`, `pair_machine`, `remove_machine_checked`, `reconnect_machine`. |
+| `crates/acd-client/src/inbox.rs` | Owned operations (`Origin`), `MachineError`, `EditLock` over every machine and settings writer, secrets outside `inner`, `pair_machine`, `remove_machine_checked`, `reconnect_machine`. |
 | `crates/acd-client/tests/inbox.rs` | New tests at the end. |
 | `app/src-tauri/src/pairing.rs` | `secret: _` in the test destructure. |
+| `crates/acd-voice-client/tests/port.rs` | `owner` in its `Action` literal. |
 
 New crate `crates/acd-inbox`:
 
@@ -170,58 +218,68 @@ New crate `crates/acd-inbox`:
 |---|---|
 | `Cargo.toml` | Manifest; Linux-only zbus and secret-service; `testing` feature exposes `secrets::fake`. |
 | `src/lib.rs` | Module list. |
-| `src/protocol.rs` | Wire constants, error codes, outcome mapping, line builders, view truncation (D7 to D9). |
+| `src/protocol.rs` | Wire constants, error codes, outcome mapping, line builders, bounded views and settings (D7 to D9). |
 | `src/prefs.rs` | Paths, `service.json` prefs, first-run settings, the `settings` snapshot. |
 | `src/startup.rs` | §4.4 socket startup and the peer check. |
-| `src/outbox.rs` | Per-connection queue: greeting order, coalescing, bounded outcomes (D12). |
-| `src/server.rs` | `Service`, `SecretControl`, accept, reader and writer tasks, broadcasts, `close` (D29). |
+| `src/outbox.rs` | Per-connection queue: greeting order, coalescing, fair turns, bounded outcomes and replies (D12). |
+| `src/server.rs` | `Service`, `SecretControl`, admission and `close` (D29, D31), registry and ordered publication (D32), accept, reader and writer tasks. |
 | `src/commands.rs` | Envelope (D10) and the command table (D11). |
-| `src/secrets.rs` | `SecretBackend`, `SecretWorker`, `WorkerStore`, `fake` (D13, D14). |
+| `src/secrets.rs` | `SecretBackend`, `SecretWorker` with deadlines, `WorkerStore` with cached outcomes and read-back, `fake` (D13, D14). |
 | `src/notify.rs` | `Reconciler`, `Notifier`, `NotifyBackend`, `ShellOpener` (D15 to D17). |
 | `src/linux/mod.rs`, `src/linux/keyring.rs`, `src/linux/dbus.rs` | Secret Service and D-Bus notification backends. |
-| `src/serve.rs` | `start_service`, logging, Linux `run`. |
+| `src/serve.rs` | `start_service`, safe logging (D33), Linux `run`. |
 | `src/install.rs` | install, uninstall, status, keybinding offer. |
 | `src/main.rs` | CLI. |
 | `tests/common/mod.rs` | Rig: fake daemon, inbox, service on a temp socket, a socket `View` client. |
-| `tests/{startup,server,commands,secrets,notify,serve,logs,install}.rs` | Integration tests. |
+| `tests/{startup,admission,server,commands,worker,secrets,notify,serve,logs,install}.rs` | Integration tests. |
 
 Plugin `clients/omarchy/`:
 
 | File | Responsibility |
 |---|---|
 | `manifest.json` | Plugin manifest. |
-| `model.mjs` | Pure view logic: line reader, sections, chips, keys, option rows, validation, error texts, outcome tracking. |
+| `model.mjs` | Pure view logic in host-neutral JS: line reader, sections, chips, keys, option rows, typed-answer editor, validation, error texts, outcome tracking. |
 | `Service.qml` | Socket client, reconnect, request/reply. |
 | `BarWidget.qml` | Glyph and count, IPC target, owns the panel. |
 | `Panel.qml` | Inbox and settings views. |
-| `tests/model.test.mjs`, `tests/plugin_files.test.mjs` | Node tests. |
+| `tests/model.test.mjs`, `tests/host.test.mjs`, `tests/plugin_files.test.mjs` | Node tests. |
 
-Also: `.github/workflows/ci.yml` (node step), `justfile` (Docker build), `docs/research/2026-10-12-omarchy-plugin-api.md`, `docs/research/2026-10-12-omarchy-live.md`.
+Also: `.github/workflows/ci.yml` (node step), `justfile` (Docker build), `docs/research/2026-10-12-omarchy-plugin-api.md` (Task 16), `docs/research/2026-10-12-omarchy-live.md` (Task 22), and spec §5 (Task 4).
 
 ## Task order and execution
 
 | # | Task | Execution |
 |---|---|---|
 | 1 | acd-client: action owners and outcome cards | cloud-ok |
-| 2 | acd-client: secrets outside the inbox lock, typed machine errors | cloud-ok |
+| 2 | acd-client: secrets outside the inbox lock, edit lock, typed machine errors | cloud-ok |
 | 3 | acd-client: secret status and `reconnect_machine` | cloud-ok (app check pending for macOS CI) |
-| 4 | acd-inbox crate and protocol | cloud-ok |
+| 4 | acd-inbox crate, protocol, bounded views (spec §5 amendment) | cloud-ok |
 | 5 | Paths, prefs and the settings snapshot | cloud-ok |
-| 6 | Socket startup and peer check | cloud-ok |
+| 6 | Socket startup, lock validation and peer check | cloud-ok |
 | 7 | Outbox | cloud-ok |
-| 8 | Server | cloud-ok |
-| 9 | Commands | cloud-ok |
-| 10 | Secret worker and unlock | cloud-ok |
-| 11 | Notifier | cloud-ok |
-| 12 | Linux backends: Secret Service and D-Bus notifications | cloud-ok (Linux session) |
-| 13 | `acd-inbox serve` and the no-text log test | cloud-ok |
-| 14 | `model.mjs` and node tests | cloud-ok |
-| 15 | QML plugin files | cloud-ok (authoring; live validation is Task 17) |
-| 16 | install, uninstall, status | cloud-ok |
-| 17 | Build in Docker, install and validate the plugin on omarchy | local |
-| 18 | Live checks on omarchy | local |
+| 8 | Connections: admission, remembered ids and close | cloud-ok |
+| 9 | Server: sockets, readers, writers and broadcasts | cloud-ok |
+| 10 | Commands | cloud-ok |
+| 11 | Secret worker: deadlines and ambiguous writes | cloud-ok |
+| 12 | Cached secret store, reconciliation and unlock | cloud-ok |
+| 13 | Notifier | cloud-ok |
+| 14 | Linux backends: Secret Service and D-Bus notifications | cloud-ok (Linux session) |
+| 15 | `acd-inbox serve` and safe logging | cloud-ok |
+| 16 | Omarchy shell API discovery | local |
+| 17 | `model.mjs` and node tests | cloud-ok |
+| 18 | Plugin manifest, socket client and bar widget | cloud-ok (validated in Task 21) |
+| 19 | Plugin panel | cloud-ok (validated in Task 21) |
+| 20 | install, uninstall, status | cloud-ok |
+| 21 | Build in Docker, install and validate on omarchy | local |
+| 22 | Live checks on omarchy | local |
 
-Tasks 1 to 3 are sequential. Tasks 4 to 7 depend on 1 to 3 only through `acd-client` types and can follow in order. Tasks 8 to 13 build on each other. Task 14 is independent of the Rust tasks. Task 15 needs 14. Task 16 needs 15 (it embeds the plugin files).
+Dependencies:
+- Tasks 1 to 3 are sequential.
+- Tasks 4 to 15 build in order on them.
+- Task 16 is local and can run any time before Task 17, in parallel with Tasks 1 to 15.
+- Tasks 17 to 19 need Task 16's note.
+- Task 20 needs 17 to 19, because it embeds the plugin files.
+- Tasks 21 and 22 come last.
 
 ---
 ### Task 1: acd-client: action owners and outcome cards
@@ -230,6 +288,7 @@ Tasks 1 to 3 are sequential. Tasks 4 to 7 depend on 1 to 3 only through `acd-cli
 
 **Files:**
 - Modify: `crates/acd-client/src/actions.rs`: `Action` (108 to 118), `Actions` impl, the test helper `action` (284)
+- Modify: `crates/acd-voice-client/tests/port.rs:129` (the one `Action` literal outside acd-client)
 - Modify: `crates/acd-client/src/voice.rs`: `ActionEvent` (53 to 57)
 - Modify: `crates/acd-client/src/inbox.rs` (line numbers from `f18b06f`):
   - imports 1 to 14
@@ -283,7 +342,7 @@ In `crates/acd-client/src/actions.rs`, in `mod tests`, add `owner: ActionOwner::
 
 - [ ] **Step 2: Write the failing integration tests**
 
-Append to `crates/acd-client/tests/inbox.rs` (it already imports `acd_client::{fake::*, inbox::*, settings::*, view::*, voice::*}`; add `use acd_client::actions::ActionOwner;` below line 2):
+Append to `crates/acd-client/tests/inbox.rs` (it already imports `acd_client::{fake::*, inbox::*, settings::*, view::*, voice::*}`; add `use acd_client::actions::ActionOwner;` below line 2). The race tests force each ordering instead of hoping for one, and a sentinel action proves no second terminal outcome follows; no test sleeps for a fixed time.
 
 ```rust
 fn second_pending_agent() -> Value {
@@ -303,6 +362,25 @@ async fn setup_two(timing: acd_client::Timing) -> (FakeServer, FakeConn, Arc<Inb
     (f, c, ib)
 }
 
+/// Starts and cancels a sentinel action on `m1/a2`, then reads outcomes up
+/// to the sentinel's: none of them may belong to `id`.
+async fn no_more_outcomes_for(ib: &Arc<Inbox>, rx: &mut tokio::sync::broadcast::Receiver<ActionEvent>, id: &str) {
+    let sentinel = ib.pick("m1/a2", "r2", "deny", 1).unwrap();
+    assert!(ib.cancel(&sentinel));
+    loop {
+        let e = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        assert_ne!(e.action_id, id, "a second outcome for one action: {:?}", e.outcome);
+        if e.action_id == sentinel {
+            return;
+        }
+    }
+}
+
+async fn deliver(f: &FakeServer, c: &FakeConn) {
+    let frame = answer_frame(f).await;
+    c.send(serde_json::json!({"type":"result","id":frame["id"],"ok":true,"outcome":"delivered"})).await;
+}
+
 #[tokio::test]
 async fn escape_owned_cancels_only_that_owners_newest() {
     let (_f, _c, ib) = setup_two(held()).await;
@@ -319,8 +397,8 @@ async fn escape_owned_cancels_only_that_owners_newest() {
 }
 
 #[tokio::test]
-async fn cancel_owned_ends_every_countdown_of_that_owner() {
-    let (f, _c, ib) = setup_two(common::fast()).await;
+async fn cancel_owned_ends_every_countdown_of_that_owner_and_nothing_fires() {
+    let (f, _c, ib) = setup_two(held()).await;
     let mut rx = ib.action_outcomes();
     let a = ib.pick_owned(ActionOwner(7), "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     let b = ib.pick_owned(ActionOwner(7), "m1/a2", "r2", "deny", 1).unwrap();
@@ -328,7 +406,8 @@ async fn cancel_owned_ends_every_countdown_of_that_owner() {
     assert_eq!(ib.cancel_owned(ActionOwner(7)), 0);
     assert_eq!(next_outcome(&mut rx, &a).await, ActionOutcome::Cancelled);
     assert_eq!(next_outcome(&mut rx, &b).await, ActionOutcome::Cancelled);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    ib.expire_countdowns_for_test();
+    view_until(&ib, "no countdowns", |v| v.actions.is_empty()).await;
     assert_eq!(answers(&f), 0);
 }
 
@@ -353,49 +432,57 @@ async fn outcomes_name_the_card() {
 }
 
 #[tokio::test]
-async fn escape_owned_racing_expiry_ends_with_one_terminal_outcome() {
-    let (f, c, ib) = setup_with(held()).await;
+async fn escape_owned_before_expiry_cancels_once_and_sends_nothing() {
+    let (f, _c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let owner = ActionOwner(3);
+    let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert!(ib.escape_owned(owner));
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Cancelled);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
+    assert_eq!(answers(&f), 0);
+}
+
+#[tokio::test]
+async fn escape_owned_after_expiry_is_refused_and_the_send_ends_once() {
+    let (f, c, ib) = setup_two(held()).await;
     let mut rx = ib.action_outcomes();
     let owner = ActionOwner(3);
     let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     ib.expire_countdowns_for_test();
-    let escaped = ib.escape_owned(owner);
-    let first = next_outcome(&mut rx, &id).await;
-    if escaped {
-        assert_eq!(first, ActionOutcome::Cancelled);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(answers(&f), 0, "nothing is sent after a cancel");
-    } else {
-        assert_eq!(first, ActionOutcome::Fired);
-        let frame = answer_frame(&f).await;
-        c.send(serde_json::json!({"type":"result","id":frame["id"],"ok":true,"outcome":"delivered"})).await;
-        assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Delivered);
-    }
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    assert!(!ib.escape_owned(owner), "too late once fired");
+    deliver(&f, &c).await;
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Delivered);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
 }
-```
 
-Also append the same race for a disconnect:
-
-```rust
 #[tokio::test]
-async fn cancel_owned_racing_expiry_ends_with_one_terminal_outcome() {
-    let (f, c, ib) = setup_with(held()).await;
+async fn cancel_owned_before_expiry_cancels_once_and_sends_nothing() {
+    let (f, _c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let owner = ActionOwner(4);
+    let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert_eq!(ib.cancel_owned(owner), 1);
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Cancelled);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
+    assert_eq!(answers(&f), 0);
+}
+
+#[tokio::test]
+async fn cancel_owned_after_expiry_cancels_nothing_and_the_send_ends_once() {
+    let (f, c, ib) = setup_two(held()).await;
     let mut rx = ib.action_outcomes();
     let owner = ActionOwner(4);
     let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     ib.expire_countdowns_for_test();
-    let cancelled = ib.cancel_owned(owner);
-    let first = next_outcome(&mut rx, &id).await;
-    if cancelled == 1 {
-        assert_eq!(first, ActionOutcome::Cancelled);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(answers(&f), 0, "nothing is sent after a disconnect");
-    } else {
-        assert_eq!(first, ActionOutcome::Fired);
-        let frame = answer_frame(&f).await;
-        c.send(serde_json::json!({"type":"result","id":frame["id"],"ok":true,"outcome":"delivered"})).await;
-        assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Delivered);
-    }
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    assert_eq!(ib.cancel_owned(owner), 0, "a disconnect after the countdown cannot stop it");
+    deliver(&f, &c).await;
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Delivered);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
 }
 ```
 
@@ -473,31 +560,58 @@ perl -pi -e 's/emit\(&(\w+)\.id, /emit(&$1, /g' crates/acd-client/src/inbox.rs
 grep -n 'emit(&' crates/acd-client/src/inbox.rs   # every match now passes an Action, none ends in .id
 ```
 
-Give `pick_with`, `answer_text_with` and `reply_with` an `owner: ActionOwner` parameter after `self`, and add `owner,` after `id: id.clone(),` in each of their `Action { … }` literals. The `pick_with` signature becomes:
+Find every `Action` literal first; each needs the new field:
 
-```rust
-    fn pick_with(
-        self: &Arc<Self>,
-        owner: ActionOwner,
-        card_key: &str,
-        request_id: &str,
-        option_id: &str,
-        revision: u64,
-        expect: Option<&Guard>,
-    ) -> Result<String, PickError> {
+```bash
+grep -rnE '(^|[^A-Za-z])Action \{' crates app/src-tauri/src | grep -v 'struct Action'
 ```
 
-`answer_text_with(self: &Arc<Self>, owner: ActionOwner, card_key: &str, request_id: &str, revision: u64, text: String, expect: Option<&Guard>)` and `reply_with(self: &Arc<Self>, owner: ActionOwner, card_key: &str, text: String, expect: Option<&Guard>)` follow the same pattern.
+Expected at `f18b06f`:
+- `crates/acd-client/src/actions.rs:285`, the test helper; Step 1 adds `owner`.
+- `crates/acd-client/src/inbox.rs:851`, `916` and `973`, in `pick_with`, `answer_text_with` and `reply_with`.
+- `crates/acd-voice-client/tests/port.rs:129`. Add `owner: acd_client::actions::ActionOwner::DEFAULT,` after `id: "act".into(),`.
+
+The grep must show no other site. If it does, add `owner` there too.
+
+So the three builders stay within Clippy's argument limit, they take one `Origin` instead of a growing list. Add above `impl Inbox`:
+
+```rust
+/// Who asks for an action, and what it was planned on (voice guards).
+#[derive(Clone, Copy)]
+struct Origin<'a> {
+    owner: ActionOwner,
+    expect: Option<&'a Guard>,
+}
+
+impl Origin<'_> {
+    const KEYS: Origin<'static> = Origin { owner: ActionOwner::DEFAULT, expect: None };
+    fn owned(owner: ActionOwner) -> Origin<'static> {
+        Origin { owner, expect: None }
+    }
+}
+```
+
+The signatures become:
+
+```rust
+    fn pick_with(self: &Arc<Self>, origin: Origin<'_>, card_key: &str, request_id: &str, option_id: &str, revision: u64) -> Result<String, PickError> {
+    fn answer_text_with(self: &Arc<Self>, origin: Origin<'_>, card_key: &str, request_id: &str, revision: u64, text: String) -> Result<String, PickError> {
+    fn reply_with(self: &Arc<Self>, origin: Origin<'_>, card_key: &str, text: String) -> Result<String, PickError> {
+```
+
+In their bodies:
+- Replace `expect` with `origin.expect`. It appears in the `guard(&inner.settings, &state, card_key, expect)?` calls and in `reply_with`'s `match expect`.
+- Add `owner: origin.owner,` after `id: id.clone(),` in each `Action { … }` literal.
 
 Replace the public wrappers (995 to 1025) and `cancel`/`escape` (1026 to 1043) with:
 
 ```rust
     pub fn pick(self: &Arc<Self>, card_key: &str, request_id: &str, option_id: &str, revision: u64) -> Result<String, PickError> {
-        self.pick_with(ActionOwner::DEFAULT, card_key, request_id, option_id, revision, None)
+        self.pick_with(Origin::KEYS, card_key, request_id, option_id, revision)
     }
     /// `pick` for one owner (omarchy spec §6).
     pub fn pick_owned(self: &Arc<Self>, owner: ActionOwner, card_key: &str, request_id: &str, option_id: &str, revision: u64) -> Result<String, PickError> {
-        self.pick_with(owner, card_key, request_id, option_id, revision, None)
+        self.pick_with(Origin::owned(owner), card_key, request_id, option_id, revision)
     }
     /// `pick` on the request `guard` names, refused unless connection,
     /// agent and request still match (voice spec §5.6).
@@ -505,35 +619,35 @@ Replace the public wrappers (995 to 1025) and `cancel`/`escape` (1026 to 1043) w
         let Some((request_id, revision)) = guard.request.clone() else {
             return Err(PickError::StaleRequest);
         };
-        self.pick_with(ActionOwner::DEFAULT, card_key, &request_id, option_id, revision, Some(guard))
+        self.pick_with(Origin { owner: ActionOwner::DEFAULT, expect: Some(guard) }, card_key, &request_id, option_id, revision)
     }
     /// A typed answer to a free-text request, with the same undo countdown as
     /// `pick`. The text is trimmed; blank, oversize (16 KiB) or control-char
     /// text is `BadAnswerText`.
     pub fn answer_text(self: &Arc<Self>, card_key: &str, request_id: &str, revision: u64, text: String) -> Result<String, PickError> {
-        self.answer_text_with(ActionOwner::DEFAULT, card_key, request_id, revision, text, None)
+        self.answer_text_with(Origin::KEYS, card_key, request_id, revision, text)
     }
     /// `answer_text` for one owner.
     pub fn answer_text_owned(self: &Arc<Self>, owner: ActionOwner, card_key: &str, request_id: &str, revision: u64, text: String) -> Result<String, PickError> {
-        self.answer_text_with(owner, card_key, request_id, revision, text, None)
+        self.answer_text_with(Origin::owned(owner), card_key, request_id, revision, text)
     }
     pub fn answer_text_guarded(self: &Arc<Self>, card_key: &str, text: String, guard: &Guard) -> Result<String, PickError> {
         let Some((request_id, revision)) = guard.request.clone() else {
             return Err(PickError::StaleRequest);
         };
-        self.answer_text_with(ActionOwner::DEFAULT, card_key, &request_id, revision, text, Some(guard))
+        self.answer_text_with(Origin { owner: ActionOwner::DEFAULT, expect: Some(guard) }, card_key, &request_id, revision, text)
     }
     pub fn reply(self: &Arc<Self>, card_key: &str, text: String) -> Result<String, PickError> {
-        self.reply_with(ActionOwner::DEFAULT, card_key, text, None)
+        self.reply_with(Origin::KEYS, card_key, text)
     }
     /// `reply` for one owner.
     pub fn reply_owned(self: &Arc<Self>, owner: ActionOwner, card_key: &str, text: String) -> Result<String, PickError> {
-        self.reply_with(owner, card_key, text, None)
+        self.reply_with(Origin::owned(owner), card_key, text)
     }
     /// `reply`, refused unless connection, agent and request (including
     /// "no request") still match what the step was planned on.
     pub fn reply_guarded(self: &Arc<Self>, card_key: &str, text: String, guard: &Guard) -> Result<String, PickError> {
-        self.reply_with(ActionOwner::DEFAULT, card_key, text, Some(guard))
+        self.reply_with(Origin { owner: ActionOwner::DEFAULT, expect: Some(guard) }, card_key, text)
     }
     pub fn cancel(&self, id: &str) -> bool {
         let removed = self.inner.lock().unwrap().actions.cancel(id);
@@ -584,7 +698,7 @@ Run: `cargo test -p acd-client --locked`
 Expected: PASS, including every existing test in `tests/inbox.rs` and `tests/bindings.rs` (the bindings do not change).
 
 Run: `cargo test -p acd-voice-client --locked`
-Expected: PASS.
+Expected: PASS (its `tests/port.rs` literal now has `owner`).
 
 - [ ] **Step 8: Lint and commit**
 
@@ -592,13 +706,13 @@ Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 Expected: no warnings.
 
 ```bash
-git add crates/acd-client/src/actions.rs crates/acd-client/src/voice.rs crates/acd-client/src/inbox.rs crates/acd-client/tests/inbox.rs
+git add crates/acd-client/src/actions.rs crates/acd-client/src/voice.rs crates/acd-client/src/inbox.rs crates/acd-client/tests/inbox.rs crates/acd-voice-client/tests/port.rs
 git commit -m "acd-client: action owners, owned cancel and escape, card in outcomes"
 ```
 
 ---
 
-### Task 2: acd-client: secrets outside the inbox lock, typed machine errors
+### Task 2: acd-client: secrets outside the inbox lock, edit lock, typed machine errors
 
 **Execution:** cloud-ok
 
@@ -635,32 +749,47 @@ pub enum MachineError {
 - Produces (on `Inbox`):
   - `pair_machine(self: &Arc<Self>, line: &str) -> Result<MachineEntry, MachineError>`.
   - `remove_machine_checked(&self, key: &str) -> Result<(), MachineError>`.
+  - Under `feature = "testing"`: `edit_waiters_for_test(&self) -> usize`.
   - `import_pairing` and `remove_machine` become wrappers that return `e.to_string()`: the same texts as today.
-- Rule (§4.3, D3): no `SecretStore` call runs while `inner` is locked. That covers `machines`, `pair_machine`, `remove_machine_checked` and `start`. The pairing secret is stored first and the machine committed second. A failed commit deletes a new machine's secret or restores a re-paired machine's previous one.
+- Rule (§4.3, D3): no `SecretStore` call runs while `inner` is locked; that covers `machines`, `pair_machine`, `remove_machine_checked` and `start`. Every machine or settings-file change (pair, rename, remove, reconnect, `set_hotkey`, `set_show_subagents`, `set_show_hook_only`) holds the edit lock for its whole length, so no writer saves over another's result. The pairing secret is stored first and the machine committed second. A failed commit deletes a new machine's secret or restores a re-paired machine's previous one.
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `crates/acd-client/tests/inbox.rs`:
+Append to `crates/acd-client/tests/inbox.rs`. Every blocked store call is released by a guard's `Drop`, so a failing assertion cannot leave a thread blocked and hang runtime teardown. "The second caller is waiting" is observed through `Inbox::edit_waiters_for_test()`, not a sleep.
 
 ```rust
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 
-/// A secret store whose reads or writes wait while `hold_*` is set, as a
+/// A secret store whose reads, writes or deletes wait while held, as a
 /// keyring prompt does.
 #[derive(Default)]
 struct Gate {
     inner: MemorySecrets,
     hold_get: AtomicBool,
     hold_set: AtomicBool,
+    hold_delete: AtomicBool,
     entered: AtomicUsize,
 }
 
+/// Holds one of the gate's operations until dropped, panics included.
+struct Hold<'a>(&'a AtomicBool);
+
+impl Drop for Hold<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, SeqCst);
+    }
+}
+
 impl Gate {
+    fn hold<'a>(&'a self, which: &'a AtomicBool) -> Hold<'a> {
+        which.store(true, SeqCst);
+        Hold(which)
+    }
     fn wait(&self, hold: &AtomicBool) {
         if hold.load(SeqCst) {
             self.entered.fetch_add(1, SeqCst);
             while hold.load(SeqCst) {
-                std::thread::sleep(Duration::from_millis(5));
+                std::thread::yield_now();
             }
         }
     }
@@ -676,18 +805,20 @@ impl SecretStore for Gate {
         self.inner.set(key, value)
     }
     fn delete(&self, key: &str) -> Result<(), SecretError> {
+        self.wait(&self.hold_delete);
         self.inner.delete(key)
     }
 }
 
-async fn until_entered(gate: &Gate, n: usize) {
+/// Polls `cond` (no fixed sleep) for up to 5 s.
+async fn until(what: &str, cond: impl Fn() -> bool) {
     tokio::time::timeout(Duration::from_secs(5), async {
-        while gate.entered.load(SeqCst) < n {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        while !cond() {
+            tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("the store was never entered");
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
 }
 
 fn box_secret(f: &FakeServer) -> String {
@@ -713,12 +844,15 @@ fn options(timing: acd_client::Timing) -> InboxOptions {
     InboxOptions { timing, settings_path: None, client_name: "t".into(), client_version: "0".into() }
 }
 
-/// `setup_with`, over a `Gate` store.
-async fn setup_gated(timing: acd_client::Timing) -> (FakeServer, FakeConn, Arc<Inbox>, Arc<Gate>) {
+/// `setup_with` over a `Gate` store, optionally with a settings file.
+async fn setup_gated(
+    timing: acd_client::Timing,
+    settings_path: Option<std::path::PathBuf>,
+) -> (FakeServer, FakeConn, Arc<Inbox>, Arc<Gate>) {
     let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
     let gate = Arc::new(Gate::default());
     gate.inner.set("m1", &box_secret(&f)).unwrap();
-    let ib = Inbox::new(box_settings(&f), gate.clone(), options(timing));
+    let ib = Inbox::new(box_settings(&f), gate.clone(), InboxOptions { settings_path, ..options(timing) });
     ib.start();
     let c = f.next_connection().await;
     c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
@@ -731,71 +865,71 @@ fn localhost_line(f: &FakeServer) -> String {
     format!("acd://localhost:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN)
 }
 
+/// The same machine as `m1`, re-paired.
+fn m1_line(f: &FakeServer) -> String {
+    format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN)
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::time::timeout(Duration::from_secs(2), tokio::task::spawn_blocking(f))
+        .await
+        .expect("the call waited for the secret store")
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_blocked_secret_write_never_stops_a_cancel_or_a_listing() {
-    let (f, _c, ib, gate) = setup_gated(held()).await;
+    let (f, _c, ib, gate) = setup_gated(held(), None).await;
     let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
-    gate.hold_set.store(true, SeqCst);
     let pairing = {
-        let (ib, line) = (ib.clone(), localhost_line(&f));
-        tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        let _hold = gate.hold(&gate.hold_set);
+        let pairing = {
+            let (ib, line) = (ib.clone(), localhost_line(&f));
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the secret write", || gate.entered.load(SeqCst) == 1).await;
+        let ib2 = ib.clone();
+        assert!(blocking(move || ib2.cancel(&id)).await);
+        let ib2 = ib.clone();
+        assert_eq!(blocking(move || ib2.machines().len()).await, 1, "not committed before its secret is stored");
+        pairing
     };
-    until_entered(&gate, 1).await;
-    let cancelled = {
-        let ib = ib.clone();
-        tokio::time::timeout(Duration::from_secs(2), tokio::task::spawn_blocking(move || ib.cancel(&id)))
-            .await
-            .expect("cancel waited for the secret store")
-            .unwrap()
-    };
-    assert!(cancelled);
-    let listed = {
-        let ib = ib.clone();
-        tokio::time::timeout(Duration::from_secs(2), tokio::task::spawn_blocking(move || ib.machines().len()))
-            .await
-            .expect("machines() waited for the secret store")
-            .unwrap()
-    };
-    assert_eq!(listed, 1, "the new machine is not committed before its secret is stored");
-    gate.hold_set.store(false, SeqCst);
     assert!(pairing.await.unwrap().is_ok());
     assert_eq!(ib.settings().machines.len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_countdown_fires_while_a_secret_write_is_blocked() {
-    let (f, _c, ib, gate) = setup_gated(common::fast()).await;
-    gate.hold_set.store(true, SeqCst);
+    let (f, _c, ib, gate) = setup_gated(common::fast(), None).await;
     let pairing = {
-        let (ib, line) = (ib.clone(), localhost_line(&f));
-        tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        let _hold = gate.hold(&gate.hold_set);
+        let pairing = {
+            let (ib, line) = (ib.clone(), localhost_line(&f));
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the secret write", || gate.entered.load(SeqCst) == 1).await;
+        ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+        answer_frame(&f).await;
+        pairing
     };
-    until_entered(&gate, 1).await;
-    ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
-    answer_frame(&f).await;
-    gate.hold_set.store(false, SeqCst);
     pairing.await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_blocked_secret_read_during_removal_never_stops_a_cancel() {
-    let (_f, _c, ib, gate) = setup_gated(held()).await;
+    let (_f, _c, ib, gate) = setup_gated(held(), None).await;
     let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
-    gate.hold_get.store(true, SeqCst);
     let removal = {
-        let ib = ib.clone();
-        tokio::task::spawn_blocking(move || ib.remove_machine_checked("m1"))
+        let _hold = gate.hold(&gate.hold_get);
+        let removal = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.remove_machine_checked("m1"))
+        };
+        until("the secret read", || gate.entered.load(SeqCst) == 1).await;
+        let ib2 = ib.clone();
+        assert!(blocking(move || ib2.cancel(&id)).await);
+        removal
     };
-    until_entered(&gate, 1).await;
-    let cancelled = {
-        let ib = ib.clone();
-        tokio::time::timeout(Duration::from_secs(2), tokio::task::spawn_blocking(move || ib.cancel(&id)))
-            .await
-            .expect("cancel waited for the secret store")
-            .unwrap()
-    };
-    assert!(cancelled);
-    gate.hold_get.store(false, SeqCst);
     removal.await.unwrap().unwrap();
     assert!(ib.settings().machines.is_empty());
 }
@@ -805,22 +939,18 @@ async fn start_reads_secrets_outside_the_inbox_lock() {
     let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
     let gate = Arc::new(Gate::default());
     gate.inner.set("m1", &box_secret(&f)).unwrap();
-    gate.hold_get.store(true, SeqCst);
     let ib = Inbox::new(box_settings(&f), gate.clone(), options(common::fast()));
     let starting = {
-        let ib = ib.clone();
-        tokio::task::spawn_blocking(move || ib.start())
+        let _hold = gate.hold(&gate.hold_get);
+        let starting = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.start())
+        };
+        until("start's secret read", || gate.entered.load(SeqCst) == 1).await;
+        let ib2 = ib.clone();
+        assert_eq!(blocking(move || ib2.settings()).await.machines.len(), 1);
+        starting
     };
-    until_entered(&gate, 1).await;
-    let settings = {
-        let ib = ib.clone();
-        tokio::time::timeout(Duration::from_secs(2), tokio::task::spawn_blocking(move || ib.settings()))
-            .await
-            .expect("settings() waited for start's secret read")
-            .unwrap()
-    };
-    assert_eq!(settings.machines.len(), 1);
-    gate.hold_get.store(false, SeqCst);
     starting.await.unwrap();
     f.next_connection().await;
 }
@@ -830,23 +960,76 @@ async fn concurrent_pairings_of_one_host_leave_one_machine() {
     let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
     let gate = Arc::new(Gate::default());
     let ib = empty_inbox(gate.clone(), None);
-    gate.hold_set.store(true, SeqCst);
-    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
-    let first = {
-        let (ib, line) = (ib.clone(), line.clone());
-        tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+    let line = m1_line(&f);
+    let (first, second) = {
+        let _hold = gate.hold(&gate.hold_set);
+        let first = {
+            let (ib, line) = (ib.clone(), line.clone());
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the first secret write", || gate.entered.load(SeqCst) == 1).await;
+        let second = {
+            let (ib, line) = (ib.clone(), line.clone());
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the second pairing to wait", || ib.edit_waiters_for_test() == 1).await;
+        assert_eq!(gate.entered.load(SeqCst), 1, "the second pairing has not reached the store");
+        (first, second)
     };
-    let second = {
-        let (ib, line) = (ib.clone(), line.clone());
-        tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
-    };
-    until_entered(&gate, 1).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(gate.entered.load(SeqCst), 1, "the second pairing waits for the first");
-    gate.hold_set.store(false, SeqCst);
     let (a, b) = (first.await.unwrap().unwrap(), second.await.unwrap().unwrap());
     assert_eq!(a, b, "the second pairing re-pairs the machine the first one added");
     assert_eq!(ib.settings().machines.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rename_during_a_re_pairing_is_kept() {
+    let (f, _c, ib, gate) = setup_gated(held(), None).await;
+    let (pairing, rename) = {
+        let _hold = gate.hold(&gate.hold_set);
+        let pairing = {
+            let (ib, line) = (ib.clone(), m1_line(&f));
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the re-pairing's secret write", || gate.entered.load(SeqCst) == 1).await;
+        let rename = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.rename_machine("m1", "Renamed"))
+        };
+        until("the rename to wait for the edit lock", || ib.edit_waiters_for_test() == 1).await;
+        assert_eq!(ib.settings().machines[0].name, "Box");
+        (pairing, rename)
+    };
+    assert_eq!(pairing.await.unwrap().unwrap(), "m1");
+    rename.await.unwrap().unwrap();
+    assert_eq!(ib.settings().machines[0].name, "Renamed");
+    // Task 3: ib.reconnect_machine("m1").unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settings_write_during_a_removal_never_brings_the_machine_back() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("settings.json");
+    let (_f, _c, ib, gate) = setup_gated(held(), Some(path.clone())).await;
+    let (removal, toggle) = {
+        let _hold = gate.hold(&gate.hold_delete);
+        let removal = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.remove_machine_checked("m1"))
+        };
+        until("the secret delete", || gate.entered.load(SeqCst) == 1).await;
+        let toggle = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.set_show_subagents(true))
+        };
+        until("the settings write to wait for the edit lock", || ib.edit_waiters_for_test() == 1).await;
+        (removal, toggle)
+    };
+    removal.await.unwrap().unwrap();
+    toggle.await.unwrap().unwrap();
+    let saved: Settings = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(saved.machines.is_empty(), "the removed machine came back in the file");
+    assert!(saved.show_subagents);
+    assert_eq!(ib.settings(), saved);
 }
 
 /// Records every store call; keys only, never values.
@@ -879,8 +1062,7 @@ async fn a_failed_commit_deletes_a_new_machines_secret() {
     std::fs::write(&blocker, "block").unwrap();
     let store = Arc::new(Recording::default());
     let ib = empty_inbox(store.clone(), Some(blocker.join("settings.json")));
-    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
-    assert!(matches!(ib.pair_machine(&line), Err(MachineError::Settings(_))));
+    assert!(matches!(ib.pair_machine(&m1_line(&f)), Err(MachineError::Settings(_))));
     let ops = store.ops.lock().unwrap().clone();
     let kinds: Vec<&str> = ops.iter().map(|(op, _)| *op).collect();
     assert_eq!(kinds, ["get", "set", "delete"]);
@@ -904,10 +1086,12 @@ async fn machine_errors_are_typed_and_keep_the_old_texts() {
 }
 ```
 
+`a_rename_during_a_re_pairing_is_kept` calls `reconnect_machine`, which Task 3 adds. Until then, leave that line commented with `// Task 3:` and enable it in Task 3 Step 2.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p acd-client --locked --test inbox -- secret machine start_reads concurrent a_failed_commit`
-Expected: compile error, `no method named pair_machine` and `cannot find type MachineError`.
+Run: `cargo test -p acd-client --locked --test inbox -- secret machine start_reads concurrent a_failed_commit rename settings_write`
+Expected: compile errors, `no method named pair_machine`, `no method named edit_waiters_for_test` and `cannot find type MachineError`.
 
 - [ ] **Step 3: Add `MachineError`, the edit lock and the split spawn helpers**
 
@@ -921,15 +1105,38 @@ In `inbox.rs`:
    /// shows today.
    ```
 
-3. In `pub struct Inbox`, after `inner: Mutex<Inner>,`, add:
+3. Above `struct Machine`, add the edit lock:
 
    ```rust
-       /// Serializes pairing, removal and reconnection (plan D3). SecretStore
-       /// calls may run under it; they never run under `inner`.
-       edits: Mutex<()>,
+   /// Serializes every change to machines or to the saved settings: pair,
+   /// rename, remove, reconnect and each settings write (plan D3).
+   /// SecretStore calls may run under it; they never run under `inner`.
+   /// Timers, cancels, views, `machines()` and `settings()` never take it.
+   #[derive(Default)]
+   struct EditLock {
+       lock: Mutex<()>,
+       waiting: AtomicUsize,
+   }
+
+   impl EditLock {
+       fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
+           self.waiting.fetch_add(1, Ordering::SeqCst);
+           let guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+           self.waiting.fetch_sub(1, Ordering::SeqCst);
+           guard
+       }
+   }
    ```
 
-   In `Inbox::new`, add `edits: Mutex::new(()),` after the `inner` field.
+   Add `AtomicUsize` to the `std::sync::atomic` import. In `pub struct Inbox`, after `inner: Mutex<Inner>,`, add `edits: EditLock,`; in `Inbox::new`, add `edits: EditLock::default(),`. Add the test hook next to `expire_countdowns_for_test`:
+
+   ```rust
+       /// Test hook: callers blocked on the edit lock right now.
+       #[cfg(feature = "testing")]
+       pub fn edit_waiters_for_test(&self) -> usize {
+           self.edits.waiting.load(Ordering::SeqCst)
+       }
+   ```
 
 Replace `spawn_for` (1165 to 1207) with:
 
@@ -1028,7 +1235,7 @@ Replace `import_pairing` with:
     /// machine's previous one (omarchy spec §4.3, §9).
     pub fn pair_machine(self: &Arc<Self>, line: &str) -> Result<MachineEntry, MachineError> {
         let pairing = Pairing::parse(line).map_err(|_| MachineError::BadPairing)?;
-        let _edit = self.edits.lock().unwrap();
+        let _edit = self.edits.lock();
         let existing = self
             .inner
             .lock()
@@ -1112,7 +1319,7 @@ Replace `remove_machine` with:
     /// `inner`; the settings file is written first, the secret deleted
     /// second, and the file restored if the delete fails.
     pub fn remove_machine_checked(&self, key: &str) -> Result<(), MachineError> {
-        let _edit = self.edits.lock().unwrap();
+        let _edit = self.edits.lock();
         if !self.inner.lock().unwrap().settings.machines.iter().any(|m| m.key == key) {
             return Err(MachineError::UnknownMachine);
         }
@@ -1141,12 +1348,10 @@ Replace `remove_machine` with:
             }
             return Err(MachineError::SecretDelete(error));
         }
+        // The file already matches: every settings writer holds `edits`, so
+        // none can have saved this machine back since (plan D3).
         let mut inner = self.inner.lock().unwrap();
         inner.settings.machines.retain(|m| m.key != key);
-        // A show toggle saved since the write above wrote this machine back.
-        if let Some(path) = &self.opts.settings_path {
-            let _ = inner.settings.save(path);
-        }
         for machine in inner.machines.iter().filter(|m| m.entry.key == key) {
             if let Some(handle) = &machine.handle {
                 handle.cancel();
@@ -1210,6 +1415,16 @@ Replace the first block of `start` (from `let handles = {` to the `for (key, han
 ```
 
 Leave the timer loop below it unchanged.
+
+- [ ] **Step 4b: Put every other settings writer under the edit lock**
+
+Each of `rename_machine`, `set_hotkey`, `set_show_subagents` and `set_show_hook_only` saves the settings file. Make the first line of each body:
+
+```rust
+        let _edit = self.edits.lock();
+```
+
+None of them calls the SecretStore, so a Mac caller waits at most for one pairing's keyring call. `set_show_idle` saves nothing and stays as it is. acd-inbox runs these commands off the socket reader (Task 10, D11), so a wait never delays a disconnect.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -1329,8 +1544,7 @@ async fn a_locked_secret_is_shown_as_locked_and_reconnect_creates_the_handle() {
     ib.start();
     let m = ib.machines().remove(0);
     assert_eq!((m.secret, m.pairing), (SecretStatus::Locked, PairingState::Unreadable));
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(f.connections(), 0, "no handle without a secret");
+    assert!(ib.conn_stamp("m1").is_none(), "no handle without a secret");
     assert!(matches!(
         ib.reconnect_machine("m1"),
         Err(MachineError::SecretRead(e)) if e.kind() == SecretErrorKind::Locked
@@ -1346,9 +1560,9 @@ async fn a_locked_secret_is_shown_as_locked_and_reconnect_creates_the_handle() {
 #[tokio::test]
 async fn reconnect_keeps_an_online_handle_and_rejects_unknown_or_unpaired_machines() {
     let (f, _c, ib) = setup().await;
+    let before = ib.conn_stamp("m1");
     ib.reconnect_machine("m1").unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(f.connections(), 1, "an online handle is kept, not rebuilt");
+    assert_eq!(ib.conn_stamp("m1"), before, "an online handle is kept, not rebuilt");
     assert!(matches!(ib.reconnect_machine("nope"), Err(MachineError::UnknownMachine)));
     let empty = Inbox::new(box_settings(&f), Arc::new(MemorySecrets::default()), options(common::fast()));
     assert!(matches!(empty.reconnect_machine("m1"), Err(MachineError::NotPaired)));
@@ -1367,6 +1581,8 @@ fn the_secret_status_is_json_but_not_in_the_mac_bindings() {
     assert_eq!(serde_json::to_value(&view).unwrap()["secret"], "ok");
 }
 ```
+
+In `a_rename_during_a_re_pairing_is_kept` (Task 2), enable the line marked `// Task 3:`.
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
@@ -1539,7 +1755,7 @@ After `retry_machine` in `inbox.rs`:
     /// for example because its secret could not be read at start (omarchy
     /// spec §4.3, plan D6). The secret is read outside `inner`.
     pub fn reconnect_machine(self: &Arc<Self>, key: &str) -> Result<(), MachineError> {
-        let _edit = self.edits.lock().unwrap();
+        let _edit = self.edits.lock();
         let (entry, handle) = {
             let inner = self.inner.lock().unwrap();
             let m = inner.machines.iter().find(|m| m.entry.key == key).ok_or(MachineError::UnknownMachine)?;
@@ -1608,13 +1824,14 @@ git commit -m "acd-client: secret status per machine and reconnect_machine for a
 ```
 
 ---
-### Task 4: acd-inbox crate and protocol
+### Task 4: acd-inbox crate, protocol and bounded views
 
 **Execution:** cloud-ok
 
 **Files:**
 - Create: `crates/acd-inbox/Cargo.toml`, `crates/acd-inbox/src/lib.rs`, `crates/acd-inbox/src/protocol.rs`
 - Modify: `Cargo.toml` (workspace dependency `acd-inbox`), `Cargo.lock`
+- Modify: `docs/superpowers/specs/2026-10-12-omarchy-inbox-design.md` §5, first paragraph (spec amendment, Step 6)
 - Test: `crates/acd-inbox/src/protocol.rs` (unit)
 
 **Interfaces:**
@@ -1630,8 +1847,9 @@ git commit -m "acd-client: secret status per machine and reconnect_machine for a
   - `pub enum OutcomeResult` (tagged `kind`), `pub enum NotSentCode`, and `From` impls from `ActionOutcome` and `NotSentReason`.
   - Line builders (no trailing newline):
     - `hello_line(version: &str) -> String`
-    - `settings_line(&SettingsSnapshot) -> String`
-    - `view_line(&InboxView, max: usize) -> String`
+    - `settings_line(&SettingsSnapshot, max: usize) -> String` (machines beyond the bound are left out and counted in `omitted_machines`)
+    - `view_line(&InboxView, max: usize) -> Option<String>` (D9; `None`: send nothing, keep the previous view)
+  - `pub struct Omitted { pub done: usize, pub working: usize }`, serialized in every `view` line.
     - `outcome_line(&ActionEvent) -> String`
     - `outcomes_lost_line() -> String`
     - `ok_line(id: &str, result: serde_json::Value) -> String`
@@ -1642,7 +1860,7 @@ JSON shapes this task fixes:
 ```json
 {"type":"hello","protocol":1,"service":"0.1.0"}
 {"type":"settings","machines":[{"key":"m1","name":"Box","endpoint":{"kind":"tcp","host":"h","port":47800},"pairing":"paired","secret":"ok"}],"notifications":true,"show_idle":false,"show_subagents":false,"show_hook_only":false}
-{"type":"view","view":{"machines":[],"cards":[],"hidden_idle":0,"show_idle":false,"show_subagents":false,"show_hook_only":false,"tray":{"color":"grey","needs_you":0},"actions":[]}}
+{"type":"view","view":{"machines":[],"cards":[],"hidden_idle":0,"show_idle":false,"show_subagents":false,"show_hook_only":false,"tray":{"color":"grey","needs_you":0},"actions":[]},"omitted":{"done":0,"working":0}}
 {"type":"outcome","action":"<id>","card":"m1/a1","result":{"kind":"rejected","code":"request_gone"}}
 {"type":"outcome","action":"<id>","card":"m1/a1","result":{"kind":"not_sent","reason":"answered_elsewhere"}}
 {"type":"outcomes_lost"}
@@ -1750,7 +1968,7 @@ mod tests {
         assert_eq!(parse(&hello_line("0.1.0")), json!({"type":"hello","protocol":1,"service":"0.1.0"}));
         let s = SettingsSnapshot { machines: vec![], notifications: true, show_idle: false, show_subagents: true, show_hook_only: false };
         assert_eq!(
-            parse(&settings_line(&s)),
+            parse(&settings_line(&s, MAX_LINE)),
             json!({"type":"settings","machines":[],"notifications":true,"show_idle":false,"show_subagents":true,"show_hook_only":false})
         );
         assert_eq!(parse(&ok_line("c1", json!("a-1"))), json!({"type":"ok","id":"c1","result":"a-1"}));
@@ -1799,56 +2017,148 @@ mod tests {
         }
     }
 
+    /// A Done (or Working) card without a request.
+    fn quiet(id: &str, state: &str, group: CardGroup) -> CardView {
+        let mut a = agent(id, "quiet agent", None);
+        a.pending = None;
+        a.state = serde_json::from_value(json!(state)).unwrap();
+        CardView { group, answerable: false, selectable_options: vec![], ..card(a) }
+    }
+
+    fn line(v: &InboxView, max: usize) -> Value {
+        let l = view_line(v, max).expect("fits");
+        assert!(l.len() < max, "{} bytes for a {max} limit", l.len());
+        parse(&l)
+    }
+
+    fn keys(out: &Value) -> Vec<String> {
+        out["view"]["cards"].as_array().unwrap().iter().map(|c| c["key"].as_str().unwrap().to_owned()).collect()
+    }
+
     #[test]
     fn a_small_view_is_sent_whole() {
         let v = view(vec![card(agent("a1", "fix tests", None))]);
-        let line = view_line(&v, MAX_LINE);
-        assert_eq!(parse(&line), json!({"type":"view","view":serde_json::to_value(&v).unwrap()}));
-        assert!(!line.contains(TRUNCATED));
+        assert_eq!(
+            line(&v, MAX_LINE),
+            json!({"type":"view","view":serde_json::to_value(&v).unwrap(),"omitted":{"done":0,"working":0}})
+        );
     }
 
     #[test]
     fn a_5_mib_screen_is_cut_with_a_marker_and_the_request_survives() {
         let screen = "é".repeat(5 * 1024 * 1024 / 2 + 7);
         let v = view(vec![card(agent("a1", "fix tests", Some(&screen)))]);
-        let line = view_line(&v, MAX_LINE);
-        assert!(line.len() < MAX_LINE, "{} bytes", line.len());
-        let out = parse(&line);
+        let out = line(&v, MAX_LINE);
         let pending = &out["view"]["cards"][0]["agent"]["pending"];
         assert!(pending["raw_screen"].as_str().unwrap().ends_with(TRUNCATED));
         assert_eq!(pending["id"], "r-a1");
         assert_eq!(out["view"]["cards"][0]["agent"]["title"], "fix tests", "short text is not cut");
+        assert_eq!(out["omitted"], json!({"done":0,"working":0}));
     }
 
     #[test]
-    fn many_cards_fit_by_cutting_every_long_text() {
+    fn text_is_cut_before_any_card_is_omitted() {
         let title = "t".repeat(3000);
-        let cards: Vec<CardView> = (0..2000).map(|i| card(agent(&format!("a{i}"), &title, None))).collect();
-        let line = view_line(&view(cards), MAX_LINE);
-        assert!(line.len() < MAX_LINE);
-        let out = parse(&line);
-        assert_eq!(out["view"]["cards"].as_array().unwrap().len(), 2000);
-        assert!(out["view"]["cards"][1999]["agent"]["title"].as_str().unwrap().ends_with(TRUNCATED));
+        let cards: Vec<CardView> = (0..200).map(|i| card(agent(&format!("a{i}"), &title, None))).collect();
+        let v = view(cards);
+        let at_256 = {
+            let mut short = v.clone();
+            for c in &mut short.cards {
+                c.agent.title = format!("{}{TRUNCATED}", "t".repeat(256));
+            }
+            view_line(&short, usize::MAX).unwrap().len()
+        };
+        let out = line(&v, at_256 + 1);
+        assert_eq!(keys(&out).len(), 200);
+        assert!(out["view"]["cards"][199]["agent"]["title"].as_str().unwrap().ends_with(TRUNCATED));
+    }
+
+    #[test]
+    fn done_cards_go_first_then_working_cards_and_requests_never() {
+        let mut cards = vec![card(agent("r1", "needs you", None))];
+        cards.extend((0..100).map(|i| quiet(&format!("w{i}"), "working", CardGroup::Working)));
+        cards.extend((0..100).map(|i| quiet(&format!("d{i}"), "done", CardGroup::Done)));
+        let v = view(cards);
+        let size = |keep: &dyn Fn(&CardView) -> bool| {
+            let mut x = v.clone();
+            x.cards.retain(|c| keep(c));
+            view_line(&x, usize::MAX).unwrap().len()
+        };
+        let without_done = size(&|c| c.group != CardGroup::Done);
+        let requests_only = size(&|c| c.group == CardGroup::Request);
+        let out = line(&v, without_done + 32);
+        assert_eq!(out["omitted"], json!({"done":100,"working":0}));
+        assert!(keys(&out).iter().all(|k| !k.starts_with("m1/d")));
+        let out = line(&v, requests_only + 32);
+        assert_eq!(out["omitted"], json!({"done":100,"working":100}));
+        assert_eq!(keys(&out), ["m1/r1"]);
+    }
+
+    #[test]
+    fn a_card_with_a_countdown_is_never_omitted() {
+        let mut counting = quiet("d0", "done", CardGroup::Done);
+        counting.action = Some(acd_client::view::ActionView {
+            id: "x".into(),
+            card_key: "m1/d0".into(),
+            label: "Reply".into(),
+            detail: None,
+            fires_at_ms: 0.,
+        });
+        let mut cards = vec![card(agent("r1", "needs you", None)), counting];
+        cards.extend((1..100).map(|i| quiet(&format!("d{i}"), "done", CardGroup::Done)));
+        let v = view(cards);
+        let mut two = v.clone();
+        two.cards.truncate(2);
+        let out = line(&v, view_line(&two, usize::MAX).unwrap().len() + 32);
+        assert_eq!(keys(&out), ["m1/r1", "m1/d0"]);
+        assert_eq!(out["omitted"]["done"], 99);
+    }
+
+    #[test]
+    fn needs_you_text_is_cut_further_but_no_request_is_dropped() {
+        let cards: Vec<CardView> = (0..50).map(|i| card(agent(&format!("a{i}"), &"t".repeat(1000), None))).collect();
+        let v = view(cards);
+        let mut at_100 = v.clone();
+        for c in &mut at_100.cards {
+            c.agent.title = format!("{}{TRUNCATED}", "t".repeat(100));
+        }
+        let out = line(&v, view_line(&at_100, usize::MAX).unwrap().len() + 1);
+        assert_eq!(keys(&out).len(), 50);
+        let title = out["view"]["cards"][0]["agent"]["title"].as_str().unwrap();
+        assert!(title.ends_with(TRUNCATED) && title.chars().count() <= 100 + TRUNCATED.chars().count());
+        assert!(view_line(&v, 200).is_none(), "nothing is sent rather than dropping a request");
     }
 
     #[test]
     fn ids_and_enums_are_never_cut() {
         let long_id = "x".repeat(500);
         let v = view(vec![card(agent(&long_id, &"t".repeat(5000), None))]);
-        let out = parse(&view_line(&v, 4000));
+        let out = line(&v, 4000);
         assert_eq!(out["view"]["cards"][0]["agent"]["id"].as_str().unwrap(), long_id);
         assert_eq!(out["view"]["cards"][0]["agent"]["state"], "needs_you");
     }
 
     #[test]
-    fn cards_are_dropped_from_the_end_as_a_last_resort() {
-        let cards: Vec<CardView> = (0..5).map(|i| card(agent(&format!("a{i}"), "title", None))).collect();
-        let line = view_line(&view(cards), 2500);
-        assert!(line.len() < 2500);
-        let out = parse(&line);
-        let kept = out["view"]["cards"].as_array().unwrap();
-        assert!(!kept.is_empty() && kept.len() < 5);
-        assert_eq!(kept[0]["key"], "m1/a0", "the first cards (requests sort first) stay");
+    fn settings_are_bounded_too() {
+        use acd_client::settings::{EndpointConfig, SecretStatus};
+        use acd_client::view::{MachineEntryView, PairingState};
+        let machines = (0..100)
+            .map(|i| MachineEntryView {
+                key: format!("{i:08}-0000-4000-8000-000000000000"),
+                name: "n".repeat(64),
+                endpoint: EndpointConfig::Tcp { host: "h".repeat(200), port: 1 },
+                pairing: PairingState::Paired,
+                secret: SecretStatus::Ok,
+            })
+            .collect();
+        let s = SettingsSnapshot { machines, notifications: true, show_idle: false, show_subagents: false, show_hook_only: false };
+        let whole = settings_line(&s, usize::MAX);
+        assert!(parse(&whole).get("omitted_machines").is_none());
+        let cut = settings_line(&s, whole.len() / 2);
+        assert!(cut.len() < whole.len() / 2);
+        let out = parse(&cut);
+        let kept = out["machines"].as_array().unwrap().len();
+        assert_eq!(kept + out["omitted_machines"].as_u64().unwrap() as usize, 100);
     }
 }
 ```
@@ -1867,7 +2177,7 @@ Put this above the test module:
 //! The socket protocol (omarchy spec §5): JSON, one object per line, UTF-8.
 use acd_client::{
     inbox::PickError,
-    view::{InboxView, MachineEntryView},
+    view::{CardGroup, InboxView, MachineEntryView},
     voice::{ActionEvent, ActionOutcome, NotSentReason},
 };
 use serde::Serialize;
@@ -2015,8 +2325,27 @@ pub fn hello_line(version: &str) -> String {
     json!({"type": "hello", "protocol": PROTOCOL, "service": version}).to_string()
 }
 
-pub fn settings_line(s: &SettingsSnapshot) -> String {
-    serde_json::to_string(s).expect("serializable")
+/// A `settings` line under `max` bytes. Machine entries are small (names
+/// at most 64 characters), so the cut below is for robustness: entries are
+/// left out from the end and counted in `omitted_machines`.
+pub fn settings_line(s: &SettingsSnapshot, max: usize) -> String {
+    let whole = serde_json::to_string(s).expect("serializable");
+    if whole.len() < max {
+        return whole;
+    }
+    let mut cut = s.clone();
+    let mut omitted = 0usize;
+    loop {
+        cut.machines.pop();
+        omitted += 1;
+        let mut v = serde_json::to_value(&cut).expect("serializable");
+        v["omitted_machines"] = omitted.into();
+        let line = v.to_string();
+        if line.len() < max || cut.machines.is_empty() {
+            tracing::warn!(omitted, "settings too large; machines left out");
+            return line;
+        }
+    }
 }
 
 pub fn outcome_line(e: &ActionEvent) -> String {
@@ -2046,49 +2375,83 @@ const KEEP: &[&str] = &[
     "id", "machine_id", "agent_id", "source", "kind", "state", "status", "answer_path", "effect",
     "state_since", "opened_at", "role",
 ];
-/// Agent text is never cut below this many characters.
-const MIN_CAP: usize = 64;
+/// Agent text is cut to no less than this before any card is left out.
+const FIRST_CAP: usize = 256;
+/// The shortest agent text field is ever cut to.
+const MIN_CAP: usize = 32;
 
-/// A `view` line under `max` bytes, newline included (plan D9).
-pub fn view_line(view: &InboxView, max: usize) -> String {
-    let mut v = json!({"type": "view", "view": view});
-    let whole = v.to_string();
+/// Cards a `view` line left out to fit (plan D9). Always present.
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Omitted {
+    pub done: usize,
+    pub working: usize,
+}
+
+/// A `view` line under `max` bytes, newline included (plan D9, spec §5
+/// as amended in Step 6):
+/// 1. the whole view;
+/// 2. agent text cut, longest first, to no less than `FIRST_CAP`;
+/// 3. then Done and idle cards left out, then Working and unknown ones,
+///    except cards with a countdown, counted in `omitted`;
+/// 4. then the remaining (Needs-you) text cut down to `MIN_CAP`.
+///
+/// `None` when even that does not fit: the caller sends nothing and keeps
+/// the previous view. Needs-you cards are never left out.
+pub fn view_line(view: &InboxView, max: usize) -> Option<String> {
+    let encode = |v: &InboxView, o: Omitted| json!({"type": "view", "view": v, "omitted": o});
+    let whole = encode(view, Omitted::default()).to_string();
     if whole.len() < max {
-        return whole;
+        return Some(whole);
     }
-    let fits = |cap: usize, v: &Value| {
+    if let Some(s) = fit_text(&encode(view, Omitted::default()), FIRST_CAP, max) {
+        return Some(s);
+    }
+    let mut v = view.clone();
+    let mut omitted = Omitted::default();
+    let stages: [(&[CardGroup], bool); 2] =
+        [(&[CardGroup::Done, CardGroup::Idle], true), (&[CardGroup::Working, CardGroup::Unknown], false)];
+    for (groups, done) in stages {
+        let before = v.cards.len();
+        v.cards.retain(|c| !groups.contains(&c.group) || c.action.is_some());
+        let n = before - v.cards.len();
+        if done {
+            omitted.done = n;
+        } else {
+            omitted.working = n;
+        }
+        if let Some(s) = fit_text(&encode(&v, omitted), FIRST_CAP, max) {
+            tracing::warn!(done = omitted.done, working = omitted.working, "view too large; cards left out");
+            return Some(s);
+        }
+    }
+    let s = fit_text(&encode(&v, omitted), MIN_CAP, max);
+    if s.is_none() {
+        tracing::error!(cards = v.cards.len(), "view too large even with requests only; not sent");
+    }
+    s
+}
+
+/// The largest cap, at least `floor`, at which `v` fits under `max`.
+fn fit_text(v: &Value, floor: usize, max: usize) -> Option<String> {
+    let fits = |cap: usize| {
         let mut c = v.clone();
         cap_text(&mut c, cap);
         let s = c.to_string();
         (s.len() < max).then_some(s)
     };
-    if let Some(at_min) = fits(MIN_CAP, &v) {
-        let (mut lo, mut hi, mut best) = (MIN_CAP, longest_text(&v).max(MIN_CAP), at_min);
-        while lo < hi {
-            let mid = lo + (hi - lo).div_ceil(2);
-            match fits(mid, &v) {
-                Some(s) => {
-                    lo = mid;
-                    best = s;
-                }
-                None => hi = mid - 1,
+    let mut best = fits(floor)?;
+    let (mut lo, mut hi) = (floor, longest_text(v).max(floor));
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        match fits(mid) {
+            Some(s) => {
+                lo = mid;
+                best = s;
             }
+            None => hi = mid - 1,
         }
-        return best;
     }
-    cap_text(&mut v, MIN_CAP);
-    let mut dropped = 0usize;
-    loop {
-        let s = v.to_string();
-        let Some(cards) = v["view"]["cards"].as_array_mut() else { return s };
-        if s.len() < max || cards.pop().is_none() {
-            if dropped > 0 {
-                tracing::warn!(dropped, "view too large; cards dropped from the end");
-            }
-            return s;
-        }
-        dropped += 1;
-    }
+    Some(best)
 }
 
 fn texts_mut<'a>(v: &'a mut Value, out: &mut Vec<&'a mut String>) {
@@ -2145,14 +2508,31 @@ Run: `cargo test -p acd-inbox --lib` (this updates `Cargo.lock` once)
 Run: `cargo test -p acd-inbox --locked --lib`
 Expected: PASS.
 
-- [ ] **Step 6: Lint and commit**
+- [ ] **Step 6: Amend the spec**
+
+The orchestrator decided (2026-10-12) how oversized views behave. In `docs/superpowers/specs/2026-10-12-omarchy-inbox-design.md` §5, replace the paragraph's last sentence ("The service keeps its own lines under 4 MiB: agent text fields in a view are truncated by the service (with a marker) until the view fits, and the panel shows the marker.") with:
+
+```markdown
+The service keeps its own lines under 4 MiB. To fit a view it first
+truncates agent text fields (with a marker the panel shows); then leaves
+out Done cards, then Working cards (never a card with a countdown), and
+reports them as `"omitted":{"done":n,"working":m}` so the panel shows
+"N not shown"; Needs-you cards are never left out, and if they alone do
+not fit, their text is truncated further down to a minimum per field.
+`settings` is bounded the same way (machines left out are counted in
+`omitted_machines`).
+```
+
+Add to §13 under the re-review paragraph: "Oversized views (2026-10-12, orchestrator): text first, then Done, then Working cards with counts; Needs-you cards are never left out."
+
+- [ ] **Step 7: Lint and commit**
 
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 Expected: no warnings.
 
 ```bash
-git add Cargo.toml Cargo.lock crates/acd-inbox
-git commit -m "acd-inbox: crate, wire types, error codes and view truncation"
+git add Cargo.toml Cargo.lock crates/acd-inbox docs/superpowers/specs/2026-10-12-omarchy-inbox-design.md
+git commit -m "acd-inbox: crate, wire types, error codes and bounded views and settings"
 ```
 
 ---
@@ -2248,7 +2628,7 @@ mod tests {
             InboxOptions { timing: Timing::default(), settings_path: None, client_name: "t".into(), client_version: "0".into() },
         );
         let s = snapshot(&inbox, Prefs { notifications: false });
-        let line = crate::protocol::settings_line(&s);
+        let line = crate::protocol::settings_line(&s, crate::protocol::MAX_LINE);
         assert!(!line.contains(TOKEN) && !line.contains("sha256:"), "secrets in the settings line");
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["machines"][0]["secret"], "ok");
@@ -2414,7 +2794,7 @@ pub fn snapshot(inbox: &Inbox, prefs: Prefs) -> SettingsSnapshot {
 }
 ```
 
-`gethostname` is used in Task 13 (`local_name(&gethostname::gethostname().to_string_lossy())`). The dependency goes in now so this task updates the lock file once.
+`gethostname` is used in Task 15 (`local_name(&gethostname::gethostname().to_string_lossy())`). The dependency goes in now so this task updates the lock file once.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -2433,7 +2813,7 @@ git commit -m "acd-inbox: paths, service prefs, first-run settings and the setti
 
 ---
 
-### Task 6: Socket startup and peer check
+### Task 6: Socket startup, lock validation and peer check
 
 **Execution:** cloud-ok
 
@@ -2446,7 +2826,7 @@ git commit -m "acd-inbox: paths, service prefs, first-run settings and the setti
 - Produces (in `acd_inbox::startup`):
   - `pub enum StartupError { RuntimeDir(PathBuf), AlreadyRunning(PathBuf), NotASocket(PathBuf), Io(PathBuf, std::io::Error) }`.
   - `pub fn check_runtime_dir(dir: &Path) -> Result<(), StartupError>`.
-  - `pub struct LockFile` and `pub fn take_lock(path: &Path) -> Result<LockFile, StartupError>`.
+  - `pub struct LockFile` and `pub fn take_lock(path: &Path) -> Result<LockFile, StartupError>`. The opened descriptor is validated like `crates/acd/src/writer_lock.rs:17`: a regular file owned by the euid, with a looser mode repaired to 0600.
   - `pub fn clear_socket_path(lock: &LockFile, path: &Path) -> Result<(), StartupError>`.
   - `pub struct OwnedSocket`, which removes its path on drop while it is still the same inode.
   - `pub struct Listening { pub listener: tokio::net::UnixListener, pub socket: OwnedSocket, pub lock: LockFile }`.
@@ -2533,6 +2913,20 @@ fn another_uid_is_refused() {
 }
 
 #[tokio::test]
+async fn a_loose_lock_file_is_repaired_and_a_directory_refused() {
+    let (_d, dir) = runtime();
+    let lock = dir.join("acd-inbox.lock");
+    std::fs::write(&lock, "").unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let held = startup::take_lock(&lock).unwrap();
+    assert_eq!(std::fs::metadata(&lock).unwrap().permissions().mode() & 0o7777, 0o600);
+    drop(held);
+    let (_d2, dir2) = runtime();
+    std::fs::create_dir(dir2.join("acd-inbox.lock")).unwrap();
+    assert!(matches!(listen(&dir2), Err(StartupError::Io(..))));
+}
+
+#[tokio::test]
 async fn a_symlinked_lock_path_is_refused() {
     let (_d, dir) = runtime();
     std::os::unix::fs::symlink(dir.join("target"), dir.join("acd-inbox.lock")).unwrap();
@@ -2586,9 +2980,10 @@ pub fn take_lock(path: &Path) -> Result<LockFile, StartupError> {
         .read(true)
         .write(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
         .map_err(io(path))?;
+    validate_lock(&f, path)?;
     // SAFETY: a valid open descriptor; flock has no other preconditions.
     if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let e = std::io::Error::last_os_error();
@@ -2598,6 +2993,22 @@ pub fn take_lock(path: &Path) -> Result<LockFile, StartupError> {
         return Err(StartupError::Io(path.to_path_buf(), e));
     }
     Ok(LockFile(f))
+}
+
+/// Checks the opened descriptor, not the path, as `crates/acd/src/writer_lock.rs`
+/// does: a regular file owned by the euid. A looser mode is repaired.
+fn validate_lock(f: &File, path: &Path) -> Result<(), StartupError> {
+    let m = f.metadata().map_err(io(path))?;
+    if !m.file_type().is_file() || m.uid() != acd_securefs::euid() {
+        return Err(StartupError::Io(
+            path.to_path_buf(),
+            std::io::Error::other("the lock file must be a regular file you own"),
+        ));
+    }
+    if m.mode() & 0o7777 != 0o600 {
+        f.set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(io(path))?;
+    }
+    Ok(())
 }
 
 /// With the lock held: a socket at `path` is removed. Any other file type,
@@ -2691,10 +3102,10 @@ git commit -m "acd-inbox: socket startup contract and peer check"
 **Interfaces:**
 - Consumes: `protocol::outcomes_lost_line`.
 - Produces (in `acd_inbox::outbox`), following D12:
-  - `pub const OUTCOME_QUEUE: usize = 256;`
+  - `pub const OUTCOME_QUEUE: usize = 256; pub const REPLY_QUEUE: usize = 1024;`
   - `pub struct Outbox` with:
-    - `new(hello: String, cap: usize) -> Outbox`
-    - `reply(&self, line: String)`
+    - `new(hello: String, outcome_cap: usize, reply_cap: usize) -> Outbox`
+    - `reply(&self, line: String) -> bool`: false means the reply queue is full; the caller closes the connection (a view that sends faster than it reads)
     - `outcome(&self, line: String)`
     - `outcomes_lost(&self)`
     - `set_settings(&self, line: String)`
@@ -2702,6 +3113,7 @@ git commit -m "acd-inbox: socket startup contract and peer check"
     - `close(&self)`
     - `is_closed(&self) -> bool`
     - `async fn next(&self) -> Option<String>`, which returns `None` once closed
+- Order (D12): `hello`, `settings` and `view` first, in that order. After that the writer takes turns over four classes (replies, outcomes with a pending `outcomes_lost` first, settings, view), resuming after the class it served last, so no class starves another.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2717,12 +3129,13 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), o.next()).await.expect("a line is due").expect("open")
     }
 
-    async fn nothing_due(o: &Outbox) {
-        assert!(tokio::time::timeout(Duration::from_millis(50), o.next()).await.is_err());
+    /// Nothing is due: `next` stays pending. Checked with a poll, not a wait.
+    fn nothing_due(o: &Outbox) {
+        assert_eq!(o.take(), None);
     }
 
-    async fn greeted(cap: usize) -> Outbox {
-        let o = Outbox::new("hello".into(), cap);
+    async fn greeted(outcome_cap: usize, reply_cap: usize) -> Outbox {
+        let o = Outbox::new("hello".into(), outcome_cap, reply_cap);
         o.set_settings("s0".into());
         o.set_view("v0".into());
         for want in ["hello", "s0", "v0"] {
@@ -2733,33 +3146,49 @@ mod tests {
 
     #[tokio::test]
     async fn hello_settings_and_view_come_first_in_that_order() {
-        let o = Outbox::new("hello".into(), OUTCOME_QUEUE);
+        let o = Outbox::new("hello".into(), OUTCOME_QUEUE, REPLY_QUEUE);
         o.set_view("v1".into());
         o.outcome("o1".into());
-        o.reply("r1".into());
+        assert!(o.reply("r1".into()));
         assert_eq!(next(&o).await, "hello");
-        nothing_due(&o).await;
+        nothing_due(&o);
         o.set_settings("s1".into());
-        for want in ["s1", "v1", "r1", "o1"] {
-            assert_eq!(next(&o).await, want);
-        }
+        assert_eq!(next(&o).await, "s1");
+        assert_eq!(next(&o).await, "v1");
+        let mut rest = vec![next(&o).await, next(&o).await];
+        rest.sort();
+        assert_eq!(rest, ["o1", "r1"]);
     }
 
     #[tokio::test]
     async fn views_and_settings_coalesce_to_the_newest() {
-        let o = greeted(OUTCOME_QUEUE).await;
+        let o = greeted(OUTCOME_QUEUE, REPLY_QUEUE).await;
         o.set_view("a".into());
         o.set_settings("x".into());
         o.set_view("b".into());
         o.set_settings("y".into());
-        assert_eq!(next(&o).await, "y");
-        assert_eq!(next(&o).await, "b");
-        nothing_due(&o).await;
+        let mut got = vec![next(&o).await, next(&o).await];
+        got.sort();
+        assert_eq!(got, ["b", "y"]);
+        nothing_due(&o);
+    }
+
+    #[tokio::test]
+    async fn classes_take_turns_so_replies_cannot_starve_outcomes() {
+        let o = greeted(OUTCOME_QUEUE, REPLY_QUEUE).await;
+        for i in 1..=3 {
+            assert!(o.reply(format!("r{i}")));
+            o.outcome(format!("o{i}"));
+        }
+        o.set_settings("s".into());
+        o.set_view("v".into());
+        let got: Vec<String> = [(); 8].iter().map(|_| o.take().unwrap().unwrap()).collect();
+        assert_eq!(got, ["r1", "o1", "s", "v", "r2", "o2", "r3", "o3"]);
     }
 
     #[tokio::test]
     async fn outcomes_are_never_coalesced_and_overflow_sends_one_loss() {
-        let o = greeted(3).await;
+        let o = greeted(3, REPLY_QUEUE).await;
         o.outcome("o1".into());
         o.outcome("o2".into());
         assert_eq!(next(&o).await, "o1");
@@ -2769,27 +3198,35 @@ mod tests {
         }
         assert_eq!(next(&o).await, crate::protocol::outcomes_lost_line());
         assert_eq!(next(&o).await, "x4", "outcomes after the overflow queue again");
-        nothing_due(&o).await;
+        nothing_due(&o);
     }
 
     #[tokio::test]
     async fn an_upstream_lag_drops_the_queue_and_reports_once() {
-        let o = greeted(OUTCOME_QUEUE).await;
+        let o = greeted(OUTCOME_QUEUE, REPLY_QUEUE).await;
         o.outcome("o1".into());
         o.outcomes_lost();
         o.outcomes_lost();
         assert_eq!(next(&o).await, crate::protocol::outcomes_lost_line());
-        nothing_due(&o).await;
+        nothing_due(&o);
+    }
+
+    #[tokio::test]
+    async fn a_full_reply_queue_refuses_more() {
+        let o = greeted(OUTCOME_QUEUE, 2).await;
+        assert!(o.reply("r1".into()));
+        assert!(o.reply("r2".into()));
+        assert!(!o.reply("r3".into()));
     }
 
     #[tokio::test]
     async fn closing_ends_the_stream() {
-        let o = greeted(OUTCOME_QUEUE).await;
-        o.reply("r".into());
+        let o = greeted(OUTCOME_QUEUE, REPLY_QUEUE).await;
+        assert!(o.reply("r".into()));
         o.close();
         assert!(o.is_closed());
         assert_eq!(o.next().await, None);
-        o.reply("ignored".into());
+        assert!(o.reply("ignored".into()), "a reply to a closed view is dropped, not an overflow");
         assert_eq!(o.next().await, None);
     }
 }
@@ -2806,7 +3243,7 @@ Expected: compile error, `cannot find struct Outbox`.
 ```rust
 //! One connection's outgoing lines (omarchy spec §5.1, plan D12): hello,
 //! settings and view first; then replies, outcomes (bounded, never
-//! coalesced) and the newest settings and view (coalesced).
+//! coalesced) and the newest settings and view (coalesced), taking turns.
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
@@ -2815,6 +3252,8 @@ use tokio::sync::Notify;
 use crate::protocol;
 
 pub const OUTCOME_QUEUE: usize = 256;
+/// Replies a view may have unread before it is disconnected.
+pub const REPLY_QUEUE: usize = 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -2832,17 +3271,20 @@ struct State {
     lost: bool,
     settings: Option<String>,
     view: Option<String>,
+    /// The class served last: 0 replies, 1 outcomes, 2 settings, 3 view.
+    last: usize,
     closed: bool,
 }
 
 pub struct Outbox {
     state: Mutex<State>,
     ready: Notify,
-    cap: usize,
+    outcome_cap: usize,
+    reply_cap: usize,
 }
 
 impl Outbox {
-    pub fn new(hello: String, cap: usize) -> Outbox {
+    pub fn new(hello: String, outcome_cap: usize, reply_cap: usize) -> Outbox {
         Outbox {
             state: Mutex::new(State {
                 phase: Phase::Hello,
@@ -2852,10 +3294,12 @@ impl Outbox {
                 lost: false,
                 settings: None,
                 view: None,
+                last: 3,
                 closed: false,
             }),
             ready: Notify::new(),
-            cap,
+            outcome_cap,
+            reply_cap,
         }
     }
 
@@ -2869,14 +3313,26 @@ impl Outbox {
         self.ready.notify_one();
     }
 
-    pub fn reply(&self, line: String) {
-        self.update(|s| s.replies.push_back(line));
+    /// Queues a reply. False when the queue is full: the caller closes the
+    /// connection. A closed outbox drops the reply and returns true.
+    pub fn reply(&self, line: String) -> bool {
+        let mut s = self.state.lock().unwrap();
+        if s.closed {
+            return true;
+        }
+        if s.replies.len() >= self.reply_cap {
+            return false;
+        }
+        s.replies.push_back(line);
+        drop(s);
+        self.ready.notify_one();
+        true
     }
 
     /// Queues an outcome. A full queue is dropped and one `outcomes_lost`
     /// becomes due instead (omarchy spec §5.1).
     pub fn outcome(&self, line: String) {
-        let cap = self.cap;
+        let cap = self.outcome_cap;
         self.update(|s| {
             if s.outcomes.len() >= cap {
                 s.outcomes.clear();
@@ -2946,20 +3402,24 @@ impl Outbox {
             }
             Phase::Open => {}
         }
-        if let Some(r) = s.replies.pop_front() {
-            return Some(Some(r));
+        for step in 1..=4 {
+            let class = (s.last + step) % 4;
+            let line = match class {
+                0 => s.replies.pop_front(),
+                1 if s.lost => {
+                    s.lost = false;
+                    Some(protocol::outcomes_lost_line())
+                }
+                1 => s.outcomes.pop_front(),
+                2 => s.settings.take(),
+                _ => s.view.take(),
+            };
+            if let Some(line) = line {
+                s.last = class;
+                return Some(Some(line));
+            }
         }
-        if s.lost {
-            s.lost = false;
-            return Some(Some(protocol::outcomes_lost_line()));
-        }
-        if let Some(o) = s.outcomes.pop_front() {
-            return Some(Some(o));
-        }
-        if let Some(l) = s.settings.take() {
-            return Some(Some(l));
-        }
-        s.view.take().map(Some)
+        None
     }
 }
 ```
@@ -2976,51 +3436,48 @@ Expected: no warnings.
 
 ```bash
 git add crates/acd-inbox
-git commit -m "acd-inbox: per-connection outbox with greeting order, coalescing and bounded outcomes"
+git commit -m "acd-inbox: per-connection outbox with greeting order, fair turns and bounded queues"
 ```
 
 ---
-### Task 8: Server
+
+### Task 8: Connections: admission, remembered ids and close
 
 **Execution:** cloud-ok
 
 **Files:**
-- Create: `crates/acd-inbox/src/server.rs`, `crates/acd-inbox/src/commands.rs` (envelope only; Task 9 adds the table)
-- Create: `crates/acd-inbox/tests/common/mod.rs`, `crates/acd-inbox/tests/server.rs`
+- Create: `crates/acd-inbox/src/server.rs` (the `Service` core; Task 9 adds the socket side), `crates/acd-inbox/src/commands.rs` (envelope; Task 10 adds the table)
+- Create: `crates/acd-inbox/tests/common/mod.rs`, `crates/acd-inbox/tests/admission.rs`
 - Modify: `crates/acd-inbox/src/lib.rs` (`pub mod commands; pub mod server;`)
 
 **Interfaces:**
 - Consumes:
-  - Task 4: the `protocol` line builders.
+  - Task 1: `Inbox::{cancel_owned, pick_owned}` and `ActionOwner`.
+  - Task 4: the line builders.
   - Task 5: `prefs::{Prefs, snapshot}`.
-  - Task 6: `startup::peer_ok`.
-  - Task 7: `outbox::{Outbox, OUTCOME_QUEUE}`.
-  - Task 1: `Inbox::cancel_owned` and `ActionOwner`.
+  - Task 7: `outbox::{Outbox, OUTCOME_QUEUE, REPLY_QUEUE}`.
 - Produces (in `acd_inbox::server`):
-  - `pub trait SecretControl: Send + Sync { fn unlock(&self) -> Result<(), SecretError>; fn refresh(&self, keys: &[String]); }`. Both methods block.
-  - `pub struct NoKeyring;`: unlock is `Ok`, refresh does nothing.
-  - `#[derive(Clone, Debug)] pub struct ServerOptions { pub max_line: usize, pub write_timeout: Duration, pub outcome_queue: usize, pub version: String }`. `Default` gives 4 MiB, 30 s, 256 and the crate version.
-  - `pub enum CloseReason { Eof, ReadError, Oversize, Malformed, WriteTimeout, WriteError }`, with `tag()`.
+  - `pub trait SecretControl: Send + Sync { fn unlock(&self) -> Result<(), SecretError>; fn refresh(&self, keys: &[String]); }`. Both methods block. `pub struct NoKeyring;` is a control that never locks.
+  - `#[derive(Clone, Debug)] pub struct ServerOptions { pub max_line: usize, pub write_timeout: Duration, pub outcome_queue: usize, pub reply_queue: usize, pub remembered_ids: usize, pub version: String }`. `Default` gives 4 MiB, 30 s, 256, 1024, 1024 and the crate version.
+  - `pub enum CloseReason { Eof, ReadError, Oversize, Malformed, WriteTimeout, WriteError, ReplyOverflow }`, with `tag()`.
   - `pub struct Conn { pub id: u64, pub owner: ActionOwner, pub outbox: Outbox, .. }`.
   - `pub struct Service { pub inbox: Arc<Inbox>, pub opts: ServerOptions, .. }`, with:
     - `Service::new(inbox: Arc<Inbox>, prefs: Prefs, prefs_path: Option<PathBuf>, secrets: Arc<dyn SecretControl>, opts: ServerOptions) -> Arc<Service>`
-    - `spawn(self: &Arc<Self>, listener: UnixListener) -> JoinHandle<()>`
-    - `route_outcomes(self: Arc<Self>, rx: broadcast::Receiver<ActionEvent>)` (async)
-    - `publish_settings(self: &Arc<Self>)` (async)
-    - `panel_open(&self) -> watch::Receiver<bool>`
-    - `prefs(&self) -> watch::Receiver<Prefs>`
-    - `connections(&self) -> usize`
-  - Crate-internal: `close(&self, &Conn, CloseReason)` (D29), `set_panel`, `set_notifications`, `settings_changed`, `secrets`.
-  - `pub async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R, buf: &mut Vec<u8>, max: usize) -> Result<bool, LineError>` and `pub enum LineError { TooLong, Io }`.
-- Produces (in `acd_inbox::commands`): `pub struct Malformed;` and `pub fn handle(svc: &Arc<Service>, conn: &Arc<Conn>, line: &[u8]) -> Result<(), Malformed>` (D10). In this task every well-formed command replies `unsupported`.
+    - `panel_open(&self) -> watch::Receiver<bool>`, `prefs(&self) -> watch::Receiver<Prefs>`, `connections(&self) -> usize`
+    - `close(&self, conn: &Conn, why: CloseReason)` (D29)
+    - `admit<R>(&self, conn: &Conn, f: impl FnOnce() -> R) -> Option<R>` (D31)
+    - crate-internal: `register() -> Arc<Conn>`, `set_panel`, `set_notifications`, `reply(&self, conn, line)`, `secrets`
+    - under `feature = "testing"`: `connect_for_test(&self) -> Arc<Conn>` (a registered connection without a socket), `set_admission_hook(&self, hook: Arc<dyn Fn() + Send + Sync>)`, and `Conn::gate_waiters_for_test(&self) -> usize`
+- Produces (in `acd_inbox::commands`): `pub struct Malformed;` and `pub fn handle(svc: &Arc<Service>, conn: &Arc<Conn>, line: &[u8]) -> Result<(), Malformed>` (D10). In this task `pick`, `answer_text`, `reply` and `panel` are wired, each admitted (D31); every other well-formed command replies `unsupported` until Task 10.
 
-- [ ] **Step 1: Write the test rig**
+The rule this task pins (D31): a connection has one admission lock. Each command that may create an action or set the panel flag runs under it, after checking that the connection is still open. `close` takes the same lock to mark the connection closed and call `cancel_owned`. So an action is either created before the close, and the close cancels it, or it is refused. A `panel(open)` that arrives after the close is refused too.
 
-`crates/acd-inbox/tests/common/mod.rs`:
+- [ ] **Step 1: Write the test rig (inbox part)**
+
+`crates/acd-inbox/tests/common/mod.rs` (Task 9 appends the socket part):
 
 ```rust
 #![allow(dead_code)]
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -3032,14 +3489,7 @@ use acd_client::{
     settings::{EndpointConfig, MachineEntry, MachineSecret, MemorySecrets, SecretStore, Settings},
     view::InboxView,
 };
-use acd_inbox::{
-    prefs::Prefs,
-    server::{NoKeyring, SecretControl, ServerOptions, Service},
-};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 pub const TOKEN: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 
@@ -3058,7 +3508,8 @@ pub fn fast() -> Timing {
     }
 }
 
-/// Countdowns that never end on their own.
+/// Countdowns that never end on their own; tests end them with
+/// `expire_countdowns_for_test`.
 pub fn held() -> Timing {
     Timing { undo: Duration::from_secs(3600), ..fast() }
 }
@@ -3082,6 +3533,692 @@ pub fn box_settings(f: &FakeServer) -> Settings {
         ..Settings::fresh()
     }
 }
+
+/// A fake daemon and a started inbox over `store` (default: memory with
+/// m1's secret). With `agents`, waits for the snapshot to show.
+pub async fn inbox_rig(
+    agents: Option<Vec<Value>>,
+    timing: Timing,
+    store: Option<Box<dyn FnOnce(&FakeServer) -> Arc<dyn SecretStore> + Send>>,
+) -> (FakeServer, Option<FakeConn>, Arc<Inbox>) {
+    let f = FakeServer::start(TOKEN, Identity::Paired).await;
+    let store = match store {
+        Some(make) => make(&f),
+        None => {
+            let s = Arc::new(MemorySecrets::default());
+            s.set("m1", &box_secret(&f)).unwrap();
+            s as Arc<dyn SecretStore>
+        }
+    };
+    let inbox = Inbox::new(
+        box_settings(&f),
+        store,
+        InboxOptions { timing, settings_path: None, client_name: "t".into(), client_version: "0".into() },
+    );
+    inbox.start();
+    let Some(agents) = agents else { return (f, None, inbox) };
+    let c = f.next_connection().await;
+    c.send(json!({"type":"snapshot","epoch":"e1","seq":1,"agents":agents})).await;
+    let want = agents.len();
+    view_until(&inbox, move |v| v.cards.len() >= want && v.machines.iter().any(|m| m.status == MachineStatus::Online)).await;
+    (f, Some(c), inbox)
+}
+
+pub async fn view_until(ib: &Inbox, pred: impl Fn(&InboxView) -> bool) {
+    let mut rx = ib.view();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if pred(&rx.borrow()) {
+                break;
+            }
+            rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the view never matched");
+}
+
+/// Polls `cond` (no fixed sleep) for up to 5 s.
+pub async fn until(what: &str, cond: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !cond() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+/// The first frame of this type the fake daemon received.
+pub async fn frame_of_type(f: &FakeServer, ty: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(v) = f.received().into_iter().find(|v| v["type"] == ty) {
+                return v;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {ty} frame"))
+}
+
+pub fn answers(f: &FakeServer) -> usize {
+    f.received().iter().filter(|v| v["type"] == "request.answer").count()
+}
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+`crates/acd-inbox/tests/admission.rs`:
+
+```rust
+mod common;
+
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::Arc;
+
+use acd_client::voice::ActionOutcome;
+use acd_inbox::commands;
+use acd_inbox::prefs::Prefs;
+use acd_inbox::server::{CloseReason, NoKeyring, ServerOptions, Service};
+use common::*;
+
+async fn service(timing: acd_client::Timing) -> (acd_client::fake::FakeServer, Arc<acd_client::inbox::Inbox>, Arc<Service>) {
+    let (f, _c, inbox) = inbox_rig(Some(vec![pending_agent("a1", "r1")]), timing, None).await;
+    let svc = Service::new(inbox.clone(), Prefs::default(), None, Arc::new(NoKeyring), ServerOptions::default());
+    (f, inbox, svc)
+}
+
+const PICK: &[u8] = br#"{"type":"pick","id":"p1","card":"m1/a1","request":"r1","option":"allow","revision":1}"#;
+
+/// The hook parks every admitted command inside the admission lock until
+/// the `Release` guard is dropped, panics included, so a failed assertion
+/// never leaves a thread parked.
+fn park(svc: &Service) -> (Arc<AtomicBool>, Release) {
+    let inside = Arc::new(AtomicBool::new(false));
+    let released = Arc::new(AtomicBool::new(false));
+    let (i, r) = (inside.clone(), released.clone());
+    svc.set_admission_hook(Arc::new(move || {
+        i.store(true, SeqCst);
+        while !r.load(SeqCst) {
+            std::thread::yield_now();
+        }
+    }));
+    (inside, Release(released))
+}
+
+struct Release(Arc<AtomicBool>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.store(true, SeqCst);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_close_during_a_pick_cancels_the_new_action() {
+    let (f, inbox, svc) = service(held()).await;
+    let mut rx = inbox.action_outcomes();
+    let conn = svc.connect_for_test();
+    let (inside, release) = park(&svc);
+    let picking = {
+        let (svc, conn) = (svc.clone(), conn.clone());
+        tokio::task::spawn_blocking(move || commands::handle(&svc, &conn, PICK).unwrap())
+    };
+    until("the pick inside the admission lock", || inside.load(SeqCst)).await;
+    let closing = {
+        let (svc, conn) = (svc.clone(), conn.clone());
+        tokio::task::spawn_blocking(move || svc.close(&conn, CloseReason::Eof))
+    };
+    until("the close to wait for the admission lock", || conn.gate_waiters_for_test() == 1).await;
+    drop(release);
+    picking.await.unwrap();
+    closing.await.unwrap();
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+    assert_eq!(event.outcome, ActionOutcome::Cancelled, "the action created before the close was cancelled by it");
+    inbox.expire_countdowns_for_test();
+    view_until(&inbox, |v| v.actions.is_empty()).await;
+    assert_eq!(answers(&f), 0);
+}
+
+#[tokio::test]
+async fn a_command_after_close_is_refused() {
+    let (_f, inbox, svc) = service(held()).await;
+    let conn = svc.connect_for_test();
+    svc.close(&conn, CloseReason::Eof);
+    commands::handle(&svc, &conn, PICK).unwrap();
+    commands::handle(&svc, &conn, br#"{"type":"panel","id":"p2","open":true}"#).unwrap();
+    assert!(inbox.stamped_view().view.actions.is_empty() && !*svc.panel_open().borrow());
+    view_until(&inbox, |v| v.actions.is_empty()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_panel_open_cannot_stick_after_close() {
+    let (_f, _inbox, svc) = service(held()).await;
+    let conn = svc.connect_for_test();
+    let (inside, release) = park(&svc);
+    let opening = {
+        let (svc, conn) = (svc.clone(), conn.clone());
+        tokio::task::spawn_blocking(move || {
+            commands::handle(&svc, &conn, br#"{"type":"panel","id":"o1","open":true}"#).unwrap()
+        })
+    };
+    until("panel(open) inside the admission lock", || inside.load(SeqCst)).await;
+    let closing = {
+        let (svc, conn) = (svc.clone(), conn.clone());
+        tokio::task::spawn_blocking(move || svc.close(&conn, CloseReason::Eof))
+    };
+    until("the close to wait", || conn.gate_waiters_for_test() == 1).await;
+    drop(release);
+    opening.await.unwrap();
+    closing.await.unwrap();
+    assert!(!*svc.panel_open().borrow(), "the panel flag of a closed view was left set");
+}
+
+#[tokio::test]
+async fn ids_are_remembered_up_to_a_bound() {
+    let (_f, inbox, _svc) = service(held()).await;
+    let svc = Service::new(
+        inbox.clone(),
+        Prefs::default(),
+        None,
+        Arc::new(NoKeyring),
+        ServerOptions { remembered_ids: 2, ..Default::default() },
+    );
+    let conn = svc.connect_for_test();
+    for id in ["a", "b", "a", "c", "a"] {
+        commands::handle(&svc, &conn, format!(r#"{{"type":"escape","id":"{id}"}}"#).as_bytes()).unwrap();
+    }
+    let codes: Vec<String> = std::iter::from_fn(|| conn.outbox.try_next_for_test())
+        .skip(3) // hello, settings, view
+        .map(|l| serde_json::from_str::<serde_json::Value>(&l).unwrap()["code"].as_str().unwrap_or("").to_owned())
+        .collect();
+    assert_eq!(codes, ["unsupported", "unsupported", "duplicate_id", "unsupported", "unsupported"],
+        "a repeat within the last 2 ids is refused; an older one is forgotten");
+}
+```
+
+`ids_are_remembered_up_to_a_bound` needs `Outbox::try_next_for_test(&self) -> Option<String>` (`#[cfg(any(test, feature = "testing"))]`, returning `self.take().flatten()`); add it to `outbox.rs` in this task. `escape` replies `unsupported` until Task 10, which updates this test's expected codes to `ok`.
+
+- [ ] **Step 3: Run the tests to verify they fail**
+
+Add `pub mod commands; pub mod server;` to `lib.rs`.
+Run: `cargo test -p acd-inbox --locked --test admission`
+Expected: compile error, `could not find server in acd_inbox`.
+
+- [ ] **Step 4: Implement the `Service` core in `server.rs`**
+
+```rust
+//! The service (omarchy spec §5): connections, admission and close. Task 9
+//! adds the socket side.
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use acd_client::{actions::ActionOwner, inbox::Inbox, settings::SecretError};
+use tokio::sync::watch;
+
+use crate::outbox::{OUTCOME_QUEUE, Outbox, REPLY_QUEUE};
+use crate::prefs::{self, Prefs};
+use crate::protocol;
+
+/// What the server needs from the keyring (§9). Both calls block: run them
+/// on `spawn_blocking`.
+pub trait SecretControl: Send + Sync {
+    /// Unlocks the keyring; may wait for the user's prompt.
+    fn unlock(&self) -> Result<(), SecretError>;
+    /// Reads `keys` from the keyring again, replacing cached values and
+    /// cached errors (plan D14).
+    fn refresh(&self, keys: &[String]);
+}
+
+/// A keyring that is never locked: tests, and stores without one.
+pub struct NoKeyring;
+
+impl SecretControl for NoKeyring {
+    fn unlock(&self) -> Result<(), SecretError> {
+        Ok(())
+    }
+    fn refresh(&self, _: &[String]) {}
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerOptions {
+    pub max_line: usize,
+    pub write_timeout: Duration,
+    pub outcome_queue: usize,
+    pub reply_queue: usize,
+    /// Command ids remembered per connection for duplicate detection.
+    pub remembered_ids: usize,
+    pub version: String,
+}
+
+impl Default for ServerOptions {
+    fn default() -> Self {
+        ServerOptions {
+            max_line: protocol::MAX_LINE,
+            write_timeout: Duration::from_secs(30),
+            outcome_queue: OUTCOME_QUEUE,
+            reply_queue: REPLY_QUEUE,
+            remembered_ids: 1024,
+            version: env!("CARGO_PKG_VERSION").into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseReason {
+    Eof,
+    ReadError,
+    Oversize,
+    Malformed,
+    WriteTimeout,
+    WriteError,
+    ReplyOverflow,
+}
+
+impl CloseReason {
+    pub fn tag(self) -> &'static str {
+        match self {
+            CloseReason::Eof => "eof",
+            CloseReason::ReadError => "read_error",
+            CloseReason::Oversize => "oversize",
+            CloseReason::Malformed => "malformed",
+            CloseReason::WriteTimeout => "write_timeout",
+            CloseReason::WriteError => "write_error",
+            CloseReason::ReplyOverflow => "reply_overflow",
+        }
+    }
+}
+
+/// The last `cap` command ids of a connection (plan D10).
+pub(crate) struct RecentIds {
+    order: VecDeque<String>,
+    set: HashSet<String>,
+    cap: usize,
+}
+
+impl RecentIds {
+    fn new(cap: usize) -> Self {
+        RecentIds { order: VecDeque::new(), set: HashSet::new(), cap }
+    }
+    /// False when `id` is among the remembered ones.
+    pub(crate) fn insert(&mut self, id: &str) -> bool {
+        if self.set.contains(id) {
+            return false;
+        }
+        if self.order.len() >= self.cap
+            && let Some(old) = self.order.pop_front()
+        {
+            self.set.remove(&old);
+        }
+        self.order.push_back(id.to_owned());
+        self.set.insert(id.to_owned());
+        true
+    }
+}
+
+struct ConnState {
+    closed: bool,
+    ids: RecentIds,
+}
+
+/// One view connection.
+pub struct Conn {
+    pub id: u64,
+    pub owner: ActionOwner,
+    pub outbox: Outbox,
+    /// The admission lock (plan D31).
+    gate: Mutex<ConnState>,
+    waiting: AtomicUsize,
+    pub(crate) shut: watch::Sender<bool>,
+}
+
+impl Conn {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ConnState> {
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let g = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        g
+    }
+
+    /// False when the id was seen among the remembered ones. Refused (and
+    /// so true) once closed: nothing is replied then anyway.
+    pub(crate) fn remember(&self, id: &str) -> bool {
+        self.lock().ids.insert(id)
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn gate_waiters_for_test(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
+    }
+}
+
+/// Connections and the newest published lines, under one lock, so a new
+/// connection is seeded and a broadcast reaches it without a gap or an
+/// older line overwriting a newer one (plan D32).
+pub(crate) struct Registry {
+    pub(crate) conns: HashMap<u64, Arc<Conn>>,
+    pub(crate) settings: (u64, String),
+    pub(crate) view: String,
+}
+
+pub struct Service {
+    pub inbox: Arc<Inbox>,
+    pub(crate) secrets: Arc<dyn SecretControl>,
+    prefs_tx: watch::Sender<Prefs>,
+    prefs_path: Option<PathBuf>,
+    pub(crate) registry: Mutex<Registry>,
+    pub(crate) settings_gen: AtomicU64,
+    next_conn: AtomicU64,
+    panels: Mutex<HashSet<u64>>,
+    panel_tx: watch::Sender<bool>,
+    #[cfg(feature = "testing")]
+    hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    pub opts: ServerOptions,
+}
+
+impl Service {
+    pub fn new(
+        inbox: Arc<Inbox>,
+        prefs: Prefs,
+        prefs_path: Option<PathBuf>,
+        secrets: Arc<dyn SecretControl>,
+        opts: ServerOptions,
+    ) -> Arc<Service> {
+        let settings = protocol::settings_line(&prefs::snapshot(&inbox, prefs), opts.max_line);
+        let view = protocol::view_line(&inbox.view().borrow().clone(), opts.max_line).unwrap_or_default();
+        Arc::new(Service {
+            inbox,
+            secrets,
+            prefs_tx: watch::Sender::new(prefs),
+            prefs_path,
+            registry: Mutex::new(Registry { conns: HashMap::new(), settings: (0, settings), view }),
+            settings_gen: AtomicU64::new(0),
+            next_conn: AtomicU64::new(1),
+            panels: Mutex::new(HashSet::new()),
+            panel_tx: watch::Sender::new(false),
+            #[cfg(feature = "testing")]
+            hook: Mutex::new(None),
+            opts,
+        })
+    }
+
+    /// True while any view reports its panel open (§8).
+    pub fn panel_open(&self) -> watch::Receiver<bool> {
+        self.panel_tx.subscribe()
+    }
+
+    pub fn prefs(&self) -> watch::Receiver<Prefs> {
+        self.prefs_tx.subscribe()
+    }
+
+    pub fn connections(&self) -> usize {
+        self.registry.lock().unwrap().conns.len()
+    }
+
+    /// A new connection, registered (and so subscribed to outcomes, §5.3)
+    /// and seeded with `hello`, the newest `settings` and the newest `view`
+    /// under the registry lock.
+    pub(crate) fn register(&self) -> Arc<Conn> {
+        let id = self.next_conn.fetch_add(1, Ordering::Relaxed);
+        let conn = Arc::new(Conn {
+            id,
+            owner: ActionOwner(id),
+            outbox: Outbox::new(protocol::hello_line(&self.opts.version), self.opts.outcome_queue, self.opts.reply_queue),
+            gate: Mutex::new(ConnState { closed: false, ids: RecentIds::new(self.opts.remembered_ids) }),
+            waiting: AtomicUsize::new(0),
+            shut: watch::Sender::new(false),
+        });
+        let mut reg = self.registry.lock().unwrap();
+        conn.outbox.set_settings(reg.settings.1.clone());
+        conn.outbox.set_view(reg.view.clone());
+        reg.conns.insert(id, conn.clone());
+        conn
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn connect_for_test(&self) -> Arc<Conn> {
+        self.register()
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn set_admission_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Runs `f` under the connection's admission lock if it is still open
+    /// (plan D31). `f` must not call `close` or `admit`.
+    pub fn admit<R>(&self, conn: &Conn, f: impl FnOnce() -> R) -> Option<R> {
+        let state = conn.lock();
+        if state.closed {
+            return None;
+        }
+        #[cfg(feature = "testing")]
+        if let Some(hook) = self.hook.lock().unwrap().clone() {
+            hook();
+        }
+        let r = f();
+        drop(state);
+        Some(r)
+    }
+
+    /// Queues a reply; a view with too many unread replies is closed.
+    pub(crate) fn reply(&self, conn: &Conn, line: String) {
+        if !conn.outbox.reply(line) {
+            self.close(conn, CloseReason::ReplyOverflow);
+        }
+    }
+
+    /// Called only inside `admit`.
+    pub(crate) fn set_panel(&self, conn: u64, open: bool) {
+        let mut panels = self.panels.lock().unwrap();
+        if open {
+            panels.insert(conn);
+        } else {
+            panels.remove(&conn);
+        }
+        let any = !panels.is_empty();
+        self.panel_tx.send_if_modified(|v| std::mem::replace(v, any) != any);
+    }
+
+    pub(crate) fn set_notifications(&self, on: bool) -> std::io::Result<()> {
+        let mut p = *self.prefs_tx.borrow();
+        p.notifications = on;
+        if let Some(path) = &self.prefs_path {
+            p.save(path)?;
+        }
+        self.prefs_tx.send_replace(p);
+        Ok(())
+    }
+
+    /// Ends a connection, once (plan D29, D31). Under the admission lock it
+    /// is marked closed, its unsent countdowns are cancelled (§6) and its
+    /// panel flag is cleared; then it leaves the registry.
+    pub fn close(&self, conn: &Conn, why: CloseReason) {
+        let cancelled = {
+            let mut state = conn.lock();
+            if state.closed {
+                return;
+            }
+            state.closed = true;
+            let cancelled = self.inbox.cancel_owned(conn.owner);
+            self.set_panel(conn.id, false);
+            cancelled
+        };
+        self.registry.lock().unwrap().conns.remove(&conn.id);
+        conn.outbox.close();
+        conn.shut.send_replace(true);
+        tracing::info!(conn = conn.id, reason = why.tag(), cancelled, "connection closed");
+    }
+}
+```
+
+Lock order: a connection's admission lock, then the inbox's `inner` (inside `pick_owned` and `cancel_owned`) or `panels`. Nothing takes them the other way round.
+
+- [ ] **Step 5: Implement the envelope in `commands.rs`**
+
+```rust
+//! Commands from views (omarchy spec §5.2, plan D10, D11, D31).
+use std::sync::Arc;
+
+use acd_client::inbox::PickError;
+use serde_json::{Map, Value};
+
+use crate::protocol::{self, ErrorCode};
+use crate::server::{Conn, Service};
+
+/// The line is not a JSON object with a string `type` and a string `id` of
+/// 1 to 64 bytes. The connection closes (§11).
+#[derive(Debug)]
+pub struct Malformed;
+
+/// The command types this service knows. A view's `type` text is logged
+/// only when it is one of these; anything else as "unknown".
+const KNOWN: &[&str] = &[
+    "pick", "answer_text", "reply", "cancel", "escape", "mark_seen", "set_show", "pair", "rename_machine",
+    "remove_machine", "retry_machine", "unlock_secrets", "set_notifications", "panel",
+];
+
+pub fn handle(svc: &Arc<Service>, conn: &Arc<Conn>, line: &[u8]) -> Result<(), Malformed> {
+    let Ok(Value::Object(m)) = serde_json::from_slice::<Value>(line) else {
+        return Err(Malformed);
+    };
+    let (Some(ty), Some(id)) = (m.get("type").and_then(Value::as_str), m.get("id").and_then(Value::as_str)) else {
+        return Err(Malformed);
+    };
+    if id.is_empty() || id.len() > protocol::MAX_ID {
+        return Err(Malformed);
+    }
+    let tag = KNOWN.iter().copied().find(|k| *k == ty).unwrap_or("unknown");
+    tracing::debug!(conn = conn.id, command = tag, "command");
+    if !conn.remember(id) {
+        svc.reply(conn, protocol::error_line(id, ErrorCode::DuplicateId));
+        return Ok(());
+    }
+    dispatch(svc, conn, tag, id, &m);
+    Ok(())
+}
+
+pub(crate) fn line_for(id: &str, r: Result<Value, ErrorCode>) -> String {
+    match r {
+        Ok(v) => protocol::ok_line(id, v),
+        Err(c) => protocol::error_line(id, c),
+    }
+}
+
+pub(crate) fn s<'a>(m: &'a Map<String, Value>, k: &str) -> Result<&'a str, ErrorCode> {
+    m.get(k).and_then(Value::as_str).ok_or(ErrorCode::BadRequest)
+}
+
+pub(crate) fn n(m: &Map<String, Value>, k: &str) -> Result<u64, ErrorCode> {
+    m.get(k).and_then(Value::as_u64).ok_or(ErrorCode::BadRequest)
+}
+
+pub(crate) fn b(m: &Map<String, Value>, k: &str) -> Result<bool, ErrorCode> {
+    m.get(k).and_then(Value::as_bool).ok_or(ErrorCode::BadRequest)
+}
+
+fn pick_err(e: PickError) -> ErrorCode {
+    protocol::pick_error_code(&e)
+}
+
+/// Inline commands run under the admission lock; a closed connection runs
+/// nothing and gets no reply (plan D31).
+fn dispatch(svc: &Arc<Service>, conn: &Arc<Conn>, tag: &'static str, id: &str, m: &Map<String, Value>) {
+    let Some(r) = svc.admit(conn, || admitted(svc, conn, tag, m)) else { return };
+    svc.reply(conn, line_for(id, r));
+}
+
+fn admitted(svc: &Arc<Service>, conn: &Conn, tag: &str, m: &Map<String, Value>) -> Result<Value, ErrorCode> {
+    let ib = &svc.inbox;
+    match tag {
+        "pick" => ib
+            .pick_owned(conn.owner, s(m, "card")?, s(m, "request")?, s(m, "option")?, n(m, "revision")?)
+            .map(Value::String)
+            .map_err(pick_err),
+        "answer_text" => ib
+            .answer_text_owned(conn.owner, s(m, "card")?, s(m, "request")?, n(m, "revision")?, s(m, "text")?.to_owned())
+            .map(Value::String)
+            .map_err(pick_err),
+        "reply" => ib
+            .reply_owned(conn.owner, s(m, "card")?, s(m, "text")?.to_owned())
+            .map(Value::String)
+            .map_err(pick_err),
+        "panel" => {
+            svc.set_panel(conn.id, b(m, "open")?);
+            Ok(Value::Null)
+        }
+        _ => Err(ErrorCode::Unsupported),
+    }
+}
+```
+
+In `outbox.rs`, add the test accessor:
+
+```rust
+    /// Test hook: the next due line without waiting.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn try_next_for_test(&self) -> Option<String> {
+        self.take().flatten()
+    }
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `cargo test -p acd-inbox --locked --test admission`
+Expected: PASS. Then remove the admission lock from `admit` and `close` as a check: `a_close_during_a_pick_cancels_the_new_action` and `a_late_panel_open_cannot_stick_after_close` must fail. Restore the lock.
+
+- [ ] **Step 7: Lint and commit**
+
+Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
+Expected: no warnings.
+
+```bash
+git add crates/acd-inbox
+git commit -m "acd-inbox: connection admission serialized with close, bounded ids"
+```
+
+---
+
+### Task 9: Server: sockets, readers, writers and broadcasts
+
+**Execution:** cloud-ok
+
+**Files:**
+- Modify: `crates/acd-inbox/src/server.rs` (socket side)
+- Modify: `crates/acd-inbox/tests/common/mod.rs` (socket rig and the `View` client)
+- Create: `crates/acd-inbox/tests/server.rs`
+
+**Interfaces:**
+- Consumes: Task 6's `startup::peer_ok`; Task 8's `Service` core, `Registry`, `register`, `close`, `reply`; Task 4's `view_line` (returns `Option`) and `settings_line`.
+- Produces (on `Service`):
+  - `spawn(self: &Arc<Self>, listener: UnixListener) -> JoinHandle<()>`.
+  - `route_outcomes(self: Arc<Self>, rx: broadcast::Receiver<ActionEvent>)` (async).
+  - `publish_settings(self: &Arc<Self>)` (async) and `settings_changed(self: &Arc<Self>)`.
+- Produces (in `acd_inbox::server`): `pub async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R, buf: &mut Vec<u8>, max: usize) -> Result<bool, LineError>` and `pub enum LineError { TooLong, Io }`.
+- Publication (D32):
+  - Views have one owner, the broadcaster task. It encodes each new `InboxView` once and stores and queues it under the registry lock. A `None` from `view_line` keeps the previous line.
+  - Settings carry a generation, taken before the snapshot is computed. A publication older than the stored one is dropped.
+  - A new connection is seeded from the registry under the same lock, so it can never get an older line after a newer one.
+
+- [ ] **Step 1: Extend the test rig**
+
+Append to `crates/acd-inbox/tests/common/mod.rs`:
+
+```rust
+use std::path::{Path, PathBuf};
+
+use acd_inbox::{
+    prefs::Prefs,
+    server::{NoKeyring, SecretControl, ServerOptions, Service},
+};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 pub type MakeSecrets = Box<dyn FnOnce(&FakeServer) -> (Arc<dyn SecretStore>, Arc<dyn SecretControl>) + Send>;
 
@@ -3125,71 +4262,24 @@ pub async fn rig(agents: Vec<Value>, timing: Timing) -> Rig {
 }
 
 pub async fn rig_with(o: RigOptions) -> Rig {
-    let f = FakeServer::start(TOKEN, Identity::Paired).await;
-    let (store, control) = match o.secrets {
-        Some(make) => make(&f),
-        None => {
-            let s = Arc::new(MemorySecrets::default());
-            s.set("m1", &box_secret(&f)).unwrap();
-            (s as Arc<dyn SecretStore>, o.control)
-        }
-    };
-    let inbox = Inbox::new(
-        box_settings(&f),
-        store,
-        InboxOptions { timing: o.timing, settings_path: None, client_name: "t".into(), client_version: "0".into() },
-    );
-    inbox.start();
-    let c = if o.connect {
-        let c = f.next_connection().await;
-        c.send(json!({"type":"snapshot","epoch":"e1","seq":1,"agents":o.agents})).await;
-        let want = o.agents.len();
-        view_until(&inbox, move |v| {
-            v.cards.len() >= want && v.machines.iter().any(|m| m.status == MachineStatus::Online)
-        })
-        .await;
-        Some(c)
-    } else {
-        None
-    };
+    type MakeStore = Box<dyn FnOnce(&FakeServer) -> Arc<dyn SecretStore> + Send>;
+    let slot: Arc<std::sync::Mutex<Option<Arc<dyn SecretControl>>>> = Arc::new(std::sync::Mutex::new(None));
+    let make: Option<MakeStore> = o.secrets.map(|make| {
+        let out = slot.clone();
+        Box::new(move |f: &FakeServer| {
+            let (store, control) = make(f);
+            *out.lock().unwrap() = Some(control);
+            store
+        }) as MakeStore
+    });
+    let (f, c, inbox) = inbox_rig(o.connect.then_some(o.agents), o.timing, make).await;
+    let control = slot.lock().unwrap().take().unwrap_or(o.control);
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("s.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let svc = Service::new(inbox.clone(), Prefs::default(), None, control, o.server);
     let server = svc.spawn(listener);
     Rig { f, c, inbox, svc, socket, server, _dir: dir }
-}
-
-pub async fn view_until(ib: &Inbox, pred: impl Fn(&InboxView) -> bool) {
-    let mut rx = ib.view();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if pred(&rx.borrow()) {
-                break;
-            }
-            rx.changed().await.unwrap();
-        }
-    })
-    .await
-    .expect("the view never matched");
-}
-
-/// The first frame of this type the fake daemon received.
-pub async fn frame_of_type(f: &FakeServer, ty: &str) -> Value {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(v) = f.received().into_iter().find(|v| v["type"] == ty) {
-                return v;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("no {ty} frame"))
-}
-
-pub fn answers(f: &FakeServer) -> usize {
-    f.received().iter().filter(|v| v["type"] == "request.answer").count()
 }
 
 /// A view: a socket client that speaks the JSON-lines protocol.
@@ -3291,6 +4381,7 @@ async fn a_view_gets_hello_settings_and_view_in_order() {
     assert_eq!(settings["machines"][0]["secret"], "ok");
     assert_eq!(settings["notifications"], true);
     assert_eq!(view["view"]["cards"][0]["key"], "m1/a1");
+    assert_eq!(view["omitted"], json!({"done":0,"working":0}));
 }
 
 #[tokio::test]
@@ -3344,13 +4435,7 @@ async fn a_view_that_stops_reading_is_disconnected_and_its_countdowns_cancelled(
     let mut watcher = View::connect(&rig.socket).await;
     watcher.greeting().await; // connection 1 reads everything
     let stalled = tokio::net::UnixStream::connect(&rig.socket).await.unwrap(); // connection 2 never reads
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while rig.svc.connections() < 2 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    until("the second connection", || rig.svc.connections() == 2).await;
     let id = rig.inbox.pick_owned(ActionOwner(2), "m1/a1", "r1", "allow", 1).unwrap();
     let o = watcher.recv_until(|m| m["type"] == "outcome" && m["action"] == id.as_str()).await;
     assert_eq!(o["result"]["kind"], "cancelled");
@@ -3422,12 +4507,15 @@ async fn a_lagged_outcome_stream_tells_every_view() {
 }
 ```
 
-Unit tests for `read_line`, at the end of `server.rs`:
+Unit tests at the end of `server.rs`:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acd_client::{inbox::InboxOptions, settings::{MemorySecrets, Settings}};
+
+
 
     #[tokio::test]
     async fn lines_are_split_capped_and_a_final_partial_line_is_dropped() {
@@ -3445,193 +4533,47 @@ mod tests {
         let mut r = BufReader::with_capacity(2, &b"123456"[..]);
         assert_eq!(read_line(&mut r, &mut buf, 5).await, Err(LineError::TooLong), "without a newline too");
     }
+
+    #[test]
+    fn an_older_settings_publication_never_overwrites_a_newer_one() {
+        let inbox = Inbox::new(
+            Settings { machines: vec![], ..Settings::fresh() },
+            Arc::new(MemorySecrets::default()),
+            InboxOptions { timing: Default::default(), settings_path: None, client_name: "t".into(), client_version: "0".into() },
+        );
+        let svc = Service::new(inbox, Prefs::default(), None, Arc::new(NoKeyring), ServerOptions::default());
+        let conn = svc.register();
+        svc.store_settings(2, "new".into());
+        svc.store_settings(1, "old".into());
+        assert_eq!(svc.registry.lock().unwrap().settings, (2, "new".to_owned()));
+        let lines: Vec<String> = std::iter::from_fn(|| conn.outbox.try_next_for_test()).collect();
+        assert!(lines.contains(&"new".to_owned()) && !lines.contains(&"old".to_owned()));
+    }
 }
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Add `pub mod commands; pub mod server;` to `lib.rs`.
 Run: `cargo test -p acd-inbox --locked --test server`
-Expected: compile errors, `could not find server in acd_inbox`.
+Expected: compile error, `no method named spawn`.
 
-- [ ] **Step 4: Implement the envelope in `commands.rs`**
+- [ ] **Step 4: Implement the socket side in `server.rs`**
 
-```rust
-//! Commands from views (omarchy spec §5.2, plan D10, D11).
-use std::sync::Arc;
-
-use serde_json::{Map, Value};
-
-use crate::protocol::{self, ErrorCode};
-use crate::server::{Conn, Service};
-
-/// The line is not a JSON object with a string `type` and a string `id` of
-/// 1 to 64 bytes. The connection closes (§11).
-#[derive(Debug)]
-pub struct Malformed;
-
-/// The command types this service knows. A view's `type` text is logged
-/// only when it is one of these, as itself; anything else as "unknown".
-const KNOWN: &[&str] = &[
-    "pick", "answer_text", "reply", "cancel", "escape", "mark_seen", "set_show", "pair", "rename_machine",
-    "remove_machine", "retry_machine", "unlock_secrets", "set_notifications", "panel",
-];
-
-pub fn handle(svc: &Arc<Service>, conn: &Arc<Conn>, line: &[u8]) -> Result<(), Malformed> {
-    let Ok(Value::Object(m)) = serde_json::from_slice::<Value>(line) else {
-        return Err(Malformed);
-    };
-    let (Some(ty), Some(id)) = (m.get("type").and_then(Value::as_str), m.get("id").and_then(Value::as_str)) else {
-        return Err(Malformed);
-    };
-    if id.is_empty() || id.len() > protocol::MAX_ID {
-        return Err(Malformed);
-    }
-    let tag = KNOWN.iter().copied().find(|k| *k == ty).unwrap_or("unknown");
-    tracing::debug!(conn = conn.id, command = tag, "command");
-    if !conn.ids.lock().unwrap().insert(id.to_owned()) {
-        conn.outbox.reply(protocol::error_line(id, ErrorCode::DuplicateId));
-        return Ok(());
-    }
-    dispatch(svc, conn, tag, id, &m);
-    Ok(())
-}
-
-fn dispatch(_svc: &Arc<Service>, conn: &Arc<Conn>, _tag: &str, id: &str, _m: &Map<String, Value>) {
-    conn.outbox.reply(protocol::error_line(id, ErrorCode::Unsupported));
-}
-```
-
-- [ ] **Step 5: Implement `server.rs`**
-
-Put this above the unit test module:
+Add to the imports:
 
 ```rust
-//! The socket server (omarchy spec §5): accept, peer check, a reader and a
-//! writer per connection, view and outcome broadcasts, and one `close`.
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use acd_client::{actions::ActionOwner, inbox::Inbox, settings::SecretError, voice::ActionEvent};
+use acd_client::voice::ActionEvent;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::broadcast;
 
-use crate::outbox::{OUTCOME_QUEUE, Outbox};
-use crate::prefs::{self, Prefs};
-use crate::{commands, protocol, startup};
+use crate::{commands, startup};
+```
 
-/// What the server needs from the keyring (§9). Both calls block: run them
-/// on `spawn_blocking`.
-pub trait SecretControl: Send + Sync {
-    /// Unlocks the keyring; may wait for the user's prompt.
-    fn unlock(&self) -> Result<(), SecretError>;
-    /// Drops cached values for `keys` and reads them again.
-    fn refresh(&self, keys: &[String]);
-}
+Add to `impl Service`:
 
-/// A keyring that is never locked: tests, and stores without one.
-pub struct NoKeyring;
-
-impl SecretControl for NoKeyring {
-    fn unlock(&self) -> Result<(), SecretError> {
-        Ok(())
-    }
-    fn refresh(&self, _: &[String]) {}
-}
-
-#[derive(Clone, Debug)]
-pub struct ServerOptions {
-    pub max_line: usize,
-    pub write_timeout: Duration,
-    pub outcome_queue: usize,
-    pub version: String,
-}
-
-impl Default for ServerOptions {
-    fn default() -> Self {
-        ServerOptions {
-            max_line: protocol::MAX_LINE,
-            write_timeout: Duration::from_secs(30),
-            outcome_queue: OUTCOME_QUEUE,
-            version: env!("CARGO_PKG_VERSION").into(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CloseReason {
-    Eof,
-    ReadError,
-    Oversize,
-    Malformed,
-    WriteTimeout,
-    WriteError,
-}
-
-impl CloseReason {
-    pub fn tag(self) -> &'static str {
-        match self {
-            CloseReason::Eof => "eof",
-            CloseReason::ReadError => "read_error",
-            CloseReason::Oversize => "oversize",
-            CloseReason::Malformed => "malformed",
-            CloseReason::WriteTimeout => "write_timeout",
-            CloseReason::WriteError => "write_error",
-        }
-    }
-}
-
-/// One view connection.
-pub struct Conn {
-    pub id: u64,
-    pub owner: ActionOwner,
-    pub outbox: Outbox,
-    closed: AtomicBool,
-    shut: watch::Sender<bool>,
-    pub(crate) ids: Mutex<HashSet<String>>,
-}
-
-pub struct Service {
-    pub inbox: Arc<Inbox>,
-    pub(crate) secrets: Arc<dyn SecretControl>,
-    prefs_tx: watch::Sender<Prefs>,
-    prefs_path: Option<PathBuf>,
-    conns: Mutex<HashMap<u64, Arc<Conn>>>,
-    next_conn: AtomicU64,
-    panels: Mutex<HashSet<u64>>,
-    panel_tx: watch::Sender<bool>,
-    settings_line: Mutex<String>,
-    pub opts: ServerOptions,
-}
-
-impl Service {
-    pub fn new(
-        inbox: Arc<Inbox>,
-        prefs: Prefs,
-        prefs_path: Option<PathBuf>,
-        secrets: Arc<dyn SecretControl>,
-        opts: ServerOptions,
-    ) -> Arc<Service> {
-        let settings_line = protocol::settings_line(&prefs::snapshot(&inbox, prefs));
-        Arc::new(Service {
-            inbox,
-            secrets,
-            prefs_tx: watch::Sender::new(prefs),
-            prefs_path,
-            conns: Mutex::new(HashMap::new()),
-            next_conn: AtomicU64::new(1),
-            panels: Mutex::new(HashSet::new()),
-            panel_tx: watch::Sender::new(false),
-            settings_line: Mutex::new(settings_line),
-            opts,
-        })
-    }
-
+```rust
     /// Serves `listener`. The view and outcome broadcasters stop when the
     /// returned task is aborted.
     pub fn spawn(self: &Arc<Self>, listener: UnixListener) -> tokio::task::JoinHandle<()> {
@@ -3646,60 +4588,38 @@ impl Service {
                     Ok((stream, _)) => me.accept(stream),
                     Err(e) => {
                         tracing::warn!(kind = ?e.kind(), "accept failed");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::task::yield_now().await;
                     }
                 }
             }
         })
     }
 
-    /// True while any view reports its panel open (§8).
-    pub fn panel_open(&self) -> watch::Receiver<bool> {
-        self.panel_tx.subscribe()
-    }
-
-    pub fn prefs(&self) -> watch::Receiver<Prefs> {
-        self.prefs_tx.subscribe()
-    }
-
-    pub fn connections(&self) -> usize {
-        self.conns.lock().unwrap().len()
-    }
-
-    pub(crate) fn set_panel(&self, conn: u64, open: bool) {
-        let mut panels = self.panels.lock().unwrap();
-        if open {
-            panels.insert(conn);
-        } else {
-            panels.remove(&conn);
-        }
-        let any = !panels.is_empty();
-        self.panel_tx.send_if_modified(|v| std::mem::replace(v, any) != any);
-    }
-
-    pub(crate) fn set_notifications(&self, on: bool) -> std::io::Result<()> {
-        let mut p = *self.prefs_tx.borrow();
-        p.notifications = on;
-        if let Some(path) = &self.prefs_path {
-            p.save(path)?;
-        }
-        self.prefs_tx.send_replace(p);
-        Ok(())
-    }
-
-    /// Recomputes `settings` and queues it for every view.
+    /// Recomputes `settings` off the async workers and publishes it unless
+    /// a newer publication got there first (plan D32).
     pub async fn publish_settings(self: &Arc<Self>) {
+        let generation = self.settings_gen.fetch_add(1, Ordering::SeqCst) + 1;
         let me = self.clone();
         let Ok(line) = tokio::task::spawn_blocking(move || {
             let p = *me.prefs_tx.borrow();
-            protocol::settings_line(&prefs::snapshot(&me.inbox, p))
+            protocol::settings_line(&prefs::snapshot(&me.inbox, p), me.opts.max_line)
         })
         .await
         else {
             return;
         };
-        *self.settings_line.lock().unwrap() = line.clone();
-        self.each(|c| c.outbox.set_settings(line.clone()));
+        self.store_settings(generation, line);
+    }
+
+    pub(crate) fn store_settings(&self, generation: u64, line: String) {
+        let mut reg = self.registry.lock().unwrap();
+        if generation <= reg.settings.0 {
+            return;
+        }
+        reg.settings = (generation, line.clone());
+        for c in reg.conns.values() {
+            c.outbox.set_settings(line.clone());
+        }
     }
 
     /// `publish_settings` in the background.
@@ -3708,18 +4628,18 @@ impl Service {
         tokio::spawn(async move { me.publish_settings().await });
     }
 
-    fn each(&self, f: impl Fn(&Conn)) {
-        for c in self.conns.lock().unwrap().values() {
-            f(c);
-        }
-    }
-
+    /// The only publisher of views (plan D32).
     async fn broadcast_views(self: Arc<Self>) {
         let mut rx = self.inbox.view();
         loop {
             let view = rx.borrow_and_update().clone();
-            let line = protocol::view_line(&view, self.opts.max_line);
-            self.each(|c| c.outbox.set_view(line.clone()));
+            if let Some(line) = protocol::view_line(&view, self.opts.max_line) {
+                let mut reg = self.registry.lock().unwrap();
+                reg.view = line.clone();
+                for c in reg.conns.values() {
+                    c.outbox.set_view(line.clone());
+                }
+            }
             if rx.changed().await.is_err() {
                 return;
             }
@@ -3733,11 +4653,15 @@ impl Service {
             match rx.recv().await {
                 Ok(event) => {
                     let line = protocol::outcome_line(&event);
-                    self.each(|c| c.outbox.outcome(line.clone()));
+                    for c in self.registry.lock().unwrap().conns.values() {
+                        c.outbox.outcome(line.clone());
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "outcome stream lagged");
-                    self.each(|c| c.outbox.outcomes_lost());
+                    for c in self.registry.lock().unwrap().conns.values() {
+                        c.outbox.outcomes_lost();
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
             }
@@ -3749,21 +4673,8 @@ impl Service {
             tracing::warn!("connection refused: the peer is another user");
             return;
         }
-        let id = self.next_conn.fetch_add(1, Ordering::Relaxed);
-        let conn = Arc::new(Conn {
-            id,
-            owner: ActionOwner(id),
-            outbox: Outbox::new(protocol::hello_line(&self.opts.version), self.opts.outcome_queue),
-            closed: AtomicBool::new(false),
-            shut: watch::Sender::new(false),
-            ids: Mutex::new(HashSet::new()),
-        });
-        // Registered, and so subscribed to outcomes, before hello (§5.3).
-        self.conns.lock().unwrap().insert(id, conn.clone());
-        conn.outbox.set_settings(self.settings_line.lock().unwrap().clone());
-        let view = self.inbox.view().borrow().clone();
-        conn.outbox.set_view(protocol::view_line(&view, self.opts.max_line));
-        tracing::info!(conn = id, "connection accepted");
+        let conn = self.register();
+        tracing::info!(conn = conn.id, "connection accepted");
         let (r, w) = stream.into_split();
         tokio::spawn(self.clone().write_loop(conn.clone(), w));
         tokio::spawn(self.clone().read_loop(conn, r));
@@ -3807,22 +4718,11 @@ impl Service {
             return self.close(&conn, why);
         }
     }
+```
 
-    /// Ends a connection, once (plan D29). First its unsent countdowns are
-    /// cancelled (§6), then its panel flag is cleared.
-    pub(crate) fn close(&self, conn: &Conn, why: CloseReason) {
-        if conn.closed.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let cancelled = self.inbox.cancel_owned(conn.owner);
-        self.conns.lock().unwrap().remove(&conn.id);
-        self.set_panel(conn.id, false);
-        conn.outbox.close();
-        conn.shut.send_replace(true);
-        tracing::info!(conn = conn.id, reason = why.tag(), cancelled, "connection closed");
-    }
-}
+Add after `impl Service`:
 
+```rust
 #[derive(Debug, PartialEq, Eq)]
 pub enum LineError {
     TooLong,
@@ -3857,30 +4757,31 @@ pub async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R, buf: &mut Vec<u8>, ma
 }
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p acd-inbox --locked --test server`
+Run: `cargo test -p acd-inbox --locked --test server --test admission`
 Run: `cargo test -p acd-inbox --locked --lib server`
 Expected: PASS.
 
-- [ ] **Step 7: Lint and commit**
+- [ ] **Step 6: Lint and commit**
 
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 Expected: no warnings.
 
 ```bash
 git add crates/acd-inbox
-git commit -m "acd-inbox: socket server with greeting, broadcasts, limits and disconnect cancellation"
+git commit -m "acd-inbox: socket server with ordered publication, limits and disconnect cancellation"
 ```
 
 ---
 
-### Task 9: Commands
+### Task 10: Commands
 
 **Execution:** cloud-ok
 
 **Files:**
-- Modify: `crates/acd-inbox/src/commands.rs` (replace `dispatch`)
+- Modify: `crates/acd-inbox/src/commands.rs` (replace `dispatch` and `admitted`)
+- Modify: `crates/acd-inbox/tests/admission.rs` (expected codes)
 - Create: `crates/acd-inbox/tests/commands.rs`
 
 **Interfaces:**
@@ -3888,7 +4789,7 @@ git commit -m "acd-inbox: socket server with greeting, broadcasts, limits and di
   - Task 1: `Inbox::{pick_owned, answer_text_owned, reply_owned, cancel, escape_owned}`.
   - `Inbox::{mark_seen, set_show_idle, set_show_subagents, set_show_hook_only, rename_machine, settings, machines}`.
   - Tasks 2 and 3: `pair_machine`, `remove_machine_checked`, `reconnect_machine`, `MachineError`, `SecretErrorKind`, `SecretStatus`.
-  - Task 8: `Service::{set_panel, set_notifications, settings_changed, publish_settings, secrets}`.
+  - Task 8: `Service::{admit, reply, set_panel, set_notifications, secrets}` and `commands::{line_for, s, n, b}`; Task 9: `Service::{settings_changed, publish_settings}`.
 - Produces (in `acd_inbox::commands`):
   - `pub fn machine_error_code(e: &MachineError) -> ErrorCode`
   - `pub fn secret_code(e: &SecretError) -> ErrorCode`
@@ -3902,13 +4803,13 @@ git commit -m "acd-inbox: socket server with greeting, broadcasts, limits and di
 | `cancel` | `action` | `true`/`false` | inline |
 | `escape` | none | `true`/`false` | inline |
 | `mark_seen` | `card` | `null` | inline |
-| `set_show` | `what` (`idle`, `subagents`, `hook_only`), `on` | `null` | inline |
-| `rename_machine` | `machine`, `name` | `null` | inline |
+| `set_show` | `what` (`idle`, `subagents`, `hook_only`), `on` | `null` | blocking pool (waits for the edit lock) |
+| `rename_machine` | `machine`, `name` | `null` | blocking pool (waits for the edit lock) |
 | `set_notifications` | `on` | `null` | inline |
 | `panel` | `open` | `null` | inline |
 | `pair` | `pairing` | `{"machine","name"}` | blocking pool |
 | `remove_machine` | `machine` | `null` | blocking pool |
-| `retry_machine` | `machine` | `null` | blocking pool |
+| `retry_machine` | `machine` | `null` | blocking pool (refreshes the machine's cached secret first) |
 | `unlock_secrets` | none | `null` | blocking pool |
 
 Every command that changes settings, machines or the notification switch publishes a new `settings` snapshot afterwards.
@@ -4062,33 +4963,38 @@ impl SecretControl for SlowUnlock {
     fn unlock(&self) -> Result<(), SecretError> {
         self.entered.store(true, SeqCst);
         while !self.release.load(SeqCst) {
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::yield_now();
         }
         Ok(())
     }
     fn refresh(&self, _: &[String]) {}
 }
 
+/// Releases the unlock on drop, panics included.
+struct Unblock(Arc<SlowUnlock>);
+
+impl Drop for Unblock {
+    fn drop(&mut self) {
+        self.0.release.store(true, SeqCst);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_disconnect_during_a_slow_command_still_cancels_countdowns() {
     let control = Arc::new(SlowUnlock::default());
+    let unblock = Unblock(control.clone());
     let rig = rig_with(RigOptions { timing: held(), control: control.clone(), ..Default::default() }).await;
     let mut a = greeted(&rig).await;
     let mut watcher = greeted(&rig).await;
     let id = action_id(a.cmd(pick("m1/a1", "r1", "allow")).await);
     a.send(&json!({"type":"unlock_secrets","id":"u1"})).await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !control.entered.load(SeqCst) {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    until("the unlock to start", || control.entered.load(SeqCst)).await;
     drop(a);
     let o = watcher.recv_until(|m| m["type"] == "outcome" && m["action"] == id.as_str()).await;
     assert_eq!(o["result"]["kind"], "cancelled");
-    control.release.store(true, SeqCst);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(unblock);
+    rig.inbox.expire_countdowns_for_test();
+    view_until(&rig.inbox, |v| v.actions.is_empty()).await;
     assert_eq!(answers(&rig.f), 0);
 }
 
@@ -4106,56 +5012,39 @@ async fn rename_and_remove_publish_settings() {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p acd-inbox --locked --test commands`
-Expected: FAIL. Every command still replies `unsupported`, so `pick_returns_the_action_id_and_the_countdown_fires` panics at `assert_eq!(r["type"], "ok")`.
+Expected: FAIL. Only `pick`, `answer_text`, `reply` and `panel` are wired (Task 8), so `stale_unknown_and_bad_input_get_their_codes` gets `unsupported` for `mark_seen`, and the settings and slow-command tests fail.
 
 - [ ] **Step 3: Implement the table**
 
-In `commands.rs`, add to the imports:
+In `commands.rs`, extend the imports:
 
 ```rust
 use acd_client::{
-    inbox::{MachineError, PickError},
+    inbox::MachineError,
     settings::{EndpointConfig, SecretError, SecretErrorKind, SecretStatus},
 };
 use serde_json::json;
 ```
 
-and replace `dispatch` with:
+Replace `dispatch` and `admitted` with:
 
 ```rust
+/// Inline commands run under the admission lock (plan D31); slow ones, which
+/// may wait on the keyring or the edit lock, on the blocking pool (D11).
 fn dispatch(svc: &Arc<Service>, conn: &Arc<Conn>, tag: &'static str, id: &str, m: &Map<String, Value>) {
     match tag {
-        "pair" | "remove_machine" | "retry_machine" | "unlock_secrets" => slow(svc, conn, tag, id, m.clone()),
-        "unknown" => conn.outbox.reply(protocol::error_line(id, ErrorCode::Unsupported)),
-        _ => conn.outbox.reply(line_for(id, inline(svc, conn, tag, m))),
+        "pair" | "remove_machine" | "retry_machine" | "unlock_secrets" | "rename_machine" | "set_show" => {
+            slow(svc, conn, tag, id, m.clone())
+        }
+        "unknown" => svc.reply(conn, protocol::error_line(id, ErrorCode::Unsupported)),
+        _ => {
+            let Some(r) = svc.admit(conn, || admitted(svc, conn, tag, m)) else { return };
+            svc.reply(conn, line_for(id, r));
+        }
     }
 }
 
-fn line_for(id: &str, r: Result<Value, ErrorCode>) -> String {
-    match r {
-        Ok(v) => protocol::ok_line(id, v),
-        Err(c) => protocol::error_line(id, c),
-    }
-}
-
-fn s<'a>(m: &'a Map<String, Value>, k: &str) -> Result<&'a str, ErrorCode> {
-    m.get(k).and_then(Value::as_str).ok_or(ErrorCode::BadRequest)
-}
-
-fn n(m: &Map<String, Value>, k: &str) -> Result<u64, ErrorCode> {
-    m.get(k).and_then(Value::as_u64).ok_or(ErrorCode::BadRequest)
-}
-
-fn b(m: &Map<String, Value>, k: &str) -> Result<bool, ErrorCode> {
-    m.get(k).and_then(Value::as_bool).ok_or(ErrorCode::BadRequest)
-}
-
-fn pick_err(e: PickError) -> ErrorCode {
-    protocol::pick_error_code(&e)
-}
-
-/// Commands that never wait on the keyring (plan D11).
-fn inline(svc: &Arc<Service>, conn: &Conn, tag: &str, m: &Map<String, Value>) -> Result<Value, ErrorCode> {
+fn admitted(svc: &Arc<Service>, conn: &Conn, tag: &str, m: &Map<String, Value>) -> Result<Value, ErrorCode> {
     let ib = &svc.inbox;
     match tag {
         "pick" => ib
@@ -4176,17 +5065,6 @@ fn inline(svc: &Arc<Service>, conn: &Conn, tag: &str, m: &Map<String, Value>) ->
             PickError::CannotReply => ErrorCode::CannotMarkSeen,
             e => pick_err(e),
         }),
-        "set_show" => {
-            let on = b(m, "on")?;
-            match s(m, "what")? {
-                "idle" => ib.set_show_idle(on),
-                "subagents" => ib.set_show_subagents(on).map_err(|_| ErrorCode::SettingsFailed)?,
-                "hook_only" => ib.set_show_hook_only(on).map_err(|_| ErrorCode::SettingsFailed)?,
-                _ => return Err(ErrorCode::BadRequest),
-            }
-            svc.settings_changed();
-            Ok(Value::Null)
-        }
         "set_notifications" => {
             svc.set_notifications(b(m, "on")?).map_err(|_| ErrorCode::SettingsFailed)?;
             svc.settings_changed();
@@ -4196,26 +5074,12 @@ fn inline(svc: &Arc<Service>, conn: &Conn, tag: &str, m: &Map<String, Value>) ->
             svc.set_panel(conn.id, b(m, "open")?);
             Ok(Value::Null)
         }
-        "rename_machine" => {
-            let (key, name) = (s(m, "machine")?, s(m, "name")?);
-            let mut entry = ib
-                .settings()
-                .machines
-                .into_iter()
-                .find(|e| e.key == key)
-                .ok_or(ErrorCode::UnknownMachine)?;
-            entry.name = name.to_owned();
-            entry.validate().map_err(|_| ErrorCode::BadName)?;
-            ib.rename_machine(key, name).map_err(|_| ErrorCode::SettingsFailed)?;
-            svc.settings_changed();
-            Ok(Value::Null)
-        }
         _ => Err(ErrorCode::Unsupported),
     }
 }
 
-/// Commands that may wait on the keyring run on the blocking pool, so the
-/// reader keeps reading and a disconnect is seen at once (plan D11).
+/// Runs off the reader, so a disconnect is seen at once (plan D11). The
+/// reply is dropped if the view left meanwhile.
 fn slow(svc: &Arc<Service>, conn: &Arc<Conn>, tag: &'static str, id: &str, m: Map<String, Value>) {
     let (svc, conn, id) = (svc.clone(), conn.clone(), id.to_owned());
     tokio::spawn(async move {
@@ -4223,7 +5087,7 @@ fn slow(svc: &Arc<Service>, conn: &Arc<Conn>, tag: &'static str, id: &str, m: Ma
         let r = tokio::task::spawn_blocking(move || run_slow(&worker, tag, &m))
             .await
             .unwrap_or(Err(ErrorCode::SecretStoreFailed));
-        conn.outbox.reply(line_for(&id, r));
+        svc.reply(&conn, line_for(&id, r));
         svc.publish_settings().await;
     });
 }
@@ -4239,11 +5103,35 @@ fn run_slow(svc: &Arc<Service>, tag: &str, m: &Map<String, Value>) -> Result<Val
             .remove_machine_checked(s(m, "machine")?)
             .map(|()| Value::Null)
             .map_err(|e| machine_error_code(&e)),
-        "retry_machine" => ib
-            .reconnect_machine(s(m, "machine")?)
-            .map(|()| Value::Null)
-            .map_err(|e| machine_error_code(&e)),
+        "retry_machine" => {
+            let key = s(m, "machine")?;
+            // A cached keyring error is retried only when asked (plan D14).
+            svc.secrets.refresh(&[key.to_owned()]);
+            ib.reconnect_machine(key).map(|()| Value::Null).map_err(|e| machine_error_code(&e))
+        }
         "unlock_secrets" => unlock(svc).map(|()| Value::Null),
+        "rename_machine" => {
+            let (key, name) = (s(m, "machine")?, s(m, "name")?);
+            let mut entry = ib
+                .settings()
+                .machines
+                .into_iter()
+                .find(|e| e.key == key)
+                .ok_or(ErrorCode::UnknownMachine)?;
+            entry.name = name.to_owned();
+            entry.validate().map_err(|_| ErrorCode::BadName)?;
+            ib.rename_machine(key, name).map(|()| Value::Null).map_err(|_| ErrorCode::SettingsFailed)
+        }
+        "set_show" => {
+            let on = b(m, "on")?;
+            match s(m, "what")? {
+                "idle" => ib.set_show_idle(on),
+                "subagents" => ib.set_show_subagents(on).map_err(|_| ErrorCode::SettingsFailed)?,
+                "hook_only" => ib.set_show_hook_only(on).map_err(|_| ErrorCode::SettingsFailed)?,
+                _ => return Err(ErrorCode::BadRequest),
+            }
+            Ok(Value::Null)
+        }
         _ => Err(ErrorCode::Unsupported),
     }
 }
@@ -4288,12 +5176,14 @@ pub fn machine_error_code(e: &MachineError) -> ErrorCode {
 }
 ```
 
-`handle` passes `tag` (now `&'static str` from `KNOWN`, or `"unknown"`) to `dispatch`; update its signature accordingly.
+`set_show` with `what: "idle"` saves nothing, but goes the same way to keep one path. Every slow command publishes settings when done; `set_notifications` publishes inline.
+
+In `tests/admission.rs`, `ids_are_remembered_up_to_a_bound` now gets `ok` for each admitted `escape`: change its expected codes to `["", "", "duplicate_id", "", ""]` (an `ok` line has no `code`).
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p acd-inbox --locked`
-Expected: PASS, including Task 8's `an_unknown_type_is_unsupported_and_a_repeated_id_is_refused`.
+Expected: PASS, including Task 9's `an_unknown_type_is_unsupported_and_a_repeated_id_is_refused` and Task 8's admission tests.
 
 - [ ] **Step 5: Lint and commit**
 
@@ -4306,216 +5196,130 @@ git commit -m "acd-inbox: command table with owned actions, error codes and slow
 ```
 
 ---
-### Task 10: Secret worker and unlock
+### Task 11: Secret worker: deadlines and ambiguous writes
 
 **Execution:** cloud-ok
 
 **Files:**
-- Create: `crates/acd-inbox/src/secrets.rs`, `crates/acd-inbox/tests/secrets.rs`
+- Create: `crates/acd-inbox/src/secrets.rs` (worker and fake; Task 12 adds the store), `crates/acd-inbox/tests/worker.rs`
 - Modify: `crates/acd-inbox/src/lib.rs` (`pub mod secrets;`), `crates/acd-inbox/Cargo.toml` (`async-trait.workspace = true`), `Cargo.lock`
 
 **Interfaces:**
-- Consumes: `acd_client::settings::{SecretError, SecretStore}`; Task 8's `SecretControl`.
+- Consumes: nothing from earlier tasks.
 - Produces (in `acd_inbox::secrets`):
   - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum BackendError { Locked, Dismissed, Timeout, Unavailable, Failed }`, with `tag()`.
-  - `#[async_trait] pub trait SecretBackend: Send + 'static`, with these methods:
-    - `async fn read(&mut self, key: &str) -> Result<Option<String>, BackendError>`
-    - `async fn write(&mut self, key: &str, value: &str) -> Result<(), BackendError>`
-    - `async fn delete(&mut self, key: &str) -> Result<(), BackendError>`
-    - `async fn unlock(&mut self) -> Result<(), BackendError>`
+  - `#[async_trait] pub trait SecretBackend: Send + 'static`, with `read`, `write`, `delete` and `unlock`. Only `unlock` may prompt.
+  - `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum WorkerError { Backend(BackendError), Expired, Ambiguous }`:
+    - `Expired`: the deadline passed before the operation started, so it never ran.
+    - `Ambiguous`: a write or delete started and did not finish in time; it may still take effect.
   - `#[derive(Clone, Copy, Debug)] pub struct WorkerTimeouts { pub op: Duration, pub unlock: Duration }`, with `WorkerTimeouts::LIVE` = 5 s and 120 s.
-  - `pub struct SecretWorker`, with `SecretWorker::spawn<B: SecretBackend>(backend: B, timeouts: WorkerTimeouts) -> SecretWorker` (D13).
-  - `pub struct WorkerStore` (D14): `WorkerStore::new(worker: SecretWorker)` and `prefill(&self, keys: &[String])`. It implements `SecretStore` (`status` is the trait default) and `SecretControl`.
+  - `pub struct SecretWorker` with:
+    - `spawn<B: SecretBackend>(backend: B, timeouts: WorkerTimeouts) -> SecretWorker`
+    - `read(&self, key) -> Result<Option<String>, WorkerError>`
+    - `write(&self, key, value) -> Result<(), WorkerError>`
+    - `delete(&self, key) -> Result<(), WorkerError>`
+    - `unlock(&self) -> Result<(), WorkerError>`
+    All four block, at most until their deadline plus 1 s.
   - Under `cfg(any(test, feature = "testing"))`: `pub mod fake` with:
-    - `FakeKeyring { pub items: HashMap<String, String>, pub locked: bool, pub unlock: UnlockBehaviour, pub hang_writes: bool, pub calls: Vec<String> }`
+    - `FakeKeyring { pub items, pub locked, pub unavailable, pub unlock: UnlockBehaviour, pub hang_writes: Hang, pub hang_deletes: Hang, pub calls: Vec<String> }`
     - `pub enum UnlockBehaviour { Succeed, Dismiss, Hang }`
+    - `pub enum Hang { No, BeforeApplying, AfterApplying }`, for writes and deletes
     - `#[derive(Clone, Default)] pub struct FakeBackend(pub Arc<Mutex<FakeKeyring>>)`
+- Rules (D13):
+  - Every job carries the caller's deadline. A job that reaches the front of the queue after its deadline is answered `Expired` and never runs, so a caller that gave up can never have its write happen later.
+  - A started job runs only until that deadline.
+  - A write or delete cut off mid-call is `Ambiguous`, because D-Bus may already have applied it. Task 12 reconciles it by reading the item back.
 
 - [ ] **Step 1: Write the failing tests**
 
-`crates/acd-inbox/tests/secrets.rs`:
+`crates/acd-inbox/tests/worker.rs`:
 
 ```rust
-mod common;
+use std::time::{Duration, Instant};
 
-use std::sync::Arc;
-use std::time::Duration;
+use acd_inbox::secrets::fake::{FakeBackend, Hang, UnlockBehaviour};
+use acd_inbox::secrets::{BackendError, SecretWorker, WorkerError, WorkerTimeouts};
 
-use acd_client::fake::FakeServer;
-use acd_client::settings::{SecretErrorKind, SecretStatus, SecretStore};
-use acd_inbox::secrets::fake::{FakeBackend, UnlockBehaviour};
-use acd_inbox::secrets::{SecretWorker, WorkerStore, WorkerTimeouts};
-use acd_inbox::server::SecretControl;
-use common::*;
-use serde_json::json;
+const QUICK: WorkerTimeouts = WorkerTimeouts { op: Duration::from_millis(200), unlock: Duration::from_millis(600) };
 
-fn store(backend: &FakeBackend, timeouts: WorkerTimeouts) -> Arc<WorkerStore> {
-    Arc::new(WorkerStore::new(SecretWorker::spawn(backend.clone(), timeouts)))
+fn calls(b: &FakeBackend) -> Vec<String> {
+    b.0.lock().unwrap().calls.clone()
 }
 
-const QUICK: WorkerTimeouts = WorkerTimeouts { op: Duration::from_millis(200), unlock: Duration::from_millis(300) };
+#[test]
+fn operations_reach_the_backend() {
+    let b = FakeBackend::default();
+    let w = SecretWorker::spawn(b.clone(), QUICK);
+    w.write("k", "v").unwrap();
+    assert_eq!(w.read("k").unwrap().as_deref(), Some("v"));
+    w.delete("k").unwrap();
+    assert_eq!(w.read("k").unwrap(), None);
+    assert_eq!(calls(&b), ["write k", "read k", "delete k", "read k"]);
+}
 
 #[test]
-fn reads_are_cached_and_writes_go_through() {
-    let backend = FakeBackend::default();
-    backend.0.lock().unwrap().items.insert("k".into(), "v".into());
-    let s = store(&backend, WorkerTimeouts::LIVE);
-    s.prefill(&["k".into()]);
-    for _ in 0..3 {
-        assert_eq!(s.get("k").unwrap().as_deref(), Some("v"));
+fn a_job_queued_past_its_deadline_never_runs() {
+    let b = FakeBackend::default();
+    b.0.lock().unwrap().unlock = UnlockBehaviour::Hang;
+    let w = std::sync::Arc::new(SecretWorker::spawn(b.clone(), QUICK));
+    let unlocking = {
+        let w = w.clone();
+        std::thread::spawn(move || w.unlock())
+    };
+    while !calls(&b).contains(&"unlock".to_owned()) {
+        std::thread::yield_now();
     }
-    s.set("k", "w").unwrap();
-    assert_eq!(s.get("k").unwrap().as_deref(), Some("w"));
-    s.delete("k").unwrap();
-    assert_eq!(s.get("k").unwrap(), None);
-    let calls = backend.0.lock().unwrap().calls.clone();
-    assert_eq!(calls, ["read k", "write k", "delete k"]);
+    let started = Instant::now();
+    assert_eq!(w.write("k", "v"), Err(WorkerError::Expired), "queued behind the prompt past its deadline");
+    assert!(started.elapsed() < QUICK.unlock + Duration::from_secs(1));
+    assert_eq!(unlocking.join().unwrap(), Err(WorkerError::Backend(BackendError::Timeout)));
+    assert!(!calls(&b).iter().any(|c| c.starts_with("write")), "the expired write never ran");
+    assert!(b.0.lock().unwrap().items.is_empty());
 }
 
 #[test]
-fn a_locked_keyring_at_start_is_noted_and_never_prompted() {
-    let backend = FakeBackend::default();
-    {
-        let mut k = backend.0.lock().unwrap();
-        k.items.insert("k".into(), "v".into());
-        k.locked = true;
+fn a_write_cut_off_mid_call_is_ambiguous_whether_or_not_it_applied() {
+    for hang in [Hang::BeforeApplying, Hang::AfterApplying] {
+        let b = FakeBackend::default();
+        {
+            let mut k = b.0.lock().unwrap();
+            (k.hang_writes, k.hang_deletes) = (hang, hang);
+        }
+        let w = SecretWorker::spawn(b.clone(), QUICK);
+        assert_eq!(w.write("k", "v"), Err(WorkerError::Ambiguous));
+        assert_eq!(w.read("k").unwrap().is_some(), hang == Hang::AfterApplying, "{hang:?}");
+        assert_eq!(w.delete("k"), Err(WorkerError::Ambiguous));
+        assert!(w.read("k").unwrap().is_none(), "{hang:?}");
     }
-    let s = store(&backend, WorkerTimeouts::LIVE);
-    s.prefill(&["k".into()]);
-    assert_eq!(s.status("k"), SecretStatus::Locked);
-    assert_eq!(s.get("k").unwrap_err().kind(), SecretErrorKind::Locked);
-    assert!(!backend.0.lock().unwrap().calls.iter().any(|c| c == "unlock"));
-    assert_eq!(backend.0.lock().unwrap().calls.len(), 1, "a cached lock does not go back to D-Bus");
 }
 
 #[test]
-fn a_stuck_call_times_out_and_the_worker_serves_the_next() {
-    let backend = FakeBackend::default();
-    backend.0.lock().unwrap().hang_writes = true;
-    let s = store(&backend, QUICK);
-    assert_eq!(s.set("k", "v").unwrap_err().kind(), SecretErrorKind::Timeout);
-    backend.0.lock().unwrap().hang_writes = false;
-    s.set("k", "v").unwrap();
-    assert_eq!(s.get("k").unwrap().as_deref(), Some("v"));
-}
-
-#[test]
-fn unlock_outcomes_map_to_kinds() {
-    let backend = FakeBackend::default();
-    backend.0.lock().unwrap().locked = true;
-    let s = store(&backend, QUICK);
-    backend.0.lock().unwrap().unlock = UnlockBehaviour::Dismiss;
-    assert_eq!(s.unlock().unwrap_err().kind(), SecretErrorKind::Locked);
-    backend.0.lock().unwrap().unlock = UnlockBehaviour::Hang;
-    assert_eq!(s.unlock().unwrap_err().kind(), SecretErrorKind::Timeout);
-    backend.0.lock().unwrap().unlock = UnlockBehaviour::Succeed;
-    s.unlock().unwrap();
-    assert!(!backend.0.lock().unwrap().locked);
-}
-
-/// A rig whose inbox reads a `WorkerStore` over a locked fake keyring
-/// that holds m1's secret.
-async fn locked_rig(behaviour: UnlockBehaviour, timeouts: WorkerTimeouts) -> (Rig, FakeBackend) {
-    let backend = FakeBackend::default();
-    let b = backend.clone();
-    let rig = rig_with(RigOptions {
-        timing: held(),
-        connect: false,
-        secrets: Some(Box::new(move |f: &FakeServer| {
-            {
-                let mut k = b.0.lock().unwrap();
-                k.items.insert("m1".into(), box_secret(f));
-                k.locked = true;
-                k.unlock = behaviour;
-            }
-            let s = store(&b, timeouts);
-            s.prefill(&["m1".into()]);
-            (s.clone() as Arc<dyn SecretStore>, s as Arc<dyn SecretControl>)
-        })),
-        ..Default::default()
-    })
-    .await;
-    (rig, backend)
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_locked_keyring_at_start_unlocks_and_reconnects_without_restart() {
-    let (rig, _backend) = locked_rig(UnlockBehaviour::Succeed, WorkerTimeouts::LIVE).await;
-    let mut v = View::connect(&rig.socket).await;
-    let (_, settings, _) = v.greeting().await;
-    assert_eq!(settings["machines"][0]["secret"], "locked");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(rig.f.connections(), 0, "no connection without the secret");
-    assert_eq!(v.cmd(json!({"type":"unlock_secrets"})).await["type"], "ok");
-    let c = rig.f.next_connection().await;
-    c.send(json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent("a1","r1")]})).await;
-    v.recv_until(|m| m["type"] == "settings" && m["machines"][0]["secret"] == "ok").await;
-    v.recv_until(|m| m["type"] == "view" && m["view"]["cards"][0]["answerable"] == true).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_dismissed_or_slow_prompt_changes_nothing() {
-    let (rig, _b) = locked_rig(UnlockBehaviour::Dismiss, QUICK).await;
-    let mut v = View::connect(&rig.socket).await;
-    v.greeting().await;
-    assert_eq!(v.cmd(json!({"type":"unlock_secrets"})).await["code"], "secret_store_locked");
-    let (rig2, _b2) = locked_rig(UnlockBehaviour::Hang, QUICK).await;
-    let mut w = View::connect(&rig2.socket).await;
-    w.greeting().await;
-    assert_eq!(w.cmd(json!({"type":"unlock_secrets"})).await["code"], "secret_store_timeout");
-    assert_eq!(rig.f.connections() + rig2.f.connections(), 0);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cancel_is_answered_while_an_unlock_prompt_waits() {
-    let backend = FakeBackend::default();
-    let b = backend.clone();
-    let rig = rig_with(RigOptions {
-        timing: held(),
-        secrets: Some(Box::new(move |f: &FakeServer| {
-            {
-                let mut k = b.0.lock().unwrap();
-                k.items.insert("m1".into(), box_secret(f));
-                k.unlock = UnlockBehaviour::Hang;
-            }
-            // A short unlock limit: the test runtime waits for the blocked thread on drop.
-            let s = store(&b, WorkerTimeouts { op: Duration::from_secs(5), unlock: Duration::from_secs(2) });
-            s.prefill(&["m1".into()]);
-            (s.clone() as Arc<dyn SecretStore>, s as Arc<dyn SecretControl>)
-        })),
-        ..Default::default()
-    })
-    .await;
-    let mut v = View::connect(&rig.socket).await;
-    v.greeting().await;
-    let r = v.cmd(json!({"type":"pick","card":"m1/a1","request":"r1","option":"allow","revision":1})).await;
-    let id = r["result"].as_str().unwrap().to_owned();
-    v.send(&json!({"type":"unlock_secrets","id":"u1"})).await;
-    let cancel = tokio::time::timeout(Duration::from_secs(1), v.cmd(json!({"type":"cancel","action":id})))
-        .await
-        .expect("cancel waited for the keyring prompt");
-    assert_eq!(cancel["result"], true);
+fn a_slow_unlock_is_a_plain_timeout_and_reads_never_prompt() {
+    let b = FakeBackend::default();
+    b.0.lock().unwrap().unlock = UnlockBehaviour::Hang;
+    let w = SecretWorker::spawn(b.clone(), QUICK);
+    assert_eq!(w.unlock(), Err(WorkerError::Backend(BackendError::Timeout)));
+    b.0.lock().unwrap().unlock = UnlockBehaviour::Dismiss;
+    assert_eq!(w.unlock(), Err(WorkerError::Backend(BackendError::Dismissed)));
+    b.0.lock().unwrap().locked = true;
+    assert_eq!(w.read("k"), Err(WorkerError::Backend(BackendError::Locked)));
+    assert_eq!(calls(&b).iter().filter(|c| *c == "unlock").count(), 2, "the locked read did not prompt");
 }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Add `pub mod secrets;` to `lib.rs` and `async-trait.workspace = true` to `[dependencies]`.
-Run: `cargo test -p acd-inbox --test secrets` (updates `Cargo.lock`)
+Run: `cargo test -p acd-inbox --test worker` (updates `Cargo.lock`)
 Expected: compile error, `could not find secrets in acd_inbox`.
 
-- [ ] **Step 3: Implement `secrets.rs`**
+- [ ] **Step 3: Implement the worker in `secrets.rs`**
 
 ```rust
-//! The secret worker (omarchy spec §9, plan D13, D14): one thread owns the
-//! keyring connection; every call has a timeout; `Inbox` reads a cache.
-use std::collections::HashMap;
-use std::sync::{Mutex, mpsc as std_mpsc};
-use std::time::Duration;
-
-use acd_client::settings::{SecretError, SecretStore};
-
-use crate::server::SecretControl;
+//! The secret worker (omarchy spec §9, plan D13): one thread owns the
+//! keyring connection; every job carries a deadline.
+use std::sync::mpsc as std_mpsc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendError {
@@ -4551,6 +5355,25 @@ pub trait SecretBackend: Send + 'static {
     async fn unlock(&mut self) -> Result<(), BackendError>;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerError {
+    Backend(BackendError),
+    /// The deadline passed before the job started: it never ran.
+    Expired,
+    /// A write or delete started and was cut off: it may have applied.
+    Ambiguous,
+}
+
+impl WorkerError {
+    pub fn tag(self) -> &'static str {
+        match self {
+            WorkerError::Backend(e) => e.tag(),
+            WorkerError::Expired => "expired",
+            WorkerError::Ambiguous => "ambiguous",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct WorkerTimeouts {
     pub op: Duration,
@@ -4570,25 +5393,26 @@ enum Op {
 }
 
 impl Op {
-    fn limit(&self, t: WorkerTimeouts) -> Duration {
-        match self {
-            Op::Unlock => t.unlock,
-            _ => t.op,
-        }
+    fn mutates(&self) -> bool {
+        matches!(self, Op::Write(..) | Op::Delete(_))
     }
 }
 
-type Reply = std_mpsc::SyncSender<Result<Option<String>, BackendError>>;
+struct Job {
+    op: Op,
+    deadline: Instant,
+    reply: std_mpsc::SyncSender<Result<Option<String>, WorkerError>>,
+}
 
 pub struct SecretWorker {
-    tx: tokio::sync::mpsc::UnboundedSender<(Op, Reply)>,
+    tx: tokio::sync::mpsc::UnboundedSender<Job>,
     timeouts: WorkerTimeouts,
 }
 
 impl SecretWorker {
-    /// Starts the worker thread. It owns `backend` for the process's life.
+    /// Starts the worker thread; it owns `backend` for the process's life.
     pub fn spawn<B: SecretBackend>(mut backend: B, timeouts: WorkerTimeouts) -> SecretWorker {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Op, Reply)>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
         std::thread::Builder::new()
             .name("acd-inbox-secrets".into())
             .spawn(move || {
@@ -4597,20 +5421,29 @@ impl SecretWorker {
                     .build()
                     .expect("the secret worker's runtime");
                 rt.block_on(async move {
-                    while let Some((op, reply)) = rx.recv().await {
-                        let limit = op.limit(timeouts);
+                    while let Some(job) = rx.recv().await {
+                        let now = Instant::now();
+                        if now >= job.deadline {
+                            let _ = job.reply.send(Err(WorkerError::Expired));
+                            continue;
+                        }
+                        let mutates = job.op.mutates();
                         let run = async {
-                            match op {
+                            match job.op {
                                 Op::Read(k) => backend.read(&k).await,
                                 Op::Write(k, v) => backend.write(&k, &v).await.map(|()| None),
                                 Op::Delete(k) => backend.delete(&k).await.map(|()| None),
                                 Op::Unlock => backend.unlock().await.map(|()| None),
                             }
                         };
-                        // A timed-out call is dropped here, so a stuck prompt
-                        // never blocks the calls behind it.
-                        let result = tokio::time::timeout(limit, run).await.unwrap_or(Err(BackendError::Timeout));
-                        let _ = reply.send(result);
+                        // Never past the caller's deadline. A cut-off job's
+                        // future is dropped, so it cannot block later jobs.
+                        let result = match tokio::time::timeout(job.deadline - now, run).await {
+                            Ok(r) => r.map_err(WorkerError::Backend),
+                            Err(_) if mutates => Err(WorkerError::Ambiguous),
+                            Err(_) => Err(WorkerError::Backend(BackendError::Timeout)),
+                        };
+                        let _ = job.reply.send(result);
                     }
                 });
             })
@@ -4618,126 +5451,35 @@ impl SecretWorker {
         SecretWorker { tx, timeouts }
     }
 
-    /// Blocks for at most the operation's limit plus 1 s. A call queued
-    /// behind a long unlock times out.
-    fn call(&self, op: Op) -> Result<Option<String>, BackendError> {
-        let wait = op.limit(self.timeouts) + Duration::from_secs(1);
+    fn call(&self, op: Op, limit: Duration) -> Result<Option<String>, WorkerError> {
+        let mutates = op.mutates();
+        let deadline = Instant::now() + limit;
         let (reply, rx) = std_mpsc::sync_channel(1);
-        self.tx.send((op, reply)).map_err(|_| BackendError::Unavailable)?;
-        match rx.recv_timeout(wait) {
+        self.tx
+            .send(Job { op, deadline, reply })
+            .map_err(|_| WorkerError::Backend(BackendError::Unavailable))?;
+        match rx.recv_timeout(limit + Duration::from_secs(1)) {
             Ok(r) => r,
-            Err(std_mpsc::RecvTimeoutError::Timeout) => Err(BackendError::Timeout),
-            Err(std_mpsc::RecvTimeoutError::Disconnected) => Err(BackendError::Unavailable),
-        }
-    }
-}
-
-#[derive(Clone)]
-enum Cached {
-    Value(Option<String>),
-    Locked,
-}
-
-/// The inbox's `SecretStore`: a per-key cache in front of the worker.
-pub struct WorkerStore {
-    worker: SecretWorker,
-    cache: Mutex<HashMap<String, Cached>>,
-}
-
-fn to_secret_error(e: BackendError) -> SecretError {
-    match e {
-        BackendError::Locked | BackendError::Dismissed => SecretError::locked(),
-        BackendError::Timeout => SecretError::timeout(),
-        other => SecretError(format!("keyring {}", other.tag())),
-    }
-}
-
-impl WorkerStore {
-    pub fn new(worker: SecretWorker) -> WorkerStore {
-        WorkerStore { worker, cache: Mutex::new(HashMap::new()) }
-    }
-
-    /// Reads `keys` now, before `Inbox::start`. A locked keyring is noted,
-    /// never prompted (§9).
-    pub fn prefill(&self, keys: &[String]) {
-        for key in keys {
-            let _ = self.read_through(key);
+            // The worker answers every job by its deadline; this is a stall.
+            Err(_) if mutates => Err(WorkerError::Ambiguous),
+            Err(_) => Err(WorkerError::Backend(BackendError::Timeout)),
         }
     }
 
-    fn read_through(&self, key: &str) -> Result<Option<String>, SecretError> {
-        match self.worker.call(Op::Read(key.to_owned())) {
-            Ok(value) => {
-                self.cache.lock().unwrap().insert(key.to_owned(), Cached::Value(value.clone()));
-                Ok(value)
-            }
-            Err(BackendError::Locked) => {
-                self.cache.lock().unwrap().insert(key.to_owned(), Cached::Locked);
-                Err(SecretError::locked())
-            }
-            Err(e) => {
-                tracing::warn!(error = e.tag(), "keyring read failed");
-                Err(to_secret_error(e))
-            }
-        }
-    }
-}
-
-impl SecretStore for WorkerStore {
-    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
-        let hit = self.cache.lock().unwrap().get(key).cloned();
-        match hit {
-            Some(Cached::Value(v)) => Ok(v),
-            Some(Cached::Locked) => Err(SecretError::locked()),
-            None => self.read_through(key),
-        }
+    pub fn read(&self, key: &str) -> Result<Option<String>, WorkerError> {
+        self.call(Op::Read(key.to_owned()), self.timeouts.op)
     }
 
-    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
-        match self.worker.call(Op::Write(key.to_owned(), value.to_owned())) {
-            Ok(_) => {
-                self.cache.lock().unwrap().insert(key.to_owned(), Cached::Value(Some(value.to_owned())));
-                Ok(())
-            }
-            Err(e) => {
-                tracing::warn!(error = e.tag(), "keyring write failed");
-                self.cache.lock().unwrap().remove(key);
-                Err(to_secret_error(e))
-            }
-        }
+    pub fn write(&self, key: &str, value: &str) -> Result<(), WorkerError> {
+        self.call(Op::Write(key.to_owned(), value.to_owned()), self.timeouts.op).map(|_| ())
     }
 
-    fn delete(&self, key: &str) -> Result<(), SecretError> {
-        match self.worker.call(Op::Delete(key.to_owned())) {
-            Ok(_) => {
-                self.cache.lock().unwrap().insert(key.to_owned(), Cached::Value(None));
-                Ok(())
-            }
-            Err(e) => {
-                tracing::warn!(error = e.tag(), "keyring delete failed");
-                self.cache.lock().unwrap().remove(key);
-                Err(to_secret_error(e))
-            }
-        }
-    }
-}
-
-impl SecretControl for WorkerStore {
-    fn unlock(&self) -> Result<(), SecretError> {
-        self.worker.call(Op::Unlock).map(|_| ()).map_err(|e| {
-            tracing::info!(error = e.tag(), "keyring unlock failed");
-            to_secret_error(e)
-        })
+    pub fn delete(&self, key: &str) -> Result<(), WorkerError> {
+        self.call(Op::Delete(key.to_owned()), self.timeouts.op).map(|_| ())
     }
 
-    fn refresh(&self, keys: &[String]) {
-        {
-            let mut cache = self.cache.lock().unwrap();
-            for key in keys {
-                cache.remove(key);
-            }
-        }
-        self.prefill(keys);
+    pub fn unlock(&self) -> Result<(), WorkerError> {
+        self.call(Op::Unlock, self.timeouts.unlock).map(|_| ())
     }
 }
 
@@ -4756,53 +5498,80 @@ pub mod fake {
         Hang,
     }
 
+    /// How writes and deletes misbehave.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum Hang {
+        #[default]
+        No,
+        BeforeApplying,
+        AfterApplying,
+    }
+
     /// An in-memory keyring. `calls` records operations and keys, never values.
     #[derive(Default)]
     pub struct FakeKeyring {
         pub items: HashMap<String, String>,
         pub locked: bool,
+        pub unavailable: bool,
         pub unlock: UnlockBehaviour,
-        pub hang_writes: bool,
+        pub hang_writes: Hang,
+        pub hang_deletes: Hang,
         pub calls: Vec<String>,
     }
 
     #[derive(Clone, Default)]
     pub struct FakeBackend(pub Arc<Mutex<FakeKeyring>>);
 
-    #[async_trait::async_trait]
-    impl SecretBackend for FakeBackend {
-        async fn read(&mut self, key: &str) -> Result<Option<String>, BackendError> {
+    impl FakeBackend {
+        /// Records the call; the error the keyring's state forces, if any;
+        /// else how a write (`deleting == false`) or delete misbehaves.
+        fn enter(&self, call: String, deleting: bool) -> Result<Hang, BackendError> {
             let mut k = self.0.lock().unwrap();
-            k.calls.push(format!("read {key}"));
+            k.calls.push(call);
+            if k.unavailable {
+                return Err(BackendError::Unavailable);
+            }
             if k.locked {
                 return Err(BackendError::Locked);
             }
-            Ok(k.items.get(key).cloned())
+            Ok(if deleting { k.hang_deletes } else { k.hang_writes })
+        }
+
+        async fn mutate(&self, hang: Hang, f: impl FnOnce(&mut HashMap<String, String>)) {
+            if hang == Hang::BeforeApplying {
+                std::future::pending::<()>().await;
+            }
+            f(&mut self.0.lock().unwrap().items);
+            if hang == Hang::AfterApplying {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SecretBackend for FakeBackend {
+        async fn read(&mut self, key: &str) -> Result<Option<String>, BackendError> {
+            self.enter(format!("read {key}"), false)?;
+            Ok(self.0.lock().unwrap().items.get(key).cloned())
         }
 
         async fn write(&mut self, key: &str, value: &str) -> Result<(), BackendError> {
-            let hang = {
-                let mut k = self.0.lock().unwrap();
-                k.calls.push(format!("write {key}"));
-                if k.locked {
-                    return Err(BackendError::Locked);
-                }
-                k.hang_writes
-            };
-            if hang {
-                std::future::pending::<()>().await;
-            }
-            self.0.lock().unwrap().items.insert(key.into(), value.into());
+            let hang = self.enter(format!("write {key}"), false)?;
+            let (key, value) = (key.to_owned(), value.to_owned());
+            self.mutate(hang, move |items| {
+                items.insert(key, value);
+            })
+            .await;
             Ok(())
         }
 
         async fn delete(&mut self, key: &str) -> Result<(), BackendError> {
-            let mut k = self.0.lock().unwrap();
-            k.calls.push(format!("delete {key}"));
-            if k.locked {
-                return Err(BackendError::Locked);
-            }
-            k.items.remove(key);
+            let hang = self.enter(format!("delete {key}"), true)?;
+            let key = key.to_owned();
+            self.mutate(hang, move |items| {
+                items.remove(&key);
+            })
+            .await;
             Ok(())
         }
 
@@ -4825,11 +5594,11 @@ pub mod fake {
 }
 ```
 
-`read` and `delete` have no `.await`, so their mutex guards are never held across one and the `async_trait` futures stay `Send`. `write` and `unlock` drop the guard in a block before awaiting.
+No mutex guard is held across an `.await`: `enter` and each `items` access lock and release within one statement.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p acd-inbox --locked --test secrets`
+Run: `cargo test -p acd-inbox --locked --test worker`
 Expected: PASS.
 
 - [ ] **Step 5: Lint and commit**
@@ -4839,12 +5608,473 @@ Expected: no warnings.
 
 ```bash
 git add Cargo.lock crates/acd-inbox
-git commit -m "acd-inbox: secret worker with timeouts, cached store, unlock and reconnect"
+git commit -m "acd-inbox: secret worker with job deadlines and ambiguous-write detection"
 ```
 
 ---
 
-### Task 11: Notifier
+### Task 12: Cached secret store, reconciliation and unlock
+
+**Execution:** cloud-ok
+
+**Files:**
+- Modify: `crates/acd-inbox/src/secrets.rs` (`WorkerStore`)
+- Create: `crates/acd-inbox/tests/secrets.rs`
+
+**Interfaces:**
+- Consumes: Task 11's `SecretWorker`, `WorkerError` and `fake`; Task 8's `SecretControl`; `acd_client::settings::{SecretError, SecretStore}`.
+- Produces (in `acd_inbox::secrets`): `pub struct WorkerStore`, with `new(worker: SecretWorker)` and `prefill(&self, keys: &[String])`. It implements `SecretStore` (its `status` is the trait default) and `SecretControl`.
+- Rules (D14):
+  - The cache holds an outcome per key: a value, `Locked`, `Unavailable`, `TimedOut` or `Unknown`, where `Unknown` is an ambiguous write that could not be read back.
+  - A cached error is returned without calling the worker. Only `refresh` (on unlock and on `retry_machine`) reads a key again.
+  - `prefill` runs on the blocking pool before `Inbox::start` (Task 15). Every key in `settings.json` then has an entry, so `start`, `Service::new` and every settings snapshot are served from memory.
+  - A read for a key with no entry (a machine being paired) goes to the worker; that only happens in `pair_machine`, which runs on the blocking pool.
+  - An `Ambiguous` write or delete is reconciled before the call returns: the item is read back. If it shows the intended state, the call succeeds; otherwise it fails with a timeout, and the cache records what was read (or `Unknown`). So acd-client's pairing rollback (Task 2) decides on the item's real state.
+
+- [ ] **Step 1: Write the failing tests**
+
+`crates/acd-inbox/tests/secrets.rs`:
+
+```rust
+mod common;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use acd_client::fake::FakeServer;
+use acd_client::inbox::{Inbox, InboxOptions, MachineError};
+use acd_client::settings::{SecretErrorKind, SecretStatus, SecretStore, Settings};
+use acd_inbox::prefs::Prefs;
+use acd_inbox::secrets::fake::{FakeBackend, Hang, UnlockBehaviour};
+use acd_inbox::secrets::{SecretWorker, WorkerStore, WorkerTimeouts};
+use acd_inbox::server::{SecretControl, ServerOptions, Service};
+use common::*;
+use serde_json::json;
+
+const QUICK: WorkerTimeouts = WorkerTimeouts { op: Duration::from_millis(200), unlock: Duration::from_millis(300) };
+
+fn store(backend: &FakeBackend, timeouts: WorkerTimeouts) -> Arc<WorkerStore> {
+    Arc::new(WorkerStore::new(SecretWorker::spawn(backend.clone(), timeouts)))
+}
+
+fn calls(b: &FakeBackend) -> usize {
+    b.0.lock().unwrap().calls.len()
+}
+
+#[test]
+fn reads_are_cached_and_writes_go_through() {
+    let backend = FakeBackend::default();
+    backend.0.lock().unwrap().items.insert("k".into(), "v".into());
+    let s = store(&backend, WorkerTimeouts::LIVE);
+    s.prefill(&["k".into()]);
+    for _ in 0..3 {
+        assert_eq!(s.get("k").unwrap().as_deref(), Some("v"));
+    }
+    s.set("k", "w").unwrap();
+    assert_eq!(s.get("k").unwrap().as_deref(), Some("w"));
+    s.delete("k").unwrap();
+    assert_eq!(s.get("k").unwrap(), None);
+    assert_eq!(backend.0.lock().unwrap().calls, ["read k", "write k", "delete k"]);
+}
+
+#[test]
+fn errors_are_cached_until_refreshed() {
+    for (setup, kind) in [
+        ((true, false), SecretErrorKind::Locked),
+        ((false, true), SecretErrorKind::Other),
+    ] {
+        let backend = FakeBackend::default();
+        {
+            let mut k = backend.0.lock().unwrap();
+            k.items.insert("k".into(), "v".into());
+            (k.locked, k.unavailable) = setup;
+        }
+        let s = store(&backend, WorkerTimeouts::LIVE);
+        s.prefill(&["k".into()]);
+        let before = calls(&backend);
+        assert_eq!(s.get("k").unwrap_err().kind(), kind);
+        let _ = s.status("k");
+        assert_eq!(calls(&backend), before, "a cached error does not go back to the keyring");
+        {
+            let mut k = backend.0.lock().unwrap();
+            (k.locked, k.unavailable) = (false, false);
+        }
+        assert_eq!(s.get("k").unwrap_err().kind(), kind, "still cached");
+        s.refresh(&["k".into()]);
+        assert_eq!(s.get("k").unwrap().as_deref(), Some("v"));
+    }
+}
+
+#[test]
+fn a_locked_keyring_at_start_is_noted_and_never_prompted() {
+    let backend = FakeBackend::default();
+    {
+        let mut k = backend.0.lock().unwrap();
+        k.items.insert("k".into(), "v".into());
+        k.locked = true;
+    }
+    let s = store(&backend, WorkerTimeouts::LIVE);
+    s.prefill(&["k".into()]);
+    assert_eq!(s.status("k"), SecretStatus::Locked);
+    assert!(!backend.0.lock().unwrap().calls.iter().any(|c| c == "unlock"));
+}
+
+#[test]
+fn an_ambiguous_write_is_read_back_before_it_is_reported() {
+    let backend = FakeBackend::default();
+    backend.0.lock().unwrap().hang_writes = Hang::AfterApplying;
+    let s = store(&backend, QUICK);
+    assert!(s.set("k", "v").is_ok(), "the write had applied, as the read-back shows");
+    assert_eq!(s.get("k").unwrap().as_deref(), Some("v"));
+
+    let backend = FakeBackend::default();
+    backend.0.lock().unwrap().hang_writes = Hang::BeforeApplying;
+    let s = store(&backend, QUICK);
+    assert_eq!(s.set("k", "v").unwrap_err().kind(), SecretErrorKind::Timeout);
+    assert_eq!(s.get("k").unwrap(), None, "the read-back found nothing, and the cache says so");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pairing_rollback_decides_on_the_read_back_state() {
+    let f = FakeServer::start(TOKEN, acd_client::fake::Identity::Paired).await;
+    let d = tempfile::tempdir().unwrap();
+    let blocker = d.path().join("file");
+    std::fs::write(&blocker, "block").unwrap();
+    for (hang, recovered) in [(Hang::AfterApplying, true), (Hang::BeforeApplying, false)] {
+        // The write succeeds, the settings save fails, the rollback delete is cut off.
+        let backend = FakeBackend::default();
+        backend.0.lock().unwrap().hang_deletes = hang;
+        let s = store(&backend, QUICK);
+        let inbox = Inbox::new(
+            Settings { machines: vec![], ..Settings::fresh() },
+            s,
+            InboxOptions { timing: fast(), settings_path: Some(blocker.join("settings.json")), client_name: "t".into(), client_version: "0".into() },
+        );
+        let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), TOKEN);
+        let result = tokio::task::spawn_blocking(move || inbox.pair_machine(&line)).await.unwrap();
+        if recovered {
+            assert!(matches!(result, Err(MachineError::Settings(_))), "the delete had applied: the rollback succeeded");
+            assert!(backend.0.lock().unwrap().items.is_empty());
+        } else {
+            assert!(matches!(result, Err(MachineError::PairRecoveryFailed)), "the secret is still there: reported");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_after_prefill_never_waits_on_the_keyring() {
+    let backend = FakeBackend::default();
+    backend.0.lock().unwrap().unavailable = true;
+    let s = store(&backend, WorkerTimeouts::LIVE);
+    let f = FakeServer::start(TOKEN, acd_client::fake::Identity::Paired).await;
+    let keys = vec!["m1".to_owned()];
+    let prefill = s.clone();
+    tokio::task::spawn_blocking(move || prefill.prefill(&keys)).await.unwrap();
+    let before = calls(&backend);
+    let inbox = Inbox::new(
+        box_settings(&f),
+        s.clone(),
+        InboxOptions { timing: fast(), settings_path: None, client_name: "t".into(), client_version: "0".into() },
+    );
+    inbox.start();
+    let svc = Service::new(inbox.clone(), Prefs::default(), None, s.clone(), ServerOptions::default());
+    svc.publish_settings().await;
+    assert_eq!(inbox.machines()[0].secret, SecretStatus::Unreadable);
+    assert_eq!(calls(&backend), before, "start and the settings snapshot used the cache only");
+}
+
+/// A rig whose inbox reads a `WorkerStore` over a locked fake keyring that
+/// holds m1's secret.
+async fn locked_rig(behaviour: UnlockBehaviour, timeouts: WorkerTimeouts) -> (Rig, FakeBackend) {
+    let backend = FakeBackend::default();
+    let b = backend.clone();
+    let rig = rig_with(RigOptions {
+        timing: held(),
+        connect: false,
+        secrets: Some(Box::new(move |f: &FakeServer| {
+            {
+                let mut k = b.0.lock().unwrap();
+                k.items.insert("m1".into(), box_secret(f));
+                k.locked = true;
+                k.unlock = behaviour;
+            }
+            let s = store(&b, timeouts);
+            s.prefill(&["m1".into()]);
+            (s.clone() as Arc<dyn SecretStore>, s as Arc<dyn SecretControl>)
+        })),
+        ..Default::default()
+    })
+    .await;
+    (rig, backend)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_locked_keyring_at_start_unlocks_and_reconnects_without_restart() {
+    let (rig, _backend) = locked_rig(UnlockBehaviour::Succeed, WorkerTimeouts::LIVE).await;
+    let mut v = View::connect(&rig.socket).await;
+    let (_, settings, _) = v.greeting().await;
+    assert_eq!(settings["machines"][0]["secret"], "locked");
+    assert!(rig.inbox.conn_stamp("m1").is_none(), "no connection without the secret");
+    assert_eq!(v.cmd(json!({"type":"unlock_secrets"})).await["type"], "ok");
+    let c = rig.f.next_connection().await;
+    c.send(json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent("a1","r1")]})).await;
+    v.recv_until(|m| m["type"] == "settings" && m["machines"][0]["secret"] == "ok").await;
+    v.recv_until(|m| m["type"] == "view" && m["view"]["cards"][0]["answerable"] == true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dismissed_or_slow_prompt_changes_nothing() {
+    let (rig, _b) = locked_rig(UnlockBehaviour::Dismiss, QUICK).await;
+    let mut v = View::connect(&rig.socket).await;
+    v.greeting().await;
+    assert_eq!(v.cmd(json!({"type":"unlock_secrets"})).await["code"], "secret_store_locked");
+    let (rig2, _b2) = locked_rig(UnlockBehaviour::Hang, QUICK).await;
+    let mut w = View::connect(&rig2.socket).await;
+    w.greeting().await;
+    assert_eq!(w.cmd(json!({"type":"unlock_secrets"})).await["code"], "secret_store_timeout");
+    assert!(rig.inbox.conn_stamp("m1").is_none() && rig2.inbox.conn_stamp("m1").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_is_answered_while_an_unlock_prompt_waits() {
+    let backend = FakeBackend::default();
+    let b = backend.clone();
+    let rig = rig_with(RigOptions {
+        timing: held(),
+        secrets: Some(Box::new(move |f: &FakeServer| {
+            {
+                let mut k = b.0.lock().unwrap();
+                k.items.insert("m1".into(), box_secret(f));
+                k.unlock = UnlockBehaviour::Hang;
+            }
+            // A short unlock limit: runtime teardown waits for the blocked thread.
+            let s = store(&b, WorkerTimeouts { op: Duration::from_secs(5), unlock: Duration::from_secs(2) });
+            s.prefill(&["m1".into()]);
+            (s.clone() as Arc<dyn SecretStore>, s as Arc<dyn SecretControl>)
+        })),
+        ..Default::default()
+    })
+    .await;
+    let mut v = View::connect(&rig.socket).await;
+    v.greeting().await;
+    let r = v.cmd(json!({"type":"pick","card":"m1/a1","request":"r1","option":"allow","revision":1})).await;
+    let id = r["result"].as_str().unwrap().to_owned();
+    v.send(&json!({"type":"unlock_secrets","id":"u1"})).await;
+    let cancel = tokio::time::timeout(Duration::from_secs(1), v.cmd(json!({"type":"cancel","action":id})))
+        .await
+        .expect("cancel waited for the keyring prompt");
+    assert_eq!(cancel["result"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_reads_a_cached_failure_again() {
+    let backend = FakeBackend::default();
+    let b = backend.clone();
+    let rig = rig_with(RigOptions {
+        timing: held(),
+        connect: false,
+        secrets: Some(Box::new(move |f: &FakeServer| {
+            {
+                let mut k = b.0.lock().unwrap();
+                k.items.insert("m1".into(), box_secret(f));
+                k.unavailable = true;
+            }
+            let s = store(&b, QUICK);
+            s.prefill(&["m1".into()]);
+            (s.clone() as Arc<dyn SecretStore>, s as Arc<dyn SecretControl>)
+        })),
+        ..Default::default()
+    })
+    .await;
+    backend.0.lock().unwrap().unavailable = false;
+    let mut v = View::connect(&rig.socket).await;
+    v.greeting().await;
+    assert_eq!(v.cmd(json!({"type":"retry_machine","machine":"m1"})).await["type"], "ok");
+    rig.f.next_connection().await;
+}
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cargo test -p acd-inbox --locked --test secrets`
+Expected: compile error, `cannot find struct WorkerStore`.
+
+- [ ] **Step 3: Implement `WorkerStore`**
+
+Append to `secrets.rs` (above `pub mod fake`):
+
+```rust
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use acd_client::settings::{SecretError, SecretStore};
+
+use crate::server::SecretControl;
+
+/// What the store knows about a key (plan D14).
+#[derive(Clone)]
+enum Cached {
+    Value(Option<String>),
+    Locked,
+    Unavailable,
+    TimedOut,
+    /// An ambiguous write or delete that could not be read back.
+    Unknown,
+}
+
+impl Cached {
+    fn of(e: WorkerError) -> Cached {
+        match e {
+            WorkerError::Backend(BackendError::Locked | BackendError::Dismissed) => Cached::Locked,
+            WorkerError::Backend(BackendError::Unavailable | BackendError::Failed) => Cached::Unavailable,
+            WorkerError::Backend(BackendError::Timeout) | WorkerError::Expired => Cached::TimedOut,
+            WorkerError::Ambiguous => Cached::Unknown,
+        }
+    }
+
+    fn error(&self) -> Option<SecretError> {
+        match self {
+            Cached::Value(_) => None,
+            Cached::Locked => Some(SecretError::locked()),
+            Cached::TimedOut | Cached::Unknown => Some(SecretError::timeout()),
+            Cached::Unavailable => Some(SecretError("keyring unavailable".into())),
+        }
+    }
+}
+
+/// The inbox's `SecretStore`: a per-key cache in front of the worker.
+pub struct WorkerStore {
+    worker: SecretWorker,
+    cache: Mutex<HashMap<String, Cached>>,
+}
+
+impl WorkerStore {
+    pub fn new(worker: SecretWorker) -> WorkerStore {
+        WorkerStore { worker, cache: Mutex::new(HashMap::new()) }
+    }
+
+    /// Reads `keys` now and caches each outcome, errors included. Run on
+    /// the blocking pool before `Inbox::start`. Never prompts (§9).
+    pub fn prefill(&self, keys: &[String]) {
+        for key in keys {
+            let _ = self.read_through(key);
+        }
+    }
+
+    fn remember(&self, key: &str, c: Cached) {
+        self.cache.lock().unwrap().insert(key.to_owned(), c);
+    }
+
+    fn read_through(&self, key: &str) -> Result<Option<String>, SecretError> {
+        match self.worker.read(key) {
+            Ok(value) => {
+                self.remember(key, Cached::Value(value.clone()));
+                Ok(value)
+            }
+            Err(e) => {
+                tracing::warn!(error = e.tag(), "keyring read failed");
+                let c = Cached::of(e);
+                let err = c.error().expect("an error state");
+                self.remember(key, c);
+                Err(err)
+            }
+        }
+    }
+
+    /// After an ambiguous write or delete: read the item back, so callers
+    /// (pairing rollback) decide on its real state (plan D14).
+    fn reconcile(&self, key: &str, want: Option<&str>) -> Result<(), SecretError> {
+        match self.worker.read(key) {
+            Ok(now) => {
+                let applied = now.as_deref() == want;
+                self.remember(key, Cached::Value(now));
+                if applied { Ok(()) } else { Err(SecretError::timeout()) }
+            }
+            Err(e) => {
+                tracing::warn!(error = e.tag(), "keyring read-back failed");
+                self.remember(key, Cached::Unknown);
+                Err(SecretError::timeout())
+            }
+        }
+    }
+
+    fn after_change(&self, key: &str, want: Option<&str>, r: Result<(), WorkerError>) -> Result<(), SecretError> {
+        match r {
+            Ok(()) => {
+                self.remember(key, Cached::Value(want.map(str::to_owned)));
+                Ok(())
+            }
+            Err(WorkerError::Ambiguous) => self.reconcile(key, want),
+            // Expired or refused: nothing changed. The cached entry stands.
+            Err(e) => {
+                tracing::warn!(error = e.tag(), "keyring change failed");
+                Err(Cached::of(e).error().expect("an error state"))
+            }
+        }
+    }
+}
+
+impl SecretStore for WorkerStore {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        let hit = self.cache.lock().unwrap().get(key).cloned();
+        match hit {
+            Some(Cached::Value(v)) => Ok(v),
+            Some(other) => Err(other.error().expect("an error state")),
+            None => self.read_through(key),
+        }
+    }
+
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        let r = self.worker.write(key, value);
+        self.after_change(key, Some(value), r)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        let r = self.worker.delete(key);
+        self.after_change(key, None, r)
+    }
+}
+
+impl SecretControl for WorkerStore {
+    fn unlock(&self) -> Result<(), SecretError> {
+        self.worker.unlock().map_err(|e| {
+            tracing::info!(error = e.tag(), "keyring unlock failed");
+            Cached::of(e).error().expect("an error state")
+        })
+    }
+
+    fn refresh(&self, keys: &[String]) {
+        {
+            let mut cache = self.cache.lock().unwrap();
+            for key in keys {
+                cache.remove(key);
+            }
+        }
+        self.prefill(keys);
+    }
+}
+```
+
+Move the new `use` lines to the top of `secrets.rs`, next to the existing imports.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cargo test -p acd-inbox --locked --test secrets --test worker`
+Expected: PASS.
+
+- [ ] **Step 5: Lint and commit**
+
+Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
+Expected: no warnings.
+
+```bash
+git add crates/acd-inbox
+git commit -m "acd-inbox: cached secret store with error states, read-back of ambiguous writes, unlock and retry"
+```
+
+---
+
+### Task 13: Notifier
 
 **Execution:** cloud-ok
 
@@ -4977,11 +6207,13 @@ struct FakeNotify {
     closes: Mutex<Vec<u32>>,
     owner: Mutex<Option<String>>,
     fail: Mutex<bool>,
+    attempts: Mutex<u32>,
 }
 
 #[async_trait::async_trait]
 impl NotifyBackend for FakeNotify {
     async fn show(&self, summary: &str, _body: &str, open_action: bool) -> Result<u32, NotifyError> {
+        *self.attempts.lock().unwrap() += 1;
         if *self.fail.lock().unwrap() {
             return Err(NotifyError::Unavailable);
         }
@@ -5052,10 +6284,12 @@ async fn actions_from_a_new_notification_server_are_ignored() {
 async fn a_failing_server_turns_notifications_off_for_the_session() {
     let (backend, _opened, n) = fake();
     *backend.fail.lock().unwrap() = true;
-    n.apply(&view(vec![card("a1", 1, false)]), true, false).await;
-    *backend.fail.lock().unwrap() = false;
     n.apply(&view(vec![card("a1", 1, false), card("a2", 1, false)]), true, false).await;
+    assert_eq!(*backend.attempts.lock().unwrap(), 1, "the batch stops at the first failure (D28)");
+    *backend.fail.lock().unwrap() = false;
+    n.apply(&view(vec![card("a1", 1, false), card("a2", 1, false), card("a3", 1, false)]), true, false).await;
     assert!(backend.shows.lock().unwrap().is_empty());
+    assert_eq!(*backend.attempts.lock().unwrap(), 1);
 }
 
 fn script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
@@ -5360,8 +6594,10 @@ impl Notifier {
                             s.ids.insert(key, id);
                         }
                         Err(e) => {
+                            // D28: off for the session; the rest of this batch is dropped.
                             tracing::warn!(error = ?e, "notification failed; notifications are off for this session");
                             self.state.lock().unwrap().available = false;
+                            return;
                         }
                     }
                 }
@@ -5440,16 +6676,16 @@ git commit -m "acd-inbox: notification reconciliation, trusted open action and a
 ```
 
 ---
-### Task 12: Linux backends: Secret Service and D-Bus notifications
+### Task 14: Linux backends: Secret Service and D-Bus notifications
 
-**Execution:** cloud-ok, in a Linux session. The modules compile only on Linux; on macOS this task can only confirm that the workspace still builds without them. The live behaviour is checked in Task 18.
+**Execution:** cloud-ok, in a Linux session. The modules compile only on Linux; on macOS this task can only confirm that the workspace still builds without them. The live behaviour is checked in Task 22.
 
 **Files:**
 - Create: `crates/acd-inbox/src/linux/mod.rs`, `crates/acd-inbox/src/linux/keyring.rs`, `crates/acd-inbox/src/linux/dbus.rs`
 - Modify: `crates/acd-inbox/src/lib.rs` (`#[cfg(target_os = "linux")] pub mod linux;`), `crates/acd-inbox/Cargo.toml`, `Cargo.lock`
 
 **Interfaces:**
-- Consumes: Task 10's `secrets::{SecretBackend, BackendError}`; Task 11's `notify::{NotifyBackend, NotifyError, ActionSignal, OPEN_ACTION}`.
+- Consumes: Task 11's `secrets::{SecretBackend, BackendError}`; Task 13's `notify::{NotifyBackend, NotifyError, ActionSignal, OPEN_ACTION}`.
 - Produces (in `acd_inbox::linux::keyring`):
   - `pub struct SecretServiceBackend`, with `new() -> Self`; it implements `SecretBackend`.
   - `pub fn attributes(key: &str) -> HashMap<&str, &str>` and `pub fn map_error(e: &secret_service::Error) -> BackendError`.
@@ -5513,7 +6749,7 @@ mod tests {
     }
 
     /// Needs a desktop session bus with an unlocked keyring and a Rust
-    /// toolchain (omarchy has none; Task 18 check 4 covers the keyring
+    /// toolchain (omarchy has none; Task 22 check 4 covers the keyring
     /// there): `cargo test -p acd-inbox --locked --lib -- --ignored keyring_round_trip`
     #[tokio::test]
     #[ignore = "touches the user's keyring"]
@@ -5563,7 +6799,8 @@ Above its tests:
 ```rust
 //! Remote secrets in the Secret Service (omarchy spec §9): items in the
 //! default collection with attributes `service=agent-caller`,
-//! `machine=<key>`. Reads never prompt; only `unlock` does (plan D13).
+//! `machine=<key>`. Reads, writes and deletes check the collection and
+//! item lock first and never prompt; only `unlock` does (plan D13).
 use std::collections::HashMap;
 
 use secret_service::{EncryptionType, Error, SecretService};
@@ -5648,11 +6885,21 @@ async fn delete_in(ss: &SecretService<'_>, key: &str) -> Result<(), BackendError
         return Err(BackendError::Locked);
     }
     for item in col.search_items(attributes(key)).await.map_err(class)? {
+        // `Item::delete` runs a prompt when the service asks for one; a
+        // locked item would ask, so it is refused here instead.
+        if item.is_locked().await.map_err(class)? {
+            return Err(BackendError::Locked);
+        }
         item.delete().await.map_err(class)?;
     }
     Ok(())
 }
 
+/// The only call that may prompt (§9). secret-service 5.2 has no way to
+/// dismiss its prompt: when the worker's 120 s limit drops this future, the
+/// prompt stays on screen until the user answers it. A late "unlock" then
+/// unlocks the collection and the next `refresh` or `retry_machine` reads
+/// the secrets; a late dismiss changes nothing.
 async fn unlock_in(ss: &SecretService<'_>) -> Result<(), BackendError> {
     let col = ss.get_default_collection().await.map_err(class)?;
     if col.is_locked().await.map_err(class)? {
@@ -5829,7 +7076,7 @@ git commit -m "acd-inbox: Secret Service and D-Bus notification backends (Linux)
 
 ---
 
-### Task 13: `acd-inbox serve` and the no-text log test
+### Task 15: `acd-inbox serve` and safe logging
 
 **Execution:** cloud-ok
 
@@ -5841,17 +7088,22 @@ git commit -m "acd-inbox: Secret Service and D-Bus notification backends (Linux)
 - Consumes:
   - Task 5: `prefs::{Paths, Prefs, init_settings, local_name}`.
   - Task 6: `startup::{listen, Listening, OwnedSocket, LockFile}`.
-  - Task 8: `server::{Service, ServerOptions, SecretControl}`.
-  - Task 10: `secrets::{SecretWorker, WorkerStore, WorkerTimeouts}`.
-  - Task 11: `notify::{Notifier, ShellOpener, Opener}`.
-  - Task 12: `linux::{keyring::SecretServiceBackend, dbus::DbusNotify}`.
+  - Tasks 8 and 9: `server::{Service, ServerOptions, SecretControl}`.
+  - Tasks 11 and 12: `secrets::{SecretWorker, WorkerStore, WorkerTimeouts}`.
+  - Task 13: `notify::{Notifier, ShellOpener, Opener}`.
+  - Task 14: `linux::{keyring::SecretServiceBackend, dbus::DbusNotify}`.
 - Produces (in `acd_inbox::serve`):
   - `pub struct Running { pub service: Arc<Service>, pub inbox: Arc<Inbox>, pub server: JoinHandle<()>, pub socket: OwnedSocket, pub lock: LockFile }`.
   - `pub async fn start_service(paths: &Paths, store: Arc<dyn SecretStore>, control: Arc<dyn SecretControl>, timing: Timing, local_name: &str, prepare: impl FnOnce(Vec<String>) + Send + 'static) -> anyhow::Result<Running>`. It runs §4.4, loads `settings.json`, runs `prepare(remote keys)` on the blocking pool (the Linux entry point prefills the `WorkerStore` there), then starts the inbox and the server.
   - `pub fn remote_keys(settings: &Settings) -> Vec<String>`.
-  - `pub fn init_logging()`: stderr, which journald collects; `RUST_LOG`, default `info`. acd-client logs no agent text at any level (checked: its only `tracing` calls are `conn.rs:392`, an error code, and `conn.rs:577`, a static reason). `fmt().init()` also bridges the `log` crate, so `RUST_LOG=debug` or `trace` lets rustls and tungstenite log; the unit keeps the default.
+  - Logging (D33):
+    - `pub fn init_logging_to<W>(env: Option<&str>, writer: W) -> Result<(), TryInitError>`, where `W: for<'a> MakeWriter<'a> + Send + Sync + 'static`. It installs the global subscriber and the `log` bridge.
+    - `env` (`RUST_LOG`) sets levels, with `info` as the default.
+    - A fixed deny-list, ANDed after `env` as a second filter layer, caps the dependencies whatever `env` says: `tungstenite` and `tokio_tungstenite` off; `rustls`, `tokio_rustls`, `hyper`, `hyper_util`, `h2`, `axum`, `zbus`, `zvariant`, `secret_service`, `mio` and `tokio` at most `warn`.
+    - acd-client logs no agent text at any level (its only `tracing` calls are `conn.rs:392`, an error code, and `conn.rs:577`, a static reason).
+  - `pub fn init_logging()`: `init_logging_to(RUST_LOG, stderr)`, which journald collects. The capture test calls the same function.
   - `pub fn run() -> anyhow::Result<()>`: the `serve` command (D25).
-- Produces: the binary `acd-inbox` with subcommand `serve`. Task 16 adds `install`, `uninstall` and `status`.
+- Produces: the binary `acd-inbox` with subcommand `serve`. Task 20 adds `install`, `uninstall` and `status`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5921,20 +7173,22 @@ impl std::io::Write for Buffer {
 }
 
 /// Spec §4.1 and CLAUDE.md: agent text, typed text, pairing strings, tokens
-/// and raw socket lines never reach the logs. The subscriber is global
-/// because slow commands log from the blocking pool; this file holds one test.
+/// and raw socket lines never reach the logs. It installs the production
+/// logging (`init_logging_to`, with the `log` bridge) once, at `trace`, so
+/// `RUST_LOG` is shown unable to open the dependencies; this file holds
+/// one test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_text_secrets_and_raw_lines_never_reach_the_logs() {
     let buffer = Buffer::default();
     let writer = buffer.clone();
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish(),
-    )
-    .unwrap();
+    acd_inbox::serve::init_logging_to(Some("trace"), move || writer.clone()).unwrap();
+    // What the dependencies would print at trace through the `log` bridge
+    // and through tracing: frames carry tokens and agent text.
+    log::trace!(target: "tungstenite::protocol", "SECRET-FRAME {TOKEN}");
+    log::warn!(target: "tokio_tungstenite::compat", "SECRET-WARN");
+    tracing::debug!(target: "rustls::conn", "SECRET-TLS");
+    tracing::trace!(target: "zbus::connection", "SECRET-DBUS");
+
     let mut agent = pending_agent("a1", "r1");
     agent["title"] = "SECRET-TITLE".into();
     agent["pending"]["detail"] = "SECRET-DETAIL".into();
@@ -5955,13 +7209,14 @@ async fn agent_text_secrets_and_raw_lines_never_reach_the_logs() {
     w.greeting().await;
     w.send_raw(b"SECRET-NOT-JSON\n").await;
     w.closed().await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let logs = || String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    until("both close lines", || logs().matches("connection closed").count() >= 2).await;
 
-    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    let logs = logs();
     assert!(logs.contains("connection accepted"), "the capture works");
     assert!(logs.contains("line rejected"), "rejections are logged by tag");
-    assert!(logs.contains("connection closed"));
-    assert!(!logs.contains("SECRET"), "agent or user text reached the logs");
+    assert!(logs.contains("command"), "trace is on for acd-inbox itself");
+    assert!(!logs.contains("SECRET"), "agent, user or dependency text reached the logs");
     assert!(!logs.contains(TOKEN), "a token reached the logs");
     assert!(!logs.contains(&rig.f.pin()), "a pin reached the logs");
 }
@@ -5969,7 +7224,7 @@ async fn agent_text_secrets_and_raw_lines_never_reach_the_logs() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Add `pub mod serve;` to `lib.rs`, and to `[dependencies]`: `anyhow.workspace = true`, `clap.workspace = true`, `tracing-subscriber.workspace = true`.
+Add `pub mod serve;` to `lib.rs`, and to `[dependencies]`: `anyhow.workspace = true`, `clap.workspace = true`, `tracing-subscriber.workspace = true`; to `[dev-dependencies]`: `log = "0.4.34"` (already in `Cargo.lock` through rustls).
 Run: `cargo test -p acd-inbox --test serve --test logs` (updates `Cargo.lock`)
 Expected: compile error, `cannot find function start_service`.
 
@@ -5985,6 +7240,10 @@ use acd_client::{
     settings::{EndpointConfig, SecretStore, Settings},
 };
 use anyhow::{Context, Result};
+use tracing_subscriber::filter::{EnvFilter, LevelFilter, Targets};
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::{SubscriberInitExt, TryInitError};
 
 use crate::prefs::{self, Paths, Prefs};
 use crate::server::{SecretControl, ServerOptions, Service};
@@ -6041,15 +7300,50 @@ pub async fn start_service(
     Ok(Running { service, inbox, server, socket, lock })
 }
 
-/// Logs to stderr (journald for the unit); `RUST_LOG`, default `info`.
+/// Dependencies whose logs can carry frames, tokens or agent text, capped
+/// whatever `RUST_LOG` says (plan D33).
+const DENY: &[(&str, LevelFilter)] = &[
+    ("tungstenite", LevelFilter::OFF),
+    ("tokio_tungstenite", LevelFilter::OFF),
+    ("rustls", LevelFilter::WARN),
+    ("tokio_rustls", LevelFilter::WARN),
+    ("hyper", LevelFilter::WARN),
+    ("hyper_util", LevelFilter::WARN),
+    ("h2", LevelFilter::WARN),
+    ("axum", LevelFilter::WARN),
+    ("zbus", LevelFilter::WARN),
+    ("zvariant", LevelFilter::WARN),
+    ("secret_service", LevelFilter::WARN),
+    ("mio", LevelFilter::WARN),
+    ("tokio", LevelFilter::WARN),
+];
+
+/// The deny-list as a filter that passes everything else.
+pub fn deny_list() -> Targets {
+    DENY.iter().fold(Targets::new().with_default(LevelFilter::TRACE), |t, (target, level)| t.with_target(*target, *level))
+}
+
+/// The production logging: `env` (`RUST_LOG`, default `info`) AND the
+/// deny-list, both as filter layers, so an event must pass both; plus the
+/// `log` bridge, which `try_init` installs.
+pub fn init_logging_to<W>(env: Option<&str>, writer: W) -> Result<(), TryInitError>
+where
+    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+{
+    let env = env.and_then(|e| EnvFilter::try_new(e).ok()).unwrap_or_else(|| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(env)
+        .with(deny_list())
+        .with(tracing_subscriber::fmt::layer().with_ansi(false).with_target(false).with_writer(writer))
+        .try_init()
+}
+
+/// Logs to stderr (journald for the unit).
 pub fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_ansi(false)
-        .with_writer(std::io::stderr)
-        .init();
+    let env = std::env::var("RUST_LOG").ok();
+    if let Err(e) = init_logging_to(env.as_deref(), std::io::stderr) {
+        eprintln!("acd-inbox: logging is already set up: {e}");
+    }
 }
 
 /// `acd-inbox serve` (plan D25).
@@ -6163,23 +7457,146 @@ Expected: no warnings.
 
 ```bash
 git add Cargo.lock crates/acd-inbox
-git commit -m "acd-inbox: serve wiring, journald logging, and a test that no text reaches the logs"
+git commit -m "acd-inbox: serve wiring and logging that RUST_LOG cannot open for dependencies"
 ```
 
 ---
-### Task 14: `model.mjs` and node tests
+### Task 16: Omarchy shell API discovery
 
-**Execution:** cloud-ok
+**Execution:** local. It runs on the omarchy machine with the user. It can run any time before Task 17, in parallel with Tasks 1 to 15; Tasks 17 to 21 depend on its findings.
 
 **Files:**
-- Create: `clients/omarchy/model.mjs`, `clients/omarchy/tests/model.test.mjs`
+- Create: `docs/research/2026-10-12-omarchy-plugin-api.md`
+- Create (scratch, not committed): a probe plugin under `~/.config/omarchy/plugins/tonibergholm.probe/` on omarchy
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks.
+- Produces: a research note that records, with file paths and quoted lines, every installed-shell fact the plugin relies on. Tasks 17 to 21 use the recorded names as written. Where a fact differs from this plan's assumption (listed in Step 3), the note says what to change, and the controller amends Tasks 17 to 21 before they start.
+
+- [ ] **Step 1: Find the shell, the CLI and a reference plugin**
+
+On omarchy (`ssh omarchy`):
+
+```bash
+omarchy-shell --help; omarchy plugin --help
+command -v omarchy-plugin-validate qmllint qmllint6 qs quickshell
+qs --version 2>/dev/null || quickshell --version
+find / -name manifest.json -path '*omarchy*' 2>/dev/null | xargs grep -l '"omarchy.tailscale"'
+ls ~/.config/hypr/
+busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.Notifications GetCapabilities
+busctl --user status org.freedesktop.Notifications | grep -E '^(Comm|Exe)='
+```
+
+Read the `manifest.json` and every `.qml` file of `omarchy.tailscale`.
+
+- [ ] **Step 2: Run a probe plugin**
+
+Install this probe as plugin `tonibergholm.probe`, with a manifest copied from `omarchy.tailscale` and the id changed. It prints only to its own log; it holds no secrets.
+
+`Probe.qml`:
+
+```qml
+import QtQuick
+import Quickshell
+import Quickshell.Io
+import "probe.mjs" as P
+
+Item {
+    Component.onCompleted: {
+        console.log("probe: mjs import", P.answer());
+        console.log("probe: TextEncoder", typeof TextEncoder, "TextDecoder", typeof TextDecoder);
+        console.log("probe: XDG_RUNTIME_DIR", Quickshell.env("XDG_RUNTIME_DIR") !== "");
+    }
+
+    Socket {
+        id: probe
+        path: Quickshell.env("XDG_RUNTIME_DIR") + "/acd-inbox-probe.sock"
+        connected: true
+        onConnectedChanged: console.log("probe: connected", connected)
+        onError: e => console.log("probe: error", e)
+        parser: SplitParser {
+            splitMarker: "\n"
+            onRead: data => console.log("probe: line", JSON.stringify(data), data.length)
+        }
+    }
+}
+```
+
+`probe.mjs`:
+
+```js
+export function answer() {
+  return 42;
+}
+```
+
+Serve the probe socket from omarchy with a line that ends in a split 4-byte character, written in two chunks:
+
+```bash
+python3 - <<'PY'
+import os, socket, time
+path = os.path.join(os.environ["XDG_RUNTIME_DIR"], "acd-inbox-probe.sock")
+if os.path.exists(path): os.remove(path)
+s = socket.socket(socket.AF_UNIX); s.bind(path); s.listen(1)
+c, _ = s.accept()
+line = '{"t":"é😀"}\n'.encode()
+c.sendall(line[:9]); time.sleep(0.5); c.sendall(line[9:] + b'{"t":"two"}\n')
+time.sleep(1); c.close()
+PY
+```
+
+Read the probe's output in the shell's log (`journalctl --user -b | grep 'probe:'`, or the path `omarchy-shell` reports).
+
+- [ ] **Step 3: Record the findings**
+
+Write `docs/research/2026-10-12-omarchy-plugin-api.md`. For each item, give the fact, the quoted source line, and the plan's assumption with "holds" or "differs: <what to change>".
+
+| # | Question | Plan's assumption (Tasks 17 to 21) |
+|---|---|---|
+| 1 | Manifest keys; how a bar widget and its panel are declared | `id`, `name`, `version`, `description`, `author`, `category`, `kinds: ["bar-widget"]`, `defaultSection`, `barWidget: "BarWidget.qml"` |
+| 2 | Imports and names: `qs.Ui` `Panel` (open, close, visibility API), `qs.Commons` `Color` (urgent, accent, dim, text, surface, surfaceActive) and `Style` (spacing, spacingSmall, radius) | as named, qualified imports `qs.Ui as Ui`, `qs.Commons as Commons` |
+| 3 | IPC: `ShellIpc` or Quickshell `IpcHandler`; how a target and functions are declared; how `omarchy-shell <target> <fn> <arg>` maps | `IpcHandler { target: "tonibergholm.agentcaller"; function openCard(key: string): void }` |
+| 4 | `.mjs` import from a plugin | works (`import "model.mjs" as Model`) |
+| 5 | JS host globals: `TextEncoder`, `TextDecoder` | not relied on: `model.mjs` uses neither |
+| 6 | `Socket`: `connected`, `connectedChanged`, `error`, `write`, `flush`; reconnect by toggling `connected` | as named |
+| 7 | `SplitParser`: splits bytes before decoding (the split `😀` arrives whole); one `read` per line, newline stripped | holds; the plugin does no byte handling (D20) |
+| 8 | Key events: `Keys.onPressed` on a `TextField` sees letters before the field; `inputMethodComposing` is available | as used in Task 19 |
+| 9 | Notification server: name, and whether `GetCapabilities` lists `actions` | lists `actions` |
+| 10 | Plugin lifecycle: `omarchy-shell shell rescanPlugins`, `omarchy plugin enable <id>` and `disable <id>`, placement by `defaultSection` | as named |
+| 11 | The Hyprland bindings file and its line format | `~/.config/hypr/bindings.conf`, `bindd = SUPER ALT, A, Agent inbox, exec, …` |
+| 12 | `omarchy-plugin-validate` and `qmllint` invocation (import paths) | used in Task 21 |
+
+If item 4 differs, the plan's fallback is:
+1. `model.mjs` becomes `model.js`, with `.pragma library` as its first line and the `export ` keywords removed.
+2. The QML imports become `import "model.js" as Model`.
+3. `tests/model.test.mjs` loads it with `node:vm`, as Task 17 Step 4b shows.
+
+If item 7 differs (raw chunks), Service.qml must buffer bytes. Stop and report to the orchestrator; there is no `TextDecoder` to fall back on.
+
+- [ ] **Step 4: Remove the probe and commit the note**
+
+```bash
+ssh omarchy 'omarchy plugin disable tonibergholm.probe; rm -rf ~/.config/omarchy/plugins/tonibergholm.probe; omarchy-shell shell rescanPlugins'
+git add docs/research/2026-10-12-omarchy-plugin-api.md
+git commit -m "Research: the Omarchy shell plugin API as installed"
+```
+
+---
+
+### Task 17: `model.mjs` and node tests
+
+**Execution:** cloud-ok. Starts after Task 16's research note; if the note changes item 4 or 5, apply its fallback here.
+
+**Files:**
+- Create: `clients/omarchy/model.mjs`, `clients/omarchy/tests/model.test.mjs`, `clients/omarchy/tests/host.test.mjs`
 - Modify: `.github/workflows/ci.yml` (a node step on the Ubuntu leg)
 
 **Interfaces:**
 - Consumes: the wire shapes of Task 4 (D7), the error codes (D8), and `InboxView` and `CardView` as the Mac bindings describe them (`app/src/lib/bindings/*.ts`). `settings.machines[*].secret` comes from Task 3.
-- Produces (ES module `clients/omarchy/model.mjs`; Task 15's QML imports it as `Model`):
+- Produces (ES module `clients/omarchy/model.mjs`; the QML of Tasks 18 and 19 imports it as `Model`):
   - Constants `MAX_LINE`, `ANSWER_MAX_BYTES`, `REPLY_MAX_BYTES`, `UNCERTAIN_TEXT`, `QT`.
-  - `class LineReader { constructor(max = MAX_LINE); push(text) -> {lines, overflow}; pushBytes(uint8array) -> {lines, overflow} }` (D20).
+  - `utf8Length(s)`, pure JS, since the QML host has no `TextEncoder` (D20).
+  - `class LineReader { constructor(max = MAX_LINE); push(text) -> {lines, overflow} }` over `SplitParser` output (D20).
   - `parseMessage(line) -> object | null`.
   - `class Ids { constructor(prefix); next() -> string }`.
   - `sections(cards, machine) -> {needs, working, done}`, as `app/src/lib/panel.ts` does.
@@ -6192,6 +7609,8 @@ git commit -m "acd-inbox: serve wiring, journald logging, and a test that no tex
   - `validateAnswer(text) -> {ok, text} | {ok: false, reason}` and `validateReply(text)`, with the same rules as `acd-client`.
   - `errorText(code)`, `reasonText(reason)`.
   - `class Tracker { started(actionId, cardKey); outcome(msg); lost() -> cardKeys }`.
+  - `answerEditor(card) -> {cardKey, requestId, revision} | null`, `answerEditorValid(editor, cards)` and `EDITOR_CLOSED_TEXT` (D34).
+  - `omittedText(omitted)` (D9).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6238,11 +7657,16 @@ test("the line reader handles partial lines, several lines per chunk and split c
   const emoji = "😀";
   assert.deepEqual(r.push(`"${emoji[0]}`), { lines: [], overflow: false });
   assert.deepEqual(r.push(`${emoji[1]}"\n`), { lines: [`"${emoji}"`], overflow: false });
-  const bytes = new TextEncoder().encode('"é😀"\n');
-  const b = new M.LineReader();
-  assert.deepEqual(b.pushBytes(bytes.slice(0, 2)), { lines: [], overflow: false });
-  assert.deepEqual(b.pushBytes(bytes.slice(2, 5)), { lines: [], overflow: false });
-  assert.deepEqual(b.pushBytes(bytes.slice(5)), { lines: ['"é😀"'], overflow: false });
+});
+
+test("UTF-8 lengths are counted without TextEncoder", () => {
+  assert.equal(M.utf8Length("a"), 1);
+  assert.equal(M.utf8Length("é"), 2);
+  assert.equal(M.utf8Length("€"), 3);
+  assert.equal(M.utf8Length("😀"), 4);
+  assert.equal(M.utf8Length("😀"[0]), 3, "a lone surrogate");
+  const sample = "aé€😀\u{10FFFF}x";
+  assert.equal(M.utf8Length(sample), Buffer.byteLength(sample, "utf8"));
 });
 
 test("a line over the limit overflows, counted in UTF-8 bytes", () => {
@@ -6390,11 +7814,51 @@ test("ids are unique and short", () => {
   assert.ok(a.length <= 64);
 });
 
+test("a typed answer stays bound to the request it was opened for", () => {
+  const c = card("m1/a", "request", { free_text_answerable: true });
+  const editor = M.answerEditor(c);
+  assert.deepEqual(editor, { cardKey: "m1/a", requestId: "r1", revision: 1 });
+  assert.equal(M.answerEditorValid(editor, [c]), true);
+  const bumped = card("m1/a", "request", { free_text_answerable: true });
+  bumped.agent.pending = pending({ revision: 2 });
+  assert.equal(M.answerEditorValid(editor, [bumped]), false, "a new revision closes the editor");
+  const replaced = card("m1/a", "request", { free_text_answerable: true });
+  replaced.agent.pending = pending({ id: "r2" });
+  assert.equal(M.answerEditorValid(editor, [replaced]), false, "a new request closes the editor");
+  assert.equal(M.answerEditorValid(editor, []), false);
+  assert.equal(M.answerEditor(card("m1/a")), null, "no editor without a typed-answer request");
+});
+
+test("omitted cards are counted for the panel", () => {
+  assert.equal(M.omittedText({ done: 0, working: 0 }), "");
+  assert.equal(M.omittedText({ done: 3, working: 0 }), "3 done not shown");
+  assert.equal(M.omittedText({ done: 3, working: 2 }), "3 done and 2 working not shown");
+  assert.equal(M.omittedText(undefined), "");
+});
+
 test("card meta and the countdown bar", () => {
   const c = card("m1/a");
   assert.deepEqual(M.cardMeta(c), { kind: "Claude", machine: "Box", project: "api", title: "agent", badge: "herdr", tag: "BASH APPROVAL" });
   assert.equal(M.countdownFraction({ fires_at_ms: 2000 }, 1000), 0.5);
   assert.equal(M.countdownFraction({ fires_at_ms: 0 }, 1000), 0);
+});
+```
+
+`clients/omarchy/tests/host.test.mjs`, which loads the model with no `TextEncoder` or `TextDecoder`, as in QML:
+
+```js
+import test from "node:test";
+import assert from "node:assert/strict";
+
+// QML's JavaScript host has no TextEncoder or TextDecoder (plan D20).
+test("model.mjs works without browser or Node globals", async () => {
+  delete globalThis.TextEncoder;
+  delete globalThis.TextDecoder;
+  const M = await import("../model.mjs");
+  const r = new M.LineReader(8);
+  assert.deepEqual(r.push("é😀\n"), { lines: ["é😀"], overflow: false });
+  assert.equal(r.push("éééée\n").overflow, true);
+  assert.deepEqual(M.validateAnswer(" ok "), { ok: true, text: "ok" });
 });
 ```
 
@@ -6416,17 +7880,37 @@ export const REPLY_MAX_BYTES = 64 * 1024;
 export const UNDO_MS = 2000;
 export const UNCERTAIN_TEXT = "Check the terminal";
 
-const encoder = new TextEncoder();
-const byteLength = (s) => encoder.encode(s).length;
-// A UTF-16 unit is at least one UTF-8 byte and at most three.
-const tooLong = (s, max) => s.length > max || (s.length * 3 > max && byteLength(s) > max);
+/**
+ * UTF-8 length of a JS string, in pure JS: QML's host has no TextEncoder
+ * (plan D20). A lone surrogate counts 3, as its replacement character would.
+ */
+export function utf8Length(s) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      n += 4;
+      i += 1;
+    } else n += 3;
+  }
+  return n;
+}
 
-/** Splits the socket stream into lines (plan D20). On overflow the caller drops the connection. */
+// A UTF-16 unit is at least one UTF-8 byte and at most three.
+const tooLong = (s, max) => s.length > max || (s.length * 3 > max && utf8Length(s) > max);
+
+/**
+ * Joins Quickshell SplitParser output into lines and enforces the 4 MiB
+ * limit (plan D20). SplitParser splits bytes before decoding, so text
+ * arrives as whole characters; this reader also copes with a line given in
+ * pieces. On overflow the caller drops the connection.
+ */
 export class LineReader {
   constructor(max = MAX_LINE) {
     this.max = max;
     this.buf = "";
-    this.decoder = new TextDecoder("utf-8");
   }
 
   push(text) {
@@ -6440,11 +7924,6 @@ export class LineReader {
       if (line.length > 0) lines.push(line);
     }
     return { lines, overflow: tooLong(this.buf, this.max) };
-  }
-
-  /** Bytes; a UTF-8 sequence split across chunks decodes once complete. */
-  pushBytes(bytes) {
-    return this.push(this.decoder.decode(bytes, { stream: true }));
   }
 }
 
@@ -6574,6 +8053,34 @@ export function optionRows(card) {
   });
 }
 
+/**
+ * A typed-answer editor remembers the request it was opened for (spec §7):
+ * the answer goes to that request id and revision, never to a later one.
+ */
+export function answerEditor(card) {
+  const p = card.agent.pending;
+  if (!card.free_text_answerable || !p) return null;
+  return { cardKey: card.key, requestId: p.id, revision: p.revision };
+}
+
+/** False once the card is gone, its request changed, or it no longer takes a typed answer: the editor closes. */
+export function answerEditorValid(editor, cards) {
+  if (!editor) return false;
+  const card = cards.find((c) => c.key === editor.cardKey);
+  const p = card?.agent.pending;
+  return !!card && card.free_text_answerable && !!p && p.id === editor.requestId && p.revision === editor.revision;
+}
+
+export const EDITOR_CLOSED_TEXT = "The request changed. Your answer was not sent.";
+
+/** "N not shown" for the cards a large view left out (plan D9). */
+export function omittedText(omitted) {
+  const parts = [];
+  if (omitted?.done > 0) parts.push(`${omitted.done} done`);
+  if (omitted?.working > 0) parts.push(`${omitted.working} working`);
+  return parts.length === 0 ? "" : `${parts.join(" and ")} not shown`;
+}
+
 export function countdownFraction(action, nowMs) {
   return Math.max(0, Math.min(1, (action.fires_at_ms - nowMs) / UNDO_MS));
 }
@@ -6654,7 +8161,7 @@ const FORBIDDEN = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200E\u200F\u2
 export function validateAnswer(text) {
   const t = text.replace(/\r\n/g, "\n").trim();
   if (!t) return { ok: false, reason: "empty" };
-  if (byteLength(t) > ANSWER_MAX_BYTES) return { ok: false, reason: "too_long" };
+  if (utf8Length(t) > ANSWER_MAX_BYTES) return { ok: false, reason: "too_long" };
   if (FORBIDDEN.test(t)) return { ok: false, reason: "characters" };
   return { ok: true, text: t };
 }
@@ -6662,7 +8169,7 @@ export function validateAnswer(text) {
 /** As Inbox::reply: not blank, at most 64 KiB; sent as typed. */
 export function validateReply(text) {
   if (!text.trim()) return { ok: false, reason: "empty" };
-  if (byteLength(text) > REPLY_MAX_BYTES) return { ok: false, reason: "too_long" };
+  if (utf8Length(text) > REPLY_MAX_BYTES) return { ok: false, reason: "too_long" };
   return { ok: true, text };
 }
 
@@ -6731,7 +8238,26 @@ export class Tracker {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test 'clients/omarchy/tests/*.test.mjs'`
-Expected: PASS, 15 tests.
+Expected: PASS, 19 tests in two files.
+
+- [ ] **Step 4b: Only if Task 16 found `.mjs` imports unsupported**
+
+Apply Task 16's fallback: rename `model.mjs` to `model.js`, make its first line `.pragma library`, remove the `export ` keywords (`sed -i '' 's/^export //' clients/omarchy/model.js`), and load it in both test files with `node:vm`. Replace each `import * as M from "../model.mjs";` (and the dynamic import in `host.test.mjs`) with:
+
+```js
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const src = readFileSync(new URL("../model.js", import.meta.url), "utf8").replace(/^\.pragma library\n/, "");
+const ctx = vm.createContext({});
+vm.runInContext(
+  `${src}\nglobalThis.M = { MAX_LINE, ANSWER_MAX_BYTES, REPLY_MAX_BYTES, UNDO_MS, UNCERTAIN_TEXT, EDITOR_CLOSED_TEXT, QT, utf8Length, LineReader, parseMessage, Ids, sections, headerText, barState, machineChips, keyringLocked, requestTag, cardMeta, optionRows, answerEditor, answerEditorValid, omittedText, countdownFraction, fromQt, onKey, validateAnswer, validateReply, reasonText, errorText, Tracker };`,
+  ctx,
+);
+const M = ctx.M;
+```
+
+The empty context has no `TextEncoder`, as QML has none. Record the choice in this plan's D19.
 
 - [ ] **Step 5: Run the node tests in CI**
 
@@ -6747,29 +8273,29 @@ The `ubuntu-latest` image ships Node, so no setup step is needed. The glob form 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add clients/omarchy/model.mjs clients/omarchy/tests/model.test.mjs .github/workflows/ci.yml
+git add clients/omarchy/model.mjs clients/omarchy/tests/model.test.mjs clients/omarchy/tests/host.test.mjs .github/workflows/ci.yml
 git commit -m "Omarchy plugin: view model with node tests"
 ```
 
 ---
-### Task 15: QML plugin files
+### Task 18: Plugin manifest, socket client and bar widget
 
-**Execution:** cloud-ok for writing the files and the node checks. They cannot be loaded without the Omarchy shell; Task 17 validates and aligns them on the machine (plan S8).
+**Execution:** cloud-ok for writing the files and the node checks. They cannot load without the Omarchy shell; Task 21 validates them on the machine. Names follow Task 16's research note: where the note says "differs", use the recorded name instead of the one below.
 
 **Files:**
-- Create: `clients/omarchy/manifest.json`, `clients/omarchy/Service.qml`, `clients/omarchy/BarWidget.qml`, `clients/omarchy/Panel.qml`, `clients/omarchy/tests/plugin_files.test.mjs`
+- Create: `clients/omarchy/manifest.json`, `clients/omarchy/Service.qml`, `clients/omarchy/BarWidget.qml`, `clients/omarchy/tests/plugin_files.test.mjs`
 
 **Interfaces:**
-- Consumes: Task 14's `model.mjs` (as `Model`); the socket protocol of Tasks 4 and 9.
+- Consumes: Task 17's `model.mjs` (as `Model`); Task 16's research note; the protocol of Tasks 4, 9 and 10.
 - Produces:
-  - `Service.qml` has properties `view`, `settings` and `connected`, plus `tracker`. It has signals `outcome(msg)`, `outcomesLost(cards)` and `ready()`, and the function `send(type, fields, done)`.
-  - `Panel.qml` has the functions `open()`, `close()`, `toggle()` and `openCard(key)`.
-  - `BarWidget.qml` owns `Service` and `Panel` and declares the IPC target `tonibergholm.agentcaller`.
+  - `Service.qml` properties: `view`, `settings`, `omitted`, `connected` and `tracker`.
+  - Its signals: `outcome(msg)`, `outcomesLost(cards)` and `ready()`.
+  - Its function `send(type, fields, done)`.
+  - `BarWidget.qml` owns `Service` and `Panel` (Task 19) and declares the IPC target `tonibergholm.agentcaller`.
 - Rules (spec §7):
-  - No colours or sizes of the plugin's own: `Commons.Color` and `Commons.Style` only.
+  - `Commons` colours and sizes only.
   - Every write is followed by `flush()`.
-  - The pairing field is masked, cleared after every attempt and never logged.
-  - No `console.` calls anywhere.
+  - No `console.` calls, and no `TextEncoder` or `TextDecoder`: `SplitParser` hands over whole lines as strings (D20).
 
 - [ ] **Step 1: Write the failing checks**
 
@@ -6781,7 +8307,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const read = (name) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
-const QML = ["BarWidget.qml", "Panel.qml", "Service.qml"];
+const QML = ["BarWidget.qml", "Service.qml"]; // Task 19 adds Panel.qml
 
 test("the manifest names the plugin, its kind, section and category", () => {
   const m = JSON.parse(read("manifest.json"));
@@ -6803,21 +8329,17 @@ test("no QML file logs or sets colours of its own", () => {
     assert.doesNotMatch(src, /console\./, f);
     assert.doesNotMatch(src, /#[0-9a-fA-F]{3,8}\b/, f);
     assert.doesNotMatch(src, /color:\s*"/, f);
+    assert.doesNotMatch(src, /TextEncoder|TextDecoder/, f);
   }
-});
-
-test("the pairing field is masked and cleared before the line is sent", () => {
-  const panel = read("Panel.qml");
-  assert.match(panel, /echoMode:\s*TextInput\.Password/);
-  const body = panel.slice(panel.indexOf("function submitPairing"));
-  const cleared = body.indexOf('pairingField.text = ""');
-  const sent = body.indexOf('service.send("pair"');
-  assert.ok(cleared > 0 && sent > cleared, "cleared before sending");
 });
 
 test("every write is flushed and every QML file uses model.mjs", () => {
   assert.match(read("Service.qml"), /socket\.write\([^\n]*\);\s*\n\s*socket\.flush\(\);/);
   for (const f of QML) assert.match(read(f), /import "model\.mjs" as Model/, f);
+});
+
+test("a view message carries its omitted counts to the panel", () => {
+  assert.match(read("Service.qml"), /root\.omitted = msg\.omitted;/);
 });
 ```
 
@@ -6827,8 +8349,6 @@ Run: `node --test 'clients/omarchy/tests/*.test.mjs'`
 Expected: FAIL, `ENOENT … manifest.json`.
 
 - [ ] **Step 3: Write `manifest.json`**
-
-The keys beyond the spec's three are aligned with the installed plugins in Task 17 Step 2.
 
 ```json
 {
@@ -6858,6 +8378,8 @@ Item {
 
     property var view: null
     property var settings: null
+    // Cards the service left out of a large view (plan D9).
+    property var omitted: ({ done: 0, working: 0 })
     property bool connected: false
     property var tracker: new Model.Tracker()
     property var ids: new Model.Ids("omarchy")
@@ -6896,6 +8418,7 @@ Item {
             break;
         case "view":
             root.view = msg.view;
+            root.omitted = msg.omitted;
             break;
         case "outcome":
             root.tracker.outcome(msg);
@@ -7032,7 +8555,77 @@ Item {
 }
 ```
 
-- [ ] **Step 6: Write `Panel.qml`**
+- [ ] **Step 6: Run the checks to verify they pass**
+
+Run: `node --test 'clients/omarchy/tests/*.test.mjs'`
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add clients/omarchy
+git commit -m "Omarchy plugin: manifest, socket client and bar widget"
+```
+
+---
+
+### Task 19: Plugin panel
+
+**Execution:** cloud-ok for writing the file and the node checks; Task 21 validates it on the machine. Names follow Task 16's research note.
+
+**Files:**
+- Create: `clients/omarchy/Panel.qml`
+- Modify: `clients/omarchy/tests/plugin_files.test.mjs`
+
+**Interfaces:**
+- Consumes: Task 17's `model.mjs`; Task 18's `Service.qml`.
+- Produces: `Panel.qml` with `open()`, `close()`, `toggle()`, `openCard(key)` and `keyEvent(event, field, composing, input)`.
+- Rules (spec §7, D34):
+  - Every key, in the panel or in a text field, goes through `Model.onKey` with the field's kind and its `inputMethodComposing`. So letters and digits typed into a field stay text, Enter submits, and IME composition is never a shortcut.
+  - A typed answer remembers the request id and revision it was opened for and sends those. When the view shows that request changed or went away, the editor closes with "The request changed. Your answer was not sent.", and the text is dropped.
+  - "N not shown" appears when the service left cards out (D9).
+  - The pairing field is masked, cleared before each send, and never logged.
+
+- [ ] **Step 1: Write the failing checks**
+
+In `clients/omarchy/tests/plugin_files.test.mjs`, change the `QML` list to `["BarWidget.qml", "Panel.qml", "Service.qml"]` and append:
+
+```js
+
+test("the pairing field is masked and cleared before the line is sent", () => {
+  const panel = read("Panel.qml");
+  assert.match(panel, /echoMode:\s*TextInput\.Password/);
+  const body = panel.slice(panel.indexOf("function submitPairing"));
+  const cleared = body.indexOf('pairingField.text = ""');
+  const sent = body.indexOf('service.send("pair"');
+  assert.ok(cleared > 0 && sent > cleared, "cleared before sending");
+});
+
+test("every text field sends its keys through model.mjs with its IME state", () => {
+  const panel = read("Panel.qml");
+  const fields = panel.split("TextField {").slice(1);
+  assert.equal(fields.length, 4, "reply, answer, machine name, pairing");
+  for (const f of fields) {
+    assert.match(f.slice(0, f.indexOf("\n            }")), /Keys\.onPressed: event => panel\.keyEvent\(event, \{ kind: "[a-z]+"/);
+    assert.match(f, /inputMethodComposing/);
+  }
+});
+
+test("a typed answer goes to the request its editor was opened for", () => {
+  const panel = read("Panel.qml");
+  const body = panel.slice(panel.indexOf("function submitAnswer"), panel.indexOf("function keyEvent"));
+  assert.match(body, /request: editor\.requestId, revision: editor\.revision/);
+  assert.doesNotMatch(body, /pending\.(id|revision)/);
+  assert.match(panel, /onViewChanged:[\s\S]*answerEditorValid/);
+});
+```
+
+- [ ] **Step 2: Run the checks to verify they fail**
+
+Run: `node --test 'clients/omarchy/tests/*.test.mjs'`
+Expected: FAIL, `ENOENT … Panel.qml`.
+
+- [ ] **Step 3: Write `Panel.qml`**
 
 ```qml
 // The inbox panel (omarchy spec §7). What shows follows InboxView exactly;
@@ -7051,7 +8644,8 @@ Ui.Panel {
 
     property bool shown: false
     property var keyState: ({ selected: null, replyFor: null })
-    property string answerFor: ""
+    // The request a typed answer was opened for (plan D34).
+    property var answerEditor: null
     property string machineFilter: ""
     property bool settingsOpen: false
     property bool doneOpen: false
@@ -7103,13 +8697,23 @@ Ui.Panel {
         };
     }
 
-    function run(effect) {
+    // `input`: the focused text field, or null.
+    function run(effect, input) {
         switch (effect.kind) {
         case "pick":
             service.send("pick", { card: effect.cardKey, request: effect.requestId, option: effect.optionId, revision: effect.revision }, started(effect.cardKey));
             break;
         case "focusAnswer":
-            answerFor = effect.cardKey;
+            answerEditor = Model.answerEditor(cardFor(effect.cardKey));
+            break;
+        case "submitReply":
+            if (submitReply(effect.cardKey, input.text)) input.text = "";
+            break;
+        case "submitAnswer":
+            if (submitAnswer(input.text)) input.text = "";
+            break;
+        case "submitPairing":
+            submitPairing();
             break;
         case "openReply":
             keyState = Object.assign({}, keyState, { replyFor: effect.cardKey });
@@ -7137,18 +8741,42 @@ Ui.Panel {
         return true;
     }
 
-    function submitAnswer(cardKey, text) {
-        const card = cardFor(cardKey);
-        if (!card || !card.agent.pending) return false;
+    // Sends to the request the editor was opened for, never the card's
+    // current one; the service refuses it if that request moved on.
+    function submitAnswer(text) {
+        const editor = answerEditor;
+        if (!Model.answerEditorValid(editor, view ? view.cards : [])) {
+            answerEditor = null;
+            message = Model.EDITOR_CLOSED_TEXT;
+            return false;
+        }
         const r = Model.validateAnswer(text);
         if (!r.ok) {
             message = Model.reasonText(r.reason);
             return false;
         }
-        const p = card.agent.pending;
-        service.send("answer_text", { card: cardKey, request: p.id, revision: p.revision, text: r.text }, started(cardKey));
-        answerFor = "";
+        service.send("answer_text", { card: editor.cardKey, request: editor.requestId, revision: editor.revision, text: r.text }, started(editor.cardKey));
+        answerEditor = null;
         return true;
+    }
+
+    // Every key goes through model.mjs: `field` says which text field has
+    // focus, and `composing` is that field's IME state (spec §7).
+    function keyEvent(event, field, composing, input) {
+        const r = Model.onKey(visibleCards, keyState, Model.fromQt(event.key, event.text, event.modifiers, composing, field));
+        keyState = r.state;
+        if (r.effect.kind !== "none") {
+            run(r.effect, input);
+            event.accepted = true;
+        }
+    }
+
+    // A changed request closes its typed-answer editor; the text is dropped.
+    onViewChanged: {
+        if (answerEditor !== null && !Model.answerEditorValid(answerEditor, view ? view.cards : [])) {
+            answerEditor = null;
+            message = Model.EDITOR_CLOSED_TEXT;
+        }
     }
 
     // The pairing line is a secret: cleared before it is sent, after every
@@ -7182,15 +8810,7 @@ Ui.Panel {
         onTriggered: panel.now = Date.now()
     }
 
-    Keys.onPressed: event => {
-        const input = Model.fromQt(event.key, event.text, event.modifiers, false, null);
-        const r = Model.onKey(panel.visibleCards, panel.keyState, input);
-        panel.keyState = r.state;
-        if (r.effect.kind !== "none") {
-            panel.run(r.effect);
-            event.accepted = true;
-        }
-    }
+    Keys.onPressed: event => panel.keyEvent(event, null, false, null)
 
     component CardItem: Rectangle {
         id: cardItem
@@ -7247,7 +8867,7 @@ Ui.Panel {
                     MouseArea {
                         anchors.fill: parent
                         enabled: modelData.pickable
-                        onClicked: panel.run({ kind: "pick", cardKey: cardItem.card.key, requestId: cardItem.card.agent.pending.id, optionId: modelData.id, revision: cardItem.card.agent.pending.revision })
+                        onClicked: panel.run({ kind: "pick", cardKey: cardItem.card.key, requestId: cardItem.card.agent.pending.id, optionId: modelData.id, revision: cardItem.card.agent.pending.revision }, null)
                     }
                 }
             }
@@ -7290,19 +8910,21 @@ Ui.Panel {
             }
 
             TextField {
+                id: replyField
                 visible: panel.keyState.replyFor === cardItem.card.key
                 Layout.fillWidth: true
                 placeholderText: "Reply"
                 focus: visible
-                onAccepted: if (panel.submitReply(cardItem.card.key, text)) text = ""
+                Keys.onPressed: event => panel.keyEvent(event, { kind: "reply", cardKey: cardItem.card.key }, inputMethodComposing, replyField)
             }
 
             TextField {
-                visible: panel.answerFor === cardItem.card.key
+                id: answerField
+                visible: panel.answerEditor !== null && panel.answerEditor.cardKey === cardItem.card.key
                 Layout.fillWidth: true
                 placeholderText: "Answer"
                 focus: visible
-                onAccepted: if (panel.submitAnswer(cardItem.card.key, text)) text = ""
+                Keys.onPressed: event => panel.keyEvent(event, { kind: "answer", cardKey: cardItem.card.key }, inputMethodComposing, answerField)
             }
         }
 
@@ -7347,6 +8969,13 @@ Ui.Panel {
             wrapMode: Text.Wrap
             color: Commons.Color.urgent
             text: panel.message
+        }
+
+        Text {
+            visible: !panel.settingsOpen && Model.omittedText(panel.service.omitted) !== ""
+            Layout.fillWidth: true
+            color: Commons.Color.dim
+            text: Model.omittedText(panel.service.omitted)
         }
 
         Flow {
@@ -7415,8 +9044,10 @@ Ui.Panel {
                     Layout.fillWidth: true
 
                     TextField {
+                        id: nameField
                         Layout.fillWidth: true
                         text: modelData.name
+                        Keys.onPressed: event => panel.keyEvent(event, { kind: "rename", cardKey: null }, inputMethodComposing, nameField)
                         onAccepted: panel.service.send("rename_machine", { machine: modelData.key, name: text }, panel.report)
                     }
 
@@ -7446,7 +9077,7 @@ Ui.Panel {
                     Layout.fillWidth: true
                     echoMode: TextInput.Password
                     placeholderText: "Paste the line from `acd pair`"
-                    onAccepted: panel.submitPairing()
+                    Keys.onPressed: event => panel.keyEvent(event, { kind: "pairing", cardKey: null }, inputMethodComposing, pairingField)
                 }
 
                 Button {
@@ -7483,29 +9114,30 @@ Ui.Panel {
 }
 ```
 
-- [ ] **Step 7: Run the checks to verify they pass**
+- [ ] **Step 4: Run the checks to verify they pass**
 
 Run: `node --test 'clients/omarchy/tests/*.test.mjs'`
-Expected: PASS, both test files.
+Expected: PASS, every test in the three files.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add clients/omarchy
-git commit -m "Omarchy plugin: manifest, socket client, bar widget and panel"
+git commit -m "Omarchy plugin: panel with model-driven keys and bound typed answers"
 ```
 
 ---
-### Task 16: install, uninstall, status
 
-**Execution:** cloud-ok (a fake runner; nothing touches systemd or the shell)
+### Task 20: install, uninstall, status
+
+**Execution:** cloud-ok (a fake runner; nothing touches systemd or the shell). The command names, plugin directory and bindings file below follow Task 16's note; where it says "differs", use the recorded value.
 
 **Files:**
 - Create: `crates/acd-inbox/src/install.rs`, `crates/acd-inbox/tests/install.rs`
 - Modify: `crates/acd-inbox/src/lib.rs` (`pub mod install;`), `crates/acd-inbox/src/main.rs` (three subcommands)
 
 **Interfaces:**
-- Consumes: Task 15's plugin files (embedded, D21); `prefs::Paths` (socket path); the `hello` and `settings` lines (Tasks 4, 8).
+- Consumes: the plugin files of Tasks 17 to 19 (embedded, D21); Task 16's research note for the shell commands, plugin directory and bindings file; `prefs::Paths` (socket path); the `hello` and `settings` lines (Tasks 4, 9).
 - Produces (in `acd_inbox::install`):
   - Constants: `UNIT_NAME = "acd-inbox.service"`, `PLUGIN_ID`, `MARKER`, `KEYBINDING` (D22), `PLUGIN_FILES: &[(&str, &str)]`.
   - `pub trait Runner { fn run(&self, program: &str, args: &[&str]) -> anyhow::Result<()>; }` and `pub struct SystemRunner`.
@@ -8003,21 +9635,19 @@ git commit -m "acd-inbox: install, uninstall and status with the embedded plugin
 
 ---
 
-### Task 17: Build in Docker, install and validate the plugin on omarchy
+### Task 21: Build in Docker, install and validate on omarchy
 
-**Execution:** local. It needs the Mac (Docker) and the omarchy machine, and the user answers the keyring and keybinding prompts. The controller runs it with the user.
+**Execution:** local. It needs the Mac (Docker) and the omarchy machine, and the user answers the keyring and keybinding prompts. The controller runs it with the user. The shell API was settled in Task 16, so this task builds, installs and validates; it does not redesign.
 
 **Files:**
 - Modify: `justfile` (two recipes)
-- Create: `docs/research/2026-10-12-omarchy-plugin-api.md`
-- Modify, if Step 2 finds differences: `clients/omarchy/*`, `clients/omarchy/tests/*`, `crates/acd-inbox/src/install.rs` (commands, paths, `KEYBINDING`), `crates/acd-inbox/tests/install.rs`
+- Modify, only for gaps Step 2 finds: `clients/omarchy/*`, `crates/acd-inbox/src/install.rs`, their tests, and `docs/research/2026-10-12-omarchy-plugin-api.md`
 
 **Interfaces:**
 - Consumes: everything above.
 - Produces:
   - An installed `acd-inbox` and plugin on omarchy.
-  - A research note recording the plugin API facts this plan could not check (S8).
-  - QML aligned with them.
+  - Validation output from `omarchy-plugin-validate`, `qmllint` and `acd-inbox status`.
 
 - [ ] **Step 1: Add the Docker recipes**
 
@@ -8040,61 +9670,18 @@ inbox-install host="omarchy": inbox-linux
 Run: `just inbox-linux && file target/linux-amd64/release/acd-inbox`
 Expected: `ELF 64-bit LSB pie executable, x86-64`.
 
-- [ ] **Step 2: Read the installed plugin API on omarchy**
+- [ ] **Step 2: Check the files against the research note**
 
-On omarchy (`ssh omarchy`):
+Compare `clients/omarchy/*` and `install.rs` (commands, paths, `KEYBINDING`) with every "differs" item in `docs/research/2026-10-12-omarchy-plugin-api.md`. Each must already be applied (Tasks 17 to 20). A gap found here is a defect in those tasks: fix it in their files, keep their tests passing (`node --test 'clients/omarchy/tests/*.test.mjs'`, `cargo test -p acd-inbox --locked`), and note it in the research note.
 
-```bash
-omarchy-shell --help; omarchy plugin --help
-command -v omarchy-plugin-validate qmllint qmllint6
-find / -name manifest.json -path '*omarchy*' 2>/dev/null | xargs grep -l '"omarchy.tailscale"'
-ls ~/.config/hypr/
-```
-
-From the `omarchy.tailscale` directory that `find` reports, read `manifest.json` and every `.qml` file. Record in `docs/research/2026-10-12-omarchy-plugin-api.md`, with file paths and quoted lines:
-
-1. The manifest keys and how a bar widget and its panel are declared.
-2. The imports (`qs.Ui`, `qs.Commons`, `Style`) and the exact names of `Panel`, its open and close API, the colour names (urgent, accent, dim, text, surface) and the spacing and radius names.
-3. The IPC type (`ShellIpc` or Quickshell's `IpcHandler`) and how a target and its functions are declared.
-4. Whether a plugin may import an `.mjs` module. Test it with a one-line plugin, or check Quickshell's version: Qt 6 QML supports `import "x.mjs" as X`.
-5. Quickshell's `Socket` API in this version: `connected`, `connectedChanged`, `error`, `write`, `flush`, and whether `SplitParser` splits bytes before decoding (D20).
-6. The real names of `omarchy-shell shell rescanPlugins`, `omarchy plugin enable` and `disable`, and the Hyprland bindings file.
-
-- [ ] **Step 3: Align the files with what Step 2 found**
-
-Edit `manifest.json`, the three QML files, and `install.rs`'s commands, paths and `KEYBINDING` to match the recorded facts. Keep the rules of Task 15: `Commons` colours and sizes only, flushed writes, the masked and cleared pairing field, no `console.`. Update `tests/install.rs` and `tests/plugin_files.test.mjs` if a name changed (for example `IpcHandler` → `ShellIpc`).
-
-If `.mjs` imports do not work, use this fallback:
-1. Rename `model.mjs` to `model.js`, make its first line `.pragma library`, and remove the `export ` keywords (`sed -i '' 's/^export //' clients/omarchy/model.js`).
-2. Change the three QML imports to `import "model.js" as Model` and the `PLUGIN_FILES` entry to `model.js`.
-3. Load the module in `tests/model.test.mjs` with `node:vm`:
-
-```js
-import { readFileSync } from "node:fs";
-import vm from "node:vm";
-
-const src = readFileSync(new URL("../model.js", import.meta.url), "utf8").replace(/^\.pragma library\n/, "");
-const ctx = vm.createContext({ TextEncoder, TextDecoder });
-vm.runInContext(
-  `${src}\nglobalThis.M = { MAX_LINE, ANSWER_MAX_BYTES, REPLY_MAX_BYTES, UNDO_MS, UNCERTAIN_TEXT, QT, LineReader, parseMessage, Ids, sections, headerText, barState, machineChips, keyringLocked, requestTag, cardMeta, optionRows, countdownFraction, fromQt, onKey, validateAnswer, validateReply, reasonText, errorText, Tracker };`,
-  ctx,
-);
-const M = ctx.M;
-```
-
-Record the choice in the research note and in this plan's D19.
-
-Run: `node --test 'clients/omarchy/tests/*.test.mjs'` and `cargo test -p acd-inbox --locked`
-Expected: PASS.
-
-- [ ] **Step 4: Install on omarchy**
+- [ ] **Step 3: Install on omarchy**
 
 Run: `just inbox-install omarchy`
 Expected:
 - The output shows "Installed …/acd-inbox", "Started acd-inbox.service", "Installed the plugin in …" and the keybinding line.
 - A `[y/N]` question about the bindings file. The user decides; with `y`, a `.bak` file is next to it.
 
-- [ ] **Step 5: Validate the plugin and the service**
+- [ ] **Step 4: Validate the plugin and the service**
 
 On omarchy:
 
@@ -8111,18 +9698,18 @@ Expected:
 - The journal shows `acd-inbox serving` and connection lines with tags and lengths only.
 - The bar shows the glyph; Super+Alt+A (if added) toggles the panel.
 
-Fix and repeat Steps 3 to 5 until these hold.
+Fix and repeat Steps 2 to 4 until these hold. A failure that needs a design change goes to the orchestrator.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add justfile docs/research/2026-10-12-omarchy-plugin-api.md clients/omarchy crates/acd-inbox
-git commit -m "Omarchy plugin: aligned with the installed shell API; Docker build recipe"
+git commit -m "Omarchy inbox: Docker build recipe; validated on omarchy"
 ```
 
 ---
 
-### Task 18: Live checks on omarchy
+### Task 22: Live checks on omarchy
 
 **Execution:** local. It runs on the omarchy machine with a real Claude Code session, and with minos as the remote. The controller runs the steps with the user and records each result.
 
@@ -8130,7 +9717,7 @@ git commit -m "Omarchy plugin: aligned with the installed shell API; Docker buil
 - Create: `docs/research/2026-10-12-omarchy-live.md`
 
 **Interfaces:**
-- Consumes: the installed service and plugin (Task 17); `acd` on omarchy and on minos; herdr with Claude Code on omarchy.
+- Consumes: the installed service and plugin (Task 21); `acd` on omarchy and on minos; herdr with Claude Code on omarchy.
 - Produces: a record of the five live checks of spec §12, each with date, commit, steps, observed result and evidence (journal lines, `acd-inbox status`, screenshots named in the note). A failed check is recorded as failed, with the follow-up it needs.
 
 - [ ] **Step 1: Prepare and start the record**
@@ -8206,3 +9793,4 @@ git commit -m "Omarchy inbox: live check record"
 ```
 
 A failed check blocks merge. Record it, with its evidence, as a follow-up in `docs/superpowers/plans/2026-10-07-p1-followups.md`, and report it to the orchestrator.
+
