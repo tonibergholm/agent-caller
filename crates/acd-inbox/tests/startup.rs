@@ -91,3 +91,21 @@ async fn a_symlinked_lock_path_is_refused() {
     std::os::unix::fs::symlink(dir.join("target"), dir.join("acd-inbox.lock")).unwrap();
     assert!(matches!(listen(&dir), Err(StartupError::Io(..))));
 }
+
+#[tokio::test]
+async fn dropping_leaves_a_socket_or_file_that_replaced_ours() {
+    let (_d, dir) = runtime();
+    let path = dir.join("acd-inbox.sock");
+    let l = listen(&dir).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let other = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    drop(l);
+    assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_socket(), "a different socket stays");
+    drop(other);
+    std::fs::remove_file(&path).unwrap();
+    let l = listen(&dir).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, "keep me").unwrap();
+    drop(l);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+}

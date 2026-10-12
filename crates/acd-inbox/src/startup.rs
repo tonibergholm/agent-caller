@@ -96,6 +96,8 @@ impl Drop for OwnedSocket {
     }
 }
 
+/// The lock must outlive the socket: fields drop in declaration order, so
+/// `socket` is removed while `lock` is still held.
 pub struct Listening {
     pub listener: tokio::net::UnixListener,
     pub socket: OwnedSocket,
@@ -105,10 +107,13 @@ pub struct Listening {
 /// §4.4 in order: check the runtime dir, take the lock, clear a stale
 /// socket, bind, then set mode 0600. Call inside a tokio runtime.
 pub fn listen(runtime_dir: &Path, socket: &Path, lock: &Path) -> Result<Listening, StartupError> {
+    debug_assert_eq!(socket.parent(), Some(runtime_dir));
+    debug_assert_eq!(lock.parent(), Some(runtime_dir));
     check_runtime_dir(runtime_dir)?;
     let lock = take_lock(lock)?;
     clear_socket_path(&lock, socket)?;
     let std_listener = std::os::unix::net::UnixListener::bind(socket).map_err(io(socket))?;
+    // Between bind and chmod the 0700 runtime dir keeps other users out.
     let m = std::fs::symlink_metadata(socket).map_err(io(socket))?;
     let owned = OwnedSocket { path: socket.to_path_buf(), dev: m.dev(), ino: m.ino() };
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).map_err(io(socket))?;
