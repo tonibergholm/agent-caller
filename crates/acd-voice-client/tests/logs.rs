@@ -61,3 +61,33 @@ async fn voice_text_never_reaches_the_logs() {
     assert!(logs.contains("daemon error"), "{logs}");
     assert!(!logs.contains("SECRET"), "{logs}");
 }
+
+/// Spec §3.7 for speech: partial and final transcripts never reach the logs.
+#[tokio::test(flavor = "current_thread")]
+async fn spoken_text_never_reaches_the_logs() {
+    use acd_voice::listen::ListenEvent;
+    use acd_voice::text::VoiceText;
+
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let (r, speech) = speech_rig(vec![pending_agent()]).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.hold(true, true);
+    let g = speech.last_start().unwrap();
+    r.voice.speech_event(ListenEvent::Partial { generation: g, text: VoiceText::new("SECRET-PARTIAL-a1") });
+    r.voice.hold(false, true);
+    r.voice.speech_event(final_(g, "approve SECRET-SPOKEN-55"));
+    hud_until(&r.sink, "routed", |h| matches!(h, Hud::Error { .. })).await;
+
+    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("utterance routed") && logs.contains("source=\"speech\""), "{logs}");
+    assert!(logs.contains("listening"), "{logs}");
+    assert!(!logs.contains("SECRET"), "{logs}");
+}

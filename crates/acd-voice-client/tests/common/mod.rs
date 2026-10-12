@@ -59,6 +59,10 @@ pub struct InboxRig {
 }
 
 pub async fn inbox_rig(agents: Vec<Value>) -> InboxRig {
+    inbox_rig_timed(agents, fast()).await
+}
+
+pub async fn inbox_rig_timed(agents: Vec<Value>, timing: Timing) -> InboxRig {
     let f = FakeServer::start(TOKEN, Identity::Paired).await;
     let secrets = Arc::new(MemorySecrets::default());
     secrets
@@ -79,7 +83,7 @@ pub async fn inbox_rig(agents: Vec<Value>) -> InboxRig {
     let inbox = Inbox::new(
         settings,
         secrets,
-        InboxOptions { timing: fast(), settings_path: None, client_name: "t".into(), client_version: "0".into() },
+        InboxOptions { timing, settings_path: None, client_name: "t".into(), client_version: "0".into() },
     );
     inbox.start();
     let c = f.next_connection().await;
@@ -163,9 +167,15 @@ pub struct Sink {
     pub refuse_display: AtomicBool,
     /// Runs for every state published, before it is acknowledged.
     pub on_hud: Mutex<Option<HudHook>>,
+    pub mics: Mutex<Vec<bool>>,
+    pub acked: Mutex<Vec<u64>>,
 }
 
 impl HudSink for Sink {
+    fn listening(&self, on: bool) {
+        self.mics.lock().unwrap().push(on);
+    }
+
     fn hud(&self, seq: u64, hud: &Hud) -> bool {
         if hud.awaiting_display().is_some() && self.refuse_display.load(Ordering::SeqCst) {
             return false;
@@ -207,17 +217,23 @@ pub struct Rig {
 }
 
 pub async fn rig(agents: Vec<Value>, model: Option<Arc<dyn IntentModel>>, display: Display) -> Rig {
-    let InboxRig { f, c, inbox } = inbox_rig(agents).await;
+    rig_timed(agents, model, display, fast()).await
+}
+
+pub async fn rig_timed(agents: Vec<Value>, model: Option<Arc<dyn IntentModel>>, display: Display, timing: Timing) -> Rig {
+    let InboxRig { f, c, inbox } = inbox_rig_timed(agents, timing).await;
     let sink = Arc::new(Sink::default());
     let voice = Controller::start(inbox.clone(), model, sink.clone(), true);
     if display == Display::Acks {
         let (tx, mut rx) = mpsc::unbounded_channel();
         *sink.acks.lock().unwrap() = Some(tx);
         let weak = Arc::downgrade(&voice);
+        let acks = sink.clone();
         tokio::spawn(async move {
             while let Some(id) = rx.recv().await {
                 let Some(voice) = weak.upgrade() else { return };
                 voice.shown(id);
+                acks.acked.lock().unwrap().push(id);
             }
         });
     }
@@ -235,4 +251,54 @@ pub async fn hud_until(sink: &Sink, what: &str, pred: impl Fn(&Hud) -> bool) -> 
     })
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+}
+
+use acd_voice::listen::ListenEvent;
+use acd_voice::listen::fake::FakeSpeechInput;
+use acd_voice::text::VoiceText;
+
+/// `rig` with a scripted microphone and transcriber attached.
+pub async fn speech_rig(agents: Vec<Value>) -> (Rig, Arc<FakeSpeechInput>) {
+    speech_rig_with(agents, None, Display::Acks).await
+}
+
+/// `speech_rig` with a 30 s undo window, so a test can act on a countdown
+/// before it fires without racing the clock.
+pub async fn speech_rig_slow(agents: Vec<Value>, model: Option<Arc<dyn IntentModel>>) -> (Rig, Arc<FakeSpeechInput>) {
+    let r = rig_timed(agents, model, Display::Acks, Timing { undo: Duration::from_secs(30), ..fast() }).await;
+    let speech = Arc::new(FakeSpeechInput::default());
+    r.voice.attach_speech(speech.clone());
+    (r, speech)
+}
+
+pub async fn speech_rig_with(
+    agents: Vec<Value>,
+    model: Option<Arc<dyn IntentModel>>,
+    display: Display,
+) -> (Rig, Arc<FakeSpeechInput>) {
+    let r = rig(agents, model, display).await;
+    let speech = Arc::new(FakeSpeechInput::default());
+    r.voice.attach_speech(speech.clone());
+    (r, speech)
+}
+
+/// Waits until the HUD acknowledged proposal `id` (no fixed sleep).
+pub async fn acked_until(sink: &Sink, id: u64) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !sink.acked.lock().unwrap().contains(&id) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the HUD acknowledged the proposal");
+}
+
+/// A final transcript of 900 ms with 600 ms of voice.
+pub fn final_(generation: u64, text: &str) -> ListenEvent {
+    ListenEvent::Final {
+        generation,
+        text: VoiceText::new(text),
+        audio: Duration::from_millis(900),
+        voiced: Duration::from_millis(600),
+    }
 }
