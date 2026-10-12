@@ -141,6 +141,10 @@ fn run_slow(svc: &Arc<Service>, tag: &str, m: &Map<String, Value>) -> Result<Val
             .map_err(|e| machine_error_code(&e)),
         "retry_machine" => {
             let key = s(m, "machine")?;
+            // A junk key must cause no keyring read and no cache entry.
+            if !ib.settings().machines.iter().any(|e| e.key == key) {
+                return Err(ErrorCode::UnknownMachine);
+            }
             // A cached keyring error is retried only when asked (plan D14).
             svc.secrets.refresh(&[key.to_owned()]);
             ib.reconnect_machine(key).map(|()| Value::Null).map_err(|e| machine_error_code(&e))

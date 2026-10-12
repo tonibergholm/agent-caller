@@ -123,7 +123,7 @@ missing, the "Open" action is left out of notifications.
   that was never created (for example a secret that could not be read at
   start), not only one that exists.
 - Secret status per machine: `MachineEntryView` gains `secret`:
-  `ok | locked | missing | unreadable`, so a locked keyring is not shown
+  `ok | locked | missing | unreadable | unknown`, so a locked keyring is not shown
   as "not paired". Connection status stays in `InboxView.machines`;
   views join the two by machine key.
 - Secrets outside locks: `Inbox` never calls the `SecretStore` while
@@ -326,6 +326,11 @@ The service reconciles each new `InboxView` against the previous one:
   write, delete 5 s; unlock 120 s, as it waits for the user). `Inbox`
   sees `CachedSecrets` filled from the worker; no keyring call runs under
   an `Inbox` lock or blocks a timer or a cancel.
+  The worker is serial and never abandons a started write or delete: a
+  caller that stops waiting gets `secret_store_timeout`, the machine's
+  secret becomes `unknown`, and its connection stops (fail closed). Only a
+  successful read (Retry) or a re-pairing recovers it; an `unknown` previous
+  secret is not restored when a re-pairing fails, and nothing is guessed.
 - Locked at start: the service does not prompt. Affected machines show
   `secret: locked`. "Unlock keyring" (`unlock_secrets`) asks the worker
   to unlock (the user sees the keyring prompt); on success the service
@@ -448,6 +453,8 @@ The re-review added: pairing rollback restores a re-paired machine's
 secret; upstream outcome lag also sends `outcomes_lost`; connections
 subscribe to outcomes on accept; settings entries join view machines by
 key.
+
+Unconfirmed keyring changes (2026-10-12, orchestrator): serial worker, `unknown` status, recovery by Retry or re-pairing.
 
 Oversized views (2026-10-12, orchestrator): text first, then Done, then Working cards with counts; Needs-you cards are never left out.
 
