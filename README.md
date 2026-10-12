@@ -26,9 +26,10 @@ can speak `acd/1` to the same daemon. The protocol is in
 
 > **Status: pre-release (0.1.0).** Each release is published on
 > [GitHub Releases](https://github.com/tonibergholm/agent-caller/releases)
-> as a pre-release. The binaries are ad-hoc signed, and the Mac app is not
-> notarized, so macOS asks you to confirm its first launch. See
-> [docs/release.md](docs/release.md). You can also build from source.
+> as a pre-release. The macOS binaries are ad-hoc signed, and the Mac app is
+> not notarized, so macOS asks you to confirm its first launch. The Linux
+> binaries are unsigned. See [docs/release.md](docs/release.md). You can also
+> build from source.
 > Expect breaking changes to the config and protocol before 1.0.
 
 ## Screenshots

@@ -6,8 +6,9 @@ name: Release
 # dist-all artifact with SHA256SUMS, so the dry run can be tested with
 # scripts/install.sh --from-dir. No release is created.
 #
-# Secrets: each APPLE_* secret is passed only to the step that uses it, never
+# Secrets: each APPLE_* secret is passed only to the steps that use it, never
 # at job level. Steps that build Rust or install npm packages get no secrets.
+# Decision steps receive booleans, never secret values.
 #
 # Docs: docs/release.md.
 
@@ -50,6 +51,7 @@ jobs:
           echo "Version $version"
 
   # The same test gate as every push (ci.yml). A release needs it to pass.
+  # prepare and ci run in parallel. The build jobs need both.
   ci:
     uses: ./.github/workflows/ci.yml
 
@@ -81,6 +83,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -95,29 +98,39 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --target "$TARGET" -p acd-inbox
       - name: Decide signing mode
+        # Receives only booleans derived from the secrets. No secret value
+        # reaches this step.
         id: signing
         if: runner.os == 'macOS'
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          HAS_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          HAS_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+          HAS_NOTARY_CREDENTIALS: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+          HAS_ANY_NOTARY_CREDENTIAL: ${{ secrets.APPLE_ID != '' || secrets.APPLE_PASSWORD != '' || secrets.APPLE_TEAM_ID != '' }}
         run: |
           set -euo pipefail
-          if [ -z "$APPLE_CERTIFICATE" ]; then
+          if [ "$HAS_CERTIFICATE" != "true" ]; then
             echo "developer_id=false" >> "$GITHUB_OUTPUT"
             echo "notarize=false" >> "$GITHUB_OUTPUT"
+            if [ "$HAS_ANY_NOTARY_CREDENTIAL" = "true" ]; then
+              echo "::warning::Notarization credentials are set but APPLE_CERTIFICATE is not. Notarization needs a Developer ID certificate, so the build is ad hoc."
+            fi
             echo "::notice::Ad-hoc signing. No Developer ID certificate is configured."
-          elif [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
-            echo "developer_id=true" >> "$GITHUB_OUTPUT"
-            echo "notarize=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Developer ID signing and notarization enabled."
+          elif [ "$HAS_CERTIFICATE_PASSWORD" != "true" ]; then
+            echo "::error::APPLE_CERTIFICATE is set but APPLE_CERTIFICATE_PASSWORD is empty. Set the password of the .p12 file."
+            exit 1
           else
             echo "developer_id=true" >> "$GITHUB_OUTPUT"
-            echo "notarize=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID are not all set. Signing without notarization."
+            if [ "$HAS_NOTARY_CREDENTIALS" = "true" ]; then
+              echo "notarize=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Developer ID signing and notarization enabled."
+            else
+              echo "notarize=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID are not all set. Signing without notarization."
+            fi
           fi
       - name: Import Developer ID certificate
+        id: import
         if: runner.os == 'macOS' && steps.signing.outputs.developer_id == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -128,6 +141,8 @@ jobs:
         if: runner.os == 'macOS' && steps.signing.outputs.developer_id == 'true'
         env:
           TARGET: ${{ matrix.target }}
+          APPLE_KEYCHAIN: ${{ steps.import.outputs.keychain }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.import.outputs.identity }}
         run: |
           set -euo pipefail
           codesign --force --options runtime --timestamp \
@@ -166,6 +181,8 @@ jobs:
           fi
       - name: Remove temporary keychain
         if: always() && runner.os == 'macOS' && steps.signing.outputs.developer_id == 'true'
+        env:
+          APPLE_KEYCHAIN: ${{ steps.import.outputs.keychain }}
         run: |
           if [ -n "${APPLE_KEYCHAIN:-}" ]; then
             security delete-keychain "$APPLE_KEYCHAIN" || true
@@ -175,6 +192,8 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.prepare.outputs.version }}
           LINUX: ${{ matrix.linux }}
+          # Stops tar from adding AppleDouble ._ entries for extended attributes.
+          COPYFILE_DISABLE: "1"
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/stage"
@@ -192,6 +211,8 @@ jobs:
           name: release-cli-${{ matrix.target }}
           path: dist/*.tar.gz
           if-no-files-found: error
+          # A re-run of this job replaces its earlier artifact instead of failing.
+          overwrite: true
 
   app:
     name: Mac app (aarch64 dmg)
@@ -200,6 +221,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: app/src-tauri -> target
@@ -220,6 +243,7 @@ jobs:
         # Tauri reads each Apple variable when it is set, even when empty, so
         # unset the empty ones in this shell. Without a certificate, sign ad hoc
         # with the pseudo identity "-", so an empty secret never disables signing.
+        id: bundle
         working-directory: app
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -230,12 +254,17 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          if [ -n "${APPLE_CERTIFICATE:-}" ] && [ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]; then
+            echo "::error::APPLE_CERTIFICATE is set but APPLE_CERTIFICATE_PASSWORD is empty. Set the password of the .p12 file."
+            exit 1
+          fi
           for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
             APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!var:-}" ]; then
               unset "$var"
             fi
           done
+          notarize=false
           if [ -z "${APPLE_CERTIFICATE:-}" ]; then
             unset APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
             export APPLE_SIGNING_IDENTITY=-
@@ -243,18 +272,20 @@ jobs:
           else
             echo "::notice::Developer ID signing from APPLE_CERTIFICATE."
             if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
-              echo "NOTARIZE=true" >> "$GITHUB_ENV"
+              notarize=true
               echo "::notice::Notarization enabled."
             else
               echo "::warning::APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID are not all set. Signing without notarization."
               unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
             fi
           fi
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
           npx tauri bundle --bundles dmg --ci
       - name: Verify the bundle
         working-directory: app
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          NOTARIZE: ${{ steps.bundle.outputs.notarize }}
         run: |
           set -euo pipefail
           # Tauri deletes the .app after it packages the dmg, so check the app inside the image.
@@ -273,7 +304,7 @@ jobs:
           app="$mnt/Agent Caller.app"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -dvv "$app" 2>&1 | grep -E "^(Authority|Signature|TeamIdentifier)=" || true
-          if [ "${NOTARIZE:-}" = "true" ]; then
+          if [ "$NOTARIZE" = "true" ]; then
             xcrun stapler validate "$app"
             spctl --assess --type execute --verbose=2 "$app"
           fi
@@ -285,6 +316,8 @@ jobs:
           name: release-app-aarch64-apple-darwin
           path: dist/*.dmg
           if-no-files-found: error
+          # A re-run of this job replaces its earlier artifact instead of failing.
+          overwrite: true
 
   checksums:
     name: SHA256SUMS and dry-run bundle
@@ -310,6 +343,8 @@ jobs:
           name: dist-all
           path: dist
           if-no-files-found: error
+          # Without this, a re-run fails with "artifact already exists".
+          overwrite: true
 
   publish:
     name: Draft release
@@ -333,7 +368,9 @@ jobs:
       - name: Create or replace the draft pre-release
         # Re-running after a partial failure must work. A published release is
         # never touched. An existing draft for this tag is deleted and recreated
-        # with the same files. Deleting a draft does not remove the tag.
+        # with the same files. Deleting a draft does not remove the tag. Each
+        # draft is re-read right before its deletion, and it is deleted only if
+        # it is still a draft for this tag.
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -347,12 +384,18 @@ jobs:
             echo "::error::Release $TAG is already published. Refusing to change it."
             exit 1
           fi
-          printf '%s' "$releases" | jq -r --arg tag "$TAG" \
-            '.[] | select(.tag_name == $tag and .draft) | .id' |
-            while read -r draft_id; do
-              echo "Deleting earlier draft release $draft_id for $TAG"
-              gh api -X DELETE "repos/$REPO/releases/$draft_id" >/dev/null
-            done
+          draft_ids=$(printf '%s' "$releases" | jq -r --arg tag "$TAG" \
+            '.[] | select(.tag_name == $tag and .draft) | .id')
+          for draft_id in $draft_ids; do
+            # Re-check the live state of this release right before deleting it.
+            current=$(gh api "repos/$REPO/releases/$draft_id" --jq '[.tag_name, (.draft | tostring)] | @tsv')
+            if [ "$current" != "$(printf '%s\ttrue' "$TAG")" ]; then
+              echo "::error::Release $draft_id changed since it was listed ($current). Re-run the workflow."
+              exit 1
+            fi
+            echo "Deleting earlier draft release $draft_id for $TAG"
+            gh api -X DELETE "repos/$REPO/releases/$draft_id" >/dev/null
+          done
           gh release create "$TAG" dist/* \
             --draft --prerelease --verify-tag \
             --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"

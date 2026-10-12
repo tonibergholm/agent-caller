@@ -103,7 +103,8 @@ sha256_of() {
 }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/acd-install.XXXXXX")
-trap 'rm -rf "$work"' EXIT INT TERM
+trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work"; exit 130' INT TERM
 mkdir "$work/extract"
 
 if [ -n "$from_dir" ]; then

@@ -55,8 +55,10 @@ mutant absolute-path-entry \
 	's#/^\\// || ##' \
 	test_refuses_absolute_path_entry
 
+# The mutant also clears tag, so the script stops at "--tag is required" and never
+# reaches the download branch. A mutant must not make a network call.
 mutant bad-tag \
-	's#\*) die "--tag must look like v0.1.0" ;;#*) version="$tag" ;;#' \
+	's|\*) die "--tag must look like v0.1.0" ;;|*) tag=""; version=0.1.0 ;;|' \
 	test_refuses_bad_tag
 
 if [ "$status" -eq 0 ]; then

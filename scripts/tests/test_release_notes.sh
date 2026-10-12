@@ -2,7 +2,8 @@
 # Tests for scripts/release-notes.sh. Run by scripts/tests/run.sh.
 # Each test runs in a subshell that sets WORK, so SC2031 does not apply.
 # shellcheck disable=SC2031
-# shellcheck source=./lib.sh
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
 NOTES=${ACD_NOTES_SCRIPT:-$ROOT/scripts/release-notes.sh}

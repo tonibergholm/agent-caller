@@ -9,9 +9,9 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ## [0.1.0] - 2026-10-12
 
-First public pre-release. The binaries are ad-hoc signed and the Mac app is
-not notarized. See [docs/release.md](docs/release.md) for what that means
-for users.
+First public pre-release. The macOS binaries are ad-hoc signed and the Mac
+app is not notarized. The Linux binaries are unsigned. See
+[docs/release.md](docs/release.md) for what that means for users.
 
 ### Added
 
@@ -54,8 +54,9 @@ for users.
 - Voice has no intent model yet. Other phrasing shows "Model unavailable".
   Spoken replies, voice on Linux and voice on Windows are not built.
 - The release does not include a Windows client or a Windows build.
-- The Mac app is ad-hoc signed and not notarized unless the maintainer
-  configured a Developer ID certificate for the release.
+- The Mac app and the macOS `acd` binary are ad-hoc signed and not notarized
+  unless the maintainer configured a Developer ID certificate for the release.
+  The Linux binaries are unsigned.
 - Not every acceptance check has passed. The live end-to-end record and the
   follow-up list in `docs/superpowers/plans/2026-10-07-p1-followups.md`
   record the gaps.

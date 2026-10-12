@@ -18,7 +18,10 @@ run. It creates no release.
 | `acd-<version>-x86_64-unknown-linux-gnu.tar.gz` | `ubuntu-22.04` | `acd`, `acd-inbox`, `LICENSE` |
 | `acd-<version>-aarch64-unknown-linux-gnu.tar.gz` | `ubuntu-22.04-arm` | `acd`, `acd-inbox`, `LICENSE` |
 | `agent-caller-<version>-aarch64-apple-darwin.dmg` | `macos-latest` | The Agent Caller app |
-| `SHA256SUMS` | publish job | SHA-256 of every file above |
+| `SHA256SUMS` | `checksums` job | SHA-256 of every archive and the dmg |
+
+The `checksums` job also uploads all of these files as one artifact,
+`dist-all`. The dry run and the publish job both use that artifact.
 
 Notes on the choices:
 
@@ -72,15 +75,19 @@ Notes on the choices:
 7. The `ci` job runs first. A failing test stops the release. The build
    jobs run next, and the publish job creates a **draft** pre-release with
    the artifacts, `SHA256SUMS` and the CHANGELOG section as notes. If a run
-   fails part way, re-run it. The publish job replaces an existing draft for
-   the tag. It refuses to touch a published release.
+   fails part way, re-run it. The publish job deletes an existing draft for
+   the tag and creates a new one from the run's files. It refuses to touch a
+   published release. Re-running therefore discards any edits made to the
+   draft in the GitHub UI. Put release-note changes in `CHANGELOG.md` and
+   re-run instead of editing the draft.
 8. Review the draft: the asset list, the checksums and the notes. Then
    publish it from the GitHub release page. Keep the pre-release flag.
 9. Install from the published release on a Mac and on a Linux machine.
 
-The tag and the manifests must agree. The workflow fails before any build
-when they differ. A pre-release such as `v0.2.0-rc.1` needs the manifests
-to read `0.2.0-rc.1`.
+The tag and the manifests must agree. The `prepare` job checks them. It runs
+in parallel with `ci`, and the build jobs need both. A mismatch fails
+`prepare`, so the build jobs never start. A pre-release such as `v0.2.0-rc.1`
+needs the manifests to read `0.2.0-rc.1`.
 
 ## Secrets
 
@@ -103,20 +110,26 @@ The pipeline chooses a mode from these values:
 - `APPLE_CERTIFICATE` set, and `APPLE_ID`, `APPLE_PASSWORD` or
   `APPLE_TEAM_ID` missing: Developer ID signing without notarization. The
   job logs a warning.
-- All six set: Developer ID signing and notarization. Tauri staples the
-  notarization ticket to the app. The `acd` binary is notarized as a zip,
-  and a bare binary cannot be stapled.
+- `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`,
+  `APPLE_PASSWORD` and `APPLE_TEAM_ID` all set: Developer ID signing and
+  notarization. `APPLE_SIGNING_IDENTITY` is optional, as described above.
+  Tauri staples the notarization ticket to the app. The `acd` binary is
+  notarized as a zip, and a bare binary cannot be stapled.
+- `APPLE_CERTIFICATE` set with an empty `APPLE_CERTIFICATE_PASSWORD`: the
+  job fails with an error. Nothing is signed.
 
-Each secret is set only on the steps that use it: the certificate import,
-the signing and notarization steps, and the step that bundles the dmg. No
-job sets secrets at job level. The Rust build, the npm install and the
-Linux jobs get no Apple secrets. The app binary is compiled in a separate
-step (`tauri build --no-bundle`) before the bundle step runs, so Cargo build
+Each secret is set only on the steps that use it: the decision step (which
+receives booleans, not values), the certificate import, the signing and
+notarization steps, and the step that bundles the dmg. No job sets secrets
+at job level. The Rust build, the npm install and the Linux jobs get no Apple
+secrets. The app binary is compiled in a separate step
+(`tauri build --no-bundle`) before the bundle step runs, so Cargo build
 scripts never see them. The Tauri bundler reads the certificate variables
 itself. For `acd`, `scripts/apple-keychain.sh` imports the certificate into a
-temporary keychain, and the job deletes that keychain at the end. The
-workflow does not echo secret values. The notary command receives the
-password as an argument, and the runner masks it in the log.
+temporary keychain. It passes the identity and the keychain path to later
+steps as step outputs, not as environment variables, so upload steps never
+see them. The job deletes that keychain at the end. The notary command
+receives the password as an argument, and the runner masks it in the log.
 
 ## What ad-hoc signing means for users
 
@@ -207,3 +220,9 @@ sh scripts/install.sh --version X.Y.Z --from-dir /path/to/downloads
   happens, move the Linux jobs to a newer image and update the glibc floor
   in this page.
 - The pipeline does not yet produce SBOMs or build provenance attestations.
+- Re-runs: every upload sets `overwrite: true`, so a re-run replaces the
+  artifacts of an earlier attempt instead of failing with "artifact already
+  exists". The upload-artifact README documents `overwrite` and the failure
+  without it. The behavior of a "re-run all jobs" attempt on GitHub has not
+  been tested.
+- The Linux binaries are unsigned. Only the macOS binaries are signed.

@@ -3,7 +3,8 @@
 # ACD_INSTALL_SCRIPT selects another copy of install.sh (used by mutants.sh).
 # Each test runs in a subshell that sets WORK, so SC2031 does not apply.
 # shellcheck disable=SC2031
-# shellcheck source=./lib.sh
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
 INSTALL=${ACD_INSTALL_SCRIPT:-$ROOT/scripts/install.sh}

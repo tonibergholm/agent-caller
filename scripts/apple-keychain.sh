@@ -5,7 +5,7 @@
 # Reads: APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD,
 #        APPLE_SIGNING_IDENTITY (optional; defaults to the first Developer ID
 #        Application identity in the certificate).
-# Writes to $GITHUB_ENV, when set: APPLE_SIGNING_IDENTITY and APPLE_KEYCHAIN.
+# Writes to $GITHUB_OUTPUT: identity and keychain (read them as steps.<id>.outputs).
 # Never prints the certificate or its password.
 set -eu
 
@@ -44,7 +44,13 @@ if [ -z "$identity" ]; then
 	exit 1
 fi
 
-if [ -n "${GITHUB_ENV:-}" ]; then
-	printf 'APPLE_SIGNING_IDENTITY=%s\nAPPLE_KEYCHAIN=%s\n' "$identity" "$keychain" >>"$GITHUB_ENV"
+# Step outputs reach only the steps that name them (steps.<id>.outputs.*). Writing
+# to GITHUB_ENV would expose the values to every later step, including uploads.
+echo "::add-mask::$identity"
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+	printf 'identity=%s\nkeychain=%s\n' "$identity" "$keychain" >>"$GITHUB_OUTPUT"
+else
+	echo "apple-keychain.sh: GITHUB_OUTPUT is not set; run it inside a workflow step" >&2
+	exit 1
 fi
 echo "Imported Developer ID identity into a temporary keychain."
