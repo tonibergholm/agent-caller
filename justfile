@@ -49,3 +49,11 @@ inbox-linux:
 inbox-install host="toni@omarchy": inbox-linux
     scp target/linux-amd64/release/acd-inbox {{host}}:/tmp/acd-inbox
     ssh {{host}} /tmp/acd-inbox install
+
+# Check that every version field, the crates and CHANGELOG agree (docs/release.md).
+check-version:
+    scripts/check-version.sh
+
+# Runs the release script tests (scripts/tests; also run in CI on ubuntu).
+test-scripts:
+    scripts/tests/run.sh

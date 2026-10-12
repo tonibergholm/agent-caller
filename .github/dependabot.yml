@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Proposes new commit SHAs for the actions pinned in .github/workflows.
+  # Each pin keeps its version in a comment, which Dependabot updates too.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
