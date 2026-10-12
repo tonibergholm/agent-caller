@@ -110,6 +110,8 @@ test("an undetermined notification permission shows the state only after macOS a
   await userEvent.click(await screen.findByRole("button", { name: "Allow notifications" }));
   expect(asked).toBe(true);
   expect(screen.getByText("macOS has not asked for notification permission yet.")).toBeTruthy();
+  const waiting = screen.getByRole("button", { name: "Waiting for your answer…" }) as HTMLButtonElement;
+  expect(waiting.disabled).toBe(true);
   answer("granted");
   await vi.waitFor(() => expect(screen.getByText("Notifications are on for agent-caller.")).toBeTruthy());
   expect(screen.queryByRole("button", { name: "Allow notifications" })).toBeNull();

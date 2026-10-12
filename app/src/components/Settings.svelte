@@ -30,9 +30,17 @@
       (s) => (notifications = s),
       () => (notifications = "unavailable"),
     );
+  // The request returns only once the user answers the macOS prompt (up to
+  // two minutes), so the button shows that it is waiting.
+  let asking = $state(false);
   const requestNotifications = () =>
     act(async () => {
-      notifications = await api.requestNotificationAuthorization();
+      asking = true;
+      try {
+        notifications = await api.requestNotificationAuthorization();
+      } finally {
+        asking = false;
+      }
     }, "Could not ask for notification permission");
   let voice = $state<VoiceSettings>(VOICE_OFF);
   let status = $state<VoiceStatus>({
@@ -371,7 +379,9 @@
       <p class="note" role="status">Notifications are off for agent-caller. Turn them on in System Settings, then Notifications.</p>
     {:else if notifications === "not_determined"}
       <p class="note" role="status">macOS has not asked for notification permission yet.</p>
-      <button onclick={requestNotifications}>Allow notifications</button>
+      <button onclick={requestNotifications} disabled={asking}>
+        {asking ? "Waiting for your answer…" : "Allow notifications"}
+      </button>
     {:else if notifications === "unavailable"}
       <p class="note" role="status">Notification permission is not available in this build.</p>
     {/if}
