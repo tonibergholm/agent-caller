@@ -758,7 +758,7 @@ async fn an_outcome_during_a_recording_waits_for_the_recording_to_end() {
     r.voice.hold(true, true);
     let g = speech.last_start().unwrap();
     r.c.send(json!({"type":"result","id":sent["id"],"ok":false,"error":{"code":"request_gone","message":"gone"}})).await;
-    tokio::time::sleep(ms(150)).await;
+    until("the result is held", || r.voice.has_deferred_for_test()).await;
     assert_eq!(r.sink.last(), Some(Hud::Listening { id: g, partial: None, over: None }), "the result did not take the HUD");
     r.voice.hold(false, true);
     r.voice.speech_event(ListenEvent::Final { generation: g, text: VoiceText::new("uh"), audio: ms(200), voiced: ms(200) });
@@ -828,7 +828,7 @@ async fn a_result_held_during_a_recording_is_not_lost_to_the_next_command() {
     r.voice.hold(true, true);
     let g = speech.last_start().unwrap();
     r.c.send(json!({"type":"result","id":sent["id"],"ok":false,"error":{"code":"request_gone","message":"gone"}})).await;
-    tokio::time::sleep(ms(150)).await;
+    until("the result is held", || r.voice.has_deferred_for_test()).await;
     r.voice.hold(false, true);
     r.voice.speech_event(final_(g, "deny"));
     until("the late result reached the HUD", || {

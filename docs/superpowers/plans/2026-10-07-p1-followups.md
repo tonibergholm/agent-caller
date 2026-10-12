@@ -180,6 +180,7 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Probe vs safety paths.** The diagnostic probe records on its own engine: lock or voice-off do not cancel it (it ends after 4 s), and it shows no tray dot. A busy microphone (`VB_ERR_BUSY`) reads as "Speech recognition is not available".
 - **Pump stalls.** `dispatch` runs `trigger::refresh` and the tap restart (up to about 3 s) inline, so the event pump can stall behind a permission answer.
 - **Settings.** Download-speech-model gives no progress and does not report a failed install (the `ok` of `VB_EV_ASSETS` is dropped in `dispatch`); the first rejected status read hides the permission section.
+- **Press cancels a countdown, then listening fails.** `Executor::listen_failed` clears `trigger_cancelled`, so the HUD shows only the microphone or speech error, not that the countdown was cancelled (nothing was sent).
 - **Plan deviations not yet approved:** Space as a hold key in the open inbox, English only and the system microphone, no "English until installed" fallback.
 
 ### Harness (`just e2e`)
