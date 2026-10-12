@@ -3,7 +3,7 @@ use crate::{
     actions::{Action, ActionKind, ActionOwner, Actions, Semantics, TextSemantics, check_reason, notice_for},
     commands::Command,
     conn::{self, MachineHandle, MachineState, now_ms},
-    endpoint::Endpoint,
+    endpoint::{self, Endpoint},
     settings::{EndpointConfig, MachineEntry, MachineSecret, SecretError, SecretErrorKind, SecretStatus, SecretStore, Settings},
     view::{
         self, ActionView, InboxView, MachineEntryView, MachineInput, Notice, NoticeTone,
@@ -67,6 +67,8 @@ pub enum MachineError {
     BadPairing,
     #[error("This machine is not paired")]
     NotPaired,
+    #[error("That address is not a Tailscale or loopback address. Use the machine's Tailscale name or address.")]
+    NotTailscale,
     #[error("Could not read machine credentials")]
     SecretRead(SecretError),
     #[error("Could not save machine credentials")]
@@ -321,6 +323,11 @@ impl Inbox {
     /// machine's previous one (omarchy spec §4.3, §9).
     pub fn pair_machine(self: &Arc<Self>, line: &str) -> Result<MachineEntry, MachineError> {
         let pairing = Pairing::parse(line).map_err(|_| MachineError::BadPairing)?;
+        // Refused before any secret is written; the connect-time rule
+        // (`endpoint::vet`) would refuse it later anyway.
+        if endpoint::refuses_literal(&pairing.host) {
+            return Err(MachineError::NotTailscale);
+        }
         let _edit = self.edits.lock();
         let existing = self
             .inner

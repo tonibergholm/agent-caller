@@ -38,5 +38,8 @@ mac-notification-sys = "=0.6.15"
 # Feature flags only (same versions as tauri-nspanel already pulls in): the
 # screen-parameter observer in panel.rs needs NSNotificationCenter blocks.
 block2 = "=0.6.2"
-objc2-foundation = { version = "=0.3.2", features = ["block2", "NSNotification", "NSOperation", "NSString"] }
+objc2 = "=0.6.5"
+objc2-foundation = { version = "=0.3.2", features = ["block2", "NSBundle", "NSNotification", "NSOperation", "NSString"] }
+# Notification permission (notify.rs). Same versions notify-rust already locks.
+objc2-user-notifications = { version = "=0.3.2", features = ["UNUserNotificationCenter", "UNNotificationSettings", "block2"] }
 objc2-app-kit = { version = "=0.3.2", features = ["NSApplication"] }

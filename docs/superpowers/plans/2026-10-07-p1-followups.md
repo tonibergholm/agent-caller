@@ -136,23 +136,24 @@ Historical flakes and environment caveats (not reproduced in this audit):
 - Test the hotkey failed-registration path; it requires a live shortcut manager.
 - `mark_seen` has no test outside a runtime.
 - Concurrent `set_hotkey` calls can race.
+- The import check (`endpoint::refuses_literal`, shared by both clients)
+  refuses only canonical literal addresses. Decimal (`3232235786`), hex
+  (`0xC0A8010A`) and zone-scoped (`fe80::1%lo0`) forms pass import and are
+  refused at connect by `endpoint::vet`. `endpoint.rs` pins this, so a change
+  here must update that test and this entry.
 
 From the 2026-10-09 production-bundle checklist:
 
-- The app never asks for notification permission and cannot tell when
-  notifications are off; macOS dropped them silently until the user
-  enabled them in System Settings. Request authorization on first run
-  (UNUserNotificationCenter) and show the state in Settings.
-- A saved hotkey keeps the old default (`Alt+Space`) after the default
-  changed to `Control+Alt+Space`. Decide whether to migrate it.
-- A pairing line with a literal IP outside the Tailscale ranges is saved
-  and only refused at connect time. Refuse it at import.
-- A Codex agent's title showed `<environment_context>`: raw context leaks
-  into the agent title. Find which adapter sets it.
+- Notification permission is requested at launch and its state shows in
+  Settings (`notify.rs`, `Settings.svelte`). Not verified on a bundled
+  build: check that the macOS prompt appears, that the state updates after
+  it, and that a notification is delivered once allowed.
+- A Codex agent's title showed `<environment_context>`. The herdr title
+  fallback now skips that context (`herdr/map.rs`). Not confirmed on a live
+  Codex run, so the adapter that first set it is unconfirmed. The T3 title
+  path is unchanged.
 - herdr alone produces read-only blocked-screen cards; structured option
   cards need hooks or T3. herdr can send follow-ups to idle or done agents.
-- After Cancel in the inline remove confirmation, focus falls to the page
-  body. Return it to the restored Remove button.
 
 
 Open items from the live end-to-end run, the v1 acceptance checks and the panel work (PRs #10, #12, #14, #18, #19, #20). Each was found by a run or a review and was judged non-blocking.
@@ -181,6 +182,13 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Countdowns.** Turning idle agents off cancels a countdown on an Idle card that the view would now keep; the Done header count includes an out-of-filter card kept for its countdown; no panel test for J/K and Esc on a counting Done row while Done is collapsed.
 
 ### Omarchy inbox (from the final review)
+
+- **Pairing outside Tailscale says the wrong thing.** A pairing line whose
+  literal address is outside Tailscale and loopback is refused at import
+  with `bad_pairing` (`MachineError::NotTailscale` maps to it). Omarchy then
+  shows "That is not an acd pairing line", which is misleading. A specific
+  message needs a new wire code, which is a protocol decision, so it is not
+  added. `acd-inbox` tests pin the mapping.
 
 - **Unavailable keyring reads as damaged.** With no Secret Service running at prefill, `Cached::Unavailable` maps to `Unreadable`: the chip says "Pair again", `acd-inbox status` says the secret is damaged, and re-pairing fails. The spec does not define this state.
 - **Unknown write leaves an orphan.** If the write of a new machine's secret ends `Unknown`, the keyring item may stay under a UUID no machine uses.

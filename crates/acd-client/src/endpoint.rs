@@ -37,6 +37,12 @@ pub fn allowed_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Whether `host` is a literal address the connect-time rule would refuse.
+/// Names are not refused here: `vet` checks the addresses they resolve to.
+pub fn refuses_literal(host: &str) -> bool {
+    host.parse::<IpAddr>().is_ok_and(|ip| !allowed_ip(ip))
+}
+
 /// Resolves once and keeps only allowed addresses. Callers connect to the
 /// returned addresses and never resolve the name again.
 pub async fn vet(host: &str, port: u16) -> Result<Vec<SocketAddr>, EndpointError> {
@@ -88,6 +94,21 @@ mod tests {
             "::ffff:192.168.1.1",
         ] {
             assert!(!allowed_ip(ip(bad)), "{bad}");
+        }
+    }
+
+    /// The import check only parses canonical literals. These name 192.168.1.10
+    /// (or a link-local address with a zone) but are not refused at import; the
+    /// connect-time `vet` must still refuse them. This pins that known limit.
+    #[tokio::test]
+    async fn non_canonical_literals_pass_import_but_vet_refuses_them() {
+        for host in ["3232235786", "0xC0A8010A", "fe80::1%lo0"] {
+            assert!(!refuses_literal(host), "{host} is now caught at import; update the follow-ups");
+            let refused = matches!(
+                vet(host, 47800).await,
+                Err(EndpointError::NotTailscale { .. }) | Err(EndpointError::Resolve(_))
+            );
+            assert!(refused, "{host} reached a connection");
         }
     }
 

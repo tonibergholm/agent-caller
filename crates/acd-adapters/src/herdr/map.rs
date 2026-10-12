@@ -39,14 +39,26 @@ pub fn state(s: wire::AgentStatus) -> AgentState {
     }
 }
 
+/// Codex sets the terminal title from its first user message, and that
+/// message can be its own `<environment_context>` block, which is not a name.
+fn is_codex_context(title: &str) -> bool {
+    title.contains("<environment_context>")
+}
+
 pub fn agent_obs(socket_hash: &str, info: &wire::AgentInfo) -> Option<AgentObs> {
     let kind = kind(info.agent.as_deref())?;
-    let title = [&info.name, &info.title, &info.terminal_title_stripped]
-        .into_iter()
-        .flatten()
-        .map(|s| clean_display(s, TITLE_CHARS))
-        .find(|s| !s.is_empty())
-        .unwrap_or_else(|| clean_display(&info.pane_id, TITLE_CHARS));
+    // Only the terminal title can carry Codex's echoed context block; an
+    // explicit name or title is the user's and is kept as written.
+    let title = [
+        (&info.name, false),
+        (&info.title, false),
+        (&info.terminal_title_stripped, true),
+    ]
+    .into_iter()
+    .filter_map(|(s, terminal)| s.as_ref().map(|s| (clean_display(s, TITLE_CHARS), terminal)))
+    .find(|(s, terminal)| !s.is_empty() && !(*terminal && kind == AgentKind::Codex && is_codex_context(s)))
+    .map(|(s, _)| s)
+    .unwrap_or_else(|| clean_display(&info.pane_id, TITLE_CHARS));
     let cwd = info
         .cwd
         .as_deref()
@@ -143,6 +155,40 @@ mod tests {
         let o = agent_obs("abc", &info(v)).unwrap();
         assert_eq!(o.title, "w1:p2");
         assert_eq!((o.cwd, o.project), (None, None));
+    }
+
+    #[test]
+    fn a_codex_context_terminal_title_is_not_the_agent_title() {
+        // The recorded Codex agent_info, with the terminal title replaced by
+        // the context block Codex can echo from its first user message.
+        let mut v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/herdr/agent-info-codex-with-agent-session.json"
+        ))
+        .unwrap();
+        let context = "<environment_context>  <cwd>/tmp/acp3/codex/d1</cwd>  </environment_context> | d1";
+        v["result"]["agent"]["terminal_title"] = context.into();
+        v["result"]["agent"]["terminal_title_stripped"] = context.into();
+        let agent = v["result"]["agent"].clone();
+        let o = agent_obs("abc", &info(agent.clone())).unwrap();
+        assert_eq!(o.title, "w1:p1", "the pane id is the fallback title");
+        assert_eq!(o.cwd.as_deref(), Some("/tmp/acp3/codex/d1"));
+        let mut named = agent.clone();
+        named["name"] = "api refactor".into();
+        assert_eq!(agent_obs("abc", &info(named)).unwrap().title, "api refactor");
+        // The user's own name is kept even when it mentions the tag.
+        let mut tagged = agent.clone();
+        tagged["name"] = "Fix <environment_context> parsing".into();
+        assert_eq!(
+            agent_obs("abc", &info(tagged)).unwrap().title,
+            "Fix <environment_context> parsing"
+        );
+        // Only Codex echoes the block; another agent's terminal title is kept.
+        let mut other = agent.clone();
+        other["agent"] = "claude".into();
+        assert_eq!(
+            agent_obs("abc", &info(other)).unwrap().title,
+            context
+        );
     }
 
     #[test]

@@ -28,6 +28,7 @@ fn inbox(d: &common::Daemon) -> Arc<Inbox> {
     let settings = Settings {
         client_id: "11111111-1111-4111-8111-111111111111".into(),
         hotkey: DEFAULT_HOTKEY.into(),
+        hotkey_migrated: true,
         show_idle: false,
         show_subagents: false,
         show_hook_only: false,
