@@ -232,6 +232,41 @@ test("another view's fired action never marks a card here", () => {
   assert.deepEqual(t.lost(), []);
 });
 
+test("a later terminal outcome settles an uncertain card; a fired one does not", () => {
+  const marks = { "m1/a": "-", "m1/b": "r2" };
+  assert.deepEqual(M.clearUncertain(marks, { card: "m1/a", result: { kind: "delivered" } }), { "m1/b": "r2" });
+  assert.equal(M.clearUncertain(marks, { card: "m1/a", result: { kind: "fired" } }), marks);
+  assert.equal(M.clearUncertain(marks, { card: "m9/z", result: { kind: "cancelled" } }), marks);
+});
+
+test("only the lost action's own terminal outcome settles its card", () => {
+  const t = new M.Tracker();
+  t.started("x1", "m1/a");
+  t.lost();
+  // Another action on the same card, or another view's, settles nothing.
+  assert.equal(t.settles({ action: "other", card: "m1/a", result: { kind: "delivered" } }), false);
+  assert.equal(t.settles({ action: "x1", card: "m1/a", result: { kind: "fired" } }), false);
+  assert.equal(t.settles({ action: "x1", card: "m1/a", result: { kind: "delivered" } }), true);
+  assert.equal(t.settles({ action: "x1", card: "m1/a", result: { kind: "delivered" } }), false, "once");
+});
+
+test("a fired action's result after a reconnect settles its card", () => {
+  const t = new M.Tracker();
+  t.started("x1", "m1/a");
+  t.outcome({ type: "outcome", action: "x1", card: "m1/a", result: { kind: "fired" } });
+  assert.deepEqual(t.disconnected(), ["m1/a"]);
+  assert.equal(t.settles({ action: "x1", card: "m1/a", result: { kind: "delivered" } }), true);
+});
+
+test("a filter on a removed machine no longer hides the inbox", () => {
+  const settings = { machines: [{ key: "m1" }, { key: "m2" }] };
+  assert.equal(M.activeFilter("", settings), null);
+  assert.equal(M.activeFilter("m2", settings), "m2");
+  assert.equal(M.activeFilter("gone", settings), null);
+  assert.equal(M.activeFilter("m2", null), "m2", "no settings yet: keep it");
+  assert.equal(M.activeFilter("gone", { machines: [{ key: "m1" }], omitted_machines: 3 }), "gone", "the list is cut: keep it");
+});
+
 test("ids are unique and short", () => {
   const ids = new M.Ids("bar");
   const a = ids.next();

@@ -433,6 +433,9 @@ export class Tracker {
     // Ended actions whose reply may still be in flight: the outcome can be
     // written before the `ok` that names the action.
     this.ended = new Set();
+    // Actions whose outcome was lost: only their own terminal outcome
+    // settles the card they marked uncertain.
+    this.lostIds = new Set();
   }
 
   started(actionId, cardKey) {
@@ -458,9 +461,16 @@ export class Tracker {
   /** outcomes_lost: every action still open is uncertain; returns their cards. */
   lost() {
     const cards = [...new Set(this.actions.values())];
+    for (const id of this.actions.keys()) this.lostIds.add(id);
+    while (this.lostIds.size > 256) this.lostIds.delete(this.lostIds.values().next().value);
     this.actions.clear();
     this.fired.clear();
     return cards;
+  }
+
+  /** Whether `msg` is the terminal outcome of an action whose outcome was lost. */
+  settles(msg) {
+    return msg.result.kind !== "fired" && this.lostIds.delete(msg.action);
   }
 
   /**
@@ -469,7 +479,11 @@ export class Tracker {
    * saw; returns those cards. The rest are forgotten.
    */
   disconnected() {
-    const cards = [...new Set([...this.fired].map((id) => this.actions.get(id)).filter((c) => c !== undefined))];
+    const known = [...this.fired].filter((id) => this.actions.has(id));
+    const cards = [...new Set(known.map((id) => this.actions.get(id)))];
+    // Their results can still arrive on the next connection and settle the card.
+    for (const id of known) this.lostIds.add(id);
+    while (this.lostIds.size > 256) this.lostIds.delete(this.lostIds.values().next().value);
     this.actions.clear();
     this.fired.clear();
     return cards;
@@ -552,6 +566,22 @@ export function markUncertain(prev, cards, keys) {
     next[k] = c ? requestOf(c) : "-";
   }
   return next;
+}
+
+/** A terminal outcome that arrives later settles a card marked uncertain. */
+export function clearUncertain(marks, outcome) {
+  if (outcome.result.kind === "fired" || !(outcome.card in marks)) return marks;
+  const next = Object.assign({}, marks);
+  delete next[outcome.card];
+  return next;
+}
+
+/** The machine filter in force: none when its machine was removed (the inbox must not look empty). */
+export function activeFilter(filter, settings) {
+  if (filter === "") return null;
+  // A bounded settings list may leave machines out: then absence proves nothing.
+  if (settings && !(settings.omitted_machines > 0) && !settings.machines.some((m) => m.key === filter)) return null;
+  return filter;
 }
 
 /** An uncertain mark ends when its card leaves the view or its request changes. */
