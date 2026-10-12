@@ -49,7 +49,7 @@ Task text refers to these by number.
 - **D8. Error codes**, all fixed snake_case strings:
   - Picks and answers: `stale`, `unknown_card`, `not_answerable`, `unknown_option`, `already_counting`, `bad_text`, `cannot_reply`, `cannot_mark_seen`, `hidden`.
   - Machines: `unknown_machine`, `not_paired`, `bad_name`, `bad_pairing`.
-  - Keyring and settings: `secret_store_locked`, `secret_store_timeout`, `secret_store_unknown` (D36), `secret_store_failed`, `settings_failed`.
+  - Keyring and settings: `secret_store_locked`, `secret_store_timeout` (also for an unconfirmed change, D36), `secret_store_failed`, `settings_failed`.
   - Protocol: `bad_request` (a field is missing or has the wrong type), `duplicate_id`, `unsupported`.
   - `PickError::ConnectionChanged` (guarded paths only) maps to `stale`.
 - **D9. Oversized views** (orchestrator decision, 2026-10-12; Task 4 amends spec §5). `protocol::view_line(view, max)` returns a line under `max` bytes, newline included, or `None`.
@@ -77,19 +77,20 @@ Task text refers to these by number.
 - **D13. The secret worker.**
   - One `std::thread` owns the backend and runs a current-thread tokio runtime with the async `secret-service` API. The blocking API is not used: with zbus's `tokio` feature it runs its own static runtime and panics inside ours.
   - Every job carries the caller's deadline: 5 s for read, write and delete, 120 s for unlock.
-  - A job that reaches the front of the queue after its deadline is answered `Expired` and never runs. So a write queued behind a prompt cannot happen after its caller reported a timeout.
-  - A started job runs only until the deadline, and its future is then dropped, so a stuck prompt never blocks later jobs.
-  - A write or delete cut off mid-call is `Ambiguous`, because D-Bus may have applied it. Read and unlock time-outs are plain `Timeout`.
+  - The worker is strictly serial. A job that reaches the front of the queue after its deadline is answered `Expired` and never runs. So a write queued behind a prompt cannot happen after its caller reported a timeout.
+  - A started read or unlock runs only until its deadline; its future is then dropped, which changes nothing in the keyring.
+  - A started write or delete is never abandoned: the worker awaits it to completion (orchestrator decision, 2026-10-12). Its caller still stops waiting at the deadline and gets `Ambiguous`, which becomes `secret_store_timeout` with the machine `unknown` (D36). Every later job runs after the change settled.
+  - A hung D-Bus write or delete holds the worker. Every queued job then expires, or its caller times out: everything fails closed, statuses are `unknown`, and the panel says the keyring is not responding.
   - Reads check `Collection::is_locked` and `Item::is_locked` and return `Locked` without prompting. A lock check cannot stop the service from asking for a prompt on a write or delete (the Secret Service spec allows one per operation), so writes and deletes call `CreateItem` and `Item.Delete` directly and dismiss any returned prompt, reporting `Locked`. Only `unlock` runs a prompt. The fake models this with `prompts`.
   - secret-service 5.2 cannot dismiss its prompt. After an unlock time-out the prompt can stay on screen. A late unlock only unlocks the collection, and the next refresh picks that up; a late dismiss changes nothing.
 - **D14. `WorkerStore`, not `CachedSecrets`.**
-  - Per key, the cache holds the outcome of the last read: a value, `Locked`, `Unavailable`, `TimedOut`, or `Unknown` (an ambiguous change that could not be read back). A cached error is answered from memory.
+  - Per key, the cache holds the outcome of the last read: a value, `Locked`, `Unavailable`, `TimedOut`, or `Unknown` (a change whose caller stopped waiting, or a re-pairing that could not commit). A cached error is answered from memory.
   - Only `refresh(keys)`, on unlock and on `retry_machine`, reads a key again.
   - `prefill(keys)` runs on the blocking pool before `Inbox::start`. So `start`, `Service::new` and every settings snapshot are served from memory; no async thread waits on the keyring.
   - A read of a key with no entry (a machine being paired) goes to the worker. That only happens in `pair_machine`, which runs on the blocking pool.
-  - An `Ambiguous` write or delete is reconciled before the call returns: the item is read back. The call succeeds only if the item shows the intended state; otherwise the key becomes `Unknown` (D36).
+  - An `Ambiguous` write or delete makes the key `Unknown` at once; nothing is read back (D36).
   - Read results are published under per-key generations (D37).
-  - `TimedOut` and `Unavailable` show as `secret: unreadable`; `Unknown` as `secret: unknown`.
+  - `Unavailable` shows as `secret: unreadable`; `TimedOut` and `Unknown` as `secret: unknown`.
 - **D15. Notification text.**
   - Summary: `"<agent title> on <machine> needs you"`. Body: the request label, using the panel's rule (`toolName`): `"bash approval"`, `"approval"`, `"question"`, `"blocked"` or `"request"`.
   - Agent text is cleaned (whitespace, control, bidi and separator characters become single spaces) and cut to 60 characters with `…`.
@@ -143,12 +144,18 @@ Task text refers to these by number.
   - Typed-answer, reply and rename texts live in `Model.Drafts`, held by the panel. Keys: `answer:<card>:<request>:<revision>`, `reply:<card>:<request or ->` and `rename:<machine>`.
   - Each field reads its draft on creation and writes it on every change. A draft is cleared on a successful send, and pruned when its card or machine is gone or its request changed.
   - The pairing field is never drafted.
-- **D36. Unconfirmed keyring changes** (orchestrator decision, 2026-10-12). A write or delete whose outcome cannot be established (cut off, and the read-back fails or shows another state) puts the machine's secret into `SecretStatus::Unknown`.
-  - acd-client stops the machine's handle and ends its countdowns: fail closed, with no connection on uncertain credentials. No rollback guesses.
-  - Recovery is only a successful read (the user's `retry_machine`) or a re-pairing.
-  - A change that lands late is harmless: the next successful read is authoritative, and the status stays `unknown` until then.
-  - The reply code is `secret_store_unknown`, and the panel chip says "Keyring state unknown. Retry".
-  - The fake models a change that lands after cancellation (`Hang::AppliesLater`) and a failed read-back (`fail_reads`).
+- **D36. Unconfirmed keyring changes** (orchestrator decisions, 2026-10-12).
+  - The serial worker always awaits a started write or delete to completion (D13).
+  - A caller that stops waiting at its deadline gets `secret_store_timeout`, and the machine's secret becomes `SecretStatus::Unknown`.
+  - acd-client stops the machine's handle and ends its countdowns: fail closed, with no connection on uncertain credentials. Nothing rolls back on a guess.
+  - Recovery is a successful read (the user's `retry_machine`) or a re-pairing. A retry's read runs only after the change settled, because the worker is serial, so a successful read is authoritative and clears `unknown`. A change cannot land after that read.
+  - A hung D-Bus call keeps every machine it blocks at `unknown`: queued jobs expire, and nothing reconnects.
+  - **Re-pairing from `unknown`.** An `unknown` previous secret counts as "nothing restorable": pairing skips that read's result, writes the new secret, and commits. If the commit fails, it calls `SecretStore::mark_unknown`, leaves the status `unknown` and the handle stopped, and guesses no rollback.
+  - The panel chip says "Keyring state unknown. Retry"; the error text for `secret_store_timeout` says the keyring is not responding.
+  - The fakes model a slow change (`Hang::UntilReleased`), a hung one (`Hang::Forever`) and failing reads (`fail_reads`). Tests:
+    - Task 11: `a_write_past_its_deadline_settles_before_the_next_job_runs`, `a_hung_write_makes_every_later_job_fail_without_running`.
+    - Task 12: `a_timed_out_write_leaves_the_key_unknown_until_a_read_after_it_settles`, `a_hung_write_fails_everything_closed_and_nothing_reconnects`, `an_unconfirmed_rollback_is_reported_and_never_guessed`.
+    - Task 3: `re_pairing_from_unknown_writes_the_new_secret_and_connects`, `re_pairing_from_unknown_that_cannot_commit_stays_unknown_and_stopped`.
 - **D37. Per-key generations** (orchestrator decision, 2026-10-12).
   - Every write or delete raises the key's generation when it starts. These run only under acd-client's edit lock (pair, remove).
   - A read (prefill, refresh, miss) remembers the generation it started under. It publishes its result only if that generation is still current, compared and stored under the cache lock.
@@ -164,7 +171,7 @@ Task text refers to these by number.
 Sol reviewed `034d8d0` (`/tmp/sol-omarchy/findings3.md`). The blocking findings and where each is resolved:
 
 1. **Disconnect vs a buffered command.** D31: admission and close share one lock. Tests are in Task 8 (`a_close_during_a_pick_cancels_the_new_action`, `a_command_after_close_is_refused`, `a_late_panel_open_cannot_stick_after_close`).
-2. **Timed-out worker jobs running later.** D13 (deadlines, `Expired`, `Ambiguous`) and D14 (read-back before reporting). Tests are in Task 11 (`a_job_queued_past_its_deadline_never_runs`, `a_write_cut_off_mid_call_is_ambiguous_whether_or_not_it_applied`) and Task 12 (`an_ambiguous_write_is_read_back_before_it_is_reported`, `pairing_rollback_decides_on_the_read_back_state`).
+2. **Timed-out worker jobs running later.** D13 (deadlines, `Expired`, a serial worker that awaits started changes) and D36. Tests are in Task 11 (`a_job_queued_past_its_deadline_never_runs`, `a_write_past_its_deadline_settles_before_the_next_job_runs`) and Task 12 (see D36).
 3. **Keyring waits on async threads.** D14: errors are cached and refreshed only when asked; prefill runs on the blocking pool. Tests are in Task 12 (`errors_are_cached_until_refreshed`, `startup_after_prefill_never_waits_on_the_keyring`, `retry_reads_a_cached_failure_again`).
 4. **Machine edits racing settings writes.** D3: the edit lock covers every machine and settings writer. Tests are in Task 2 (`a_rename_during_a_re_pairing_is_kept`, `a_settings_write_during_a_removal_never_brings_the_machine_back`).
 5. **Missed `Action` literal and Clippy's argument limit.** Task 1 lists every literal (including `crates/acd-voice-client/tests/port.rs:129`) with a grep step, and passes an `Origin` struct instead of more arguments.
@@ -184,8 +191,7 @@ Sol re-reviewed `f95da10` (`/tmp/sol-omarchy/findings4.md`). The orchestrator de
 
 1. **Ambiguous mutations without safe recovery.** D36: an unconfirmed write or delete makes the secret `unknown`. The machine's handle is stopped, nothing rolls back on a guess, and only a successful read or a re-pairing recovers. Tests:
    - Task 3: `an_unconfirmed_secret_change_stops_the_machine_until_a_read_succeeds`.
-   - Task 11: `a_cut_off_write_can_still_land_after_its_caller_gave_up`.
-   - Task 12: `an_ambiguous_write_is_confirmed_only_by_its_read_back`, `a_change_landing_late_keeps_the_key_unknown_until_a_successful_read`, `pairing_rollback_decides_on_the_read_back_state`.
+   - Task 11 and Task 12: the serial-worker tests listed under D36 (revised after Sol's final check: in-flight changes are awaited, never abandoned).
 2. **Refresh overwriting newer credentials.** D37: per-key generations with compare-and-publish. Task 12 tests it with a barrier: `a_refresh_that_read_old_credentials_never_overwrites_a_re_pairing`.
 
 Important points adopted:
@@ -257,7 +263,7 @@ New crate `crates/acd-inbox`:
 | `src/outbox.rs` | Per-connection queue: greeting order, coalescing, fair turns, bounded outcomes and replies (D12). |
 | `src/server.rs` | `Service`, `SecretControl`, admission and `close` (D29, D31), registry and ordered publication (D32), accept, reader and writer tasks. |
 | `src/commands.rs` | Envelope (D10) and the command table (D11). |
-| `src/secrets.rs` | `SecretBackend`, `SecretWorker` with deadlines, `WorkerStore` with cached outcomes and read-back, `fake` (D13, D14). |
+| `src/secrets.rs` | `SecretBackend`, a serial `SecretWorker` with deadlines, `WorkerStore` with cached outcomes and generations, `fake` (D13, D14, D36, D37). |
 | `src/notify.rs` | `Reconciler`, `Notifier`, `NotifyBackend`, `ShellOpener` (D15 to D17). |
 | `src/linux/mod.rs`, `src/linux/keyring.rs`, `src/linux/dbus.rs` | Secret Service and D-Bus notification backends. |
 | `src/serve.rs` | `start_service`, safe logging (D33), Linux `run`. |
@@ -1495,6 +1501,7 @@ git commit -m "acd-client: no secret store calls under the inbox lock; typed mac
   - `impl SecretError { pub fn locked() -> Self; pub fn timeout() -> Self; pub fn kind(&self) -> SecretErrorKind }`.
   - `#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)] #[serde(rename_all = "snake_case")] pub enum SecretStatus { Ok, Locked, Missing, Unreadable, Unknown }`.
   - `trait SecretStore { … fn status(&self, key: &str) -> SecretStatus { /* default from get */ } }`.
+- Produces (in `acd_client::settings`): `SecretStore::mark_unknown(&self, key)`, a default no-op.
 - Produces (in `acd_client::view`): `MachineEntryView.secret: SecretStatus`, skipped by ts-rs (D5); JSON `"secret":"ok"|"locked"|"missing"|"unreadable"`.
 - Produces (on `Inbox`): `reconnect_machine(self: &Arc<Self>, key: &str) -> Result<(), MachineError>` (D6).
 
@@ -1604,56 +1611,105 @@ async fn reconnect_keeps_an_online_handle_and_rejects_unknown_or_unpaired_machin
     assert_eq!(empty.machines()[0].secret, SecretStatus::Missing);
 }
 
-/// A keyring whose writes and deletes may or may not have happened.
+/// A keyring whose reads, or writes and deletes, report an unconfirmed
+/// state; a successful write makes the item known again.
+#[derive(Default)]
 struct Uncertain {
     inner: MemorySecrets,
-    unknown: AtomicBool,
+    unknown_reads: AtomicBool,
+    unknown_writes: AtomicBool,
+    marked: AtomicBool,
+    restores: AtomicUsize,
 }
 
 impl SecretStore for Uncertain {
     fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
-        if self.unknown.load(SeqCst) {
+        if self.unknown_reads.load(SeqCst) {
             return Err(SecretError::unknown());
         }
         self.inner.get(key)
     }
     fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
-        if self.unknown.load(SeqCst) {
+        if self.unknown_writes.load(SeqCst) {
             return Err(SecretError::unknown());
         }
+        if self.inner.get(key).unwrap().is_some() && !self.unknown_reads.load(SeqCst) {
+            self.restores.fetch_add(1, SeqCst);
+        }
+        self.unknown_reads.store(false, SeqCst);
         self.inner.set(key, value)
     }
     fn delete(&self, key: &str) -> Result<(), SecretError> {
-        if self.unknown.load(SeqCst) {
+        if self.unknown_writes.load(SeqCst) {
             return Err(SecretError::unknown());
         }
+        self.restores.fetch_add(1, SeqCst);
         self.inner.delete(key)
     }
+    fn mark_unknown(&self, _key: &str) {
+        self.marked.store(true, SeqCst);
+        self.unknown_reads.store(true, SeqCst);
+    }
+}
+
+async fn uncertain_setup(store: Arc<Uncertain>, settings_path: Option<std::path::PathBuf>) -> (FakeServer, Arc<Inbox>) {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    store.inner.set("m1", &box_secret(&f)).unwrap();
+    let ib = Inbox::new(box_settings(&f), store, InboxOptions { settings_path, ..options(held()) });
+    ib.start();
+    (f, ib)
 }
 
 #[tokio::test]
 async fn an_unconfirmed_secret_change_stops_the_machine_until_a_read_succeeds() {
-    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
-    let store = Arc::new(Uncertain { inner: MemorySecrets::default(), unknown: AtomicBool::new(false) });
-    store.inner.set("m1", &box_secret(&f)).unwrap();
-    let ib = Inbox::new(box_settings(&f), store.clone(), options(held()));
-    ib.start();
+    let store = Arc::new(Uncertain::default());
+    let (f, ib) = uncertain_setup(store.clone(), None).await;
     let c = f.next_connection().await;
     c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
     view_until(&ib, "answerable", |v| v.cards.iter().any(|c| c.answerable)).await;
     let mut rx = ib.action_outcomes();
     let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
-    store.unknown.store(true, SeqCst);
+    store.unknown_writes.store(true, SeqCst);
     let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
     let e = ib.pair_machine(&line).unwrap_err();
-    assert!(matches!(&e, MachineError::SecretRead(s) | MachineError::SecretWrite(s) if s.kind() == SecretErrorKind::Unknown), "{e:?}");
+    assert!(matches!(&e, MachineError::SecretWrite(s) if s.kind() == SecretErrorKind::Unknown), "{e:?}");
     assert!(ib.conn_stamp("m1").is_none(), "no connection with uncertain credentials");
     assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+    store.unknown_writes.store(false, SeqCst);
+    store.unknown_reads.store(true, SeqCst);
     assert_eq!(ib.machines()[0].secret, SecretStatus::Unknown);
     assert!(matches!(ib.reconnect_machine("m1"), Err(MachineError::SecretRead(_))));
-    store.unknown.store(false, SeqCst);
+    store.unknown_reads.store(false, SeqCst);
     ib.reconnect_machine("m1").unwrap();
     f.next_connection().await;
+}
+
+#[tokio::test]
+async fn re_pairing_from_unknown_writes_the_new_secret_and_connects() {
+    let store = Arc::new(Uncertain::default());
+    store.unknown_reads.store(true, SeqCst);
+    let (f, ib) = uncertain_setup(store.clone(), None).await;
+    assert!(ib.conn_stamp("m1").is_none(), "unknown at start: no handle");
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
+    assert_eq!(ib.pair_machine(&line).unwrap().key, "m1", "nothing restorable is not an error");
+    f.next_connection().await;
+    assert_eq!(ib.machines()[0].secret, SecretStatus::Ok);
+}
+
+#[tokio::test]
+async fn re_pairing_from_unknown_that_cannot_commit_stays_unknown_and_stopped() {
+    let d = tempfile::tempdir().unwrap();
+    let blocker = d.path().join("file");
+    std::fs::write(&blocker, "block").unwrap();
+    let store = Arc::new(Uncertain::default());
+    store.unknown_reads.store(true, SeqCst);
+    let (f, ib) = uncertain_setup(store.clone(), Some(blocker.join("settings.json"))).await;
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
+    assert!(matches!(ib.pair_machine(&line), Err(MachineError::Settings(_))));
+    assert!(store.marked.load(SeqCst), "the store was told the state is unknown");
+    assert_eq!(store.restores.load(SeqCst), 0, "no rollback guess: nothing restored or deleted");
+    assert!(ib.conn_stamp("m1").is_none());
+    assert_eq!(ib.machines()[0].secret, SecretStatus::Unknown);
 }
 
 #[test]
@@ -1726,8 +1782,9 @@ pub enum SecretStatus {
     Locked,
     Missing,
     Unreadable,
-    /// A change to the item could not be confirmed; the machine stays
-    /// disconnected until a successful read (retry or re-pairing).
+    /// A change to the item could not be confirmed, or the keyring does not
+    /// answer; the machine stays disconnected until a successful read
+    /// (retry) or a re-pairing.
     Unknown,
 }
 ```
@@ -1746,10 +1803,15 @@ pub trait SecretStore: Send + Sync {
             Ok(Some(raw)) if MachineSecret::from_json(&raw).is_ok() => SecretStatus::Ok,
             Ok(Some(_)) => SecretStatus::Unreadable,
             Err(e) if e.kind() == SecretErrorKind::Locked => SecretStatus::Locked,
-            Err(e) if e.kind() == SecretErrorKind::Unknown => SecretStatus::Unknown,
+            // An unconfirmed change, or a keyring that does not answer (D36).
+            Err(e) if matches!(e.kind(), SecretErrorKind::Unknown | SecretErrorKind::Timeout) => SecretStatus::Unknown,
             Err(_) => SecretStatus::Unreadable,
         }
     }
+    /// Forget what is known about `key`: its status is `Unknown` until a
+    /// successful read. acd-inbox's store implements it; the Keychain store
+    /// does not need to (omarchy plan D36).
+    fn mark_unknown(&self, _key: &str) {}
 }
 ```
 
@@ -1925,7 +1987,40 @@ Add to `impl Inbox`:
 ```
 
 Call it on every SecretStore error path that touches a machine's item:
-- In `pair_machine`, map the two calls as `.map_err(|e| { self.fail_closed(&entry.key, &e); MachineError::SecretRead(e) })?` and `.map_err(|e| { self.fail_closed(&entry.key, &e); MachineError::SecretWrite(e) })?`.
+- In `pair_machine`, map the write as `.map_err(|e| { self.fail_closed(&entry.key, &e); MachineError::SecretWrite(e) })?`.
+- In `pair_machine`, an `Unknown` previous secret is "nothing restorable" (orchestrator decision, 2026-10-12). Pairing is how the user recovers it, so it skips the restore, writes the new secret and commits. If the commit fails, it does not roll back: it calls `mark_unknown` and leaves the handle stopped. Replace the read of the previous secret, and the recovery match, with:
+
+```rust
+        /// What a failed commit puts back (D36).
+        enum Restore {
+            Previous(Option<String>),
+            /// The previous item is unknown: nothing to restore, no guess.
+            Nothing,
+        }
+        let restore = match self.secrets.get(&entry.key) {
+            Ok(previous) => Restore::Previous(previous),
+            Err(e) if e.kind() == SecretErrorKind::Unknown => Restore::Nothing,
+            Err(e) => {
+                self.fail_closed(&entry.key, &e);
+                return Err(MachineError::SecretRead(e));
+            }
+        };
+```
+
+  In the commit-failure branch:
+
+```rust
+            drop(inner);
+            let recovery = match restore {
+                Restore::Previous(Some(value)) => self.secrets.set(&entry.key, &value),
+                Restore::Previous(None) => self.secrets.delete(&entry.key),
+                Restore::Nothing => {
+                    self.secrets.mark_unknown(&entry.key);
+                    self.fail_closed(&entry.key, &SecretError::unknown());
+                    return Err(MachineError::Settings(error.to_string()));
+                }
+            };
+```
 - In `remove_machine_checked`, call `self.fail_closed(key, &error)` first in the `if let Err(error) = self.secrets.delete(key)` branch.
 - The rollback branch already stops the handle when recovery fails.
 
@@ -2116,8 +2211,7 @@ mod tests {
         for code in [
             Stale, UnknownCard, NotAnswerable, UnknownOption, AlreadyCounting, BadText, CannotReply,
             CannotMarkSeen, Hidden, UnknownMachine, NotPaired, BadName, BadPairing, BadRequest,
-            SecretStoreLocked, SecretStoreTimeout, SecretStoreUnknown, SecretStoreFailed, SettingsFailed, DuplicateId,
-            Unsupported,
+            SecretStoreLocked, SecretStoreTimeout, SecretStoreFailed, SettingsFailed, DuplicateId, Unsupported,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }
@@ -2348,7 +2442,6 @@ pub enum ErrorCode {
     BadRequest,
     SecretStoreLocked,
     SecretStoreTimeout,
-    SecretStoreUnknown,
     SecretStoreFailed,
     SettingsFailed,
     DuplicateId,
@@ -2374,7 +2467,6 @@ impl ErrorCode {
             ErrorCode::BadRequest => "bad_request",
             ErrorCode::SecretStoreLocked => "secret_store_locked",
             ErrorCode::SecretStoreTimeout => "secret_store_timeout",
-            ErrorCode::SecretStoreUnknown => "secret_store_unknown",
             ErrorCode::SecretStoreFailed => "secret_store_failed",
             ErrorCode::SettingsFailed => "settings_failed",
             ErrorCode::DuplicateId => "duplicate_id",
@@ -5342,8 +5434,9 @@ fn unlock(svc: &Arc<Service>) -> Result<(), ErrorCode> {
 pub fn secret_code(e: &SecretError) -> ErrorCode {
     match e.kind() {
         SecretErrorKind::Locked => ErrorCode::SecretStoreLocked,
-        SecretErrorKind::Timeout => ErrorCode::SecretStoreTimeout,
-        SecretErrorKind::Unknown => ErrorCode::SecretStoreUnknown,
+        // An unconfirmed change is reported as a timeout; the machine shows
+        // `secret: unknown` (D36).
+        SecretErrorKind::Timeout | SecretErrorKind::Unknown => ErrorCode::SecretStoreTimeout,
         SecretErrorKind::Other => ErrorCode::SecretStoreFailed,
     }
 }
@@ -5404,15 +5497,19 @@ git commit -m "acd-inbox: command table with owned actions, error codes and slow
     - `delete(&self, key) -> Result<(), WorkerError>`
     - `unlock(&self) -> Result<(), WorkerError>`
     All four block, at most until their deadline plus 1 s.
+    - Under `cfg(any(test, feature = "testing"))`: `pending_for_test(&self) -> usize`, the jobs sent and not yet started.
   - Under `cfg(any(test, feature = "testing"))`: `pub mod fake` with:
-    - `FakeKeyring { pub items, pub locked, pub unavailable, pub fail_reads, pub prompts, pub unlock: UnlockBehaviour, pub hang_writes: Hang, pub hang_deletes: Hang, pub late: Vec<(String, Option<String>)>, pub calls: Vec<String> }`, with `FakeBackend::apply_late(&self)`
+    - `FakeKeyring { pub items, pub locked, pub unavailable, pub fail_reads, pub prompts, pub released, pub unlock: UnlockBehaviour, pub hang_writes: Hang, pub hang_deletes: Hang, pub calls: Vec<String> }`
     - `pub enum UnlockBehaviour { Succeed, Dismiss, Hang }`
-    - `pub enum Hang { No, BeforeApplying, AfterApplying, AppliesLater }`, for writes and deletes. `AppliesLater` hangs and queues the change in `late`; `apply_late` applies it, as a Secret Service that completes a call after its caller gave up. `fail_reads` makes reads fail (a failed read-back). `prompts` makes writes and deletes answer with a prompt, which the backend dismisses (`dismiss <op> <key>`) and reports as `Locked`.
+    - `pub enum Hang { No, UntilReleased, Forever }`, for writes and deletes. `UntilReleased` waits for `released`, then applies the change: a slow D-Bus call. `Forever` never returns: a hung D-Bus call. `fail_reads` makes reads fail. `prompts` makes writes and deletes answer with a prompt, which the backend dismisses (`dismiss <op> <key>`) and reports as `Locked`.
     - `#[derive(Clone, Default)] pub struct FakeBackend(pub Arc<Mutex<FakeKeyring>>)`
 - Rules (D13):
-  - Every job carries the caller's deadline. A job that reaches the front of the queue after its deadline is answered `Expired` and never runs, so a caller that gave up can never have its write happen later.
-  - A started job runs only until that deadline.
-  - A write or delete cut off mid-call is `Ambiguous`, because D-Bus may already have applied it. Task 12 reconciles it by reading the item back.
+  - The worker is strictly serial: one job at a time, in order.
+  - Every job carries the caller's deadline. A job that reaches the front of the queue after its deadline is answered `Expired` and never runs.
+  - A started read or unlock runs only until its deadline; dropping it changes nothing in the keyring.
+  - A started write or delete is never abandoned: the worker awaits it to completion (orchestrator decision, 2026-10-12). Every later job therefore runs after the change settled, so a later successful read is authoritative.
+  - A caller that stops waiting for a write or delete gets `Ambiguous`: the change is still running, and its outcome is unknown to that caller. Task 12 turns this into `SecretStatus::Unknown` (D36).
+  - A hung write or delete holds the worker, so every queued job expires or its caller times out. Everything fails closed, and no machine reconnects.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5461,31 +5558,43 @@ fn a_job_queued_past_its_deadline_never_runs() {
     assert!(b.0.lock().unwrap().items.is_empty());
 }
 
-#[test]
-fn a_write_cut_off_mid_call_is_ambiguous_whether_or_not_it_applied() {
-    for hang in [Hang::BeforeApplying, Hang::AfterApplying] {
-        let b = FakeBackend::default();
-        {
-            let mut k = b.0.lock().unwrap();
-            (k.hang_writes, k.hang_deletes) = (hang, hang);
-        }
-        let w = SecretWorker::spawn(b.clone(), QUICK);
-        assert_eq!(w.write("k", "v"), Err(WorkerError::Ambiguous));
-        assert_eq!(w.read("k").unwrap().is_some(), hang == Hang::AfterApplying, "{hang:?}");
-        assert_eq!(w.delete("k"), Err(WorkerError::Ambiguous));
-        assert!(w.read("k").unwrap().is_none(), "{hang:?}");
+/// Lets an `UntilReleased` change finish, on drop too.
+struct Release(FakeBackend);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.0.lock().unwrap().released = true;
     }
 }
 
 #[test]
-fn a_cut_off_write_can_still_land_after_its_caller_gave_up() {
+fn a_write_past_its_deadline_settles_before_the_next_job_runs() {
     let b = FakeBackend::default();
-    b.0.lock().unwrap().hang_writes = Hang::AppliesLater;
+    b.0.lock().unwrap().hang_writes = Hang::UntilReleased;
+    let release = Release(b.clone());
+    let w = std::sync::Arc::new(SecretWorker::spawn(b.clone(), WorkerTimeouts { op: Duration::from_millis(300), ..QUICK }));
+    assert_eq!(w.write("k", "v"), Err(WorkerError::Ambiguous), "the caller stopped waiting; the write still runs");
+    let reading = {
+        let w = w.clone();
+        std::thread::spawn(move || w.read("k"))
+    };
+    while w.pending_for_test() == 0 {
+        std::thread::yield_now();
+    }
+    drop(release);
+    assert_eq!(reading.join().unwrap().unwrap().as_deref(), Some("v"), "the read ran after the write settled");
+    assert_eq!(calls(&b), ["write k", "read k"]);
+}
+
+#[test]
+fn a_hung_write_makes_every_later_job_fail_without_running() {
+    let b = FakeBackend::default();
+    b.0.lock().unwrap().hang_writes = Hang::Forever;
     let w = SecretWorker::spawn(b.clone(), QUICK);
     assert_eq!(w.write("k", "v"), Err(WorkerError::Ambiguous));
-    assert_eq!(w.read("k").unwrap(), None, "not yet");
-    b.apply_late();
-    assert_eq!(w.read("k").unwrap().as_deref(), Some("v"), "the service completed it afterwards");
+    assert_eq!(w.read("k"), Err(WorkerError::Backend(BackendError::Timeout)));
+    assert_eq!(w.delete("k"), Err(WorkerError::Ambiguous));
+    assert_eq!(calls(&b), ["write k"], "nothing ran behind the hung write");
 }
 
 #[test]
@@ -5613,12 +5722,16 @@ struct Job {
 pub struct SecretWorker {
     tx: tokio::sync::mpsc::UnboundedSender<Job>,
     timeouts: WorkerTimeouts,
+    /// Jobs sent and not yet started.
+    pending: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl SecretWorker {
     /// Starts the worker thread; it owns `backend` for the process's life.
     pub fn spawn<B: SecretBackend>(mut backend: B, timeouts: WorkerTimeouts) -> SecretWorker {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let pending = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = pending.clone();
         std::thread::Builder::new()
             .name("acd-inbox-secrets".into())
             .spawn(move || {
@@ -5628,6 +5741,7 @@ impl SecretWorker {
                     .expect("the secret worker's runtime");
                 rt.block_on(async move {
                     while let Some(job) = rx.recv().await {
+                        started.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                         let now = Instant::now();
                         if now >= job.deadline {
                             let _ = job.reply.send(Err(WorkerError::Expired));
@@ -5642,31 +5756,43 @@ impl SecretWorker {
                                 Op::Unlock => backend.unlock().await.map(|()| None),
                             }
                         };
-                        // Never past the caller's deadline. A cut-off job's
-                        // future is dropped, so it cannot block later jobs.
-                        let result = match tokio::time::timeout(job.deadline - now, run).await {
-                            Ok(r) => r.map_err(WorkerError::Backend),
-                            Err(_) if mutates => Err(WorkerError::Ambiguous),
-                            Err(_) => Err(WorkerError::Backend(BackendError::Timeout)),
+                        // A started write or delete runs to completion, so no
+                        // change can land after a later read (plan D36). A read
+                        // or unlock stops at the caller's deadline.
+                        let result = if mutates {
+                            run.await.map_err(WorkerError::Backend)
+                        } else {
+                            match tokio::time::timeout(job.deadline - now, run).await {
+                                Ok(r) => r.map_err(WorkerError::Backend),
+                                Err(_) => Err(WorkerError::Backend(BackendError::Timeout)),
+                            }
                         };
                         let _ = job.reply.send(result);
                     }
                 });
             })
             .expect("spawn the secret worker thread");
-        SecretWorker { tx, timeouts }
+        SecretWorker { tx, timeouts, pending }
+    }
+
+    /// Test hook: jobs sent and not yet started.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pending_for_test(&self) -> usize {
+        self.pending.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn call(&self, op: Op, limit: Duration) -> Result<Option<String>, WorkerError> {
         let mutates = op.mutates();
         let deadline = Instant::now() + limit;
         let (reply, rx) = std_mpsc::sync_channel(1);
+        self.pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.tx
             .send(Job { op, deadline, reply })
             .map_err(|_| WorkerError::Backend(BackendError::Unavailable))?;
         match rx.recv_timeout(limit + Duration::from_secs(1)) {
             Ok(r) => r,
-            // The worker answers every job by its deadline; this is a stall.
+            // A write or delete still running (or queued behind one): its
+            // outcome is unknown to this caller (plan D36).
             Err(_) if mutates => Err(WorkerError::Ambiguous),
             Err(_) => Err(WorkerError::Backend(BackendError::Timeout)),
         }
@@ -5709,10 +5835,10 @@ pub mod fake {
     pub enum Hang {
         #[default]
         No,
-        BeforeApplying,
-        AfterApplying,
-        /// Hangs; the change is queued in `late` and lands on `apply_late`.
-        AppliesLater,
+        /// Waits for `released`, then applies: a slow D-Bus call.
+        UntilReleased,
+        /// Never returns: a hung D-Bus call.
+        Forever,
     }
 
     /// An in-memory keyring. `calls` records operations and keys, never values.
@@ -5728,8 +5854,8 @@ pub mod fake {
         pub unlock: UnlockBehaviour,
         pub hang_writes: Hang,
         pub hang_deletes: Hang,
-        /// Changes of `AppliesLater` calls, in order.
-        pub late: Vec<(String, Option<String>)>,
+        /// Lets `UntilReleased` changes finish.
+        pub released: bool,
         pub calls: Vec<String>,
     }
 
@@ -5737,17 +5863,6 @@ pub mod fake {
     pub struct FakeBackend(pub Arc<Mutex<FakeKeyring>>);
 
     impl FakeBackend {
-        /// Lands every change a cut-off `AppliesLater` call left behind.
-        pub fn apply_late(&self) {
-            let mut k = self.0.lock().unwrap();
-            for (key, value) in std::mem::take(&mut k.late) {
-                match value {
-                    Some(v) => k.items.insert(key, v),
-                    None => k.items.remove(&key),
-                };
-            }
-        }
-
         /// Records the call; the error the keyring's state forces, if any;
         /// else how a write (`deleting == false`) or delete misbehaves.
         fn enter(&self, call: String, deleting: bool) -> Result<Hang, BackendError> {
@@ -5768,20 +5883,17 @@ pub mod fake {
             Ok(if deleting { k.hang_deletes } else { k.hang_writes })
         }
 
-        /// Queues a change for `apply_late`, then hangs.
-        async fn later(&self, key: String, value: Option<String>) {
-            self.0.lock().unwrap().late.push((key, value));
-            std::future::pending::<()>().await;
-        }
-
         async fn mutate(&self, hang: Hang, f: impl FnOnce(&mut HashMap<String, String>)) {
-            if hang == Hang::BeforeApplying {
-                std::future::pending::<()>().await;
+            match hang {
+                Hang::No => {}
+                Hang::Forever => std::future::pending::<()>().await,
+                Hang::UntilReleased => {
+                    while !self.0.lock().unwrap().released {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
             }
             f(&mut self.0.lock().unwrap().items);
-            if hang == Hang::AfterApplying {
-                std::future::pending::<()>().await;
-            }
         }
     }
 
@@ -5804,9 +5916,6 @@ pub mod fake {
 
         async fn write(&mut self, key: &str, value: &str) -> Result<(), BackendError> {
             let hang = self.enter(format!("write {key}"), false)?;
-            if hang == Hang::AppliesLater {
-                self.later(key.to_owned(), Some(value.to_owned())).await;
-            }
             let (key, value) = (key.to_owned(), value.to_owned());
             self.mutate(hang, move |items| {
                 items.insert(key, value);
@@ -5817,9 +5926,6 @@ pub mod fake {
 
         async fn delete(&mut self, key: &str) -> Result<(), BackendError> {
             let hang = self.enter(format!("delete {key}"), true)?;
-            if hang == Hang::AppliesLater {
-                self.later(key.to_owned(), None).await;
-            }
             let key = key.to_owned();
             self.mutate(hang, move |items| {
                 items.remove(&key);
@@ -5873,16 +5979,18 @@ git commit -m "acd-inbox: secret worker with job deadlines and ambiguous-write d
 **Files:**
 - Modify: `crates/acd-inbox/src/secrets.rs` (`WorkerStore`)
 - Create: `crates/acd-inbox/tests/secrets.rs`
+- Modify: `docs/superpowers/specs/2026-10-12-omarchy-inbox-design.md` §4.3, §9, §13 (spec amendment, Step 4b)
 
 **Interfaces:**
 - Consumes: Task 11's `SecretWorker`, `WorkerError` and `fake`; Task 8's `SecretControl`; `acd_client::settings::{SecretError, SecretStore}`.
-- Produces (in `acd_inbox::secrets`): `pub struct WorkerStore`, with `new(worker: SecretWorker)` and `prefill(&self, keys: &[String])`, and under `cfg(any(test, feature = "testing"))` `set_read_hook(&self, hook: Arc<dyn Fn() + Send + Sync>)`. It implements `SecretStore` (its `status` is the trait default, so `Unknown` reads as `SecretStatus::Unknown`) and `SecretControl`.
+- Produces (in `acd_inbox::secrets`): `pub struct WorkerStore`, with `new(worker: SecretWorker)` and `prefill(&self, keys: &[String])`, and under `cfg(any(test, feature = "testing"))` `set_read_hook(&self, hook: Arc<dyn Fn() + Send + Sync>)` and `pending_for_test(&self) -> usize`. It implements `SecretStore` (its `status` is the trait default, so `Unknown` reads as `SecretStatus::Unknown`) and `SecretControl`.
 - Rules (D14):
-  - The cache holds an outcome per key: a value, `Locked`, `Unavailable`, `TimedOut` or `Unknown`, where `Unknown` is an ambiguous write that could not be read back.
+  - The cache holds an outcome per key: a value, `Locked`, `Unavailable`, `TimedOut` or `Unknown`, where `Unknown` is a change whose caller stopped waiting, or a re-pairing that could not commit (D36).
   - A cached error is returned without calling the worker. Only `refresh` (on unlock and on `retry_machine`) reads a key again.
   - `prefill` runs on the blocking pool before `Inbox::start` (Task 15). Every key in `settings.json` then has an entry, so `start`, `Service::new` and every settings snapshot are served from memory.
   - A read for a key with no entry (a machine being paired) goes to the worker; that only happens in `pair_machine`, which runs on the blocking pool.
-  - An `Ambiguous` write or delete is reconciled before the call returns: the item is read back. Only a read that shows the intended state confirms it. Anything else (another state, or a failed read) makes the key `Unknown` and the call fails with `SecretError::unknown()`. acd-client then stops the machine's handle (Task 3, D36), and no rollback relies on the guess. A change that lands late is harmless: the key stays `Unknown` until a successful read (`retry_machine`) or a confirmed re-pairing.
+  - An `Ambiguous` write or delete (the caller stopped waiting; the serial worker still runs it to completion) makes the key `Unknown`, and the call fails with `SecretError::unknown()`. acd-client then stops the machine's handle (Task 3, D36). Nothing is read back and no rollback guesses. The next read runs only after the change settled, so a successful `refresh` (`retry_machine`) is authoritative and clears `Unknown`.
+  - `mark_unknown(key)` (acd-client calls it when a re-pairing from `Unknown` cannot commit) publishes `Unknown`.
   - Generations (D37): each key's generation goes up at the start of every write or delete, and those run only under acd-client's edit lock. A read publishes its result only if its generation is still current, compared under the cache lock. So a refresh that read the old credentials cannot overwrite a re-pairing's new ones.
 
 - [ ] **Step 1: Write the failing tests**
@@ -5973,36 +6081,79 @@ fn a_locked_keyring_at_start_is_noted_and_never_prompted() {
     assert!(!backend.0.lock().unwrap().calls.iter().any(|c| c == "unlock"));
 }
 
-#[test]
-fn an_ambiguous_write_is_confirmed_only_by_its_read_back() {
-    let backend = FakeBackend::default();
-    backend.0.lock().unwrap().hang_writes = Hang::AfterApplying;
-    let s = store(&backend, QUICK);
-    assert!(s.set("k", "v").is_ok(), "the write had applied, as the read-back shows");
-    assert_eq!(s.get("k").unwrap().as_deref(), Some("v"));
+/// Lets an `UntilReleased` change finish, on drop too.
+struct Release(FakeBackend);
 
-    for (hang, fail_reads) in [(Hang::BeforeApplying, false), (Hang::AfterApplying, true)] {
-        let backend = FakeBackend::default();
-        {
-            let mut k = backend.0.lock().unwrap();
-            (k.hang_writes, k.fail_reads) = (hang, fail_reads);
-        }
-        let s = store(&backend, QUICK);
-        assert_eq!(s.set("k", "v").unwrap_err().kind(), SecretErrorKind::Unknown, "{hang:?}, reads fail: {fail_reads}");
-        assert_eq!(s.status("k"), SecretStatus::Unknown);
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.0.lock().unwrap().released = true;
     }
 }
 
 #[test]
-fn a_change_landing_late_keeps_the_key_unknown_until_a_successful_read() {
+fn a_timed_out_write_leaves_the_key_unknown_until_a_read_after_it_settles() {
     let backend = FakeBackend::default();
-    backend.0.lock().unwrap().hang_writes = Hang::AppliesLater;
+    backend.0.lock().unwrap().hang_writes = Hang::UntilReleased;
+    let release = Release(backend.clone());
+    let s = store(&backend, WorkerTimeouts { op: Duration::from_millis(300), ..QUICK });
+    assert_eq!(s.set("k", "v").unwrap_err().kind(), SecretErrorKind::Unknown);
+    assert_eq!(s.status("k"), SecretStatus::Unknown);
+    let retrying = {
+        let s = s.clone();
+        std::thread::spawn(move || s.refresh(&["k".into()]))
+    };
+    while s.pending_for_test() == 0 {
+        std::thread::yield_now();
+    }
+    drop(release);
+    retrying.join().unwrap();
+    assert_eq!(s.get("k").unwrap().as_deref(), Some("v"), "the retry read the settled write");
+    assert_eq!(s.status("k"), SecretStatus::Ok);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hung_write_fails_everything_closed_and_nothing_reconnects() {
+    let f = FakeServer::start(TOKEN, acd_client::fake::Identity::Paired).await;
+    let backend = FakeBackend::default();
+    backend.0.lock().unwrap().items.insert("m1".into(), box_secret(&f));
     let s = store(&backend, QUICK);
-    assert_eq!(s.set("k", "v").unwrap_err().kind(), SecretErrorKind::Unknown, "the read-back found nothing yet");
-    backend.apply_late();
-    assert_eq!(s.status("k"), SecretStatus::Unknown, "no cached guess replaces the unknown state");
+    let prefill = s.clone();
+    tokio::task::spawn_blocking(move || prefill.prefill(&["m1".into()])).await.unwrap();
+    let inbox = Inbox::new(
+        box_settings(&f),
+        s.clone(),
+        InboxOptions { timing: fast(), settings_path: None, client_name: "t".into(), client_version: "0".into() },
+    );
+    inbox.start();
+    f.next_connection().await;
+    backend.0.lock().unwrap().hang_writes = Hang::Forever;
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), TOKEN);
+    let ib = inbox.clone();
+    let result = tokio::task::spawn_blocking(move || ib.pair_machine(&line)).await.unwrap();
+    assert!(matches!(result, Err(MachineError::SecretWrite(ref e)) if e.kind() == SecretErrorKind::Unknown));
+    assert!(inbox.conn_stamp("m1").is_none(), "fail closed");
+    let (s2, ib) = (s.clone(), inbox.clone());
+    let retried = tokio::task::spawn_blocking(move || {
+        s2.refresh(&["m1".into()]);
+        ib.reconnect_machine("m1")
+    })
+    .await
+    .unwrap();
+    assert!(retried.is_err(), "the retry's read cannot run behind the hung write");
+    assert!(inbox.conn_stamp("m1").is_none());
+    assert_eq!(inbox.machines()[0].secret, SecretStatus::Unknown);
+}
+
+#[test]
+fn mark_unknown_makes_the_key_unknown() {
+    let backend = FakeBackend::default();
+    backend.0.lock().unwrap().items.insert("k".into(), "v".into());
+    let s = store(&backend, QUICK);
+    s.prefill(&["k".into()]);
+    s.mark_unknown("k");
+    assert_eq!(s.status("k"), SecretStatus::Unknown);
     s.refresh(&["k".into()]);
-    assert_eq!(s.get("k").unwrap().as_deref(), Some("v"), "a successful read is authoritative");
+    assert_eq!(s.status("k"), SecretStatus::Unreadable, "\"v\" is not a machine secret, but it was read");
 }
 
 #[test]
@@ -6050,30 +6201,23 @@ fn a_change_that_needs_a_prompt_is_refused_as_locked() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pairing_rollback_decides_on_the_read_back_state() {
+async fn an_unconfirmed_rollback_is_reported_and_never_guessed() {
     let f = FakeServer::start(TOKEN, acd_client::fake::Identity::Paired).await;
     let d = tempfile::tempdir().unwrap();
     let blocker = d.path().join("file");
     std::fs::write(&blocker, "block").unwrap();
-    for (hang, recovered) in [(Hang::AfterApplying, true), (Hang::BeforeApplying, false)] {
-        // The write succeeds, the settings save fails, the rollback delete is cut off.
-        let backend = FakeBackend::default();
-        backend.0.lock().unwrap().hang_deletes = hang;
-        let s = store(&backend, QUICK);
-        let inbox = Inbox::new(
-            Settings { machines: vec![], ..Settings::fresh() },
-            s,
-            InboxOptions { timing: fast(), settings_path: Some(blocker.join("settings.json")), client_name: "t".into(), client_version: "0".into() },
-        );
-        let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), TOKEN);
-        let result = tokio::task::spawn_blocking(move || inbox.pair_machine(&line)).await.unwrap();
-        if recovered {
-            assert!(matches!(result, Err(MachineError::Settings(_))), "the delete had applied: the rollback succeeded");
-            assert!(backend.0.lock().unwrap().items.is_empty());
-        } else {
-            assert!(matches!(result, Err(MachineError::PairRecoveryFailed)), "the delete is unconfirmed: reported, no guess");
-        }
-    }
+    // The write succeeds, the settings save fails, the rollback delete hangs.
+    let backend = FakeBackend::default();
+    backend.0.lock().unwrap().hang_deletes = Hang::Forever;
+    let s = store(&backend, QUICK);
+    let inbox = Inbox::new(
+        Settings { machines: vec![], ..Settings::fresh() },
+        s,
+        InboxOptions { timing: fast(), settings_path: Some(blocker.join("settings.json")), client_name: "t".into(), client_version: "0".into() },
+    );
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), TOKEN);
+    let result = tokio::task::spawn_blocking(move || inbox.pair_machine(&line)).await.unwrap();
+    assert!(matches!(result, Err(MachineError::PairRecoveryFailed)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6233,8 +6377,9 @@ enum Cached {
     Locked,
     Unavailable,
     TimedOut,
-    /// A write or delete whose outcome could not be established. Cleared
-    /// only by a successful read (`refresh`) or a confirmed change.
+    /// A write or delete whose caller stopped waiting, or a re-pairing that
+    /// could not commit. Cleared only by a successful read (`refresh`,
+    /// which runs after the change settled) or a confirmed change.
     Unknown,
 }
 
@@ -6354,22 +6499,10 @@ impl WorkerStore {
         }
     }
 
-    /// After an ambiguous write or delete (plan D36): read the item back.
-    /// Only a read showing the intended state confirms the change. Anything
-    /// else (another state, a failed read) leaves the key `Unknown`: the
-    /// change may still land later, so no rollback may rely on it.
-    fn reconcile(&self, key: &str, generation: u64, want: Option<&str>) -> Result<(), SecretError> {
-        match self.worker.read(key) {
-            Ok(now) if now.as_deref() == want => {
-                self.publish(key, generation, Cached::Value(now));
-                Ok(())
-            }
-            Ok(_) | Err(_) => {
-                tracing::warn!("keyring change unconfirmed; the machine's secret is unknown");
-                self.publish(key, generation, Cached::Unknown);
-                Err(SecretError::unknown())
-            }
-        }
+    /// Test hook: jobs waiting for the worker.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pending_for_test(&self) -> usize {
+        self.worker.pending_for_test()
     }
 
     fn after_change(&self, key: &str, generation: u64, want: Option<&str>, r: Result<(), WorkerError>) -> Result<(), SecretError> {
@@ -6378,7 +6511,13 @@ impl WorkerStore {
                 self.publish(key, generation, Cached::Value(want.map(str::to_owned)));
                 Ok(())
             }
-            Err(WorkerError::Ambiguous) => self.reconcile(key, generation, want),
+            // The change is still running in the serial worker (plan D36):
+            // unknown until a later read, which can only run after it.
+            Err(WorkerError::Ambiguous) => {
+                tracing::warn!("keyring change unconfirmed; the machine's secret is unknown");
+                self.publish(key, generation, Cached::Unknown);
+                Err(SecretError::unknown())
+            }
             // Expired or refused: nothing changed. The cached entry stands.
             Err(e) => {
                 tracing::warn!(error = e.tag(), "keyring change failed");
@@ -6411,6 +6550,11 @@ impl SecretStore for WorkerStore {
         let r = self.worker.delete(key);
         self.after_change(key, generation, None, r)
     }
+
+    fn mark_unknown(&self, key: &str) {
+        let generation = self.bump(key);
+        self.publish(key, generation, Cached::Unknown);
+    }
 }
 
 impl SecretControl for WorkerStore {
@@ -6436,14 +6580,30 @@ Move the new `use` lines to the top of `secrets.rs`, next to the existing import
 Run: `cargo test -p acd-inbox --locked --test secrets --test worker`
 Expected: PASS.
 
+- [ ] **Step 4b: Amend the spec**
+
+The orchestrator decided (2026-10-12) how unconfirmed keyring changes behave. In `docs/superpowers/specs/2026-10-12-omarchy-inbox-design.md`:
+- In §4.3 "Secret status per machine", change `ok | locked | missing | unreadable` to `ok | locked | missing | unreadable | unknown`.
+- Append to the §9 secret-worker bullet:
+
+```markdown
+The worker is serial and never abandons a started write or delete: a
+caller that stops waiting gets `secret_store_timeout`, the machine's
+secret becomes `unknown`, and its connection stops (fail closed). Only a
+successful read (Retry) or a re-pairing recovers it; an `unknown` previous
+secret is not restored when a re-pairing fails, and nothing is guessed.
+```
+
+- Add to §13: "Unconfirmed keyring changes (2026-10-12, orchestrator): serial worker, `unknown` status, recovery by Retry or re-pairing."
+
 - [ ] **Step 5: Lint and commit**
 
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 Expected: no warnings.
 
 ```bash
-git add crates/acd-inbox
-git commit -m "acd-inbox: cached secret store with error states, read-back of ambiguous writes, unlock and retry"
+git add crates/acd-inbox docs/superpowers/specs/2026-10-12-omarchy-inbox-design.md
+git commit -m "acd-inbox: cached secret store with error states, unknown after unconfirmed changes, unlock and retry"
 ```
 
 ---
@@ -8231,7 +8391,7 @@ test("typed answers and replies are checked as acd-client checks them", () => {
 test("every service error code has text, and unknown codes fall back", () => {
   for (const code of ["stale", "unknown_card", "not_answerable", "unknown_option", "already_counting", "bad_text",
     "cannot_reply", "cannot_mark_seen", "hidden", "unknown_machine", "not_paired", "bad_name", "bad_pairing",
-    "bad_request", "secret_store_locked", "secret_store_timeout", "secret_store_unknown", "secret_store_failed", "settings_failed",
+    "bad_request", "secret_store_locked", "secret_store_timeout", "secret_store_failed", "settings_failed",
     "duplicate_id", "unsupported", "unreachable"]) {
     assert.ok(M.errorText(code).length > 0, code);
     assert.notEqual(M.errorText(code), M.errorText("never-heard-of-it"), code);
@@ -8719,8 +8879,7 @@ const ERRORS = {
   bad_pairing: "That is not an acd pairing line. Run `acd pair` on the machine and copy its output.",
   bad_request: UPDATE,
   secret_store_locked: "The keyring is locked. Unlock it and try again.",
-  secret_store_timeout: "The keyring did not answer. Try again.",
-  secret_store_unknown: "The keyring state is unknown. Press Retry on the machine.",
+  secret_store_timeout: "The keyring is not responding. Press Retry on the machine once it answers.",
   secret_store_failed: "The keyring could not be used.",
   settings_failed: "Could not save the settings.",
   duplicate_id: "That was already sent.",
