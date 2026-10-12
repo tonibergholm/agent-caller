@@ -202,7 +202,18 @@ final class HoldTap: @unchecked Sendable {
         // instead of spinning.
         let keepAlive = CFRunLoopTimerCreateWithHandler(nil, CFAbsoluteTimeGetCurrent() + 3600, 3600, 0, 0) { _ in }
         CFRunLoopAddTimer(loop, keepAlive, .commonModes)
-        port.enable(true)
+        // A stop that arrived since the check above must win: enable under
+        // the lock that `stopRequested` is set under.
+        ctx.lock.lock()
+        let late = ctx.stopRequested
+        if late { ctx.created = false } else { port.enable(true) }
+        ctx.lock.unlock()
+        if late {
+            port.invalidate()
+            CFRunLoopRemoveTimer(loop, keepAlive, .commonModes)
+            ctx.ready.signal()
+            return
+        }
         ctx.ready.signal()
         while !ctx.shouldStop {
             _ = CFRunLoopRunInMode(.defaultMode, 0.5, false)

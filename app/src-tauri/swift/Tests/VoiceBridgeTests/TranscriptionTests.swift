@@ -3,8 +3,8 @@ import XCTest
 @testable import VoiceBridge
 
 final class FakeEngine: AnalyzerEngine, @unchecked Sendable {
-    let startEntered = Gate()
-    let startGate = Gate()
+    let startEntered = Gate("startEntered")
+    let startGate = Gate("startGate")
     var gateStart = false
     private let lock = NSLock()
     private var counts = (starts: 0, results: 0, cancels: 0)

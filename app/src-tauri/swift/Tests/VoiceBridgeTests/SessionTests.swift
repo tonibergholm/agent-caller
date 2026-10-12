@@ -50,8 +50,8 @@ final class FakeCapture: AudioCapture, @unchecked Sendable {
 }
 
 final class FakeWork: SpeechWork, @unchecked Sendable {
-    let formatGate = Gate()
-    let finishGate = Gate()
+    let formatGate = Gate("formatGate")
+    let finishGate = Gate("finishGate")
     var gateFormat = false
     var hangFinish = false
     private let lock = NSLock()

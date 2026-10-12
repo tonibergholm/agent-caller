@@ -5,22 +5,28 @@ import VoiceBridgeC
 final class AssetsTests: XCTestCase {
     /// Capability queries can finish out of order. An older result never
     /// replaces a newer one, in the cache or on the wire.
-    /// Barrier: the first check waits on a gate until the second finished.
+    /// Barrier: the first check waits on a gate until the second finished, and
+    /// the second query starts only after the first check began.
     func testAnOlderCapabilityResultNeverOverwritesANewerOne() async {
         let bridge = Bridge()
         let box = Box()
         bridge.install { [box] in box.append($0) }
-        let gate = Gate()
+        let gate = Gate("olderMayFinish")
+        let entered = Gate("olderEntered")
         let calls = Counter()
         let assets = Assets(bridge: bridge) {
             let n = calls.next()
             if n == 1 {
+                entered.release()
                 await gate.wait()
                 return (Event(kind: VB_EV_CAPS, code: VB_UA_ASSETS_MISSING), nil)
             }
             return (Event(kind: VB_EV_CAPS, code: VB_UA_NONE), Locale(identifier: "en_US"))
         }
         let older = assets.query()
+        // Detached tasks start in any order: the second query begins only
+        // once the first one is inside its check, so "first" means "older".
+        await entered.wait()
         let newer = assets.query()
         await newer.value
         gate.release()

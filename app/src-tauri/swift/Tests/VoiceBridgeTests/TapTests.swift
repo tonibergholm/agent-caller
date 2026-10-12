@@ -8,7 +8,13 @@ final class FakePort: TapPort, @unchecked Sendable {
     private var on = false
     private var ever = false
     private var gone = false
-    var source: CFRunLoopSource? { nil }
+    /// Runs when the tap thread asks for the source: after its stale check,
+    /// before it enables the port.
+    var onSource: (() -> Void)?
+    var source: CFRunLoopSource? {
+        onSource?()
+        return nil
+    }
     func enable(_ on: Bool) { lock.lock(); self.on = on; if on { ever = true }; lock.unlock() }
     var isEnabled: Bool { lock.lock(); defer { lock.unlock() }; return on }
     var wasEverEnabled: Bool { lock.lock(); defer { lock.unlock() }; return ever }
@@ -119,5 +125,45 @@ final class TapTests: XCTestCase {
         ctx.handle(.flagsChanged, flags(61, 0x80040))
         bridge.events.sync {}
         XCTAssertTrue(box.all.isEmpty)
+    }
+
+    /// The system disabled the tap: it is enabled again, Rust is told, and a
+    /// key-up that was lost does not leave a stale "down" behind.
+    func testATapDisabledByTimeoutIsReenabledAndResetsTheHold() {
+        let bridge = Bridge()
+        let box = Box()
+        bridge.install { box.append($0) }
+        let ctx = TapContext(keycode: 61, mask: 0x40, token: 7, bridge: bridge)
+        let port = FakePort()
+        ctx.port = port
+        let typed = CGEvent(keyboardEventSource: nil, virtualKey: 14, keyDown: true)!
+        ctx.handle(.flagsChanged, flags(61, 0x80040)) // down
+        XCTAssertFalse(port.isEnabled)
+        ctx.handle(.tapDisabledByTimeout, typed)
+        XCTAssertTrue(port.isEnabled, "the tap is switched back on")
+        ctx.handle(.flagsChanged, flags(61, 0x0)) // up: down was already reset
+        bridge.events.sync {}
+        XCTAssertEqual(box.all.map(\.kind), [VB_EV_HOLD, VB_EV_TAP_DISABLED])
+        XCTAssertEqual(box.all.map(\.code), [0, 1])
+        XCTAssertEqual(box.all.map(\.value), [1, 1])
+        XCTAssertEqual(Set(box.all.map(\.generation)), [7])
+    }
+
+    /// A stop that lands after the tap exists but before it is enabled wins.
+    func testAStopBeforeEnableNeverEnablesThePort() {
+        let port = FakePort()
+        let tap = HoldTap(bridge: Bridge(), granted: { true }, create: { ctx in
+            port.onSource = {
+                ctx.lock.lock()
+                ctx.stopRequested = true
+                ctx.lock.unlock()
+            }
+            return port
+        })
+        XCTAssertEqual(tap.start(keycode: 61, mask: 0x40).code, VB_ERR_TAP_FAILED)
+        tap.stop()
+        XCTAssertFalse(port.wasEverEnabled)
+        XCTAssertTrue(port.invalidated)
+        XCTAssertFalse(tap.running)
     }
 }
