@@ -309,3 +309,17 @@ test("each state asks the panel to fit its content", async () => {
   expect(api.fits.length).toBeGreaterThan(0);
   expect(api.calls).toEqual([]);
 });
+
+test("a fit is sent only for the state still on screen", async () => {
+  const api = await show({ state: "error", refusal: "did_not_understand", transcript: "x" });
+  await tick();
+  await tick();
+  const first = api.fits.at(-1)!;
+  api.fits.length = 0;
+  // Two states before one flush: only the newer one is measured.
+  api.hud!({ seq: first + 1, id: null, hud: { state: "error", refusal: "did_not_understand", transcript: "y" } });
+  api.hud!({ seq: first + 2, id: null, hud: { state: "speaking", text: "z" } });
+  await tick();
+  await tick();
+  expect(api.fits).toEqual([first + 2]);
+});
