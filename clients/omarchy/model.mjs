@@ -442,10 +442,10 @@ export class Tracker {
 
   outcome(msg) {
     if (msg.result.kind === "fired") {
+      // Other views' outcomes arrive here too: `fired` counts for this view
+      // only once `started` names the action (an outcome that beat its
+      // reply is picked up there).
       this.fired.add(msg.action);
-      // The outcome can be written before the reply that names the action;
-      // the card is on the message, so a drop right now still warns.
-      if (!this.actions.has(msg.action) && !this.ended.has(msg.action) && msg.card) this.actions.set(msg.action, msg.card);
     } else {
       this.actions.delete(msg.action);
       this.fired.delete(msg.action);
@@ -469,7 +469,7 @@ export class Tracker {
    * saw; returns those cards. The rest are forgotten.
    */
   disconnected() {
-    const cards = [...new Set([...this.fired].map((id) => this.actions.get(id)))];
+    const cards = [...new Set([...this.fired].map((id) => this.actions.get(id)).filter((c) => c !== undefined))];
     this.actions.clear();
     this.fired.clear();
     return cards;

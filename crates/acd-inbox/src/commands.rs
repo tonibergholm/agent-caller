@@ -117,6 +117,9 @@ fn admitted(svc: &Arc<Service>, conn: &Conn, tag: &str, m: &Map<String, Value>) 
 /// Runs off the reader, so a disconnect is seen at once (plan D11). The
 /// reply is dropped if the view left meanwhile.
 fn slow(svc: &Arc<Service>, conn: &Arc<Conn>, tag: &'static str, id: &str, m: Map<String, Value>) {
+    if !svc.is_open(conn) {
+        return;
+    }
     let (svc, conn, id) = (svc.clone(), conn.clone(), id.to_owned());
     tokio::spawn(async move {
         let worker = svc.clone();

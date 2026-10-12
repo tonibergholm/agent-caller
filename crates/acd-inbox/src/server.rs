@@ -267,6 +267,13 @@ impl Service {
         Some(r)
     }
 
+    /// Whether the connection is still open. A slow command checks this
+    /// before it starts, so one read just before a close cannot still change
+    /// settings afterwards.
+    pub(crate) fn is_open(&self, conn: &Conn) -> bool {
+        !conn.lock().closed
+    }
+
     /// Queues a reply; a view with too many unread replies is closed.
     pub(crate) fn reply(&self, conn: &Conn, line: String) {
         if !conn.outbox.reply(line) {

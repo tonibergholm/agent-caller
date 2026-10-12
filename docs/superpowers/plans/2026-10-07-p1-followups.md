@@ -188,6 +188,9 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Uninstall and a binary install did not write.** Uninstall now keeps the binary unless it found its own unit, but an identical binary that was already in place is still removed with it.
 - **Uninstall provenance.** `acd-inbox uninstall` disables the plugin and removes its named files without checking they came from install; a foreign directory under the same id is not protected (the install side refuses foreign units and symlinks).
 - **Notifications across restarts.** If `org.freedesktop.Notifications` restarts while requests are open, a close for a saved id goes to the new owner and may close an unrelated notification. On service shutdown the tracked notifications are not closed, so a restart can leave a stale one beside the new.
+- **Keyboard navigation in a tall list.** J/K moves the selection but the card `Flickable` does not scroll to it, so with more cards than fit the highlighted one can be off screen (`model.mjs` returns a `select` effect that `Panel.run` ignores).
+- **Notification history on a flap.** A request that leaves the view when its machine disconnects is forgotten by `notify.rs`, so the same request and revision notifies again on reconnect; keep a bounded history instead.
+- **Keyring: an individually locked item.** `unlock` only unlocks the collection; with the collection unlocked and one item locked the "Unlock keyring" action cannot recover it. Search for the locked items and unlock their paths too.
 - **Rename racing remove** returns `settings_failed`, not `unknown_machine`.
 - **Keyring deadline.** Mutating Secret Service calls have no deadline; check whether zbus applies a reply timeout, or a hung service blocks the worker until restart.
 - **One owner per panel.** Each `Service.qml` is its own connection and owner. If Omarchy creates a bar widget per monitor, Esc in one panel does not undo a countdown started from another's.
