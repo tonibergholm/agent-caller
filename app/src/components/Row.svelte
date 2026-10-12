@@ -241,6 +241,7 @@
     max-width: none;
     overflow: visible;
     white-space: normal;
+    overflow-wrap: anywhere;
   }
   .row.mobile :global(button) {
     min-height: 44px;

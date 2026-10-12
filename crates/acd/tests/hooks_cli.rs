@@ -2000,6 +2000,20 @@ fn concurrent_starts_leave_exactly_one_daemon_with_its_sockets() {
 }
 
 #[test]
+fn a_non_socket_acd_sock_is_refused_before_any_listener_binds() {
+    let (_home, dir) = home_with_acd();
+    std::fs::write(dir.join("acd.sock"), b"x").unwrap();
+    let (status, err) = run_to_exit(&dir);
+    assert!(!status.success());
+    assert!(err.contains("not a socket"), "{err}");
+    // The refusal comes before any listener is bound, so nothing starts
+    // serving and no task is left to panic during shutdown.
+    assert!(!err.contains("listening"), "a listener bound first: {err}");
+    assert!(!err.contains("panic"), "{err}");
+    assert!(std::fs::symlink_metadata(dir.join("acd.sock")).is_ok());
+}
+
+#[test]
 fn a_stale_hook_sock_is_replaced() {
     let (_home, dir) = home_with_acd();
     let sock = dir.join("hook.sock");
