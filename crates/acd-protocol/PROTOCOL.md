@@ -403,7 +403,7 @@ enough. The evidence per answer path:
 - An agent is removed when:
   - its pane closes;
   - its T3 thread is archived, deleted or hidden by the adapter's visibility
-    rules (including settled/snoozed threads and background-only threads);
+    rules (including settled and snoozed threads);
   - for a hooks-only agent, 10 minutes after `SessionEnd`, or after 24 hours
     with no event.
 

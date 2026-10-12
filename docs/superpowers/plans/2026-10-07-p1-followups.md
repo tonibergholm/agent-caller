@@ -7,6 +7,11 @@ Phase plans and live-run records retain the original evidence.
 
 ## herdr
 
+- Narrow Codex panes (about 50 columns or less) can wrap the final option
+  hint `(esc)` onto a separate row. `scan_options` stops before finding
+  the options, so the request falls back to read-only `blocked_unparsed`.
+  This parser regression is separate from unsupported multi-row commands;
+  see [live check 12](../../research/2026-10-09-p3-live.md).
 - The idle poll timer wakes every 1 s with nothing due.
 - `clean_display` joins words across stripped tabs and newlines.
 
