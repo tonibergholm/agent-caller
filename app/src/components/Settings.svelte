@@ -156,8 +156,11 @@
       },
       (e) => (error ??= `Could not read the voice settings: ${message(e)}`),
     );
-    void loadStatus();
-    void api.onVoiceStatus(loadStatus).then((un) => (closed ? un() : (offStatus = un)));
+    // Listen first, then load, so a status change in between is not lost.
+    void api
+      .onVoiceStatus(loadStatus)
+      .then((un) => (closed ? un() : (offStatus = un)))
+      .finally(() => void loadStatus());
     // A grant made in System Settings shows when this window regains focus.
     window.addEventListener("focus", loadStatus);
     void api.onVoiceProbe((r) => (probeReports = [...probeReports, r])).then((un) => (closed ? un() : (offProbe = un)));

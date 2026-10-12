@@ -841,3 +841,17 @@ async fn a_result_held_during_a_recording_is_not_lost_to_the_next_command() {
     })
     .await;
 }
+
+/// Final re-review: the recorder check also holds at admission, not only at
+/// the door, because a recording can start in between.
+#[tokio::test]
+async fn typed_input_is_refused_if_a_recording_starts_before_admission() {
+    let (r, _speech) = speech_rig(vec![pending_agent()]).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    let fired = at_next_admission(&r.voice, |v| v.hold(true, true));
+    let err = r.voice.text_input("approve".into(), true).await.unwrap_err();
+    assert!(fired.load(Ordering::SeqCst));
+    assert_eq!(err.to_string(), "A recording is running. Finish or cancel it first.");
+    tokio::time::sleep(ms(400)).await;
+    assert!(frames(&r.f, "request.answer").is_empty());
+}

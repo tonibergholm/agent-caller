@@ -129,6 +129,9 @@ final class Bridge: @unchecked Sendable {
             if overflowed {
                 batch.append(Event(kind: VB_EV_OVERFLOW))
                 overflowed = false
+                // Rust resets on the overflow; a press queued before it would
+                // start a recording whose release may be the lost event.
+                fifo.removeAll { $0.kind == VB_EV_HOLD && $0.value != 0 }
             }
             if let code = system {
                 batch.append(Event(kind: VB_EV_SYSTEM, code: code))

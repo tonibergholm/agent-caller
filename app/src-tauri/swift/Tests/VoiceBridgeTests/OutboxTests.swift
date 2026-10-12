@@ -102,6 +102,19 @@ final class OutboxTests: XCTestCase {
         XCTAssertEqual(box.all.last?.value, 0)
     }
 
+    /// Final review: after an overflow, a press queued before it is dropped
+    /// (its release may be the event that was lost).
+    func testAPressQueuedBeforeAnOverflowIsDropped() {
+        let (bridge, box) = bridge()
+        bridge.events.suspend()
+        bridge.emit(Event(generation: 1, kind: VB_EV_HOLD, value: 1))
+        for _ in 0..<(Bridge.capacity + 10) { bridge.emit(Event(kind: VB_EV_OTHER_KEY)) }
+        bridge.events.resume()
+        bridge.events.sync {}
+        XCTAssertEqual(box.all.first?.kind, VB_EV_OVERFLOW)
+        XCTAssertFalse(box.all.contains { $0.kind == VB_EV_HOLD })
+    }
+
     /// Spec §4.2: one drain block at a time, however many events arrive.
     func testOneDrainBlockAtATime() {
         let (bridge, _) = bridge()

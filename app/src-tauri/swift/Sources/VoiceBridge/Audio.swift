@@ -24,17 +24,22 @@ enum Audio {
         return status == .error || error != nil ? nil : out
     }
 
-    /// RMS level of the first channel in dBFS; -infinity for silence or a
+    /// RMS level in dBFS of the loudest channel (a multichannel interface may
+    /// carry the microphone on any of them); -infinity for silence or a
     /// format without float samples.
     static func levelDBFS(_ buffer: AVAudioPCMBuffer) -> Float {
         guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return -.infinity }
         let n = Int(buffer.frameLength)
-        var sum: Float = 0
-        for i in 0..<n {
-            let s = data[0][i]
-            sum += s * s
+        var loudest: Float = 0
+        for channel in 0..<Int(buffer.format.channelCount) {
+            var sum: Float = 0
+            for i in 0..<n {
+                let s = data[channel][i]
+                sum += s * s
+            }
+            loudest = max(loudest, sum)
         }
-        return sum > 0 ? 10 * log10(sum / Float(n)) : -.infinity
+        return loudest > 0 ? 10 * log10(loudest / Float(n)) : -.infinity
     }
 }
 

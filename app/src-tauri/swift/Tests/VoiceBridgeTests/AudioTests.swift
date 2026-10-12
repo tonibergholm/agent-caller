@@ -25,4 +25,17 @@ final class AudioTests: XCTestCase {
         let quiet = try XCTUnwrap(Chunk.make(tone(amplitude: 0), converter: converter, to: target))
         XCTAssertFalse(quiet.voiced)
     }
+
+    /// Final review: a microphone on a later channel of a multichannel input
+    /// still counts as voice.
+    func testVoiceOnALaterChannelCounts() throws {
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800))
+        buffer.frameLength = 4800
+        for i in 0..<4800 {
+            buffer.floatChannelData![0][i] = 0
+            buffer.floatChannelData![1][i] = 0.5 * sin(Float(i) * 2 * .pi * 440 / 48_000)
+        }
+        XCTAssertGreaterThanOrEqual(Audio.levelDBFS(buffer), Audio.voicedDBFS)
+    }
 }

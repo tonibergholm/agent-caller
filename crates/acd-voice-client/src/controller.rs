@@ -243,6 +243,11 @@ impl Controller {
                 tracing::info!(target: "acd_voice", source = source.tag(), "stale transcript dropped");
                 return Ok(());
             }
+            // A typed command never runs beside a live recording; checked here,
+            // under the lock, because one may have started since the first look.
+            if token.is_none() && core.recorder.active().is_some() {
+                return Err(InputError::Recording);
+            }
             if token.is_some() {
                 core.unadmitted = None;
                 // A result that landed while the HUD showed Listening must

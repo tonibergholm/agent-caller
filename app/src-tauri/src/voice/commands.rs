@@ -16,7 +16,10 @@ pub fn voice_set_settings(
     voice: State<'_, VoiceState>,
     settings: VoiceSettings,
 ) -> Result<VoiceSettings, String> {
-    if let Some(toggle) = &settings.toggle_shortcut {
+    // Turning voice off must work even when the saved shortcut conflicts.
+    if settings.enabled
+        && let Some(toggle) = &settings.toggle_shortcut
+    {
         crate::hotkey::check_voice(toggle, crate::hotkey::current_shortcut())?;
     }
     if let Some(path) = &voice.path {
