@@ -97,6 +97,21 @@ mod tests {
         }
     }
 
+    /// The import check only parses canonical literals. These name 192.168.1.10
+    /// (or a link-local address with a zone) but are not refused at import; the
+    /// connect-time `vet` must still refuse them. This pins that known limit.
+    #[tokio::test]
+    async fn non_canonical_literals_pass_import_but_vet_refuses_them() {
+        for host in ["3232235786", "0xC0A8010A", "fe80::1%lo0"] {
+            assert!(!refuses_literal(host), "{host} is now caught at import; update the follow-ups");
+            let refused = matches!(
+                vet(host, 47800).await,
+                Err(EndpointError::NotTailscale { .. }) | Err(EndpointError::Resolve(_))
+            );
+            assert!(refused, "{host} reached a connection");
+        }
+    }
+
     #[tokio::test]
     async fn vet_filters_and_refuses() {
         assert!(

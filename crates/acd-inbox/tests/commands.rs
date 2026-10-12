@@ -131,6 +131,20 @@ async fn a_bad_pairing_string_is_never_echoed() {
     assert!(!r.to_string().contains(TOKEN), "the reply repeats the pairing string");
 }
 
+#[tokio::test]
+async fn a_literal_lan_address_is_refused_with_bad_pairing_and_saved_nothing() {
+    let rig = rig(vec![pending_agent("a1", "r1")], fast()).await;
+    let mut v = greeted(&rig).await;
+    let before = rig.inbox.settings().machines.len();
+    let lan = format!("acd://192.168.1.10:47800?pin=sha256:{}#{TOKEN}", "A".repeat(43));
+    let r = v.cmd(json!({"type":"pair","pairing":lan})).await;
+    // The wire code stays `bad_pairing`: a new code is a protocol change.
+    assert_eq!(r["code"], "bad_pairing");
+    assert!(!r.to_string().contains("192.168.1.10"), "the reply names the address");
+    assert!(!r.to_string().contains(TOKEN), "the reply repeats the pairing string");
+    assert_eq!(rig.inbox.settings().machines.len(), before, "a refused line saved a machine");
+}
+
 /// An unlock that waits until released, as a keyring prompt does.
 #[derive(Default)]
 struct SlowUnlock {

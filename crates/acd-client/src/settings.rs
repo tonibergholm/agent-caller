@@ -234,26 +234,34 @@ impl Settings {
                 Ok(mut s) if uuid::Uuid::parse_str(&s.client_id).is_ok() => {
                     let before = s.machines.len();
                     s.machines.retain(|m| m.validate().is_ok());
-                    let mut dirty = s.machines.len() != before;
-                    if dirty {
+                    if s.machines.len() != before {
                         tracing::warn!(
                             dropped = before - s.machines.len(),
                             "settings file has invalid machines; dropping them"
                         );
+                        s.save(path)?;
                     }
                     // Runs once per file. A file written before the default
                     // changed cannot tell a kept `Alt+Space` from the old
                     // default, so the old default moves to the new one. A
                     // value chosen after this runs is never touched again.
+                    // The save is best effort: an unwritable file must not stop
+                    // startup, and the migration runs again on the next start.
                     if !s.hotkey_migrated {
                         if s.hotkey == LEGACY_DEFAULT_HOTKEY {
                             s.hotkey = DEFAULT_HOTKEY.into();
                         }
                         s.hotkey_migrated = true;
-                        dirty = true;
-                    }
-                    if dirty {
-                        s.save(path)?;
+                        if let Err(error) = s.save(path) {
+                            let kind = match &error {
+                                SettingsError::Io(_, e) => format!("{:?}", e.kind()),
+                                SettingsError::Invalid(_) => "invalid".into(),
+                            };
+                            tracing::warn!(
+                                kind,
+                                "could not save the hotkey migration; it runs again on the next start"
+                            );
+                        }
                     }
                     Ok(s)
                 }
@@ -455,6 +463,22 @@ mod tests {
         s.hotkey = LEGACY_DEFAULT_HOTKEY.into();
         s.save(&path).unwrap();
         assert_eq!(Settings::load_or_init(&path).unwrap().hotkey, LEGACY_DEFAULT_HOTKEY);
+    }
+
+    #[test]
+    fn an_unwritable_settings_file_still_starts_with_the_migration_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        write_settings(&path, LEGACY_DEFAULT_HOTKEY, None);
+        // A directory where the temp file goes makes every save fail. A
+        // read-only directory would not do: `save` resets its mode, and root
+        // ignores modes.
+        fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        let s = Settings::load_or_init(&path).expect("a failed migration save must not stop startup");
+        assert_eq!(s.hotkey, DEFAULT_HOTKEY);
+        assert!(s.hotkey_migrated);
+        let on_disk: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["hotkey"], LEGACY_DEFAULT_HOTKEY, "the failed save changed the file");
     }
 
     #[test]

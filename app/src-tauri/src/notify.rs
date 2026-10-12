@@ -25,10 +25,13 @@ pub fn authorization_from_status(raw: isize) -> Authorization {
     }
 }
 
+/// How long the permission button waits for the user to answer the prompt.
+const PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Asks macOS for notification permission at startup. Does nothing in an
-/// unbundled build.
+/// unbundled build. The answer is not awaited: startup must not block on it.
 pub fn request_authorization() {
-    platform::request();
+    let _ = platform::request();
 }
 
 /// The current state. Runs the blocking macOS query off the async workers.
@@ -40,12 +43,17 @@ pub async fn notification_authorization() -> Authorization {
 }
 
 /// Asks macOS for permission (it prompts only while the state is not
-/// determined), then reports the state.
+/// determined) and reports the state once the user has answered. macOS
+/// answers asynchronously, so the answer is awaited, not read straight away.
 #[tauri::command]
 pub async fn request_notification_authorization() -> Authorization {
-    tokio::task::spawn_blocking(|| {
-        platform::request();
-        platform::read()
+    tokio::task::spawn_blocking(|| match platform::request() {
+        Some(answer) => match answer.recv_timeout(PROMPT_WAIT) {
+            Ok(true) => Authorization::Granted,
+            // Denied, or no answer in time: the stored state is authoritative.
+            _ => platform::read(),
+        },
+        None => Authorization::Unavailable,
     })
     .await
     .unwrap_or(Authorization::Unavailable)
@@ -149,18 +157,25 @@ mod platform {
         NSBundle::mainBundle().bundlePath().to_string().ends_with(".app")
     }
 
-    pub fn request() {
+    /// Starts the request. The receiver gets macOS's `granted` answer when
+    /// the prompt is closed; `None` when the build is not bundled. A failed
+    /// request sends nothing, so the receiver times out.
+    pub fn request() -> Option<mpsc::Receiver<bool>> {
         if !bundled() {
-            return;
+            return None;
         }
+        let (tx, rx) = mpsc::channel();
         let options = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
-        let block = RcBlock::new(|_granted: Bool, error: *mut NSError| {
-            if !error.is_null() {
+        let block = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+            if error.is_null() {
+                let _ = tx.send(granted.as_bool());
+            } else {
                 tracing::warn!("notification permission request failed");
             }
         });
         UNUserNotificationCenter::currentNotificationCenter()
             .requestAuthorizationWithOptions_completionHandler(options, &block);
+        Some(rx)
     }
 
     pub fn read() -> Authorization {
@@ -187,7 +202,9 @@ mod platform {
 mod platform {
     use super::Authorization;
 
-    pub fn request() {}
+    pub fn request() -> Option<std::sync::mpsc::Receiver<bool>> {
+        None
+    }
 
     pub fn read() -> Authorization {
         Authorization::Unavailable
@@ -212,7 +229,7 @@ mod tests {
     fn an_unbundled_test_process_reports_unavailable_without_asking_macos() {
         // Asking UNUserNotificationCenter here would abort the test binary.
         assert_eq!(platform::read(), Authorization::Unavailable);
-        platform::request();
+        assert!(platform::request().is_none());
     }
 
     #[test]
@@ -222,7 +239,7 @@ mod tests {
         // unbundled; a guard that read that method would ask macOS and abort.
         let _ = mac_notification_sys::set_application("com.apple.Terminal");
         assert_eq!(platform::read(), Authorization::Unavailable);
-        platform::request();
+        assert!(platform::request().is_none());
     }
 
     #[test]

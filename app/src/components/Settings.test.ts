@@ -5,6 +5,7 @@ import Settings from "./Settings.svelte";
 import { STATUS_OK, fakeApi, view } from "../lib/fixtures";
 import { DEFAULT_VOICE_TOGGLE, VOICE_OFF } from "../lib/voice";
 import type { MachineEntryView } from "../lib/bindings/MachineEntryView";
+import type { NotificationAuthorization } from "../lib/ipc";
 
 afterEach(() => {
   cleanup();
@@ -95,13 +96,23 @@ test("a denied notification permission says where to turn it on", async () => {
   expect(screen.queryByRole("button", { name: "Allow notifications" })).toBeNull();
 });
 
-test("an undetermined notification permission is requested from the Allow button", async () => {
+test("an undetermined notification permission shows the state only after macOS answers", async () => {
   const api = fakeApi({ machines: [] });
   api.notificationAuthorization = async () => "not_determined";
+  // macOS answers when the prompt closes, so the request stays pending until then.
+  let asked = false;
+  let answer!: (state: NotificationAuthorization) => void;
+  api.requestNotificationAuthorization = () => {
+    asked = true;
+    return new Promise((resolve) => (answer = resolve));
+  };
   render(Settings, { api });
   await userEvent.click(await screen.findByRole("button", { name: "Allow notifications" }));
+  expect(asked).toBe(true);
+  expect(screen.getByText("macOS has not asked for notification permission yet.")).toBeTruthy();
+  answer("granted");
   await vi.waitFor(() => expect(screen.getByText("Notifications are on for agent-caller.")).toBeTruthy());
-  expect(api.calls).toContainEqual(["requestNotificationAuthorization"]);
+  expect(screen.queryByRole("button", { name: "Allow notifications" })).toBeNull();
 });
 
 test("only one machine is pending remove confirmation", async () => {

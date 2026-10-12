@@ -136,6 +136,11 @@ Historical flakes and environment caveats (not reproduced in this audit):
 - Test the hotkey failed-registration path; it requires a live shortcut manager.
 - `mark_seen` has no test outside a runtime.
 - Concurrent `set_hotkey` calls can race.
+- The import check (`endpoint::refuses_literal`, shared by both clients)
+  refuses only canonical literal addresses. Decimal (`3232235786`), hex
+  (`0xC0A8010A`) and zone-scoped (`fe80::1%lo0`) forms pass import and are
+  refused at connect by `endpoint::vet`. `endpoint.rs` pins this, so a change
+  here must update that test and this entry.
 
 From the 2026-10-09 production-bundle checklist:
 
@@ -177,6 +182,13 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Countdowns.** Turning idle agents off cancels a countdown on an Idle card that the view would now keep; the Done header count includes an out-of-filter card kept for its countdown; no panel test for J/K and Esc on a counting Done row while Done is collapsed.
 
 ### Omarchy inbox (from the final review)
+
+- **Pairing outside Tailscale says the wrong thing.** A pairing line whose
+  literal address is outside Tailscale and loopback is refused at import
+  with `bad_pairing` (`MachineError::NotTailscale` maps to it). Omarchy then
+  shows "That is not an acd pairing line", which is misleading. A specific
+  message needs a new wire code, which is a protocol decision, so it is not
+  added. `acd-inbox` tests pin the mapping.
 
 - **Unavailable keyring reads as damaged.** With no Secret Service running at prefill, `Cached::Unavailable` maps to `Unreadable`: the chip says "Pair again", `acd-inbox status` says the secret is damaged, and re-pairing fails. The spec does not define this state.
 - **Unknown write leaves an orphan.** If the write of a new machine's secret ends `Unknown`, the keyring item may stay under a UUID no machine uses.
