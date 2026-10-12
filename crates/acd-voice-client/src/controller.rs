@@ -403,6 +403,7 @@ impl Controller {
         // A final before the key went up is not the user's release: nothing
         // is routed from it and the recording goes on.
         if matches!(ev, ListenEvent::Final { .. }) && core.recorder.listening() == Some(id) {
+            tracing::info!(target: "acd_voice", "final before release ignored");
             return;
         }
         match core.recorder.event(ev, Instant::now()) {
@@ -462,17 +463,22 @@ impl Controller {
         if !core.enabled || core.recorder.listening().is_some() {
             return;
         }
-        let Some(input) = self.input() else {
-            return;
+        let input = self.input();
+        let unavailable = match &input {
+            None => Some(Refusal::SpeechUnavailable),
+            Some(i) => i.capabilities().unavailable.map(Refusal::from),
         };
-        if let Some(why) = input.capabilities().unavailable {
-            tracing::info!(target: "acd_voice", reason = ?why, "voice cannot listen");
-            let r = core.exec.listen_failed(Refusal::from(why));
-            self.emit(&mut core.exec, r);
-            return;
-        }
+        // A press always cancels a running voice countdown first (spec
+        // §4.4), whether or not anything can listen.
         let (id, over) = core.exec.listen(&self.port);
         core.epoch += 1;
+        let (Some(input), None) = (input, unavailable) else {
+            let refusal = unavailable.unwrap_or(Refusal::SpeechUnavailable);
+            tracing::info!(target: "acd_voice", refusal = ?refusal, "voice cannot listen");
+            let r = core.exec.listen_failed(refusal);
+            self.emit(&mut core.exec, r);
+            return;
+        };
         if let Start::Replaced(old) = core.recorder.start(id, Instant::now()) {
             input.cancel(old);
         }

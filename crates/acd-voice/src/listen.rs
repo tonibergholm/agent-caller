@@ -148,7 +148,9 @@ impl ListenEvent {
 
 /// Capture and transcription (spec §4.1, one seam: plan S2). Every method
 /// returns at once and never calls back synchronously; events arrive
-/// later through `Controller::speech_event`.
+/// later through `Controller::speech_event`. The controller calls `start`,
+/// `stop` and `cancel` under its core lock, so an implementation must not
+/// call back into the controller synchronously (as `HudSink` documents).
 pub trait SpeechInput: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     /// Starts recording `generation`, stopping on its own after `max`

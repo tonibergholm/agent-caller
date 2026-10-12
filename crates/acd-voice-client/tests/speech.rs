@@ -691,3 +691,29 @@ async fn a_recording_after_a_lock_gets_a_new_generation() {
     r.voice.speech_event(final_(g1, "approve"));
     assert!(r.voice.listening(), "the old final did not end the new recording");
 }
+
+/// Spec §4.4: the press cancels a running voice countdown even when nothing
+/// can listen.
+#[tokio::test]
+async fn an_unavailable_backend_still_cancels_a_running_countdown() {
+    let (r, speech) = speech_rig_slow(vec![pending_agent()], None).await;
+    let mut outcomes = r.inbox.action_outcomes();
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.text_input("approve".into(), true).await.unwrap();
+    let Hud::Countdown { action_id: Some(id), .. } = hud_until(&r.sink, "countdown", countdown_started).await else {
+        unreachable!()
+    };
+    *speech.caps.lock().unwrap() =
+        Some(Capabilities { unavailable: Some(Unavailable::AssetsMissing), streams_partials: false, sample_rate: 0 });
+    r.voice.hold(true, true);
+    loop {
+        let e = outcomes.recv().await.unwrap();
+        if e.action_id == id {
+            assert!(matches!(e.outcome, ActionOutcome::Cancelled), "cancelled, never fired");
+            break;
+        }
+    }
+    assert_eq!(r.sink.last(), Some(Hud::Error { refusal: Refusal::SpeechAssetsMissing, transcript: None }));
+    assert!(speech.calls().is_empty());
+    assert!(frames(&r.f, "request.answer").is_empty());
+}
