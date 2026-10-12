@@ -1,3 +1,4 @@
+import VoiceBridgeC
 import AVFoundation
 
 enum Audio {
@@ -34,5 +35,32 @@ enum Audio {
             sum += s * s
         }
         return sum > 0 ? 10 * log10(sum / Float(n)) : -.infinity
+    }
+}
+
+/// One capture buffer, measured in its own float format and converted to
+/// the analyzer's format.
+struct Chunk: @unchecked Sendable {
+    let buffer: AVAudioPCMBuffer
+    let seconds: Double
+    let voiced: Bool
+
+    static func make(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter, to format: AVAudioFormat) -> Chunk? {
+        let voiced = Audio.levelDBFS(buffer) >= Audio.voicedDBFS
+        guard let out = Audio.convert(buffer, with: converter, to: format) else { return nil }
+        return Chunk(buffer: out, seconds: Double(buffer.frameLength) / buffer.format.sampleRate, voiced: voiced)
+    }
+}
+
+/// Classified only: no framework error text crosses the bridge (spec §6.3).
+enum BridgeError: Error {
+    case micUnavailable
+    case speechUnavailable
+
+    var code: Int32 {
+        switch self {
+        case .micUnavailable: return VB_ERR_MIC_UNAVAILABLE
+        case .speechUnavailable: return VB_ERR_SPEECH_UNAVAILABLE
+        }
     }
 }
