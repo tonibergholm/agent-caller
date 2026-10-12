@@ -65,15 +65,17 @@
   const remaining = $derived(action ? Math.max(0, action.fires_at_ms - now) : 0);
   const fraction = $derived(Math.min(1, remaining / WINDOW_MS));
 
-  // The panel follows the content's height: the HUD's own height, less
-  // the scrolling body's visible part, plus all of the body's content.
+  // The panel follows the content's height: the HUD's full height (with
+  // any chrome overflowing a panel still too short), less the scrolling
+  // body's visible part, plus all of the body's content.
   let main = $state<HTMLElement | null>(null);
   let body = $state<HTMLElement | null>(null);
   $effect(() => {
     void hud;
+    const seq = seen.seq;
     void tick().then(() => {
-      if (!main || !body) return;
-      quiet(api.voiceHudFit(main.offsetHeight - body.clientHeight + body.scrollHeight));
+      if (!main || !body || seen.seq !== seq) return;
+      quiet(api.voiceHudFit(seq, main.scrollHeight - body.clientHeight + body.scrollHeight));
     });
   });
 

@@ -187,6 +187,15 @@ pub fn fit_height(measured: f64) -> f64 {
     if measured.is_finite() { measured.ceil().clamp(MIN_HEIGHT, MAX_HEIGHT) } else { SIZE.1 }
 }
 
+/// Main thread. Fits the HUD to state `seq`'s content, unless a newer
+/// state replaced it: a late fit must not shrink a step that waits for
+/// input after `apply` gave it the full size.
+pub fn fit_state(app: &AppHandle, seq: u64, height: f64) {
+    if fade_applies(LAST_SEQ.load(Ordering::SeqCst), seq) {
+        fit(app, height);
+    }
+}
+
 /// Main thread. Resizes the HUD to `height`, keeping its top edge.
 pub fn fit(app: &AppHandle, height: f64) {
     if let Some(window) = app.get_webview_window(LABEL)
@@ -242,6 +251,10 @@ fn apply(app: &AppHandle, hidden: bool, wants_key: bool) -> bool {
         position(&window);
     }
     if wants_key {
+        // A step that waits for input is acknowledged as shown right after
+        // it renders (D22), before the content fit can grow the panel: give
+        // it the full default size first. The fit then shrinks or grows it.
+        fit(app, SIZE.1);
         if !HANDOFF.swap(true, Ordering::SeqCst) {
             INBOX_WAS_OPEN.store(crate::panel::is_visible(), Ordering::SeqCst);
             panel.show_and_make_key();
@@ -347,6 +360,13 @@ mod tests {
         assert_eq!(show_after(&Hud::Thinking { transcript: VoiceText::new("x"), id: 1 }), Some(THINKING_AFTER));
         assert_eq!(show_after(&Hud::Done { proposal: None, outcome: OutcomeView::Cancelled }), None);
         assert_eq!(show_after(&Hud::Hidden), None);
+    }
+
+    #[test]
+    fn a_step_that_waits_for_input_starts_at_the_full_default_size() {
+        // `apply` resets to SIZE.1 for these, which `fit_height` keeps.
+        assert_eq!(fit_height(SIZE.1), SIZE.1);
+        assert!(SIZE.1 > MIN_HEIGHT && SIZE.1 < MAX_HEIGHT);
     }
 
     #[test]

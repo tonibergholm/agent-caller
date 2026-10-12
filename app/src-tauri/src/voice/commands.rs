@@ -89,15 +89,15 @@ pub fn voice_cancel(window: WebviewWindow, voice: State<'_, VoiceState>, id: Opt
     }
 }
 
-/// The HUD measured its content: fit the panel to it.
+/// The HUD measured the content of state `seq`: fit the panel to it.
 #[tauri::command]
-pub fn voice_hud_fit(window: WebviewWindow, height: f64) {
+pub fn voice_hud_fit(window: WebviewWindow, seq: u64, height: f64) {
     if !hud::is_hud(window.label()) {
         tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
     }
     let app = tauri::Manager::app_handle(&window).clone();
-    if let Err(error) = window.run_on_main_thread(move || hud::fit(&app, height)) {
+    if let Err(error) = window.run_on_main_thread(move || hud::fit_state(&app, seq, height)) {
         tracing::error!(%error, "could not dispatch the HUD resize");
     }
 }

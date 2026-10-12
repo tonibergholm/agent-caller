@@ -174,7 +174,7 @@ export function fakeApi(
     voiceChoose: rec("voiceChoose", undefined),
     voiceCancel: rec("voiceCancel", undefined),
     // Kept out of `calls`: sizing is not an action.
-    voiceHudFit: async (height: number) => {
+    voiceHudFit: async (_seq: number, height: number) => {
       api.fits.push(height);
     },
     fits: [] as number[],
