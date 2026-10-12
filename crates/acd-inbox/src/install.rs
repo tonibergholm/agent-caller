@@ -31,6 +31,9 @@ pub trait Runner {
 }
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bytes of stderr kept, and how long to wait for it after the command ends.
+const STDERR_KEEP: usize = 64 * 1024;
+const STDERR_GRACE: Duration = Duration::from_millis(200);
 const ENABLE_ATTEMPTS: usize = 10;
 const ENABLE_PAUSE: Duration = Duration::from_millis(300);
 
@@ -56,15 +59,27 @@ impl SystemRunner {
             .spawn()
             .with_context(|| format!("running {program}"))?;
         let mut pipe = child.stderr.take().context("stderr pipe")?;
-        let reader = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = pipe.read_to_end(&mut buf);
-            String::from_utf8_lossy(&buf).into_owned()
+        // A grandchild may keep the pipe open, so stderr is read in chunks
+        // over a channel and collected only until the deadline.
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = pipe.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
         });
         let deadline = std::time::Instant::now() + timeout;
         let status = loop {
-            if let Some(st) = child.try_wait()? {
-                break Some(st);
+            match child.try_wait() {
+                Ok(Some(st)) => break Some(st),
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(e).with_context(|| format!("waiting for {program}"));
+                }
             }
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
@@ -73,7 +88,21 @@ impl SystemRunner {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        let err = reader.join().unwrap_or_default();
+        let mut kept: Vec<u8> = Vec::new();
+        let grace = std::time::Instant::now() + STDERR_GRACE;
+        while let Some(left) = grace.checked_duration_since(std::time::Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(chunk) => {
+                    kept.extend_from_slice(&chunk);
+                    if kept.len() > STDERR_KEEP {
+                        kept.drain(..kept.len() - STDERR_KEEP);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        drop(rx);
+        let err = String::from_utf8_lossy(&kept).into_owned();
         match status {
             Some(st) if st.success() => Ok(()),
             Some(st) => bail!("{program} {} failed ({st}): {}", args.join(" "), stderr_tail(&err)),

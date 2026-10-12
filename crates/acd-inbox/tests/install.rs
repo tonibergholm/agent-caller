@@ -326,3 +326,22 @@ fn status_with_nothing_listening_and_the_service_down() {
     assert!(printed.contains("keyring: unknown"), "{printed}");
     assert!(printed.contains("plugin: missing"), "{printed}");
 }
+
+#[test]
+fn a_grandchild_holding_stderr_cannot_stall_the_runner() {
+    let started = std::time::Instant::now();
+    let err = SystemRunner
+        .run_with_timeout("sh", &["-c", "sleep 30 & echo err-from-child >&2; exit 1"], std::time::Duration::from_secs(5))
+        .unwrap_err();
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+    assert!(format!("{err:#}").contains("err-from-child"));
+}
+
+#[test]
+fn a_noisy_command_keeps_only_the_end_of_its_stderr() {
+    let err = SystemRunner
+        .run_with_timeout("sh", &["-c", "yes noise | head -c 300000 >&2; echo LAST >&2; exit 1"], std::time::Duration::from_secs(5))
+        .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("LAST") && text.len() < 1000, "{}", text.len());
+}
