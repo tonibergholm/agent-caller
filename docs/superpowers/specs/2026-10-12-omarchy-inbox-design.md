@@ -382,7 +382,8 @@ Rust (CI on Ubuntu and macOS; Linux-only modules on Ubuntu):
 - Undo with two views: Esc cancels only the sender's newest; the card
   cancel control cancels any; a disconnect cancels the disconnected
   view's countdowns; races of Esc, disconnect and expiry end with one
-  terminal result each and nothing sent after a cancel.
+  terminal result each and nothing sent after a cancel; a lagged
+  `acd-client` outcome stream sends `outcomes_lost` to every connection.
 - Socket startup on a real listener: unsafe runtime dir, symlinked
   socket path, a regular file at the path, a second instance, mode 0600,
   peer check rejecting another uid (where the test can run as root, else
@@ -390,7 +391,8 @@ Rust (CI on Ubuntu and macOS; Linux-only modules on Ubuntu):
 - Secret worker with a fake store: locked start → unlock → machines
   reconnect without restart or re-pairing; dismissed and timed-out
   unlock; no keyring call under an `Inbox` lock (a blocked fake store
-  does not stop a cancel or a timer); pairing rollback.
+  does not stop a cancel or a timer); pairing rollback deletes a new
+  machine's secret and restores a re-paired machine's previous one.
 - Notifier with a fake D-Bus: one per `(card, request, revision)`, none
   for repeats, own countdowns or while a panel is open; close on resolve;
   actions from an unknown id or sender are ignored.
@@ -432,6 +434,11 @@ Sol's review found five blocking gaps; the orchestrator decided:
    on overflow, subscribe before execute, duplicate ids rejected (§5).
 5. Settings: a `settings` snapshot with machine and secret status and the
    notification preference (§5.4).
+
+The re-review added: pairing rollback restores a re-paired machine's
+secret; upstream outcome lag also sends `outcomes_lost`; connections
+subscribe to outcomes on accept; settings entries join view machines by
+key.
 
 Non-blocking points adopted: pairing-string handling, the socket startup
 contract, snapshot-based notifications with open-panel suppression, the
