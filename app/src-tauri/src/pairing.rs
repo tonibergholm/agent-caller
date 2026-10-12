@@ -30,6 +30,7 @@ mod tests {
             name: _,
             endpoint: _,
             pairing: _,
+            secret: _,
         } = view;
     }
 

@@ -114,6 +114,11 @@ Historical flakes and environment caveats (not reproduced in this audit):
   bound.
 - `herdr_e2e` failed once in a workspace run and passed on rerun (seen in
   Task 22).
+- `crates/acd/tests/hooks_cli.rs` `a_path_that_is_not_a_socket_is_never_replaced`
+  failed once on Ubuntu CI (2026-10-12, PR #24, run 38209946246): the
+  "not a socket" message was missing and a worker panicked at
+  `acd-core/src/tls.rs:430`. It passed on rerun. The daemon may have
+  exited on a TLS setup error before the socket check.
 - `secrets::tests::repair_mode_clears_special_bits_and_reports_them`,
   `init_repairs_a_setuid_secret_and_a_loose_t3_token` and
   `hooks::claude_sessions::tests::the_system_check_recognises_this_process`
@@ -175,6 +180,21 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Panel frame.** No unit test for `save_now`; the order of the screen-parameters notification and macOS's refit moves needs a runtime check with a display unplugged.
 - **Countdowns.** Turning idle agents off cancels a countdown on an Idle card that the view would now keep; the Done header count includes an out-of-filter card kept for its countdown; no panel test for J/K and Esc on a counting Done row while Done is collapsed.
 
+### Omarchy inbox (from the final review)
+
+- **Unavailable keyring reads as damaged.** With no Secret Service running at prefill, `Cached::Unavailable` maps to `Unreadable`: the chip says "Pair again", `acd-inbox status` says the secret is damaged, and re-pairing fails. The spec does not define this state.
+- **Unknown write leaves an orphan.** If the write of a new machine's secret ends `Unknown`, the keyring item may stay under a UUID no machine uses.
+- **Show idle is not saved.** `Inbox::set_show_idle` changes memory only (the Mac app behaves the same), so the Omarchy toggle resets when the service restarts. Persisting it changes shared client behaviour; decide for both clients.
+- **Uninstall and a binary install did not write.** Uninstall now keeps the binary unless it found its own unit, but an identical binary that was already in place is still removed with it.
+- **Uninstall provenance.** `acd-inbox uninstall` disables the plugin and removes its named files without checking they came from install; a foreign directory under the same id is not protected (the install side refuses foreign units and symlinks).
+- **Notifications across restarts.** If `org.freedesktop.Notifications` restarts while requests are open, a close for a saved id goes to the new owner and may close an unrelated notification. On service shutdown the tracked notifications are not closed, so a restart can leave a stale one beside the new.
+- **Keyboard navigation in a tall list.** J/K moves the selection but the card `Flickable` does not scroll to it, so with more cards than fit the highlighted one can be off screen (`model.mjs` returns a `select` effect that `Panel.run` ignores).
+- **Notification history on a flap.** A request that leaves the view when its machine disconnects is forgotten by `notify.rs`, so the same request and revision notifies again on reconnect; keep a bounded history instead.
+- **Keyring: an individually locked item.** `unlock` only unlocks the collection; with the collection unlocked and one item locked the "Unlock keyring" action cannot recover it. Search for the locked items and unlock their paths too.
+- **Rename racing remove** returns `settings_failed`, not `unknown_machine`.
+- **Keyring deadline.** Mutating Secret Service calls have no deadline; check whether zbus applies a reply timeout, or a hung service blocks the worker until restart.
+- **One owner per panel.** Each `Service.qml` is its own connection and owner. If Omarchy creates a bar widget per monitor, Esc in one panel does not undo a countdown started from another's.
+
 ### Voice step 2 (from the final review)
 
 - **Probe vs safety paths.** The diagnostic probe records on its own engine: lock or voice-off do not cancel it (it ends after 4 s), and it shows no tray dot. A busy microphone (`VB_ERR_BUSY`) reads as "Speech recognition is not available".
@@ -184,7 +204,7 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Confirm nested under Listening.** If the user starts recording after a Confirm HUD was emitted but before `voiceShown` arrived, the unacknowledged Confirm is carried inside `Listening` (`over`), the frontend does not acknowledge it, and the display watcher invalidates it; the spoken answer is then routed as a new command. Fails closed.
 - **Stale voice shortcut.** If unregistering the previous voice shortcut fails, `hotkey::apply_voice` has already replaced `VOICE_SHORTCUT`, so the old chord is routed as the inbox hotkey until restart.
 - **Dropped audio chunk** now ends the session as "microphone unavailable" (no test: needs the live engine); a dedicated refusal text would be clearer.
-- **Plan deviations not yet approved:** Space as a hold key in the open inbox, English only and the system microphone, no "English until installed" fallback.
+- **Plan deviations approved at merge (2026-10-12):** no Space as a hold key in the open inbox, English only with the system microphone, no "English until installed" fallback.
 
 ### Harness (`just e2e`)
 

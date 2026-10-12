@@ -1,0 +1,37 @@
+[package]
+name = "acd-inbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Exposes secrets::fake for this crate's integration tests.
+testing = []
+
+[dependencies]
+acd-client.workspace = true
+acd-protocol.workspace = true
+acd-securefs.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+gethostname.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-util.workspace = true
+secret-service = { version = "5.2.0", features = ["rt-tokio-crypto-rust"] }
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+log = "0.4.34"
+acd-client = { workspace = true, features = ["testing"] }
+acd-inbox = { path = ".", features = ["testing"] }
+tempfile.workspace = true

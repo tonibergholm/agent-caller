@@ -35,3 +35,17 @@ app-install:
     ditto "app/src-tauri/target/release/bundle/macos/Agent Caller.app" "/Applications/Agent Caller.app"
     codesign -dvv "/Applications/Agent Caller.app" 2>&1 | grep -E "^(Authority|Signature)=" | head -1
     open "/Applications/Agent Caller.app"
+
+# Build acd-inbox for Omarchy (x86_64 Linux) in Docker, as acd is built
+# (docs/research/2026-10-11-e2e-run.md). Output:
+# target/linux-amd64/release/acd-inbox. The Linux target dir is separate
+# from the Mac's.
+inbox-linux:
+    docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src -v acd-inbox-cargo:/usr/local/cargo/registry -e CARGO_TARGET_DIR=/src/target/linux-amd64 rust:1-bookworm cargo build --release --locked -p acd-inbox
+
+# Copy the Linux build to a host and run its installer there. The installer
+# asks before it edits the bindings file only when it has a terminal; use
+# `ssh -t` by hand for that.
+inbox-install host="toni@omarchy": inbox-linux
+    scp target/linux-amd64/release/acd-inbox {{host}}:/tmp/acd-inbox
+    ssh {{host}} /tmp/acd-inbox install

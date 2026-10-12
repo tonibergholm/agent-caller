@@ -128,6 +128,7 @@ async fn debug_never_shows_content_from_snapshot_to_wire() {
     let sem = Semantics::of(&req, "always").unwrap();
     let action = Action {
         id: "act".into(),
+        owner: acd_client::actions::ActionOwner::DEFAULT,
         card_key: "m1/a1".into(),
         machine_key: "m1".into(),
         agent_id: "a1".into(),

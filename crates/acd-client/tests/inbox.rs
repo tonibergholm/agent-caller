@@ -1,7 +1,8 @@
 mod common;
+use acd_client::actions::ActionOwner;
 use acd_client::{fake::*, inbox::*, settings::*, view::*, voice::*};
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst}}, time::Duration};
 const ANSWER_REQ: &str = "r1";
 fn pending_agent() -> Value {
     serde_json::json!({"id":"a1","machine_id":"m","source":"herdr","kind":"claude","title":"agent","cwd":null,"project":null,"state":"needs_you","state_since":"2026-10-08T00:00:00.000Z","failed":false,"last_message":null,"can_send":true,"pending":{"id":ANSWER_REQ,"revision":1,"agent_id":"a1","kind":"permission","status":"open","answer_path":"hook","title":"Bash","detail":"npm test","options":[{"id":"allow","label":"Yes","description":null,"effect":"allow"},{"id":"deny","label":"No","description":null,"effect":"deny"},{"id":"always","label":"Yes, always","description":"Bash(npm test:*)","effect":"allow_always"}],"questions":null,"free_text":false,"raw_screen":null,"opened_at":"2026-10-08T00:00:00.000Z"}})
@@ -1752,4 +1753,691 @@ async fn the_stamped_view_applies_the_hook_only_filter_like_the_published_view()
     ib.set_show_hook_only(true).unwrap();
     view_until(&ib, "shown", |v| v.cards.iter().any(|c| c.key == "m1/a3")).await;
     assert_eq!(ib.stamped_view().view, *ib.view().borrow());
+}
+
+fn second_pending_agent() -> Value {
+    let mut a = pending_agent();
+    a["id"] = "a2".into();
+    a["pending"]["id"] = "r2".into();
+    a["pending"]["agent_id"] = "a2".into();
+    a
+}
+
+/// Two answerable cards, `m1/a1` (request `r1`) and `m1/a2` (request `r2`).
+async fn setup_two(timing: acd_client::Timing) -> (FakeServer, FakeConn, Arc<Inbox>) {
+    let (f, c, ib) = setup_with(timing).await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":second_pending_agent()}))
+        .await;
+    view_until(&ib, "two answerable cards", |v| v.cards.iter().filter(|c| c.answerable).count() == 2).await;
+    (f, c, ib)
+}
+
+/// Starts and cancels a sentinel action on `m1/a2`, then reads outcomes up
+/// to the sentinel's: none of them may belong to `id`.
+async fn no_more_outcomes_for(ib: &Arc<Inbox>, rx: &mut tokio::sync::broadcast::Receiver<ActionEvent>, id: &str) {
+    let sentinel = ib.pick("m1/a2", "r2", "deny", 1).unwrap();
+    assert!(ib.cancel(&sentinel));
+    loop {
+        let e = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        assert_ne!(e.action_id, id, "a second outcome for one action: {:?}", e.outcome);
+        if e.action_id == sentinel {
+            return;
+        }
+    }
+}
+
+async fn deliver(f: &FakeServer, c: &FakeConn) {
+    let frame = answer_frame(f).await;
+    c.send(serde_json::json!({"type":"result","id":frame["id"],"ok":true,"outcome":"delivered"})).await;
+}
+
+#[tokio::test]
+async fn escape_owned_cancels_only_that_owners_newest() {
+    let (_f, _c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let (one, two) = (ActionOwner(1), ActionOwner(2));
+    let a = ib.pick_owned(one, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let b = ib.pick_owned(two, "m1/a2", "r2", "allow", 1).unwrap();
+    assert!(ib.escape_owned(one));
+    assert_eq!(next_outcome(&mut rx, &a).await, ActionOutcome::Cancelled);
+    assert!(!ib.escape_owned(one), "owner one has nothing left; two's countdown is not one's");
+    view_until(&ib, "one countdown left", |v| v.actions.len() == 1 && v.actions[0].id == b).await;
+    assert!(ib.cancel(&b), "a card's cancel control cancels any owner's action");
+    assert_eq!(next_outcome(&mut rx, &b).await, ActionOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn cancel_owned_ends_every_countdown_of_that_owner_and_nothing_fires() {
+    let (f, _c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let a = ib.pick_owned(ActionOwner(7), "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let b = ib.pick_owned(ActionOwner(7), "m1/a2", "r2", "deny", 1).unwrap();
+    assert_eq!(ib.cancel_owned(ActionOwner(7)), 2);
+    assert_eq!(ib.cancel_owned(ActionOwner(7)), 0);
+    assert_eq!(next_outcome(&mut rx, &a).await, ActionOutcome::Cancelled);
+    assert_eq!(next_outcome(&mut rx, &b).await, ActionOutcome::Cancelled);
+    ib.expire_countdowns_for_test();
+    view_until(&ib, "no countdowns", |v| v.actions.is_empty()).await;
+    assert_eq!(answers(&f), 0);
+}
+
+#[tokio::test]
+async fn escape_without_an_owner_still_takes_the_newest_of_any_owner() {
+    let (_f, _c, ib) = setup_two(held()).await;
+    ib.pick_owned(ActionOwner(1), "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let newest = ib.pick_owned(ActionOwner(2), "m1/a2", "r2", "allow", 1).unwrap();
+    let mut rx = ib.action_outcomes();
+    assert!(ib.escape());
+    assert_eq!(next_outcome(&mut rx, &newest).await, ActionOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn outcomes_name_the_card() {
+    let (_f, _c, ib) = setup_with(held()).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert!(ib.cancel(&id));
+    let event = rx.recv().await.unwrap();
+    assert_eq!((event.action_id.as_str(), event.card_key.as_str()), (id.as_str(), "m1/a1"));
+}
+
+#[tokio::test]
+async fn escape_owned_before_expiry_cancels_once_and_sends_nothing() {
+    let (f, _c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let owner = ActionOwner(3);
+    let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert!(ib.escape_owned(owner));
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Cancelled);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
+    assert_eq!(answers(&f), 0);
+}
+
+#[tokio::test]
+async fn escape_owned_after_expiry_is_refused_and_the_send_ends_once() {
+    let (f, c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let owner = ActionOwner(3);
+    let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    assert!(!ib.escape_owned(owner), "too late once fired");
+    deliver(&f, &c).await;
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Delivered);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
+}
+
+#[tokio::test]
+async fn cancel_owned_before_expiry_cancels_once_and_sends_nothing() {
+    let (f, _c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let owner = ActionOwner(4);
+    let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    assert_eq!(ib.cancel_owned(owner), 1);
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Cancelled);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
+    assert_eq!(answers(&f), 0);
+}
+
+#[tokio::test]
+async fn cancel_owned_after_expiry_cancels_nothing_and_the_send_ends_once() {
+    let (f, c, ib) = setup_two(held()).await;
+    let mut rx = ib.action_outcomes();
+    let owner = ActionOwner(4);
+    let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
+    assert_eq!(ib.cancel_owned(owner), 0, "a disconnect after the countdown cannot stop it");
+    deliver(&f, &c).await;
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Delivered);
+    no_more_outcomes_for(&ib, &mut rx, &id).await;
+}
+
+/// A secret store whose reads, writes or deletes wait while held, as a
+/// keyring prompt does.
+#[derive(Default)]
+struct Gate {
+    inner: MemorySecrets,
+    hold_get: AtomicBool,
+    hold_set: AtomicBool,
+    hold_delete: AtomicBool,
+    entered: AtomicUsize,
+}
+
+/// Holds one of the gate's operations until dropped, panics included.
+struct Hold<'a>(&'a AtomicBool);
+
+impl Drop for Hold<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, SeqCst);
+    }
+}
+
+impl Gate {
+    fn hold<'a>(&'a self, which: &'a AtomicBool) -> Hold<'a> {
+        which.store(true, SeqCst);
+        Hold(which)
+    }
+    fn wait(&self, hold: &AtomicBool) {
+        if hold.load(SeqCst) {
+            self.entered.fetch_add(1, SeqCst);
+            while hold.load(SeqCst) {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+impl SecretStore for Gate {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        self.wait(&self.hold_get);
+        self.inner.get(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        self.wait(&self.hold_set);
+        self.inner.set(key, value)
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        self.wait(&self.hold_delete);
+        self.inner.delete(key)
+    }
+}
+
+/// Polls `cond` (no fixed sleep) for up to 5 s.
+async fn until(what: &str, cond: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !cond() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+fn box_secret(f: &FakeServer) -> String {
+    MachineSecret { token: common::TOKEN.into(), pin: f.pin() }.to_json()
+}
+
+fn box_settings(f: &FakeServer) -> Settings {
+    Settings {
+        client_id: settings_client_id().into(),
+        hotkey: DEFAULT_HOTKEY.into(),
+        show_idle: false,
+        show_subagents: false,
+        show_hook_only: false,
+        machines: vec![MachineEntry {
+            key: "m1".into(),
+            name: "Box".into(),
+            endpoint: EndpointConfig::Tcp { host: "127.0.0.1".into(), port: f.port() },
+        }],
+    }
+}
+
+fn options(timing: acd_client::Timing) -> InboxOptions {
+    InboxOptions { timing, settings_path: None, client_name: "t".into(), client_version: "0".into() }
+}
+
+/// `setup_with` over a `Gate` store, optionally with a settings file.
+async fn setup_gated(
+    timing: acd_client::Timing,
+    settings_path: Option<std::path::PathBuf>,
+) -> (FakeServer, FakeConn, Arc<Inbox>, Arc<Gate>) {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let gate = Arc::new(Gate::default());
+    gate.inner.set("m1", &box_secret(&f)).unwrap();
+    let ib = Inbox::new(box_settings(&f), gate.clone(), InboxOptions { settings_path, ..options(timing) });
+    ib.start();
+    let c = f.next_connection().await;
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
+    view_until(&ib, "answerable", |v| v.cards.iter().any(|c| c.answerable)).await;
+    (f, c, ib, gate)
+}
+
+/// A pairing line for a second machine on the fake daemon's port.
+fn localhost_line(f: &FakeServer) -> String {
+    format!("acd://localhost:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN)
+}
+
+/// The same machine as `m1`, re-paired.
+fn m1_line(f: &FakeServer) -> String {
+    format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN)
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::time::timeout(Duration::from_secs(2), tokio::task::spawn_blocking(f))
+        .await
+        .expect("the call waited for the secret store")
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocked_secret_write_never_stops_a_cancel_or_a_listing() {
+    let (f, _c, ib, gate) = setup_gated(held(), None).await;
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let pairing = {
+        let _hold = gate.hold(&gate.hold_set);
+        let pairing = {
+            let (ib, line) = (ib.clone(), localhost_line(&f));
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the secret write", || gate.entered.load(SeqCst) == 1).await;
+        let ib2 = ib.clone();
+        assert!(blocking(move || ib2.cancel(&id)).await);
+        let ib2 = ib.clone();
+        assert_eq!(blocking(move || ib2.machines().len()).await, 1, "not committed before its secret is stored");
+        pairing
+    };
+    assert!(pairing.await.unwrap().is_ok());
+    assert_eq!(ib.settings().machines.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_countdown_fires_while_a_secret_write_is_blocked() {
+    let (f, _c, ib, gate) = setup_gated(common::fast(), None).await;
+    let pairing = {
+        let _hold = gate.hold(&gate.hold_set);
+        let pairing = {
+            let (ib, line) = (ib.clone(), localhost_line(&f));
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the secret write", || gate.entered.load(SeqCst) == 1).await;
+        ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+        answer_frame(&f).await;
+        pairing
+    };
+    pairing.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocked_secret_read_during_removal_never_stops_a_cancel() {
+    let (_f, _c, ib, gate) = setup_gated(held(), None).await;
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let removal = {
+        let _hold = gate.hold(&gate.hold_get);
+        let removal = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.remove_machine_checked("m1"))
+        };
+        until("the secret read", || gate.entered.load(SeqCst) == 1).await;
+        let ib2 = ib.clone();
+        assert!(blocking(move || ib2.cancel(&id)).await);
+        removal
+    };
+    removal.await.unwrap().unwrap();
+    assert!(ib.settings().machines.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_reads_secrets_outside_the_inbox_lock() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let gate = Arc::new(Gate::default());
+    gate.inner.set("m1", &box_secret(&f)).unwrap();
+    let ib = Inbox::new(box_settings(&f), gate.clone(), options(common::fast()));
+    let starting = {
+        let _hold = gate.hold(&gate.hold_get);
+        let starting = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.start())
+        };
+        until("start's secret read", || gate.entered.load(SeqCst) == 1).await;
+        let ib2 = ib.clone();
+        assert_eq!(blocking(move || ib2.settings()).await.machines.len(), 1);
+        starting
+    };
+    starting.await.unwrap();
+    f.next_connection().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_pairings_of_one_host_leave_one_machine() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let gate = Arc::new(Gate::default());
+    let ib = empty_inbox(gate.clone(), None);
+    let line = m1_line(&f);
+    let (first, second) = {
+        let _hold = gate.hold(&gate.hold_set);
+        let first = {
+            let (ib, line) = (ib.clone(), line.clone());
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the first secret write", || gate.entered.load(SeqCst) == 1).await;
+        let second = {
+            let (ib, line) = (ib.clone(), line.clone());
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the second pairing to wait", || ib.edit_waiters_for_test() == 1).await;
+        assert_eq!(gate.entered.load(SeqCst), 1, "the second pairing has not reached the store");
+        (first, second)
+    };
+    let (a, b) = (first.await.unwrap().unwrap(), second.await.unwrap().unwrap());
+    assert_eq!(a, b, "the second pairing re-pairs the machine the first one added");
+    assert_eq!(ib.settings().machines.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rename_during_a_re_pairing_is_kept() {
+    // `rename_machine` validates the key, so this machine needs a UUID key
+    // (the shared `m1` fixture key would be rejected).
+    const KEY: &str = "00000000-0000-4000-8000-0000000000aa";
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let gate = Arc::new(Gate::default());
+    gate.inner.set(KEY, &box_secret(&f)).unwrap();
+    let mut settings = box_settings(&f);
+    settings.machines[0].key = KEY.into();
+    let ib = Inbox::new(settings, gate.clone(), options(held()));
+    let (pairing, rename) = {
+        let _hold = gate.hold(&gate.hold_set);
+        let pairing = {
+            let (ib, line) = (ib.clone(), m1_line(&f));
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the re-pairing's secret write", || gate.entered.load(SeqCst) == 1).await;
+        let rename = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.rename_machine(KEY, "Renamed"))
+        };
+        until("the rename to wait for the edit lock", || ib.edit_waiters_for_test() == 1).await;
+        assert_eq!(ib.settings().machines[0].name, "Box");
+        (pairing, rename)
+    };
+    assert_eq!(pairing.await.unwrap().unwrap(), KEY);
+    rename.await.unwrap().unwrap();
+    assert_eq!(ib.settings().machines[0].name, "Renamed");
+    ib.reconnect_machine(KEY).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settings_write_during_a_removal_never_brings_the_machine_back() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("settings.json");
+    let (_f, _c, ib, gate) = setup_gated(held(), Some(path.clone())).await;
+    let (removal, toggle) = {
+        let _hold = gate.hold(&gate.hold_delete);
+        let removal = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.remove_machine_checked("m1"))
+        };
+        until("the secret delete", || gate.entered.load(SeqCst) == 1).await;
+        let toggle = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.set_show_subagents(true))
+        };
+        until("the settings write to wait for the edit lock", || ib.edit_waiters_for_test() == 1).await;
+        (removal, toggle)
+    };
+    removal.await.unwrap().unwrap();
+    toggle.await.unwrap().unwrap();
+    let saved: Settings = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(saved.machines.is_empty(), "the removed machine came back in the file");
+    assert!(saved.show_subagents);
+    assert_eq!(ib.settings(), saved);
+}
+
+/// Records every store call; keys only, never values.
+#[derive(Default)]
+struct Recording {
+    inner: MemorySecrets,
+    ops: std::sync::Mutex<Vec<(&'static str, String)>>,
+}
+
+impl SecretStore for Recording {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        self.ops.lock().unwrap().push(("get", key.into()));
+        self.inner.get(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        self.ops.lock().unwrap().push(("set", key.into()));
+        self.inner.set(key, value)
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        self.ops.lock().unwrap().push(("delete", key.into()));
+        self.inner.delete(key)
+    }
+}
+
+#[tokio::test]
+async fn a_failed_commit_deletes_a_new_machines_secret() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let d = tempfile::tempdir().unwrap();
+    let blocker = d.path().join("file");
+    std::fs::write(&blocker, "block").unwrap();
+    let store = Arc::new(Recording::default());
+    let ib = empty_inbox(store.clone(), Some(blocker.join("settings.json")));
+    assert!(matches!(ib.pair_machine(&m1_line(&f)), Err(MachineError::Settings(_))));
+    let ops = store.ops.lock().unwrap().clone();
+    let kinds: Vec<&str> = ops.iter().map(|(op, _)| *op).collect();
+    assert_eq!(kinds, ["get", "set", "delete"]);
+    assert!(ops.iter().all(|(_, key)| key == &ops[0].1));
+    assert_eq!(store.inner.get(&ops[0].1).unwrap(), None);
+    assert!(ib.settings().machines.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_re_pair_commit_restores_the_previous_secret() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let d = tempfile::tempdir().unwrap();
+    let blocker = d.path().join("file");
+    std::fs::write(&blocker, "block").unwrap();
+    let store = Arc::new(Recording::default());
+    let previous = MachineSecret { token: common::TOKEN.into(), pin: "old-pin".into() }.to_json();
+    store.inner.set("m1", &previous).unwrap();
+    let settings = box_settings(&f);
+    let ib = Inbox::new(settings.clone(), store.clone(), InboxOptions {
+        settings_path: Some(blocker.join("settings.json")),
+        ..options(common::fast())
+    });
+
+    assert!(matches!(ib.pair_machine(&m1_line(&f)), Err(MachineError::Settings(_))));
+    assert_eq!(store.inner.get("m1").unwrap().as_deref(), Some(previous.as_str()));
+    assert_eq!(ib.settings(), settings);
+    let ops = store.ops.lock().unwrap().clone();
+    let kinds: Vec<&str> = ops.iter().map(|(op, _)| *op).collect();
+    assert_eq!(kinds, ["get", "set", "set"]);
+    assert!(ops.iter().all(|(_, key)| key == "m1"));
+}
+
+#[tokio::test]
+async fn machine_errors_are_typed_and_keep_the_old_texts() {
+    let ib = empty_inbox(Arc::new(MemorySecrets::default()), None);
+    let bad = ib.pair_machine("hello #tok").unwrap_err();
+    assert!(matches!(bad, MachineError::BadPairing));
+    assert_eq!(ib.import_pairing("hello #tok").unwrap_err(), bad.to_string());
+    assert_eq!(
+        bad.to_string(),
+        "That is not an acd pairing line. Run `acd pair` on the machine and copy its output."
+    );
+    assert!(matches!(ib.remove_machine_checked("nope"), Err(MachineError::UnknownMachine)));
+    assert_eq!(ib.remove_machine("nope").unwrap_err(), "Unknown machine");
+}
+
+/// A keyring that refuses every call while locked.
+struct Lockable {
+    inner: MemorySecrets,
+    unlocked: AtomicBool,
+}
+
+impl SecretStore for Lockable {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        if !self.unlocked.load(SeqCst) {
+            return Err(SecretError::locked());
+        }
+        self.inner.get(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        if !self.unlocked.load(SeqCst) {
+            return Err(SecretError::locked());
+        }
+        self.inner.set(key, value)
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        if !self.unlocked.load(SeqCst) {
+            return Err(SecretError::locked());
+        }
+        self.inner.delete(key)
+    }
+}
+
+#[tokio::test]
+async fn a_locked_secret_is_shown_as_locked_and_reconnect_creates_the_handle() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let store = Arc::new(Lockable { inner: MemorySecrets::default(), unlocked: AtomicBool::new(false) });
+    store.inner.set("m1", &box_secret(&f)).unwrap();
+    let ib = Inbox::new(box_settings(&f), store.clone(), options(common::fast()));
+    ib.start();
+    let m = ib.machines().remove(0);
+    assert_eq!((m.secret, m.pairing), (SecretStatus::Locked, PairingState::Unreadable));
+    assert!(ib.conn_stamp("m1").is_none(), "no handle without a secret");
+    assert!(matches!(
+        ib.reconnect_machine("m1"),
+        Err(MachineError::SecretRead(e)) if e.kind() == SecretErrorKind::Locked
+    ));
+    store.unlocked.store(true, SeqCst);
+    ib.reconnect_machine("m1").unwrap();
+    let c = f.next_connection().await;
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
+    view_until(&ib, "answerable after reconnect", |v| v.cards.iter().any(|c| c.answerable)).await;
+    assert_eq!(ib.machines()[0].secret, SecretStatus::Ok);
+}
+
+#[tokio::test]
+async fn reconnect_keeps_an_online_handle_and_rejects_unknown_or_unpaired_machines() {
+    let (f, _c, ib) = setup().await;
+    let before = ib.conn_stamp("m1");
+    ib.reconnect_machine("m1").unwrap();
+    assert_eq!(ib.conn_stamp("m1"), before, "an online handle is kept, not rebuilt");
+    assert!(matches!(ib.reconnect_machine("nope"), Err(MachineError::UnknownMachine)));
+    let empty = Inbox::new(box_settings(&f), Arc::new(MemorySecrets::default()), options(common::fast()));
+    assert!(matches!(empty.reconnect_machine("m1"), Err(MachineError::NotPaired)));
+    assert_eq!(empty.machines()[0].secret, SecretStatus::Missing);
+}
+
+/// A keyring whose reads, or writes and deletes, report an unconfirmed
+/// state; a successful write makes the item known again.
+#[derive(Default)]
+struct Uncertain {
+    inner: MemorySecrets,
+    unknown_reads: AtomicBool,
+    unknown_writes: AtomicBool,
+    marked: AtomicBool,
+    restores: AtomicUsize,
+}
+
+impl SecretStore for Uncertain {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        if self.unknown_reads.load(SeqCst) {
+            return Err(SecretError::unknown());
+        }
+        self.inner.get(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        if self.unknown_writes.load(SeqCst) {
+            return Err(SecretError::unknown());
+        }
+        if self.inner.get(key).unwrap().is_some() && !self.unknown_reads.load(SeqCst) {
+            self.restores.fetch_add(1, SeqCst);
+        }
+        self.unknown_reads.store(false, SeqCst);
+        self.inner.set(key, value)
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        if self.unknown_writes.load(SeqCst) {
+            return Err(SecretError::unknown());
+        }
+        self.restores.fetch_add(1, SeqCst);
+        self.inner.delete(key)
+    }
+    fn mark_unknown(&self, _key: &str) {
+        self.marked.store(true, SeqCst);
+        self.unknown_reads.store(true, SeqCst);
+    }
+}
+
+async fn uncertain_setup(store: Arc<Uncertain>, settings_path: Option<std::path::PathBuf>) -> (FakeServer, Arc<Inbox>) {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    store.inner.set("m1", &box_secret(&f)).unwrap();
+    let ib = Inbox::new(box_settings(&f), store, InboxOptions { settings_path, ..options(held()) });
+    ib.start();
+    (f, ib)
+}
+
+#[tokio::test]
+async fn an_unconfirmed_secret_change_stops_the_machine_until_a_read_succeeds() {
+    let store = Arc::new(Uncertain::default());
+    let (f, ib) = uncertain_setup(store.clone(), None).await;
+    let c = f.next_connection().await;
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
+    view_until(&ib, "answerable", |v| v.cards.iter().any(|c| c.answerable)).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    store.unknown_writes.store(true, SeqCst);
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
+    let e = ib.pair_machine(&line).unwrap_err();
+    assert!(matches!(&e, MachineError::SecretWrite(s) if s.kind() == SecretErrorKind::Unknown), "{e:?}");
+    assert!(ib.conn_stamp("m1").is_none(), "no connection with uncertain credentials");
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+    store.unknown_writes.store(false, SeqCst);
+    store.unknown_reads.store(true, SeqCst);
+    assert_eq!(ib.machines()[0].secret, SecretStatus::Unknown);
+    assert!(matches!(ib.reconnect_machine("m1"), Err(MachineError::SecretRead(_))));
+    store.unknown_reads.store(false, SeqCst);
+    ib.reconnect_machine("m1").unwrap();
+    f.next_connection().await;
+}
+
+#[tokio::test]
+async fn an_unconfirmed_delete_on_remove_stops_the_machine_and_ends_its_countdowns() {
+    let store = Arc::new(Uncertain::default());
+    let (f, ib) = uncertain_setup(store.clone(), None).await;
+    let c = f.next_connection().await;
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
+    view_until(&ib, "answerable", |v| v.cards.iter().any(|c| c.answerable)).await;
+    let mut rx = ib.action_outcomes();
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    store.unknown_writes.store(true, SeqCst);
+    let e = ib.remove_machine_checked("m1").unwrap_err();
+    assert!(matches!(&e, MachineError::SecretDelete(s) if s.kind() == SecretErrorKind::Unknown), "{e:?}");
+    assert!(ib.conn_stamp("m1").is_none(), "no connection with uncertain credentials");
+    assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+}
+
+#[tokio::test]
+async fn re_pairing_from_unknown_writes_the_new_secret_and_connects() {
+    let store = Arc::new(Uncertain::default());
+    store.unknown_reads.store(true, SeqCst);
+    let (f, ib) = uncertain_setup(store.clone(), None).await;
+    assert!(ib.conn_stamp("m1").is_none(), "unknown at start: no handle");
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
+    assert_eq!(ib.pair_machine(&line).unwrap().key, "m1", "nothing restorable is not an error");
+    f.next_connection().await;
+    assert_eq!(ib.machines()[0].secret, SecretStatus::Ok);
+}
+
+#[tokio::test]
+async fn re_pairing_from_unknown_that_cannot_commit_stays_unknown_and_stopped() {
+    let d = tempfile::tempdir().unwrap();
+    let blocker = d.path().join("file");
+    std::fs::write(&blocker, "block").unwrap();
+    let store = Arc::new(Uncertain::default());
+    store.unknown_reads.store(true, SeqCst);
+    let (f, ib) = uncertain_setup(store.clone(), Some(blocker.join("settings.json"))).await;
+    let line = format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN);
+    assert!(matches!(ib.pair_machine(&line), Err(MachineError::Settings(_))));
+    assert!(store.marked.load(SeqCst), "the store was told the state is unknown");
+    assert_eq!(store.restores.load(SeqCst), 0, "no rollback guess: nothing restored or deleted");
+    assert!(ib.conn_stamp("m1").is_none());
+    assert_eq!(ib.machines()[0].secret, SecretStatus::Unknown);
+}
+
+#[test]
+fn the_secret_status_is_json_but_not_in_the_mac_bindings() {
+    let view = MachineEntryView {
+        key: "local".into(),
+        name: "Here".into(),
+        endpoint: EndpointConfig::Local,
+        pairing: PairingState::Paired,
+        secret: SecretStatus::Ok,
+    };
+    assert_eq!(serde_json::to_value(&view).unwrap()["secret"], "ok");
 }

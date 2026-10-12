@@ -1,0 +1,14 @@
+//! acd-inbox: the agent-caller inbox as a local service for Omarchy
+//! (omarchy spec §4). Views connect over a Unix socket and speak JSON lines.
+pub mod protocol;
+pub mod prefs;
+pub mod startup;
+pub mod outbox;
+pub mod commands;
+pub mod server;
+pub mod secrets;
+pub mod notify;
+#[cfg(target_os = "linux")]
+pub mod linux;
+pub mod serve;
+pub mod install;

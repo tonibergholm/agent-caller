@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "tonibergholm.agentcaller",
+  "name": "Agent Caller",
+  "version": "0.1.0",
+  "author": "Toni Bergholm",
+  "license": "MIT",
+  "description": "Answer coding agents that need you.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Agent Caller",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}

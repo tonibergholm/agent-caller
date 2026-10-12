@@ -53,6 +53,8 @@ impl ActionOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionEvent {
     pub action_id: String,
+    /// The card the action was started on (omarchy spec §5.3).
+    pub card_key: String,
     pub outcome: ActionOutcome,
 }
 
