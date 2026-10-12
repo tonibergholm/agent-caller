@@ -50,7 +50,7 @@ final class Session: @unchecked Sendable {
     private let work: SpeechWork
     private let bridge: Bridge
     private let lock = NSLock()
-    private var started = false
+    private var started = false // read and written only under `lock`
     private var captureEnded = false
     private var cancelled = false
     private var stoppedAt: ContinuousClock.Instant?

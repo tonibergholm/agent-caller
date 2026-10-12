@@ -91,6 +91,13 @@ final class FakeWork: SpeechWork, @unchecked Sendable {
     }
 }
 
+final class SessionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var session: Session?
+    func set(_ s: Session) { lock.lock(); session = s; lock.unlock() }
+    func get() -> Session? { lock.lock(); defer { lock.unlock() }; return session }
+}
+
 final class SessionTests: XCTestCase {
     private func until(_ what: String, _ cond: () -> Bool, file: StaticString = #filePath, line: UInt = #line) {
         let deadline = Date().addingTimeInterval(2)
@@ -111,14 +118,15 @@ final class SessionTests: XCTestCase {
         private var made: [FakeCapture] = []
         private var finished: Set<UInt64> = []
         lazy var sessions: Sessions = {
-            let s = Sessions(bridge: bridge, admission: admission) { [unowned self] g in
+            let s = Sessions(bridge: bridge, admission: admission) { [weak self] g in
+                guard let self else { return nil }
                 let capture = FakeCapture()
                 self.lock.lock(); self.made.append(capture); self.lock.unlock()
                 let session = Session(generation: g, capture: capture, work: self.work, bridge: self.bridge)
                 session.onCaptureStartedForTest = self.onCaptureStarted
                 return session
             }
-            s.onDone = { [unowned self] g in self.lock.lock(); self.finished.insert(g); self.lock.unlock() }
+            s.onDone = { [weak self] g in self?.lock.lock(); self?.finished.insert(g); self?.lock.unlock() }
             return s
         }()
 
@@ -129,6 +137,11 @@ final class SessionTests: XCTestCase {
 
         func capture(_ i: Int) -> FakeCapture? { lock.lock(); defer { lock.unlock() }; return i < made.count ? made[i] : nil }
         func done(_ g: UInt64) -> Bool { lock.lock(); defer { lock.unlock() }; return finished.contains(g) }
+        /// `on` reached the sink. The slot coalesces, so wait for it before `off`.
+        func captureOnDelivered() -> Bool {
+            bridge.events.sync {}
+            return box.all.contains { $0.kind == VB_EV_CAPTURE && $0.value == 1 }
+        }
         func kinds() -> [UInt32] { bridge.events.sync {}; return box.all.map(\.kind) }
     }
 
@@ -138,7 +151,7 @@ final class SessionTests: XCTestCase {
         let r = Rig()
         r.work.hangFinish = true
         XCTAssertEqual(r.sessions.start(1, maxMs: 60_000), VB_OK)
-        until("capture") { r.capture(0)?.running == true }
+        until("capture on") { r.captureOnDelivered() }
         r.sessions.stop(1)
         XCTAssertFalse(r.capture(0)!.running, "the microphone stopped before stop returned")
         XCTAssertEqual(r.sessions.count, 1, "the finishing session is still tracked")
@@ -199,11 +212,17 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(final?.audioMs, 0)
     }
 
-    /// Plan S9: the failsafe counts from capture start and stops capture.
-    func testTheFailsafeStopsCaptureAtTheCap() {
+    /// Plan S9: the failsafe counts from capture start, not from the call,
+    /// and stops capture. Barrier: `format()` is held longer than the cap, so
+    /// a timer that began at the call would already have fired.
+    func testTheFailsafeCountsFromCaptureStartAndStopsCapture() {
         let r = Rig()
-        _ = r.sessions.start(1, maxMs: 50)
+        r.work.gateFormat = true
+        _ = r.sessions.start(1, maxMs: 200)
+        usleep(400_000) // longer than the cap: the timer must not have started
+        r.work.formatGate.release()
         until("capture") { r.capture(0)?.starts == 1 }
+        XCTAssertEqual(r.capture(0)?.running, true, "still running right after it opened")
         until("failsafe") { r.capture(0)?.running == false }
         until("session done") { r.done(1) }
     }
@@ -257,17 +276,22 @@ final class SessionTests: XCTestCase {
     /// and starts the release there.
     func testCaptureOnIsPublishedBeforeARacingRelease() {
         let r = Rig()
-        let heldAtStart = Box()
+        let heldAtPublish = Box()
+        let current = SessionBox()
         let releasing = DispatchGroup()
         r.onCaptureStarted = { session in
-            heldAtStart.append(Event(kind: session.lockHeldForTest ? 1 : 0))
+            current.set(session)
             DispatchQueue.global().async(group: releasing) { r.sessions.stop(1) }
+        }
+        // Observes the session lock at the moment `on` is published.
+        r.bridge.onEmitCaptureForTest = { _, on in
+            if on { heldAtPublish.append(Event(kind: current.get()?.lockHeldForTest == true ? 1 : 0)) }
         }
         _ = r.sessions.start(1, maxMs: 60_000)
         until("capture") { r.capture(0)?.starts == 1 }
         releasing.wait()
         _ = r.kinds() // flush the event queue
-        XCTAssertEqual(heldAtStart.all.map(\.kind), [1], "the publish happens under the transition's lock")
+        XCTAssertEqual(heldAtPublish.all.map(\.kind), [1], "`on` is published while the session lock is held")
         let values = r.box.all.filter { $0.kind == VB_EV_CAPTURE }.map(\.value)
         XCTAssertEqual(values.last, 0, "the last state is off")
         if let off = values.firstIndex(of: 0) {

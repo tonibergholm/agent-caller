@@ -90,8 +90,13 @@ final class Bridge: @unchecked Sendable {
 
     /// Never filtered: the indicator must learn every stop (S18).
     func emitCapture(_ generation: UInt64, on: Bool) {
+        onEmitCaptureForTest?(generation, on)
         push { capture = Event(generation: generation, kind: VB_EV_CAPTURE, value: on ? 1 : 0) }
     }
+
+    /// Test hook: runs synchronously on the emitting thread, before queueing.
+    /// Set before any session starts.
+    var onEmitCaptureForTest: ((UInt64, Bool) -> Void)?
 
     func emitSystem(_ code: UInt32) {
         push { system = code }

@@ -36,7 +36,9 @@ final class Capture: AudioCapture, @unchecked Sendable {
         }
         // The device went away or changed (spec §9: "Microphone unavailable").
         observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { _ in
-            onLost()
+            // Off the engine's posting thread: `onLost` takes the session
+            // lock, which a stop or cancel may hold while it stops the engine.
+            DispatchQueue.global().async { onLost() }
         }
         engine.prepare()
         do {
