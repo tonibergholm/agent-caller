@@ -101,3 +101,21 @@ pub fn voice_hud_fit(window: WebviewWindow, seq: u64, height: f64) {
         tracing::error!(%error, "could not dispatch the HUD resize");
     }
 }
+
+/// Spike probe step `step` (plan Task 1A, S20). Settings window only, and
+/// only while voice and the debug setting are both on.
+#[tauri::command]
+pub fn voice_probe(window: WebviewWindow, voice: State<'_, VoiceState>, step: u32) {
+    let allowed = {
+        let s = voice.settings.lock().unwrap();
+        s.enabled && s.debug_input
+    };
+    if window.label() != "settings" || !allowed {
+        tracing::debug!(label = window.label(), allowed, "ignored a probe request");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    super::bridge::probe(step);
+    #[cfg(not(target_os = "macos"))]
+    let _ = step;
+}

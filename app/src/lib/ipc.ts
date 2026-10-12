@@ -48,6 +48,9 @@ export interface Api {
   voiceCancel(id: number): Promise<void>;
   /** The content height in CSS px of HUD state `seq`; the panel fits it. */
   voiceHudFit(seq: number, height: number): Promise<void>;
+  /** Spike probe step (plan Task 1A); the report arrives through `onVoiceProbe`. */
+  voiceProbe(step: number): Promise<void>;
+  onVoiceProbe(cb: (report: string) => void): Promise<() => void>;
 }
 
 export const tauriApi: Api = {
@@ -87,4 +90,6 @@ export const tauriApi: Api = {
   voiceChoose: (choiceId, index) => invoke("voice_choose", { choiceId, index }),
   voiceCancel: (id) => invoke("voice_cancel", { id }),
   voiceHudFit: (seq, height) => invoke("voice_hud_fit", { seq, height }),
+  voiceProbe: (step) => invoke("voice_probe", { step }),
+  onVoiceProbe: (cb) => listen<string>("voice://probe", (e) => cb(e.payload)),
 };

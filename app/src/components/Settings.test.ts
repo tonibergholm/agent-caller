@@ -314,3 +314,19 @@ test("the hook-only toggle reflects the daemon's view and reverts when saving fa
   expect((await screen.findByRole("alert")).textContent).toContain("disk full");
   expect(box.checked).toBe(true);
 });
+
+test("the voice probe shows only with voice and the debug setting on, and lists its reports", async () => {
+  for (const voice of [{ enabled: true, debug_input: false }, { enabled: false, debug_input: true }]) {
+    render(Settings, { api: fakeApi({ voice }) });
+    await screen.findByRole("checkbox", { name: "Voice control" });
+    expect(screen.queryByRole("button", { name: "1. Status" })).toBeNull();
+    cleanup();
+  }
+
+  const api = fakeApi({ voice: { enabled: true, debug_input: true } });
+  render(Settings, { api });
+  await userEvent.click(await screen.findByRole("button", { name: "1. Status" }));
+  expect(api.calls).toContainEqual(["voiceProbe", 1]);
+  api.voiceProbeReport!('{"microphone":"granted","step":1}');
+  expect(await screen.findByText(/"microphone":"granted"/)).toBeTruthy();
+});

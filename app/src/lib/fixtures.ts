@@ -98,6 +98,7 @@ export type FakeApi = Api & {
   /** HUD state seqs sent to `voiceHudFit`, also kept out of `calls`. */
   fits: number[];
   voiceSelect?: (cardKey: string) => void;
+  voiceProbeReport?: (report: string) => void;
   voiceSettings?: (s: VoiceSettings) => void;
   hud?: (e: HudEvent) => void;
   hudClear?: (seq: number) => void;
@@ -176,6 +177,11 @@ export function fakeApi(
     // Kept out of `calls`: sizing is not an action.
     voiceHudFit: async (seq: number) => {
       api.fits.push(seq);
+    },
+    voiceProbe: rec("voiceProbe", undefined),
+    onVoiceProbe: async (cb: (report: string) => void) => {
+      api.voiceProbeReport = cb;
+      return () => {};
     },
     fits: [] as number[],
   } as FakeApi;

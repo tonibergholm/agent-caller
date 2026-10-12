@@ -18,6 +18,16 @@
   let names = $state<Record<string, string>>({});
   let error = $state<string | null>(null);
   let added = $state<string | null>(null);
+  const PROBE_STEPS: [number, string][] = [
+    [1, "1. Status"],
+    [2, "2. Ask for the microphone"],
+    [3, "3. Transcribe 4 s from the microphone"],
+    [4, "4. Transcribe a spoken clip"],
+    [5, "5. Ask for Speech Recognition"],
+    [6, "6. Input Monitoring and Right Option (10 s)"],
+    [7, "7. Foundation Models availability"],
+  ];
+  let probeReports = $state<string[]>([]);
 
   const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -63,6 +73,7 @@
 
   onMount(() => {
     let off: (() => void) | undefined;
+    let offProbe: (() => void) | undefined;
     let closed = false;
     void act(async () => {
       const stored = await api.getHotkey();
@@ -72,6 +83,7 @@
       (s) => (voice = s),
       (e) => (error ??= `Could not read the voice settings: ${message(e)}`),
     );
+    void api.onVoiceProbe((r) => (probeReports = [...probeReports, r])).then((un) => (closed ? un() : (offProbe = un)));
     void (async () => {
       try {
         const un = await api.onView(applyView);
@@ -85,6 +97,7 @@
     return () => {
       closed = true;
       off?.();
+      offProbe?.();
     };
   });
 
@@ -260,6 +273,17 @@
       Show the typed command field
     </label>
     <p class="note">There is no microphone yet. Commands are typed into a field in the inbox panel and handled as if spoken. Nothing you type is logged or saved.</p>
+    {#if voice.enabled && voice.debug_input}
+      <div class="probe" role="group" aria-label="Voice probe">
+        <p class="note">Checks for the signed app. Reports show permission states, counts and timings, never what was said.</p>
+        {#each PROBE_STEPS as [step, label] (step)}
+          <button onclick={() => act(() => api.voiceProbe(step), "Could not run the probe")}>{label}</button>
+        {/each}
+        {#each probeReports as report, i (i)}
+          <pre class="report">{report}</pre>
+        {/each}
+      </div>
+    {/if}
   </section>
 
   <section aria-label="Hook-only agents">
@@ -293,6 +317,17 @@
     background: var(--glass);
     border: 1px solid var(--hairline);
     border-radius: var(--r-md);
+  }
+  .probe {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .report {
+    margin: 0;
+    font: 11px var(--font-mono);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .note {
     margin: 6px 0 0;

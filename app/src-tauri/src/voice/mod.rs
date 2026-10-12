@@ -1,6 +1,8 @@
 //! Voice step 1 (voice spec §11 item 1): the typed command that stands in
 //! for audio, the HUD, and the presentation snapshot.
 pub mod commands;
+#[cfg(target_os = "macos")]
+pub mod bridge;
 pub mod hud;
 pub mod settings;
 
@@ -39,6 +41,18 @@ impl HudSink for TauriSink {
         // Broadcast; only the inbox panel listens.
         if let Err(error) = self.app.emit("voice://select", card_key) {
             tracing::error!(%error, "could not emit the voice selection");
+        }
+    }
+}
+
+/// Handles one event from the Swift bridge, on the async runtime.
+#[cfg(target_os = "macos")]
+pub fn dispatch(app: &AppHandle, ev: bridge::BridgeEvent) {
+    match ev {
+        bridge::BridgeEvent::Probe(report) => {
+            if let Err(error) = app.emit("voice://probe", report) {
+                tracing::error!(%error, "could not emit the probe report");
+            }
         }
     }
 }

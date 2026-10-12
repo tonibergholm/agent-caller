@@ -64,6 +64,7 @@ fn main() {
             voice::commands::voice_choose,
             voice::commands::voice_cancel,
             voice::commands::voice_hud_fit,
+            voice::commands::voice_probe,
         ])
         .setup(|app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -105,6 +106,15 @@ fn main() {
             tray::build(app.handle())?;
             panel::create(app.handle())?;
             voice::hud::create(app.handle())?;
+            #[cfg(target_os = "macos")]
+            if let Some(mut events) = voice::bridge::start() {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    while let Some(ev) = events.recv().await {
+                        voice::dispatch(&handle, ev);
+                    }
+                });
+            }
 
             let saved_hotkey = inbox.settings().hotkey;
             if let Err(error) = hotkey::apply(app.handle(), &saved_hotkey) {
