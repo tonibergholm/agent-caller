@@ -57,10 +57,14 @@ npm ci && npm run verify
 ```
 
 Plugin tests, from `clients/omarchy/`: `node --test tests/*.test.mjs`.
-Swift bridge tests, from `app/src-tauri/swift/`: `swift test`
-(`npm run verify` runs them too). On a Mac, Linux-only code builds and
-tests in Docker (`rust:1-bookworm`, `--platform linux/amd64`, with
-`libdbus-1-dev`); see the `inbox-linux` recipe in the `justfile`.
+Swift bridge tests, from `app/src-tauri/swift/`: `swift test`.
+`npm run verify` runs them with `--skip LiveTests`; the live tests need a
+granted microphone and the speech model, so run them by hand. On a Mac,
+Linux-only code builds and tests in Docker: run
+`docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w rust:1-bookworm`
+with `libdbus-1-dev` and `pkg-config` installed (`apt-get`), then
+`cargo test -p acd-inbox`. The `inbox-linux` recipe in the `justfile` only
+builds the release binary.
 
 CI runs the workspace tests and clippy on Ubuntu and macOS, and the app
 on macOS. A workspace change is ready when both workspace commands pass.

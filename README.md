@@ -242,10 +242,12 @@ the app then asks for Microphone, Speech Recognition and Input Monitoring
 
 - Hold **Right Option** and speak, then release. Or press
   **Control+Option+V** to start and again to stop. Both can be changed in
-  settings. Esc cancels a recording.
+  settings. Esc cancels a recording while the inbox or the voice HUD has
+  focus; otherwise just release the key (a very short recording is
+  ignored).
 - Say "approve", "deny", "yes always", "option 2", "cancel", "next" or
-  "previous". Other phrasings go to an intent model when one is
-  available; otherwise the HUD says so.
+  "previous". There is no intent model yet (a later step), so any other
+  phrasing shows "Model unavailable".
 - Speech is recognised on the Mac. Only English is supported. A recording
   stops at 60 seconds, and one under 0.3 seconds or without speech is
   ignored.
@@ -271,7 +273,8 @@ the user service, and installs the shell plugin. It never restarts the
 shell: run `omarchy-restart-shell` once so the bar icon appears. To
 install on the machine itself, run `acd-inbox install` there.
 `acd-inbox status` shows the service, the socket, the keyring and the
-plugin; `acd-inbox uninstall` reverses the install.
+plugin. `acd-inbox uninstall` removes the service, the plugin and the
+binary; it leaves a keybinding you added and prints how to remove it.
 
 The bar icon opens the panel, which shows the same cards and has the same
 2-second undo as the Mac app. It reads the local `acd` and any remote machines you
