@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/mobile-schema.json",
   "identifier": "main",
-  "description": "The single iOS window: inbox events, and reading the clipboard for pairing",
+  "description": "The single iOS window: inbox events. Pairing reads the clipboard in Rust, so the webview needs no clipboard permission",
   "windows": ["main"],
-  "permissions": ["core:event:default", "clipboard-manager:allow-read-text"]
+  "permissions": ["core:event:default"]
 }

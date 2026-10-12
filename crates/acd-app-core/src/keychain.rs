@@ -3,9 +3,15 @@
 use std::sync::Arc;
 
 use acd_client::settings::{CachedSecrets, SecretError, SecretStore};
-use security_framework::passwords::{
-    delete_generic_password, get_generic_password, set_generic_password,
-};
+use security_framework::passwords::{delete_generic_password, get_generic_password};
+#[cfg(not(target_os = "ios"))]
+use security_framework::passwords::set_generic_password;
+#[cfg(target_os = "ios")]
+use security_framework::access_control::{ProtectionMode, SecAccessControl};
+#[cfg(target_os = "ios")]
+use security_framework::passwords::set_generic_password_options;
+#[cfg(target_os = "ios")]
+use security_framework::passwords_options::PasswordOptions;
 
 pub const SERVICE_NAME: &str = "dev.agentcaller.inbox";
 const NOT_FOUND: i32 = -25300; // errSecItemNotFound
@@ -55,6 +61,37 @@ pub fn gate_roundtrip() -> Result<(), SecretError> {
     }
 }
 
+impl KeychainSecrets {
+    /// Stores one value. Writes the macOS login Keychain item as before.
+    #[cfg(not(target_os = "ios"))]
+    fn write(&self, key: &str, value: &[u8]) -> security_framework::base::Result<()> {
+        set_generic_password(&self.service, key, value)
+    }
+
+    /// Stores one value on iOS, device-only: the item is not restored from a
+    /// backup or moved to another device. `set_generic_password` only rewrites
+    /// the value of an existing item (`SecItemUpdate`), so an item stored before
+    /// this change would keep its old protection class. The item is therefore
+    /// deleted and added again. The two calls are not atomic: if the add fails
+    /// after the delete, the old value is gone and the machine must be paired
+    /// again.
+    #[cfg(target_os = "ios")]
+    fn write(&self, key: &str, value: &[u8]) -> security_framework::base::Result<()> {
+        match delete_generic_password(&self.service, key) {
+            Ok(()) => {}
+            Err(error) if error.code() == NOT_FOUND => {}
+            Err(error) => return Err(error),
+        }
+        let access = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+            0,
+        )?;
+        let mut options = PasswordOptions::new_generic_password(&self.service, key);
+        options.set_access_control(access);
+        set_generic_password_options(value, options)
+    }
+}
+
 impl SecretStore for KeychainSecrets {
     fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
         match get_generic_password(&self.service, key) {
@@ -67,7 +104,7 @@ impl SecretStore for KeychainSecrets {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
-        set_generic_password(&self.service, key, value.as_bytes())
+        self.write(key, value.as_bytes())
             .map_err(|error| SecretError(error.to_string()))
     }
 

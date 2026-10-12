@@ -112,5 +112,12 @@ is not reachable from the panel on iOS (`open_settings` is a no-op). The
 settings and pairing screen is plan task 9. Until it lands, pairing a device
 needs the dev path above, which exists only in simulator debug builds.
 
+Secrets: on iOS, machine secrets are stored `AccessibleWhenUnlockedThisDeviceOnly`
+(not backed up, not moved to another device). `KeychainSecrets::write` in
+`crates/acd-app-core/src/keychain.rs` recreates the item to set the class, because
+an update keeps an old item's class. Release gate: confirm on a device that a
+secret stored before this change is replaced with the new class on the next
+pairing, and that the machine stays Online after a relaunch.
+
 Not verified: device install, Keychain behaviour on a device, the Tailscale
 route (100.64.0.0/10) and whether iOS shows a Local Network prompt for it.

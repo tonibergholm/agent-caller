@@ -5,9 +5,11 @@
 
 mod commands;
 
+#[cfg(all(debug_assertions, target_os = "ios", target_abi = "sim"))]
 use std::sync::Arc;
 
 use acd_app_core::{commands::AppState, keychain, setup};
+#[cfg(all(debug_assertions, target_os = "ios", target_abi = "sim"))]
 use acd_client::inbox::Inbox;
 use tauri::{Emitter, Manager};
 

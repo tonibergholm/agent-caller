@@ -29,7 +29,7 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - if: matrix.os == 'macos-latest'
-        run: rustup target add aarch64-apple-ios-sim && cargo check -p acd-client --target aarch64-apple-ios-sim --locked
+        run: rustup target add aarch64-apple-ios-sim && cargo check -p acd-app-core --target aarch64-apple-ios-sim --locked
       - if: matrix.os == 'ubuntu-latest'
         run: node --test 'clients/omarchy/tests/*.test.mjs'
       - if: matrix.os == 'ubuntu-latest'
