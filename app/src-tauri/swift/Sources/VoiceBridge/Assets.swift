@@ -7,7 +7,7 @@ import Speech
 /// Capabilities and asset downloads (plan S4, S21), each on its own task,
 /// never on the session path. `lock` guards the cached values.
 final class Assets: @unchecked Sendable {
-    static let shared = Assets()
+    static let shared = Assets(bridge: .shared, check: Assets.check)
 
     /// Whether SpeechTranscriber streams volatile results in the bundle.
     /// From the step-2 spike record (S22): partials arrived only at release,
@@ -18,6 +18,15 @@ final class Assets: @unchecked Sendable {
     private var cached: Event?
     private var resolved: Locale?
     private var installing = false
+    private var issued = 0
+    private var applied = 0
+    private let bridge: Bridge
+    private let checker: @Sendable () async -> (Event, Locale?)
+
+    init(bridge: Bridge, check: @escaping @Sendable () async -> (Event, Locale?)) {
+        self.bridge = bridge
+        self.checker = check
+    }
 
     /// The last VB_EV_CAPS, for vb_session_start's synchronous checks.
     var caps: Event? {
@@ -33,20 +42,33 @@ final class Assets: @unchecked Sendable {
         return resolved
     }
 
-    func query() {
-        Task.detached {
-            let (event, locale) = await Assets.check()
-            self.store(event, locale)
-            Bridge.shared.emit(event)
+    @discardableResult
+    func query() -> Task<Void, Never> {
+        let seq = nextSequence()
+        return Task.detached {
+            let (event, locale) = await self.checker()
+            if self.store(seq, event, locale) { self.bridge.emit(event) }
         }
     }
 
     // Synchronous: NSLock cannot be taken from an async context.
-    private func store(_ event: Event, _ locale: Locale?) {
+    private func nextSequence() -> Int {
         lock.lock()
+        defer { lock.unlock() }
+        issued += 1
+        return issued
+    }
+
+    /// Queries finish out of order: an older result never replaces a newer
+    /// one. False if `seq` was superseded.
+    private func store(_ seq: Int, _ event: Event, _ locale: Locale?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard seq > applied else { return false }
+        applied = seq
         cached = event
         resolved = locale
-        lock.unlock()
+        return true
     }
 
     private func finishInstall() {
@@ -64,7 +86,7 @@ final class Assets: @unchecked Sendable {
         Task.detached {
             let code = await Assets.download()
             self.finishInstall()
-            Bridge.shared.emit(Event(kind: VB_EV_ASSETS, code: UInt32(bitPattern: code)))
+            self.bridge.emit(Event(kind: VB_EV_ASSETS, code: UInt32(bitPattern: code)))
             self.query()
         }
     }

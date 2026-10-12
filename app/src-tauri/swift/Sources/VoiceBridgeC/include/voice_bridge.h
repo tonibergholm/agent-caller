@@ -107,4 +107,31 @@ void vb_query_capabilities(void);
  * one runs does nothing. */
 void vb_install_assets(void);
 
+/* Starts recording `generation` (non-zero). Returns VB_OK, or at once:
+ * VB_ERR_NOT_INITIALIZED, VB_ERR_FAILED (generation 0), VB_ERR_MIC_DENIED,
+ * VB_ERR_SPEECH_DENIED (only when speech_required is non-zero, plan S14),
+ * VB_ERR_SPEECH_UNAVAILABLE, VB_ERR_ASSETS_MISSING, or VB_ERR_BUSY while the
+ * spike probe holds the microphone (S20). Every other session
+ * is cancelled first, and its capture has stopped before this returns (S4).
+ * Capture stops on its own max_ms after it started (S9). Later: VB_EV_CAPTURE
+ * when the microphone starts and stops, VB_EV_PARTIAL, then VB_EV_FINAL or
+ * VB_EV_ERROR. */
+int32_t vb_session_start(uint64_t generation, uint32_t max_ms, uint32_t speech_required);
+
+/* Stops capture before returning, and lets the transcript finish:
+ * VB_EV_FINAL or VB_EV_ERROR follows. The finishing session stays
+ * cancellable. Ignored for an unknown generation. Never queued (S4). */
+void vb_session_stop(uint64_t generation);
+
+/* Stops capture before returning and cancels all of the session's work,
+ * finishing or not. Nothing follows but VB_EV_CAPTURE off. Ignored for an
+ * unknown generation. Never queued (S4). */
+void vb_session_cancel(uint64_t generation);
+
+/* Task 7A: the listen-only hold-key tap. On VB_OK, *out_tap holds the
+ * tap's generation; every VB_EV_HOLD, VB_EV_OTHER_KEY and
+ * VB_EV_TAP_DISABLED carries it in vb_event.generation (S26). */
+int32_t vb_tap_start(uint16_t keycode, uint64_t down_mask, uint64_t *out_tap);
+void vb_tap_stop(void);
+
 #endif

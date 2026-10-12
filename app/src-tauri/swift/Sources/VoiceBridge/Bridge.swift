@@ -189,5 +189,10 @@ public func vb_init(_ ctx: UnsafeMutableRawPointer?, _ onEvent: vb_event_fn?) ->
         }
     }
     Assets.shared.query()
+    // The observers belong to the main actor (S3).
+    Task { @MainActor in SystemEvents.shared.start() }
+    // The probe and sessions share one microphone admission (S20).
+    Probe.claimMic = { MicAdmission.shared.claimForProbe() }
+    Probe.releaseMic = { MicAdmission.shared.releaseProbe() }
     return VB_OK
 }
