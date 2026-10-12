@@ -1894,3 +1894,362 @@ async fn cancel_owned_after_expiry_cancels_nothing_and_the_send_ends_once() {
     assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Delivered);
     no_more_outcomes_for(&ib, &mut rx, &id).await;
 }
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+
+/// A secret store whose reads, writes or deletes wait while held, as a
+/// keyring prompt does.
+#[derive(Default)]
+struct Gate {
+    inner: MemorySecrets,
+    hold_get: AtomicBool,
+    hold_set: AtomicBool,
+    hold_delete: AtomicBool,
+    entered: AtomicUsize,
+}
+
+/// Holds one of the gate's operations until dropped, panics included.
+struct Hold<'a>(&'a AtomicBool);
+
+impl Drop for Hold<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, SeqCst);
+    }
+}
+
+impl Gate {
+    fn hold<'a>(&'a self, which: &'a AtomicBool) -> Hold<'a> {
+        which.store(true, SeqCst);
+        Hold(which)
+    }
+    fn wait(&self, hold: &AtomicBool) {
+        if hold.load(SeqCst) {
+            self.entered.fetch_add(1, SeqCst);
+            while hold.load(SeqCst) {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+impl SecretStore for Gate {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        self.wait(&self.hold_get);
+        self.inner.get(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        self.wait(&self.hold_set);
+        self.inner.set(key, value)
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        self.wait(&self.hold_delete);
+        self.inner.delete(key)
+    }
+}
+
+/// Polls `cond` (no fixed sleep) for up to 5 s.
+async fn until(what: &str, cond: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !cond() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+fn box_secret(f: &FakeServer) -> String {
+    MachineSecret { token: common::TOKEN.into(), pin: f.pin() }.to_json()
+}
+
+fn box_settings(f: &FakeServer) -> Settings {
+    Settings {
+        client_id: settings_client_id().into(),
+        hotkey: DEFAULT_HOTKEY.into(),
+        show_idle: false,
+        show_subagents: false,
+        show_hook_only: false,
+        machines: vec![MachineEntry {
+            key: "m1".into(),
+            name: "Box".into(),
+            endpoint: EndpointConfig::Tcp { host: "127.0.0.1".into(), port: f.port() },
+        }],
+    }
+}
+
+fn options(timing: acd_client::Timing) -> InboxOptions {
+    InboxOptions { timing, settings_path: None, client_name: "t".into(), client_version: "0".into() }
+}
+
+/// `setup_with` over a `Gate` store, optionally with a settings file.
+async fn setup_gated(
+    timing: acd_client::Timing,
+    settings_path: Option<std::path::PathBuf>,
+) -> (FakeServer, FakeConn, Arc<Inbox>, Arc<Gate>) {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let gate = Arc::new(Gate::default());
+    gate.inner.set("m1", &box_secret(&f)).unwrap();
+    let ib = Inbox::new(box_settings(&f), gate.clone(), InboxOptions { settings_path, ..options(timing) });
+    ib.start();
+    let c = f.next_connection().await;
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]})).await;
+    view_until(&ib, "answerable", |v| v.cards.iter().any(|c| c.answerable)).await;
+    (f, c, ib, gate)
+}
+
+/// A pairing line for a second machine on the fake daemon's port.
+fn localhost_line(f: &FakeServer) -> String {
+    format!("acd://localhost:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN)
+}
+
+/// The same machine as `m1`, re-paired.
+fn m1_line(f: &FakeServer) -> String {
+    format!("acd://127.0.0.1:{}?pin={}#{}", f.port(), f.pin(), common::TOKEN)
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::time::timeout(Duration::from_secs(2), tokio::task::spawn_blocking(f))
+        .await
+        .expect("the call waited for the secret store")
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocked_secret_write_never_stops_a_cancel_or_a_listing() {
+    let (f, _c, ib, gate) = setup_gated(held(), None).await;
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let pairing = {
+        let _hold = gate.hold(&gate.hold_set);
+        let pairing = {
+            let (ib, line) = (ib.clone(), localhost_line(&f));
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the secret write", || gate.entered.load(SeqCst) == 1).await;
+        let ib2 = ib.clone();
+        assert!(blocking(move || ib2.cancel(&id)).await);
+        let ib2 = ib.clone();
+        assert_eq!(blocking(move || ib2.machines().len()).await, 1, "not committed before its secret is stored");
+        pairing
+    };
+    assert!(pairing.await.unwrap().is_ok());
+    assert_eq!(ib.settings().machines.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_countdown_fires_while_a_secret_write_is_blocked() {
+    let (f, _c, ib, gate) = setup_gated(common::fast(), None).await;
+    let pairing = {
+        let _hold = gate.hold(&gate.hold_set);
+        let pairing = {
+            let (ib, line) = (ib.clone(), localhost_line(&f));
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the secret write", || gate.entered.load(SeqCst) == 1).await;
+        ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+        answer_frame(&f).await;
+        pairing
+    };
+    pairing.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocked_secret_read_during_removal_never_stops_a_cancel() {
+    let (_f, _c, ib, gate) = setup_gated(held(), None).await;
+    let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    let removal = {
+        let _hold = gate.hold(&gate.hold_get);
+        let removal = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.remove_machine_checked("m1"))
+        };
+        until("the secret read", || gate.entered.load(SeqCst) == 1).await;
+        let ib2 = ib.clone();
+        assert!(blocking(move || ib2.cancel(&id)).await);
+        removal
+    };
+    removal.await.unwrap().unwrap();
+    assert!(ib.settings().machines.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_reads_secrets_outside_the_inbox_lock() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let gate = Arc::new(Gate::default());
+    gate.inner.set("m1", &box_secret(&f)).unwrap();
+    let ib = Inbox::new(box_settings(&f), gate.clone(), options(common::fast()));
+    let starting = {
+        let _hold = gate.hold(&gate.hold_get);
+        let starting = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.start())
+        };
+        until("start's secret read", || gate.entered.load(SeqCst) == 1).await;
+        let ib2 = ib.clone();
+        assert_eq!(blocking(move || ib2.settings()).await.machines.len(), 1);
+        starting
+    };
+    starting.await.unwrap();
+    f.next_connection().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_pairings_of_one_host_leave_one_machine() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let gate = Arc::new(Gate::default());
+    let ib = empty_inbox(gate.clone(), None);
+    let line = m1_line(&f);
+    let (first, second) = {
+        let _hold = gate.hold(&gate.hold_set);
+        let first = {
+            let (ib, line) = (ib.clone(), line.clone());
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the first secret write", || gate.entered.load(SeqCst) == 1).await;
+        let second = {
+            let (ib, line) = (ib.clone(), line.clone());
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the second pairing to wait", || ib.edit_waiters_for_test() == 1).await;
+        assert_eq!(gate.entered.load(SeqCst), 1, "the second pairing has not reached the store");
+        (first, second)
+    };
+    let (a, b) = (first.await.unwrap().unwrap(), second.await.unwrap().unwrap());
+    assert_eq!(a, b, "the second pairing re-pairs the machine the first one added");
+    assert_eq!(ib.settings().machines.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rename_during_a_re_pairing_is_kept() {
+    // `rename_machine` validates the key, so this machine needs a UUID key
+    // (the shared `m1` fixture key would be rejected).
+    const KEY: &str = "00000000-0000-4000-8000-0000000000aa";
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let gate = Arc::new(Gate::default());
+    gate.inner.set(KEY, &box_secret(&f)).unwrap();
+    let mut settings = box_settings(&f);
+    settings.machines[0].key = KEY.into();
+    let ib = Inbox::new(settings, gate.clone(), options(held()));
+    let (pairing, rename) = {
+        let _hold = gate.hold(&gate.hold_set);
+        let pairing = {
+            let (ib, line) = (ib.clone(), m1_line(&f));
+            tokio::task::spawn_blocking(move || ib.pair_machine(&line).map(|e| e.key))
+        };
+        until("the re-pairing's secret write", || gate.entered.load(SeqCst) == 1).await;
+        let rename = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.rename_machine(KEY, "Renamed"))
+        };
+        until("the rename to wait for the edit lock", || ib.edit_waiters_for_test() == 1).await;
+        assert_eq!(ib.settings().machines[0].name, "Box");
+        (pairing, rename)
+    };
+    assert_eq!(pairing.await.unwrap().unwrap(), KEY);
+    rename.await.unwrap().unwrap();
+    assert_eq!(ib.settings().machines[0].name, "Renamed");
+    // Task 3: ib.reconnect_machine(KEY).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settings_write_during_a_removal_never_brings_the_machine_back() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("settings.json");
+    let (_f, _c, ib, gate) = setup_gated(held(), Some(path.clone())).await;
+    let (removal, toggle) = {
+        let _hold = gate.hold(&gate.hold_delete);
+        let removal = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.remove_machine_checked("m1"))
+        };
+        until("the secret delete", || gate.entered.load(SeqCst) == 1).await;
+        let toggle = {
+            let ib = ib.clone();
+            tokio::task::spawn_blocking(move || ib.set_show_subagents(true))
+        };
+        until("the settings write to wait for the edit lock", || ib.edit_waiters_for_test() == 1).await;
+        (removal, toggle)
+    };
+    removal.await.unwrap().unwrap();
+    toggle.await.unwrap().unwrap();
+    let saved: Settings = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(saved.machines.is_empty(), "the removed machine came back in the file");
+    assert!(saved.show_subagents);
+    assert_eq!(ib.settings(), saved);
+}
+
+/// Records every store call; keys only, never values.
+#[derive(Default)]
+struct Recording {
+    inner: MemorySecrets,
+    ops: std::sync::Mutex<Vec<(&'static str, String)>>,
+}
+
+impl SecretStore for Recording {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        self.ops.lock().unwrap().push(("get", key.into()));
+        self.inner.get(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        self.ops.lock().unwrap().push(("set", key.into()));
+        self.inner.set(key, value)
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        self.ops.lock().unwrap().push(("delete", key.into()));
+        self.inner.delete(key)
+    }
+}
+
+#[tokio::test]
+async fn a_failed_commit_deletes_a_new_machines_secret() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let d = tempfile::tempdir().unwrap();
+    let blocker = d.path().join("file");
+    std::fs::write(&blocker, "block").unwrap();
+    let store = Arc::new(Recording::default());
+    let ib = empty_inbox(store.clone(), Some(blocker.join("settings.json")));
+    assert!(matches!(ib.pair_machine(&m1_line(&f)), Err(MachineError::Settings(_))));
+    let ops = store.ops.lock().unwrap().clone();
+    let kinds: Vec<&str> = ops.iter().map(|(op, _)| *op).collect();
+    assert_eq!(kinds, ["get", "set", "delete"]);
+    assert!(ops.iter().all(|(_, key)| key == &ops[0].1));
+    assert_eq!(store.inner.get(&ops[0].1).unwrap(), None);
+    assert!(ib.settings().machines.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_re_pair_commit_restores_the_previous_secret() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let d = tempfile::tempdir().unwrap();
+    let blocker = d.path().join("file");
+    std::fs::write(&blocker, "block").unwrap();
+    let store = Arc::new(Recording::default());
+    let previous = MachineSecret { token: common::TOKEN.into(), pin: "old-pin".into() }.to_json();
+    store.inner.set("m1", &previous).unwrap();
+    let settings = box_settings(&f);
+    let ib = Inbox::new(settings.clone(), store.clone(), InboxOptions {
+        settings_path: Some(blocker.join("settings.json")),
+        ..options(common::fast())
+    });
+
+    assert!(matches!(ib.pair_machine(&m1_line(&f)), Err(MachineError::Settings(_))));
+    assert_eq!(store.inner.get("m1").unwrap().as_deref(), Some(previous.as_str()));
+    assert_eq!(ib.settings(), settings);
+    let ops = store.ops.lock().unwrap().clone();
+    let kinds: Vec<&str> = ops.iter().map(|(op, _)| *op).collect();
+    assert_eq!(kinds, ["get", "set", "set"]);
+    assert!(ops.iter().all(|(_, key)| key == "m1"));
+}
+
+#[tokio::test]
+async fn machine_errors_are_typed_and_keep_the_old_texts() {
+    let ib = empty_inbox(Arc::new(MemorySecrets::default()), None);
+    let bad = ib.pair_machine("hello #tok").unwrap_err();
+    assert!(matches!(bad, MachineError::BadPairing));
+    assert_eq!(ib.import_pairing("hello #tok").unwrap_err(), bad.to_string());
+    assert_eq!(
+        bad.to_string(),
+        "That is not an acd pairing line. Run `acd pair` on the machine and copy its output."
+    );
+    assert!(matches!(ib.remove_machine_checked("nope"), Err(MachineError::UnknownMachine)));
+    assert_eq!(ib.remove_machine("nope").unwrap_err(), "Unknown machine");
+}

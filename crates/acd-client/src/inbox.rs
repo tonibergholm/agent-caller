@@ -4,7 +4,7 @@ use crate::{
     commands::Command,
     conn::{self, MachineHandle, MachineState, now_ms},
     endpoint::Endpoint,
-    settings::{EndpointConfig, MachineEntry, MachineSecret, SecretStore, Settings},
+    settings::{EndpointConfig, MachineEntry, MachineSecret, SecretError, SecretStore, Settings},
     view::{
         self, ActionView, InboxView, MachineEntryView, MachineInput, Notice, NoticeTone,
         PairingState,
@@ -18,7 +18,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 use std::{net::IpAddr, time::Instant};
@@ -57,6 +57,49 @@ pub enum PickError {
     #[error("The agent is hidden now. Nothing was sent.")]
     Hidden,
 }
+/// Why a machine operation failed. `Display` keeps the texts the Mac app
+/// shows today.
+#[derive(Debug, thiserror::Error)]
+pub enum MachineError {
+    #[error("Unknown machine")]
+    UnknownMachine,
+    #[error("That is not an acd pairing line. Run `acd pair` on the machine and copy its output.")]
+    BadPairing,
+    #[error("This machine is not paired")]
+    NotPaired,
+    #[error("Could not read machine credentials")]
+    SecretRead(SecretError),
+    #[error("Could not save machine credentials")]
+    SecretWrite(SecretError),
+    #[error("{0}")]
+    SecretDelete(SecretError),
+    #[error("{0}")]
+    Settings(String),
+    #[error("Machine pairing recovery failed")]
+    PairRecoveryFailed,
+    #[error("Machine removal recovery failed")]
+    RemoveRecoveryFailed,
+}
+
+/// Serializes every change to machines or to the saved settings: pair,
+/// rename, remove, reconnect and each settings write (plan D3).
+/// SecretStore calls may run under it; they never run under `inner`.
+/// Timers, cancels, views, `machines()` and `settings()` never take it.
+#[derive(Default)]
+struct EditLock {
+    lock: Mutex<()>,
+    waiting: AtomicUsize,
+}
+
+impl EditLock {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        guard
+    }
+}
+
 struct Machine {
     entry: MachineEntry,
     handle: Option<MachineHandle>,
@@ -107,6 +150,7 @@ pub enum InboxEvent {
 pub const OUTCOME_CHANNEL_CAPACITY: usize = 256;
 pub struct Inbox {
     inner: Mutex<Inner>,
+    edits: EditLock,
     secrets: Arc<dyn SecretStore>,
     opts: InboxOptions,
     view_tx: watch::Sender<InboxView>,
@@ -173,6 +217,7 @@ impl Inbox {
                 notices: HashMap::new(),
                 notified: HashSet::new(),
             }),
+            edits: EditLock::default(),
             secrets,
             opts,
             view_tx: tx,
@@ -236,11 +281,15 @@ impl Inbox {
         self.inner.lock().unwrap().actions.expire_all(Instant::now());
         self.wake();
     }
+    /// Test hook: callers blocked on the edit lock right now.
+    #[cfg(feature = "testing")]
+    pub fn edit_waiters_for_test(&self) -> usize {
+        self.edits.waiting.load(Ordering::SeqCst)
+    }
     pub fn machines(&self) -> Vec<MachineEntryView> {
-        let inner = self.inner.lock().unwrap();
-        inner
-            .settings
-            .machines
+        // The SecretStore is never called under `inner` (omarchy spec §4.3).
+        let entries = self.inner.lock().unwrap().settings.machines.clone();
+        entries
             .iter()
             .map(|entry| {
                 let pairing = match &entry.endpoint {
@@ -267,54 +316,64 @@ impl Inbox {
             .collect()
     }
     pub fn import_pairing(self: &Arc<Self>, line: &str) -> Result<MachineEntry, String> {
-        let pairing = Pairing::parse(line).map_err(|_| "That is not an acd pairing line. Run `acd pair` on the machine and copy its output.".to_owned())?;
-        let mut inner = self.inner.lock().unwrap();
-        let key_match = inner.settings.machines.iter().find(|m| matches!(&m.endpoint, EndpointConfig::Tcp { host, port } if host == &pairing.host && *port == pairing.port)).cloned();
-        let entry = key_match.clone().unwrap_or_else(|| MachineEntry {
+        self.pair_machine(line).map_err(|e| e.to_string())
+    }
+
+    /// Pairs a machine from an `acd pair` line. The secret is stored first,
+    /// outside `inner`; the machine is then committed under it. A failed
+    /// commit deletes a new machine's secret or restores a re-paired
+    /// machine's previous one (omarchy spec §4.3, §9).
+    pub fn pair_machine(self: &Arc<Self>, line: &str) -> Result<MachineEntry, MachineError> {
+        let pairing = Pairing::parse(line).map_err(|_| MachineError::BadPairing)?;
+        let _edit = self.edits.lock();
+        let existing = self
+            .inner
+            .lock()
+            .unwrap()
+            .settings
+            .machines
+            .iter()
+            .find(|m| matches!(&m.endpoint, EndpointConfig::Tcp { host, port } if host == &pairing.host && *port == pairing.port))
+            .cloned();
+        let entry = existing.unwrap_or_else(|| MachineEntry {
             key: uuid::Uuid::new_v4().to_string(),
             name: default_machine_name(&pairing.host),
-            endpoint: EndpointConfig::Tcp {
-                host: pairing.host.clone(),
-                port: pairing.port,
-            },
+            endpoint: EndpointConfig::Tcp { host: pairing.host.clone(), port: pairing.port },
         });
-        let secret_json = MachineSecret {
-            token: pairing.token,
-            pin: pairing.pin,
-        }
-        .to_json();
-        let previous_secret = self
-            .secrets
-            .get(&entry.key)
-            .map_err(|_| "Could not read machine credentials".to_owned())?;
+        let secret = MachineSecret { token: pairing.token, pin: pairing.pin };
+        let previous_secret = self.secrets.get(&entry.key).map_err(MachineError::SecretRead)?;
         self.secrets
-            .set(&entry.key, &secret_json)
-            .map_err(|_| "Could not save machine credentials".to_owned())?;
+            .set(&entry.key, &secret.to_json())
+            .map_err(MachineError::SecretWrite)?;
+        let info = tcp_info(&pairing.host, pairing.port, &secret);
+        let mut inner = self.inner.lock().unwrap();
         let mut candidate = inner.settings.clone();
         candidate.machines.retain(|m| m.key != entry.key);
         candidate.machines.push(entry.clone());
         if let Some(path) = &self.opts.settings_path
             && let Err(error) = candidate.save(path)
         {
+            drop(inner);
             let recovery = match previous_secret {
                 Some(value) => self.secrets.set(&entry.key, &value),
                 None => self.secrets.delete(&entry.key),
             };
             if recovery.is_err() {
+                let mut inner = self.inner.lock().unwrap();
                 if let Some(machine) = inner.machines.iter_mut().find(|m| m.entry.key == entry.key)
                     && let Some(handle) = machine.handle.take()
                 {
                     handle.cancel();
                 }
                 eprintln!("machine pairing recovery failed");
-                return Err("Machine pairing recovery failed".to_owned());
+                return Err(MachineError::PairRecoveryFailed);
             }
-            return Err(error.to_string());
+            return Err(MachineError::Settings(error.to_string()));
         }
         inner.settings = candidate;
         if let Some(old) = inner.machines.iter().position(|m| m.entry.key == entry.key) {
             for action in inner.actions.end_machine(&entry.key) {
-                    self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+                self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
                 inner.notices.insert(
                     action.card_key,
                     (
@@ -330,19 +389,15 @@ impl Inbox {
         }
         let instance = self.next_instance.fetch_add(1, Ordering::Relaxed);
         let client_id = inner.settings.client_id.clone();
-        let handle = spawn_for(&entry, &self.secrets, &self.opts, instance, &client_id);
-        inner.machines.push(Machine {
-            entry: entry.clone(),
-            handle: handle.clone(),
-        });
+        let handle = spawn_with(&entry, info, &self.opts, instance, &client_id);
+        inner.machines.push(Machine { entry: entry.clone(), handle: Some(handle.clone()) });
         drop(inner);
-        if let Some(handle) = handle {
-            self.watch_machine(entry.key.clone(), handle);
-        }
+        self.watch_machine(entry.key.clone(), handle);
         self.wake();
         Ok(entry)
     }
     pub fn rename_machine(&self, key: &str, name: &str) -> Result<(), String> {
+        let _edit = self.edits.lock();
         let mut inner = self.inner.lock().unwrap();
         let mut candidate_settings = inner.settings.clone();
         let mut candidate = candidate_settings
@@ -371,25 +426,31 @@ impl Inbox {
         Ok(())
     }
     pub fn remove_machine(&self, key: &str) -> Result<(), String> {
-        let mut inner = self.inner.lock().unwrap();
-        let pos = inner
-            .settings
-            .machines
-            .iter()
-            .position(|m| m.key == key)
-            .ok_or("Unknown machine")?;
-        self.secrets
-            .get(key)
-            .map_err(|_| "Could not read machine credentials".to_owned())?;
-        let old_settings = inner.settings.clone();
-        let mut candidate = old_settings.clone();
-        candidate.machines.remove(pos);
-        if let Some(path) = &self.opts.settings_path {
-            candidate.save(path).map_err(|e| e.to_string())?;
+        self.remove_machine_checked(key).map_err(|e| e.to_string())
+    }
+
+    /// Removes a machine and its secret. SecretStore calls run outside
+    /// `inner`; the settings file is written first, the secret deleted
+    /// second, and the file restored if the delete fails.
+    pub fn remove_machine_checked(&self, key: &str) -> Result<(), MachineError> {
+        let _edit = self.edits.lock();
+        if !self.inner.lock().unwrap().settings.machines.iter().any(|m| m.key == key) {
+            return Err(MachineError::UnknownMachine);
+        }
+        self.secrets.get(key).map_err(MachineError::SecretRead)?;
+        {
+            let inner = self.inner.lock().unwrap();
+            let mut candidate = inner.settings.clone();
+            candidate.machines.retain(|m| m.key != key);
+            if let Some(path) = &self.opts.settings_path {
+                candidate.save(path).map_err(|e| MachineError::Settings(e.to_string()))?;
+            }
         }
         if let Err(error) = self.secrets.delete(key) {
+            let mut inner = self.inner.lock().unwrap();
+            // `inner.settings` still lists the machine: it is the old file.
             if let Some(path) = &self.opts.settings_path
-                && old_settings.save(path).is_err()
+                && inner.settings.save(path).is_err()
             {
                 if let Some(machine) = inner.machines.iter_mut().find(|m| m.entry.key == key)
                     && let Some(handle) = machine.handle.take()
@@ -397,11 +458,14 @@ impl Inbox {
                     handle.cancel();
                 }
                 eprintln!("machine removal recovery failed");
-                return Err("Machine removal recovery failed".to_owned());
+                return Err(MachineError::RemoveRecoveryFailed);
             }
-            return Err(error.to_string());
+            return Err(MachineError::SecretDelete(error));
         }
-        inner.settings = candidate;
+        // The file already matches: every settings writer holds `edits`, so
+        // none can have saved this machine back since (plan D3).
+        let mut inner = self.inner.lock().unwrap();
+        inner.settings.machines.retain(|m| m.key != key);
         for machine in inner.machines.iter().filter(|m| m.entry.key == key) {
             if let Some(handle) = &machine.handle {
                 handle.cancel();
@@ -409,7 +473,7 @@ impl Inbox {
         }
         inner.machines.retain(|m| m.entry.key != key);
         for action in inner.actions.end_machine(key) {
-                self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
+            self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
             inner.notices.insert(
                 action.card_key,
                 (
@@ -442,6 +506,7 @@ impl Inbox {
         if hotkey.trim().is_empty() {
             return Err("Hotkey cannot be empty".into());
         }
+        let _edit = self.edits.lock();
         let mut inner = self.inner.lock().unwrap();
         let mut candidate = inner.settings.clone();
         candidate.hotkey = hotkey.to_owned();
@@ -454,6 +519,7 @@ impl Inbox {
     /// Shows or hides subagent agents everywhere (cards, counts, tray,
     /// notifications) and remembers the choice.
     pub fn set_show_subagents(&self, on: bool) -> Result<(), String> {
+        let _edit = self.edits.lock();
         let mut inner = self.inner.lock().unwrap();
         let mut candidate = inner.settings.clone();
         candidate.show_subagents = on;
@@ -471,6 +537,7 @@ impl Inbox {
     /// Shows or hides hook-only agents that have no request, and remembers
     /// the choice. A pending request always shows.
     pub fn set_show_hook_only(&self, on: bool) -> Result<(), String> {
+        let _edit = self.edits.lock();
         let mut inner = self.inner.lock().unwrap();
         let mut candidate = inner.settings.clone();
         candidate.show_hook_only = on;
@@ -504,24 +571,31 @@ impl Inbox {
         });
     }
     pub fn start(self: &Arc<Self>) {
-        let handles = {
-            let mut inner = self.inner.lock().unwrap();
+        let pending: Vec<MachineEntry> = {
+            let inner = self.inner.lock().unwrap();
             if self.started.swap(true, Ordering::AcqRel) {
                 return;
             }
+            inner.machines.iter().filter(|m| m.handle.is_none()).map(|m| m.entry.clone()).collect()
+        };
+        // Secrets are read outside `inner` (omarchy spec §4.3).
+        let infos: Vec<(MachineEntry, Option<(Endpoint, conn::Credential)>)> = pending
+            .into_iter()
+            .map(|entry| {
+                let info = connect_info(&entry, &self.secrets);
+                (entry, info)
+            })
+            .collect();
+        let handles = {
+            let mut inner = self.inner.lock().unwrap();
             let client_id = inner.settings.client_id.clone();
-            for machine in &mut inner.machines {
-                if machine.handle.is_some() {
+            for (entry, info) in infos {
+                let Some(info) = info else { continue };
+                let Some(machine) = inner.machines.iter_mut().find(|m| m.entry == entry && m.handle.is_none()) else {
                     continue;
-                }
+                };
                 let instance = self.next_instance.fetch_add(1, Ordering::Relaxed);
-                machine.handle = spawn_for(
-                    &machine.entry,
-                    &self.secrets,
-                    &self.opts,
-                    instance,
-                    &client_id,
-                );
+                machine.handle = Some(spawn_with(&entry, info, &self.opts, instance, &client_id));
             }
             inner
                 .machines
@@ -1218,37 +1292,37 @@ fn find_card(i: &Inner, key: &str) -> Result<(String, MachineHandle, MachineEntr
     }
     Ok((mk.into(), h, m.entry.clone()))
 }
-fn spawn_for(
-    entry: &MachineEntry,
-    secrets: &Arc<dyn SecretStore>,
-    opts: &InboxOptions,
-    instance: u64,
-    client_id: &str,
-) -> Option<MachineHandle> {
-    let (endpoint, credential) = match &entry.endpoint {
+/// Where and how to connect to `entry`. Reads the SecretStore for a TCP
+/// machine, so never call it while holding `inner`.
+fn connect_info(entry: &MachineEntry, secrets: &Arc<dyn SecretStore>) -> Option<(Endpoint, conn::Credential)> {
+    match &entry.endpoint {
         EndpointConfig::Local => {
             let dir = crate::local::default_config_dir()?;
-            (
-                Endpoint::Local {
-                    config_dir: dir.clone(),
-                },
-                conn::Credential::LocalFile(dir),
-            )
+            Some((Endpoint::Local { config_dir: dir.clone() }, conn::Credential::LocalFile(dir)))
         }
         EndpointConfig::Tcp { host, port } => {
             let raw = secrets.get(&entry.key).ok()??;
             let secret = MachineSecret::from_json(&raw).ok()?;
-            (
-                Endpoint::Tcp {
-                    host: host.clone(),
-                    port: *port,
-                    pin: secret.pin,
-                },
-                conn::Credential::Token(secret.token),
-            )
+            Some(tcp_info(host, *port, &secret))
         }
-    };
-    Some(conn::spawn_machine(conn::MachineConfig {
+    }
+}
+
+fn tcp_info(host: &str, port: u16, secret: &MachineSecret) -> (Endpoint, conn::Credential) {
+    (
+        Endpoint::Tcp { host: host.to_owned(), port, pin: secret.pin.clone() },
+        conn::Credential::Token(secret.token.clone()),
+    )
+}
+
+fn spawn_with(
+    entry: &MachineEntry,
+    (endpoint, credential): (Endpoint, conn::Credential),
+    opts: &InboxOptions,
+    instance: u64,
+    client_id: &str,
+) -> MachineHandle {
+    conn::spawn_machine(conn::MachineConfig {
         key: entry.key.clone(),
         instance,
         endpoint,
@@ -1259,5 +1333,5 @@ fn spawn_for(
             version: opts.client_version.clone(),
         },
         timing: opts.timing.clone(),
-    }))
+    })
 }
