@@ -69,6 +69,41 @@ test("cancelling the inline remove confirmation sends nothing", async () => {
   expect(api.calls.some((c) => c[0] === "removeMachine")).toBe(false);
 });
 
+test("Cancel returns focus to the Remove button of the same machine", async () => {
+  const api = fakeApi({
+    machines: [
+      { ...devbox(), key: "a", name: "A" },
+      { ...devbox(), key: "b", name: "B" },
+    ],
+  });
+  render(Settings, { api });
+  const [, second] = await screen.findAllByRole("button", { name: "Remove" });
+  await userEvent.click(second);
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await vi.waitFor(() => {
+    const [, again] = screen.getAllByRole("button", { name: "Remove" });
+    expect(document.activeElement).toBe(again);
+  });
+  expect(api.calls.some((c) => c[0] === "removeMachine")).toBe(false);
+});
+
+test("a denied notification permission says where to turn it on", async () => {
+  const api = fakeApi({ machines: [] });
+  api.notificationAuthorization = async () => "denied";
+  render(Settings, { api });
+  expect(await screen.findByText(/Notifications are off for agent-caller/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Allow notifications" })).toBeNull();
+});
+
+test("an undetermined notification permission is requested from the Allow button", async () => {
+  const api = fakeApi({ machines: [] });
+  api.notificationAuthorization = async () => "not_determined";
+  render(Settings, { api });
+  await userEvent.click(await screen.findByRole("button", { name: "Allow notifications" }));
+  await vi.waitFor(() => expect(screen.getByText("Notifications are on for agent-caller.")).toBeTruthy());
+  expect(api.calls).toContainEqual(["requestNotificationAuthorization"]);
+});
+
 test("only one machine is pending remove confirmation", async () => {
   const api = fakeApi({
     machines: [

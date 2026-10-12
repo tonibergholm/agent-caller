@@ -5,6 +5,9 @@ import type { MachineEntryView } from "./bindings/MachineEntryView";
 import type { HudEvent } from "./hud";
 import type { PermissionKind, Presentation, VoiceSettings, VoiceStatus } from "./voice";
 
+/** macOS notification permission for this app (`notify.rs`). */
+export type NotificationAuthorization = "granted" | "denied" | "not_determined" | "unavailable";
+
 export interface Api {
   pick(cardKey: string, requestId: string, optionId: string, revision: number): Promise<void>;
   reply(cardKey: string, text: string): Promise<string>;
@@ -26,6 +29,9 @@ export interface Api {
   retryMachine(key: string): Promise<void>;
   getHotkey(): Promise<string>;
   setHotkey(hotkey: string): Promise<void>;
+  notificationAuthorization(): Promise<NotificationAuthorization>;
+  /** Asks macOS for permission, then reports the state. */
+  requestNotificationAuthorization(): Promise<NotificationAuthorization>;
   getView(): Promise<InboxView>;
   onView(cb: (v: InboxView) => void): Promise<() => void>;
   onShown(cb: () => void): Promise<() => void>;
@@ -81,6 +87,8 @@ export const tauriApi: Api = {
   retryMachine: (key) => invoke("retry_machine", { key }),
   getHotkey: () => invoke("get_hotkey"),
   setHotkey: (hotkey) => invoke("set_hotkey", { hotkey }),
+  notificationAuthorization: () => invoke("notification_authorization"),
+  requestNotificationAuthorization: () => invoke("request_notification_authorization"),
   getView: () => invoke("get_view"),
   onView: (cb) => listen<InboxView>("inbox://view", (e) => cb(e.payload)),
   onShown: (cb) => listen("panel://shown", () => cb()),

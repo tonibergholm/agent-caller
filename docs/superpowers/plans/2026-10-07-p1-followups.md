@@ -139,20 +139,16 @@ Historical flakes and environment caveats (not reproduced in this audit):
 
 From the 2026-10-09 production-bundle checklist:
 
-- The app never asks for notification permission and cannot tell when
-  notifications are off; macOS dropped them silently until the user
-  enabled them in System Settings. Request authorization on first run
-  (UNUserNotificationCenter) and show the state in Settings.
-- A saved hotkey keeps the old default (`Alt+Space`) after the default
-  changed to `Control+Alt+Space`. Decide whether to migrate it.
-- A pairing line with a literal IP outside the Tailscale ranges is saved
-  and only refused at connect time. Refuse it at import.
-- A Codex agent's title showed `<environment_context>`: raw context leaks
-  into the agent title. Find which adapter sets it.
+- Notification permission is requested at launch and its state shows in
+  Settings (`notify.rs`, `Settings.svelte`). Not verified on a bundled
+  build: check that the macOS prompt appears, that the state updates after
+  it, and that a notification is delivered once allowed.
+- A Codex agent's title showed `<environment_context>`. The herdr title
+  fallback now skips that context (`herdr/map.rs`). Not confirmed on a live
+  Codex run, so the adapter that first set it is unconfirmed. The T3 title
+  path is unchanged.
 - herdr alone produces read-only blocked-screen cards; structured option
   cards need hooks or T3. herdr can send follow-ups to idle or done agents.
-- After Cancel in the inline remove confirmation, focus falls to the page
-  body. Return it to the restored Remove button.
 
 
 Open items from the live end-to-end run, the v1 acceptance checks and the panel work (PRs #10, #12, #14, #18, #19, #20). Each was found by a run or a review and was judged non-blocking.

@@ -215,7 +215,7 @@ pub fn secret_code(e: &SecretError) -> ErrorCode {
 pub fn machine_error_code(e: &MachineError) -> ErrorCode {
     match e {
         MachineError::UnknownMachine => ErrorCode::UnknownMachine,
-        MachineError::BadPairing => ErrorCode::BadPairing,
+        MachineError::BadPairing | MachineError::NotTailscale => ErrorCode::BadPairing,
         MachineError::NotPaired => ErrorCode::NotPaired,
         MachineError::SecretRead(s) | MachineError::SecretWrite(s) | MachineError::SecretDelete(s) => secret_code(s),
         MachineError::Settings(_) => ErrorCode::SettingsFailed,

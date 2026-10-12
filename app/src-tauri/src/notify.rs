@@ -1,6 +1,55 @@
 use acd_client::inbox::InboxEvent;
+use serde::Serialize;
 use tauri::AppHandle;
 use tokio::sync::broadcast;
+
+/// What macOS allows for this app's notifications (the settings view shows it).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Authorization {
+    Granted,
+    Denied,
+    NotDetermined,
+    /// Not a bundled app, or macOS did not answer in time.
+    Unavailable,
+}
+
+/// Maps an `UNAuthorizationStatus` raw value: 0 not determined, 1 denied,
+/// 2 authorized, 3 provisional, 4 ephemeral.
+pub fn authorization_from_status(raw: isize) -> Authorization {
+    match raw {
+        0 => Authorization::NotDetermined,
+        1 => Authorization::Denied,
+        2..=4 => Authorization::Granted,
+        _ => Authorization::Unavailable,
+    }
+}
+
+/// Asks macOS for notification permission at startup. Does nothing in an
+/// unbundled build.
+pub fn request_authorization() {
+    platform::request();
+}
+
+/// The current state. Runs the blocking macOS query off the async workers.
+#[tauri::command]
+pub async fn notification_authorization() -> Authorization {
+    tokio::task::spawn_blocking(platform::read)
+        .await
+        .unwrap_or(Authorization::Unavailable)
+}
+
+/// Asks macOS for permission (it prompts only while the state is not
+/// determined), then reports the state.
+#[tauri::command]
+pub async fn request_notification_authorization() -> Authorization {
+    tokio::task::spawn_blocking(|| {
+        platform::request();
+        platform::read()
+    })
+    .await
+    .unwrap_or(Authorization::Unavailable)
+}
 
 pub fn text(e: &InboxEvent) -> (String, String) {
     let InboxEvent::RequestOpened {
@@ -76,9 +125,105 @@ fn show(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Permission through UNUserNotificationCenter. Delivery still goes through
+/// `mac-notification-sys` above; macOS applies the same per-app setting to both.
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::{Authorization, authorization_from_status};
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_foundation::{NSBundle, NSError};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNNotificationSettings, UNUserNotificationCenter,
+    };
+    use std::ptr::NonNull;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// `currentNotificationCenter` raises an Objective-C exception, which
+    /// aborts the process, outside a bundle (`tauri dev`, unit-test binaries).
+    /// Those builds report `Unavailable`. The check uses the bundle path, not
+    /// `bundleIdentifier`: `set_application` swaps that method so it reports
+    /// an id even without a bundle.
+    fn bundled() -> bool {
+        NSBundle::mainBundle().bundlePath().to_string().ends_with(".app")
+    }
+
+    pub fn request() {
+        if !bundled() {
+            return;
+        }
+        let options = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
+        let block = RcBlock::new(|_granted: Bool, error: *mut NSError| {
+            if !error.is_null() {
+                tracing::warn!("notification permission request failed");
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .requestAuthorizationWithOptions_completionHandler(options, &block);
+    }
+
+    pub fn read() -> Authorization {
+        if !bundled() {
+            return Authorization::Unavailable;
+        }
+        let (tx, rx) = mpsc::channel();
+        let block = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+            // SAFETY: the framework passes a settings object that stays valid
+            // for the duration of this callback.
+            let raw = unsafe { settings.as_ref() }.authorizationStatus().0;
+            let _ = tx.send(raw);
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getNotificationSettingsWithCompletionHandler(&block);
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(raw) => authorization_from_status(raw),
+            Err(_) => Authorization::Unavailable,
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod platform {
+    use super::Authorization;
+
+    pub fn request() {}
+
+    pub fn read() -> Authorization {
+        Authorization::Unavailable
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_status_values_map_to_the_settings_states() {
+        assert_eq!(authorization_from_status(0), Authorization::NotDetermined);
+        assert_eq!(authorization_from_status(1), Authorization::Denied);
+        assert_eq!(authorization_from_status(2), Authorization::Granted);
+        assert_eq!(authorization_from_status(3), Authorization::Granted);
+        assert_eq!(authorization_from_status(4), Authorization::Granted);
+        assert_eq!(authorization_from_status(9), Authorization::Unavailable);
+    }
+
+    #[test]
+    fn an_unbundled_test_process_reports_unavailable_without_asking_macos() {
+        // Asking UNUserNotificationCenter here would abort the test binary.
+        assert_eq!(platform::read(), Authorization::Unavailable);
+        platform::request();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_unbundled_guard_holds_after_notify_init_installs_its_hook() {
+        // `notify::init` makes `bundleIdentifier` report an id even when
+        // unbundled; a guard that read that method would ask macOS and abort.
+        let _ = mac_notification_sys::set_application("com.apple.Terminal");
+        assert_eq!(platform::read(), Authorization::Unavailable);
+        platform::request();
+    }
 
     #[test]
     fn notification_text_never_includes_detail() {

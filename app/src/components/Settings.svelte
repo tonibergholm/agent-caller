@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import type { MachineEntryView } from "../lib/bindings/MachineEntryView";
   import type { MachineStatus } from "../lib/bindings/MachineStatus";
-  import type { Api } from "../lib/ipc";
+  import type { Api, NotificationAuthorization } from "../lib/ipc";
   import { statusText } from "../lib/format";
   import {
     HOLD_KEYS,
@@ -23,6 +23,17 @@
   let showSubagents = $state(false);
   let showHookOnly = $state(false);
   let hotkey = $state("");
+  let notifications = $state<NotificationAuthorization | null>(null);
+  // Re-read on focus: the macOS permission prompt returns focus here when answered.
+  const loadNotifications = () =>
+    api.notificationAuthorization().then(
+      (s) => (notifications = s),
+      () => (notifications = "unavailable"),
+    );
+  const requestNotifications = () =>
+    act(async () => {
+      notifications = await api.requestNotificationAuthorization();
+    }, "Could not ask for notification permission");
   let voice = $state<VoiceSettings>(VOICE_OFF);
   let status = $state<VoiceStatus>({
     unavailable: "checking",
@@ -163,6 +174,8 @@
       .finally(() => void loadStatus());
     // A grant made in System Settings shows when this window regains focus.
     window.addEventListener("focus", loadStatus);
+    void loadNotifications();
+    window.addEventListener("focus", loadNotifications);
     void api.onVoiceProbe((r) => (probeReports = [...probeReports, r])).then((un) => (closed ? un() : (offProbe = un)));
     void (async () => {
       try {
@@ -180,6 +193,7 @@
       offProbe?.();
       offStatus?.();
       window.removeEventListener("focus", loadStatus);
+      window.removeEventListener("focus", loadNotifications);
     };
   });
 
@@ -231,6 +245,8 @@
   let confirming = $state<string | null>(null);
   /** Moves focus to Cancel, so a second Enter or Space cancels too. */
   const focusNow = (node: HTMLElement) => node.focus();
+  /** Each machine's Remove button, so Cancel can hand focus back to it. */
+  const removeButtons: Record<string, HTMLButtonElement | undefined> = {};
 
   const remove = (m: MachineEntryView) => {
     if (confirming !== m.key) {
@@ -239,6 +255,14 @@
     }
     confirming = null;
     return act(() => api.removeMachine(m.key), "Could not remove");
+  };
+
+  // Cancel is removed from the DOM when the confirmation closes, so focus
+  // would fall to the page body unless it moves to the restored Remove.
+  const cancelRemove = async (key: string) => {
+    confirming = null;
+    await tick();
+    removeButtons[key]?.focus();
   };
 
   const saveHotkey = () => act(() => api.setHotkey(hotkey), "Could not set the hotkey");
@@ -312,10 +336,10 @@
           {#if m.endpoint.kind !== "local"}
             {#if confirming === m.key}
               <!-- Cancel takes Remove's place at the same width, so a double click cancels. -->
-              <button class="slot" use:focusNow onclick={() => (confirming = null)}>Cancel</button>
+              <button class="slot" use:focusNow onclick={() => cancelRemove(m.key)}>Cancel</button>
               <button onclick={() => remove(m)}>Confirm remove</button>
             {:else}
-              <button class="slot" onclick={() => remove(m)}>Remove</button>
+              <button class="slot" bind:this={removeButtons[m.key]} onclick={() => remove(m)}>Remove</button>
             {/if}
             <span aria-live="polite">{confirming === m.key ? `Remove ${m.name}?` : ""}</span>
           {/if}
@@ -338,6 +362,19 @@
       <input bind:value={hotkey} oninput={() => (hotkeyEdited = true)} />
     </label>
     <button onclick={saveHotkey}>Save hotkey</button>
+  </section>
+
+  <section aria-label="Notifications">
+    {#if notifications === "granted"}
+      <p class="note" role="status">Notifications are on for agent-caller.</p>
+    {:else if notifications === "denied"}
+      <p class="note" role="status">Notifications are off for agent-caller. Turn them on in System Settings, then Notifications.</p>
+    {:else if notifications === "not_determined"}
+      <p class="note" role="status">macOS has not asked for notification permission yet.</p>
+      <button onclick={requestNotifications}>Allow notifications</button>
+    {:else if notifications === "unavailable"}
+      <p class="note" role="status">Notification permission is not available in this build.</p>
+    {/if}
   </section>
 
   <section aria-label="Idle agents">

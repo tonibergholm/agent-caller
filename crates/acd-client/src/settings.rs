@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PORT: u16 = 47800;
 pub const DEFAULT_HOTKEY: &str = "Control+Alt+Space";
+/// The default before `DEFAULT_HOTKEY`. See `load_or_init`.
+pub const LEGACY_DEFAULT_HOTKEY: &str = "Alt+Space";
 pub const LOCAL_KEY: &str = "local";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -47,6 +49,10 @@ pub struct Settings {
     pub show_hook_only: bool,
     #[serde(default)]
     pub machines: Vec<MachineEntry>,
+    /// Set once `load_or_init` has applied the hotkey migration. Files
+    /// written before this field existed read as `false`.
+    #[serde(default)]
+    pub hotkey_migrated: bool,
 }
 
 fn default_hotkey() -> String {
@@ -207,6 +213,7 @@ impl Settings {
         Self {
             client_id: uuid::Uuid::new_v4().to_string(),
             hotkey: DEFAULT_HOTKEY.into(),
+            hotkey_migrated: true,
             show_idle: false,
             show_subagents: false,
             show_hook_only: false,
@@ -227,11 +234,25 @@ impl Settings {
                 Ok(mut s) if uuid::Uuid::parse_str(&s.client_id).is_ok() => {
                     let before = s.machines.len();
                     s.machines.retain(|m| m.validate().is_ok());
-                    if s.machines.len() != before {
+                    let mut dirty = s.machines.len() != before;
+                    if dirty {
                         tracing::warn!(
                             dropped = before - s.machines.len(),
                             "settings file has invalid machines; dropping them"
                         );
+                    }
+                    // Runs once per file. A file written before the default
+                    // changed cannot tell a kept `Alt+Space` from the old
+                    // default, so the old default moves to the new one. A
+                    // value chosen after this runs is never touched again.
+                    if !s.hotkey_migrated {
+                        if s.hotkey == LEGACY_DEFAULT_HOTKEY {
+                            s.hotkey = DEFAULT_HOTKEY.into();
+                        }
+                        s.hotkey_migrated = true;
+                        dirty = true;
+                    }
+                    if dirty {
                         s.save(path)?;
                     }
                     Ok(s)
@@ -398,6 +419,52 @@ mod tests {
         assert_eq!(serde_json::to_value(SecretStatus::Unreadable).unwrap(), "unreadable");
         assert_eq!(SecretError::unknown().kind(), SecretErrorKind::Unknown);
         assert_eq!(serde_json::to_value(SecretStatus::Unknown).unwrap(), "unknown");
+    }
+
+    fn write_settings(path: &Path, hotkey: &str, migrated: Option<bool>) {
+        let mut v = serde_json::json!({
+            "client_id": uuid::Uuid::new_v4().to_string(),
+            "hotkey": hotkey,
+            "machines": [],
+        });
+        if let Some(flag) = migrated {
+            v["hotkey_migrated"] = flag.into();
+        }
+        fs::write(path, v.to_string()).unwrap();
+    }
+
+    #[test]
+    fn the_old_default_hotkey_moves_to_the_new_one_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        write_settings(&path, LEGACY_DEFAULT_HOTKEY, None);
+        let s = Settings::load_or_init(&path).unwrap();
+        assert_eq!(s.hotkey, DEFAULT_HOTKEY);
+        assert!(s.hotkey_migrated);
+        let saved: Settings = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.hotkey, DEFAULT_HOTKEY, "the migration was not saved");
+        assert!(saved.hotkey_migrated);
+    }
+
+    #[test]
+    fn a_hotkey_chosen_after_the_migration_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        write_settings(&path, LEGACY_DEFAULT_HOTKEY, None);
+        let mut s = Settings::load_or_init(&path).unwrap();
+        s.hotkey = LEGACY_DEFAULT_HOTKEY.into();
+        s.save(&path).unwrap();
+        assert_eq!(Settings::load_or_init(&path).unwrap().hotkey, LEGACY_DEFAULT_HOTKEY);
+    }
+
+    #[test]
+    fn other_hotkeys_and_migrated_files_are_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        write_settings(&path, "Control+Option+K", None);
+        assert_eq!(Settings::load_or_init(&path).unwrap().hotkey, "Control+Option+K");
+        write_settings(&path, LEGACY_DEFAULT_HOTKEY, Some(true));
+        assert_eq!(Settings::load_or_init(&path).unwrap().hotkey, LEGACY_DEFAULT_HOTKEY);
     }
 
     #[test]

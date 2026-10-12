@@ -66,6 +66,20 @@ mod tests {
     }
 
     #[test]
+    fn a_literal_lan_address_is_refused_at_import() {
+        let inbox = inbox();
+        let token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let pin = acd_protocol::pairing::spki_pin(b"test certificate");
+        let refused = import_text(
+            &inbox,
+            Some(format!("acd://192.168.1.10:47800?pin={pin}#{token}")),
+        )
+        .unwrap_err();
+        assert!(refused.contains("Tailscale"), "{refused}");
+        assert!(inbox.machines().is_empty());
+    }
+
+    #[test]
     fn successful_import_enters_tauri_runtime_from_sync_caller() {
         let inbox = inbox();
         let token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";

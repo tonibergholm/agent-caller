@@ -71,6 +71,7 @@ pub async fn inbox_rig_timed(agents: Vec<Value>, timing: Timing) -> InboxRig {
     let settings = Settings {
         client_id: "00000000-0000-4000-8000-000000000001".into(),
         hotkey: DEFAULT_HOTKEY.into(),
+        hotkey_migrated: true,
         show_idle: false,
         show_subagents: false,
         show_hook_only: false,

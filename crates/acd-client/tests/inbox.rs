@@ -23,6 +23,7 @@ async fn setup_with(timing: acd_client::Timing) -> (FakeServer, FakeConn, Arc<In
     let settings = Settings {
         client_id: "00000000-0000-4000-8000-000000000001".into(),
         hotkey: DEFAULT_HOTKEY.into(),
+        hotkey_migrated: true,
         show_idle: false,
         show_subagents: false,
         show_hook_only: false,
@@ -437,6 +438,7 @@ async fn duplicate_machine_is_hidden() {
     let mut settings = Settings {
         client_id: settings_client_id().into(),
         hotkey: DEFAULT_HOTKEY.into(),
+        hotkey_migrated: true,
         show_idle: false,
         show_subagents: false,
         show_hook_only: false,
@@ -1964,6 +1966,7 @@ fn box_settings(f: &FakeServer) -> Settings {
     Settings {
         client_id: settings_client_id().into(),
         hotkey: DEFAULT_HOTKEY.into(),
+        hotkey_migrated: true,
         show_idle: false,
         show_subagents: false,
         show_hook_only: false,
@@ -2250,6 +2253,39 @@ async fn machine_errors_are_typed_and_keep_the_old_texts() {
     );
     assert!(matches!(ib.remove_machine_checked("nope"), Err(MachineError::UnknownMachine)));
     assert_eq!(ib.remove_machine("nope").unwrap_err(), "Unknown machine");
+}
+
+#[tokio::test]
+async fn a_literal_address_outside_tailscale_is_refused_at_import() {
+    let rec = Arc::new(Recording::default());
+    let ib = empty_inbox(rec.clone(), None);
+    let pin = acd_protocol::pairing::spki_pin(b"certificate");
+    for (address, host) in [
+        ("192.168.1.10", "192.168.1.10"),
+        ("8.8.8.8", "8.8.8.8"),
+        ("[fd7a:115c:a1e1::1]", "fd7a:115c:a1e1::1"),
+        ("[2001:db8::1]", "2001:db8::1"),
+    ] {
+        let line = format!("acd://{address}:47800?pin={pin}#{}", common::TOKEN);
+        let err = ib.pair_machine(&line).unwrap_err();
+        assert!(matches!(err, MachineError::NotTailscale), "{host}: {err:?}");
+        assert!(!err.to_string().contains(host), "the error names the address: {err}");
+        assert!(!err.to_string().contains(common::TOKEN));
+    }
+    assert!(ib.settings().machines.is_empty(), "a refused line saved a machine");
+    assert!(rec.ops.lock().unwrap().is_empty(), "a refused line touched the secret store");
+}
+
+#[tokio::test]
+async fn loopback_and_tailscale_literals_still_import() {
+    let rec = Arc::new(Recording::default());
+    let ib = empty_inbox(rec.clone(), None);
+    let pin = acd_protocol::pairing::spki_pin(b"certificate");
+    for address in ["127.0.0.1", "[::1]", "100.100.100.100", "[fd7a:115c:a1e0::1]", "devbox.tail1234.ts.net"] {
+        let line = format!("acd://{address}:47800?pin={pin}#{}", common::TOKEN);
+        ib.pair_machine(&line).unwrap_or_else(|e| panic!("{address}: {e}"));
+    }
+    assert_eq!(ib.settings().machines.len(), 5);
 }
 
 /// A keyring that refuses every call while locked.

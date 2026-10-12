@@ -154,6 +154,8 @@ export function fakeApi(
     removeMachine: rec("removeMachine", undefined),
     retryMachine: rec("retryMachine", undefined),
     getHotkey: rec("getHotkey", "Control+Option+Space"),
+    notificationAuthorization: rec("notificationAuthorization", "granted"),
+    requestNotificationAuthorization: rec("requestNotificationAuthorization", "granted"),
     setHotkey: rec("setHotkey", undefined),
     getView: rec("getView", view()),
     onView: async () => () => {},

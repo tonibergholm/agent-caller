@@ -157,6 +157,8 @@ const api = fakeApi({
 api.getView = async () => v;
 api.onView = async () => () => {};
 api.getHotkey = async () => "Control+Option+Space";
+api.notificationAuthorization = async () => "not_determined";
+api.requestNotificationAuthorization = async () => "granted";
 
 document.documentElement.dataset.scene = scene;
 mount(App, { target: document.getElementById("app")!, props: { api, label: scene === "settings" ? "settings" : "panel" } });

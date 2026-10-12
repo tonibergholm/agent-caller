@@ -55,6 +55,8 @@ fn main() {
             commands::set_hotkey,
             commands::hide_panel,
             commands::open_settings,
+            notify::notification_authorization,
+            notify::request_notification_authorization,
             voice::commands::voice_get_settings,
             voice::commands::voice_set_settings,
             voice::commands::voice_publish_presentation,
@@ -75,6 +77,9 @@ fn main() {
             if let Err(error) = notify::init(app.handle()) {
                 tracing::error!(%error, "could not initialize macOS notifications");
             }
+            // macOS prompts only while the state is not determined, so asking
+            // on every start is the first-run request.
+            notify::request_authorization();
             let path = app.path().app_config_dir()?.join("settings.json");
             let settings = Settings::load_or_init(&path)?;
             let inbox = Inbox::new(

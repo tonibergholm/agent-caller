@@ -37,6 +37,12 @@ pub fn allowed_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Whether `host` is a literal address the connect-time rule would refuse.
+/// Names are not refused here: `vet` checks the addresses they resolve to.
+pub fn refuses_literal(host: &str) -> bool {
+    host.parse::<IpAddr>().is_ok_and(|ip| !allowed_ip(ip))
+}
+
 /// Resolves once and keeps only allowed addresses. Callers connect to the
 /// returned addresses and never resolve the name again.
 pub async fn vet(host: &str, port: u16) -> Result<Vec<SocketAddr>, EndpointError> {
