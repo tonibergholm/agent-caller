@@ -8,7 +8,7 @@ fn fixture(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing fixture {path}"))
 }
 
-/// Every variant, by name; a new variant does not compile until it is listed.
+/// Every variant, by name; a new variant does not compile until it has a name here.
 fn wire(step: ModelStep) -> &'static str {
     match step {
         ModelStep::Answer => "answer",
@@ -48,5 +48,22 @@ fn the_step_names_are_every_variant() {
         assert_eq!(wire(step), s);
         decoded.push(step);
     }
-    assert_eq!(decoded.len(), 8, "{steps:?}");
+    assert_eq!(decoded.len(), steps.len());
+}
+
+/// Both sides of the step list: the fixture Swift checks its `.anyOf` list
+/// against must name exactly the steps the schema allows, once each.
+#[test]
+fn the_fixture_lists_exactly_the_steps_the_schema_allows() {
+    let schema = plan_schema();
+    let mut allowed: Vec<String> = schema["$defs"]["ModelStep"]["enum"]
+        .as_array()
+        .expect("ModelStep is a string enum in the schema")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    let mut listed: Vec<String> = serde_json::from_str(&fixture("plan-steps.json")).unwrap();
+    allowed.sort();
+    listed.sort();
+    assert_eq!(listed, allowed, "plan-steps.json and ModelStep must name the same steps, once each");
 }
