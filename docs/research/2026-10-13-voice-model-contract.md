@@ -91,3 +91,54 @@ contract problem for every model, so it gets its own task: a guided type
 that cannot set unused fields (one case per step, each with only its own
 payload), clearer instructions, and a held-out phrase set beside this one so
 the fix is not fitted to these 20 phrases.
+
+## Live checks, voice steps 3 and 4 (plan Task 12)
+
+Status on 2026-10-13: **not yet run by hand.** Everything below needs a person at
+the Mac with the signed app installed (a microphone, a locked screen, Apple
+Intelligence toggled in System Settings). What could be checked without that:
+
+- Swift live tests (run by hand): `testSynthesisRunsOffTheMainThread` and
+  `testSayAndStopNeverWaitForTheMainThread` pass (synthesis works off the main thread, and
+  `say` and `stop` finish while the main thread is blocked: the deadlock case in plan V17).
+- The 20 + 20 phrase contract run against the real model: see
+  [the quality note](2026-10-13-voice-model-quality.md) (19 of 20 on each set).
+- Every Rust, Swift and frontend test in CI.
+
+### How to run it
+
+`just app-install` kills the running Agent Caller, replaces `/Applications/Agent Caller.app`
+and opens it. With the stable identity the privacy grants (microphone, speech,
+input monitoring) survive rebuilds; the first install over an ad-hoc build asks again.
+
+```sh
+APPLE_SIGNING_IDENTITY="Apple Development: Toni Bergholm (RLYXB8JS76)" just app-install
+```
+
+Turn on voice, "Show the typed command field" and spoken alerts, then work through the
+table. Record **pass** or **fail** and, for a failure, a short tag. Do not paste
+a transcript or model output.
+
+| # | Check | Result | Tag |
+|---|---|---|---|
+| 1 | Settings shows "Free-form commands use Apple Intelligence on this Mac." | not run | |
+| 2 | Turn Apple Intelligence off in System Settings, return to Settings: the model line names the reason. Say "tell the codex to run the tests": the HUD says "Apple Intelligence is off. Simple commands still work." Say "approve" on a pending card: it counts down. Turn Apple Intelligence on again; the next free-form phrase works without restarting the app. | not run | |
+| 3 | "tell the MACHINE codex to run the tests": the HUD shows Confirm with target and payload. Cancel it. | not run | |
+| 4 | A free-form phrase, then the HUD's Cancel while it thinks: the HUD says "Cancelled". Repeat with Esc in the inbox panel, and with a press of the hold key. Right after each cancel, say another free-form phrase: it must answer normally, not "The model did not answer". If it fails, the model ignores cancellation and the `maxRunning` slots were full (review item 11b); record it. | not run | |
+| 5 | "read it" on a selected permission card: the command is spoken; the HUD fades about 1.5 s after the voice stops. | not run | |
+| 6 | "what's blocked" (or "summarize"): the summary is spoken. | not run | |
+| 7 | During a long summary, press the hold key and say nothing for a second, then a short phrase: speech stops before the recording starts, no tail of the app's voice is audible after the press, and the transcript does not contain the summary's words (V19). Repeat at the fastest rate and with built-in speakers at full volume. If a tail is heard or transcribed, record it; `Speaker.drainMs` is the value to raise. | not run | |
+| 8 | During speech, click Stop; during speech, press Esc with the inbox panel open: both stop it and hide the HUD. | not run | |
+| 8a | Start an inbox countdown (press 1 on a card), ask for "read it" on another card, and press Esc in the inbox panel while it speaks: one Esc stops the speech and also undoes the inbox countdown; nothing is sent (V12). | not run | |
+| 9 | During speech, lock the screen: speech stops. Unlock: no leftover HUD. | not run | |
+| 10 | During speech, turn voice off in Settings: speech stops. | not run | |
+| 11 | Start a new request on an agent (for example trigger a permission prompt): the alert is spoken once. Trigger two within 5 s: one alert with "1 more needs you." | not run | |
+| 12 | Hold the key (recording) while a new request arrives: no alert while held; the alert follows after release. | not run | |
+| 13 | Restart the app with requests waiting: no alert at startup. | not run | |
+| 14 | Change the voice and the rate in Settings: the next reply uses them. | not run | |
+| 15 | Quit the app while speaking: speech stops. | not run | |
+| 16 | Rebuild with the same identity and reinstall: permissions still hold, and items 1 and 5 still pass. | not run | |
+
+If item 7 fails (a tail of the app's voice is heard or transcribed), `Speaker.drainMs`
+and `Speaker.tailMs` in `Speaker.swift` are the values to raise. If item 4 fails, the
+model ignores cancellation and its two slots (`ModelRequests.maxRunning`) were full.
