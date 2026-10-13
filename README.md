@@ -131,6 +131,10 @@ sh install.sh --tag v0.8.0
 
 Open the `.dmg` and drag the app to Applications. Because the app is not
 notarized, follow the first-launch steps in [docs/release.md](docs/release.md).
+The iOS app is not in the release files. Build it from source and install it
+with a free personal team: see [apps/ios/README.md](apps/ios/README.md). It
+shows requests while the app is open and has no push notifications.
+
 The sections below build from source.
 
 ## Install the daemon

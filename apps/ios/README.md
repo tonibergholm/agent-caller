@@ -32,12 +32,17 @@ platform-independent commands) and `app/` (the Svelte UI, built into `app/dist`)
 - Node 24 and npm.
 - `xcodegen`: `brew install xcodegen`.
 
-Xcode runs the build phase with its own environment. A build started from the
-Xcode window does not read your shell profile. Make sure `~/.cargo/bin` (the
-rustup proxies) and the Node install come first on `PATH`. The Homebrew
-`cargo` has no iOS standard library. The simplest route is to start Xcode from
-a shell that already has the right `PATH`:
-`open -a Xcode` after `export PATH="$HOME/.cargo/bin:$PATH"`.
+The Homebrew `cargo` has no iOS standard library, and the build fails with
+"can't find crate for `core`" if it comes first on `PATH`. Put the rustup
+toolchain first, in the shell you build from:
+
+```sh
+export PATH="$(dirname "$(rustup which cargo)"):$PATH"
+```
+
+Xcode runs the build phase with its own environment, and a build started from
+the Xcode window does not read your shell profile. To build from Xcode, start
+it from that shell: `open -a Xcode`.
 
 ## Build
 
@@ -65,9 +70,30 @@ xcrun simctl launch booted dev.agentcaller.inbox.ios
 The simulator shares the Mac's loopback, so a daemon on the Mac is reachable
 at `127.0.0.1`.
 
+### Live development
+
+```sh
+(cd apps/ios && npm run ios:dev -- "iPhone 18 Pro")
+```
+
+This starts the Vite dev server for the iOS layout (`app/`, port 1420) and runs
+the app in the simulator against it, so frontend edits reload without a rebuild.
+It needs the same `PATH` as the build. The first run installs `ios-deploy` with
+Homebrew. A physical device is not covered: it needs the dev server to listen
+on the Mac's network address.
+
+### Pairing
+
+Run `acd pair` on the daemon's machine and copy the line it prints. On the
+phone, open Settings (the gear in the header) and tap Add from clipboard. iOS
+may ask whether the app can read the clipboard; allow it. The clipboard
+route works with Universal Clipboard from a Mac. Only Tailscale addresses are
+accepted. The app stores the secret in the iOS Keychain. Clear the clipboard
+afterwards: the line contains the pairing secret.
+
 ### Dev pairing in the simulator
 
-The app has no pairing screen on iOS yet. For simulator debugging only, a debug
+To skip typing the line in the simulator, a debug
 build imports one `acd pair` line at launch when `ACD_IOS_DEV_PAIRING_FILE`
 names a file that holds it:
 
@@ -105,12 +131,6 @@ Free-team limits, from Apple's comparison page (checked 2026-10-12): a device
 install and its provisioning profile expire after 7 days, so the app must be
 rebuilt and reinstalled after that. A free account registers up to 3 devices
 and 3 apps per device.
-
-A device build cannot be paired yet. The pairing import exists in the command
-set (`import_pairing_from_clipboard`), but no screen calls it on iOS. Settings
-is not reachable from the panel on iOS (`open_settings` is a no-op). The
-settings and pairing screen is plan task 9. Until it lands, pairing a device
-needs the dev path above, which exists only in simulator debug builds.
 
 Secrets: on iOS, machine secrets are stored `AccessibleWhenUnlockedThisDeviceOnly`
 (not backed up, not moved to another device). `KeychainSecrets::write` in

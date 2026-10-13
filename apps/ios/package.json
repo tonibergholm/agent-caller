@@ -5,6 +5,7 @@
   "scripts": {
     "tauri": "tauri",
     "ios:init": "tauri ios init",
+    "ios:dev": "tauri ios dev",
     "ios:build": "tauri ios build --debug --target aarch64-sim"
   },
   "devDependencies": {
