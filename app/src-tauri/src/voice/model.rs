@@ -382,4 +382,176 @@ mod tests {
         assert!(logs.contains("model plan") && logs.contains("outcome=\"ok\""), "{logs}");
         assert!(!logs.contains("SECRET"), "{logs}");
     }
+
+    #[cfg(feature = "model-contract")]
+    mod contract {
+        use super::super::*;
+        use crate::voice::bridge::{self, BridgeEvent};
+        use acd_protocol::{AgentKind, Effect, RequestKind};
+        use acd_voice::router::model::ModelPlan;
+        use acd_voice::router::prompt::PromptOptions;
+        use acd_voice::router::{RouteOptions, Routed, Step, route};
+        use acd_voice::router::target::Provenance;
+        use acd_voice::safety::Level;
+        use acd_voice::snapshot::Snapshot;
+        use acd_voice::snapshot::fixtures::{option, pending, snapshot, working};
+        use std::sync::atomic::AtomicBool;
+
+        /// Records whether each reply parsed as a `ModelPlan`; never keeps it.
+        struct Parsing {
+            inner: Arc<MacIntentModel>,
+            parsed: AtomicBool,
+            /// `ModelPlan`'s own `Debug`: the step, which fields are set, and
+            /// the text's length. Never the model's words (spec §6.3).
+            shape: Mutex<String>,
+        }
+
+        #[async_trait]
+        impl IntentModel for Parsing {
+            async fn plan(&self, prompt: &Prompt) -> Result<VoiceText, ModelError> {
+                let reply = self.inner.plan(prompt).await;
+                let plan = reply.as_ref().ok().and_then(|r| serde_json::from_str::<ModelPlan>(r.expose()).ok());
+                self.parsed.store(plan.is_some(), Ordering::SeqCst);
+                *self.shape.lock().unwrap() = plan.map(|p| format!("{p:?}")).unwrap_or_default();
+                reply
+            }
+            fn receives_details(&self) -> bool {
+                true
+            }
+        }
+
+        fn fixture() -> Snapshot {
+            let mut fix = pending("minos", "fix");
+            fix.title = "Fix the build".into();
+            let mut docs = working("minos", "docs");
+            docs.kind = AgentKind::Codex;
+            docs.title = "Update the docs".into();
+            let mut deploy = pending("studio", "deploy");
+            deploy.title = "Deploy the site".into();
+            let r = deploy.pending.as_mut().unwrap();
+            r.kind = RequestKind::Question;
+            r.title = "Where to deploy?".into();
+            r.question = Some("Deploy to staging or production?".into());
+            r.free_text = true;
+            r.options = vec![option("1", "Staging", Effect::Choose), option("2", "Production", Effect::Choose)];
+            snapshot(vec![fix, docs, deploy])
+        }
+
+        fn confirmed_on(r: &Routed, card: &str) -> bool {
+            matches!(r, Routed::Proposal(p) if p.level == Level::Confirm && p.step.card() == Some(card))
+        }
+        fn sends_to(r: &Routed, card: &str) -> bool {
+            confirmed_on(r, card) && matches!(r, Routed::Proposal(p) if matches!(p.step, Step::Send { .. }))
+        }
+        fn is_step(r: &Routed, step: Step) -> bool {
+            matches!(r, Routed::Proposal(p) if p.step == step)
+        }
+        fn answers(r: &Routed, card: &str) -> bool {
+            matches!(r, Routed::Proposal(p) if p.step.card() == Some(card) && matches!(p.step, Step::Answer { .. }))
+        }
+        fn refused(r: &Routed) -> bool {
+            matches!(r, Routed::Refused(_))
+        }
+        fn inferred_send(r: &Routed) -> bool {
+            matches!(r, Routed::Proposal(p) if p.level == Level::Confirm
+                && p.provenance == Some(Provenance::Inferred)
+                && matches!(p.step, Step::Send { .. }))
+        }
+
+        type Check = Box<dyn Fn(&Routed) -> bool>;
+
+        fn phrases() -> Vec<(&'static str, Check)> {
+            vec![
+                ("tell the minos codex to update the readme", Box::new(|r| sends_to(r, "minos/docs"))),
+                ("ask the codex to run clippy", Box::new(|r| sends_to(r, "minos/docs"))),
+                ("send run the tests to the codex on minos", Box::new(|r| sends_to(r, "minos/docs"))),
+                ("tell the build agent on minos to try again", Box::new(|r| confirmed_on(r, "minos/fix"))),
+                ("answer the deploy question with staging", Box::new(|r| confirmed_on(r, "studio/deploy"))),
+                ("for the deploy, choose production", Box::new(|r| confirmed_on(r, "studio/deploy"))),
+                ("tell studio to deploy to staging", Box::new(|r| confirmed_on(r, "studio/deploy"))),
+                ("approve the build on minos", Box::new(|r| answers(r, "minos/fix"))),
+                ("deny the minos request", Box::new(|r| answers(r, "minos/fix"))),
+                ("read the minos request", Box::new(|r| is_step(r, Step::Read { card: "minos/fix".into() }))),
+                ("what is the deploy question", Box::new(|r| is_step(r, Step::Read { card: "studio/deploy".into() }))),
+                ("summarize minos", Box::new(|r| is_step(r, Step::Summarize { machine: Some("minos".into()) }))),
+                ("what's waiting on studio", Box::new(|r| is_step(r, Step::Summarize { machine: Some("studio".into()) }))),
+                ("give me a summary of everything", Box::new(|r| is_step(r, Step::Summarize { machine: None }))),
+                ("show the deploy agent", Box::new(|r| is_step(r, Step::Select { card: "studio/deploy".into() }))),
+                ("go to the codex", Box::new(|r| is_step(r, Step::Select { card: "minos/docs".into() }))),
+                ("tell claude to keep going", Box::new(|r| matches!(r, Routed::WhichOne(_)) || refused(r))),
+                ("what's the weather like", Box::new(refused)),
+                ("play some music", Box::new(refused)),
+                // No card is on "omarchy", and Rust finds no name in the
+                // transcript, so the model will likely pick some card; Rust
+                // then proposes a send to it with an inferred target, which
+                // always needs Confirm (review item 12). A refusal is fine too.
+                // Never a countdown.
+                ("tell the omarchy agent to stop", Box::new(|r| refused(r) || inferred_send(r))),
+            ]
+        }
+
+        /// Spec §10, plan V18. Run by hand on a Mac with Apple Intelligence on.
+        /// The feature keeps the Swift bridge out of the normal test binary; the
+        /// rpath lets this one find the Swift runtime (`@rpath` in debug builds):
+        /// RUSTFLAGS="-C link-arg=-Wl,-rpath,/usr/lib/swift" cargo test --manifest-path app/src-tauri/Cargo.toml --locked --features model-contract model_contract -- --ignored --nocapture --test-threads=1
+        /// Prints phrase numbers, tags and timings, never model output.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "needs Apple Intelligence; run by hand (plan Task 5)"]
+        async fn model_contract() {
+            let (link, events) = bridge::start().expect("the bridge starts");
+            let model = Arc::new(MacIntentModel::new(Arc::new(SwiftModelPort), MODEL_TIMEOUT));
+            let m = model.clone();
+            tokio::spawn(bridge::pump(link, events, move |ev| match ev {
+                BridgeEvent::ModelReply { id, reply } => {
+                    m.deliver(id, reply);
+                }
+                BridgeEvent::ModelCaps(state) => m.set_state(state),
+                _ => {}
+            }));
+            model.query();
+            for _ in 0..300 {
+                if model.state() != ModelState::Checking {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(model.state(), ModelState::Available, "Apple Intelligence must be on");
+            let s = fixture();
+            let opts = RouteOptions { prompt: PromptOptions { include_details: true }, ..RouteOptions::default() };
+            let (mut passed, mut parsed, mut times) = (0, 0, Vec::new());
+            for (n, (said, check)) in phrases().iter().enumerate() {
+                let probe = Parsing { inner: model.clone(), parsed: AtomicBool::new(false), shape: Mutex::new(String::new()) };
+                let started = Instant::now();
+                let routed = route(&s, &VoiceText::new(*said), Some(&probe), &opts).await;
+                let ms = started.elapsed().as_millis() as u64;
+                let (ok, valid) = (check(&routed), probe.parsed.load(Ordering::SeqCst));
+                passed += usize::from(ok);
+                parsed += usize::from(valid);
+                times.push(ms);
+                // Tags only: the refusal is a classified variant, the plan shape has no text.
+                let why = if let Routed::Refused(r) = &routed { format!(" refusal={r:?}") } else { String::new() };
+                println!(
+                    "{:>2} {} schema_valid={valid} route={}{why} model={} {ms} ms",
+                    n + 1,
+                    if ok { "pass" } else { "FAIL" },
+                    routed.tag(),
+                    probe.shape.lock().unwrap()
+                );
+            }
+            // Review item 9: the first call is cold (no prewarm, model not
+            // loaded) and the user meets it after every idle period, so it is
+            // reported on its own; p50 and p95 cover the warm calls 2 to 20.
+            let first = times[0];
+            let mut warm = times[1..].to_vec();
+            warm.sort_unstable();
+            let pct = |p: usize| warm[(warm.len() * p / 100).min(warm.len() - 1)];
+            println!(
+                "passed {passed}/20, schema-valid {parsed}/20, first (cold) {first} ms, warm p50 {} ms, warm p95 {} ms",
+                pct(50),
+                pct(95)
+            );
+            assert_eq!(parsed, 20, "every reply is a schema-valid plan");
+            assert!(passed >= 18, "at least 18 of 20 route as expected");
+        }
+    }
 }
