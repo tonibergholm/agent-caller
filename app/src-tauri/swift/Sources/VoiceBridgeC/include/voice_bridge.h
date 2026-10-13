@@ -157,13 +157,17 @@ void vb_tap_stop(void);
 
 /* Plans one step: `instructions` become the session's instructions, `input`
  * its prompt. A fresh model session per call. VB_OK, VB_ERR_NOT_INITIALIZED,
- * or VB_ERR_FAILED (id 0, or text that is not UTF-8). Later exactly one
- * VB_EV_MODEL for `id`, unless it was cancelled. Swift gives up on its own
- * timeout_ms + 1000 ms after the call. */
+ * or VB_ERR_FAILED (id 0, an id still in flight, or text that is not UTF-8).
+ * Later one VB_EV_MODEL for `id`, unless it was cancelled or an overflow
+ * (VB_EV_OVERFLOW) dropped it. Swift tries to give up on its own
+ * timeout_ms + 1000 ms after the call, but a model that ignores cancellation
+ * keeps the call running: Rust's own timeout is the real bound (plan V5). */
 int32_t vb_model_plan(uint64_t id, const uint8_t *instructions, size_t instructions_len,
                       const uint8_t *input, size_t input_len, uint32_t timeout_ms);
 
-/* Cancels request `id`; no VB_EV_MODEL follows. Unknown ids are ignored. */
+/* Cancels request `id`; no new VB_EV_MODEL is produced. One already queued
+ * may still be delivered after this returns, so the caller drops replies for
+ * ids it no longer waits for. Unknown ids are ignored. */
 void vb_model_cancel(uint64_t id);
 
 /* Voice off, quit: cancels every request and drops the prewarmed session.

@@ -6,6 +6,7 @@ import XCTest
 final class SourceRulesTests: XCTestCase {
     static let banned = [
         "print(", "NSLog", "os_log", "Logger(", "localizedDescription",
+        "debugDescription", "dump(", "fputs",
         // Cloud models in the macOS 27 SDK; add any new cloud model type here.
         "PrivateCloudCompute",
         // The model is always named: `SystemLanguageModel.default`.
@@ -16,8 +17,8 @@ final class SourceRulesTests: XCTestCase {
         var dir = URL(fileURLWithPath: #filePath)
         for _ in 0..<2 { dir.deleteLastPathComponent() } // up to Tests
         dir = dir.deletingLastPathComponent().appendingPathComponent("Sources/VoiceBridge")
-        let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "swift" }
+        let walker = try XCTUnwrap(FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil))
+        let files = walker.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
         XCTAssertFalse(files.isEmpty)
         for file in files {
             let text = try String(contentsOf: file, encoding: .utf8)
