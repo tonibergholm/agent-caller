@@ -320,10 +320,18 @@ fn real_main() -> Result<()> {
         Cmd::Run => {
             let rt = tokio::runtime::Runtime::new()?;
             let result = rt.block_on(daemon::run(&dir));
+            // Report a failure first: a panic in a task that is still ending
+            // must not hide the error that stopped the daemon.
+            if let Err(e) = &result {
+                eprintln!("acd: {e:#}");
+            }
             // Blocking tasks (registry scans, path resolution) must not
             // delay the exit.
             rt.shutdown_timeout(std::time::Duration::from_millis(500));
-            result
+            if result.is_err() {
+                std::process::exit(1);
+            }
+            Ok(())
         }
         Cmd::Status => tokio::runtime::Runtime::new()?.block_on(status::status(&dir)),
     }

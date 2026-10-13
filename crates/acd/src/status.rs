@@ -52,9 +52,20 @@ pub async fn status(dir: &Path) -> Result<()> {
     };
     ws.send(Message::text(serde_json::to_string(&hello)?))
         .await?;
-    tokio::time::timeout(Duration::from_secs(5), read_status(&mut ws))
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), read_status(&mut ws, &mut out))
         .await
-        .context("timed out waiting for the daemon's snapshot")?
+        .context("timed out waiting for the daemon's snapshot")??;
+    finish(&mut std::io::stdout().lock(), &out)
+}
+
+/// Writes the report in one piece. A reader that stops early (`acd status |
+/// head`) is a normal end, not a failure: `println!` would panic on it.
+fn finish(stdout: &mut impl std::io::Write, report: &[u8]) -> Result<()> {
+    match stdout.write_all(report).and_then(|()| stdout.flush()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other.context("could not write the status"),
+    }
 }
 
 /// Best effort (amendment A1): when acd is not running but something holds
@@ -82,7 +93,7 @@ pub fn hook_port_warning(dir: &Path, hook_port: u16) -> Option<String> {
     })
 }
 
-async fn read_status<S>(ws: &mut S) -> Result<()>
+async fn read_status<S>(ws: &mut S, out: &mut impl std::io::Write) -> Result<()>
 where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
@@ -99,28 +110,30 @@ where
                 let Some((machine, epoch)) = welcome else {
                     bail!("snapshot before welcome")
                 };
-                println!(
+                writeln!(
+                    out,
                     "machine: {} ({})  epoch {}",
                     machine.name, machine.id, epoch
-                );
-                println!(
+                )?;
+                writeln!(
+                    out,
                     "sources: hooks={:?} herdr={:?} t3={:?}",
                     machine.sources.hooks.state,
                     machine.sources.herdr.state,
                     machine.sources.t3.state
-                );
+                )?;
                 for (name, source) in [
                     ("hooks", &machine.sources.hooks),
                     ("herdr", &machine.sources.herdr),
                     ("t3", &machine.sources.t3),
                 ] {
                     if let Some(message) = &source.message {
-                        println!("  {name}: {message}");
+                        writeln!(out, "  {name}: {message}")?;
                     }
                 }
-                println!("agents: {}", agents.len());
+                writeln!(out, "agents: {}", agents.len())?;
                 for a in &agents {
-                    println!("  {}", line(a));
+                    writeln!(out, "  {}", line(a))?;
                 }
                 return Ok(());
             }
@@ -157,6 +170,43 @@ mod tests {
         let snapshot = r#"{"type":"snapshot","epoch":"e1","seq":42,"agents":[]}"#;
         let raw = [welcome, r#"{"type":"agent.launched","x":1}"#, snapshot];
         let mut ws = futures_util::stream::iter(raw.map(|t| Ok(Message::text(t))));
-        read_status(&mut ws).await.unwrap();
+        read_status(&mut ws, &mut Vec::new()).await.unwrap();
+    }
+
+    struct ClosedPipe;
+    impl std::io::Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FullDisk;
+    impl std::io::Write for FullDisk {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("no space left"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_reader_that_stops_early_is_not_an_error() {
+        finish(&mut ClosedPipe, b"machine: m\n").unwrap();
+    }
+
+    #[test]
+    fn other_write_failures_still_fail() {
+        assert!(finish(&mut FullDisk, b"machine: m\n").is_err());
+    }
+
+    #[test]
+    fn the_report_is_written_whole() {
+        let mut out = Vec::new();
+        finish(&mut out, b"machine: m\n").unwrap();
+        assert_eq!(out, b"machine: m\n");
     }
 }

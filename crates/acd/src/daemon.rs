@@ -351,6 +351,12 @@ fn stop_server_for_tests(name: &str) -> bool {
     }
 }
 
+/// A listener that ends while the daemon runs is a failure; one that ends
+/// during a clean stop is the teardown.
+fn listener_end_is_failure(stopping: &std::sync::atomic::AtomicBool) -> bool {
+    !stopping.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 async fn released(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.wait_for(|stop| *stop).await;
 }
@@ -621,9 +627,13 @@ pub async fn run(dir: &Path) -> Result<()> {
             retire_core.set_source_status(Source::Hooks, status);
         }
     });
+    // Set once a stop has begun, so the teardown of a listener is not logged
+    // as a failure.
+    let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     for (addr, listener) in listeners {
         tracing::info!(%addr, "listening");
         let app = app.clone();
+        let stopping = stopping.clone();
         let mut tls_listener = core_tls::TlsListener::new(
             listener,
             tls_rx.clone(),
@@ -643,7 +653,11 @@ pub async fn run(dir: &Path) -> Result<()> {
                         tracing::error!(%addr, error = %e, "server stopped");
                     }
                 }
-                () = ended => tracing::error!(%addr, "TLS listener task ended"),
+                () = ended => {
+                    if listener_end_is_failure(&stopping) {
+                        tracing::error!(%addr, "TLS listener task ended");
+                    }
+                }
             }
             format!("listener {addr}")
         });
@@ -742,6 +756,7 @@ pub async fn run(dir: &Path) -> Result<()> {
             Some(EXIT_SERVER_STOPPED)
         }
     };
+    stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     tls_watch.abort();
     // Fail open: every held hook request gets an empty reply, and the hook
     // servers finish those replies and close before acd exits.
@@ -767,6 +782,14 @@ pub async fn run(dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_listener_ending_is_a_failure_only_while_the_daemon_runs() {
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        assert!(listener_end_is_failure(&stopping));
+        stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!listener_end_is_failure(&stopping));
+    }
 
     #[test]
     fn claude_roots_are_the_recorded_roots_then_the_default() {
