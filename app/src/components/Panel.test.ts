@@ -785,3 +785,19 @@ test("a second click after the window re-arms instead of sending", async () => {
     vi.restoreAllMocks();
   }
 });
+
+test("an unrelated click drops the armed option", async () => {
+  const api = fakeApi();
+  const c = destructive();
+  c.can_reply = true;
+  const other = card({ key: "m/o", can_mark_seen: true, group: "done" });
+  render(Panel, { view: view({ cards: [c, other] }), api });
+  await userEvent.click(screen.getByRole("button", { name: /abandon/i }));
+  expect(screen.getByRole("button", { name: /tap again to abandon/i })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: /reply/i }));
+  expect(screen.queryByRole("button", { name: /tap again/i })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: /abandon/i }));
+  await userEvent.click(document.querySelector(".card")!);
+  expect(screen.queryByRole("button", { name: /tap again/i })).toBeNull();
+  expect(api.calls.filter((x) => x[0] === "pick")).toEqual([]);
+});

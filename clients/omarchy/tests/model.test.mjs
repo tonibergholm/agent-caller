@@ -582,3 +582,21 @@ test("the armed row tells the user to press Enter", () => {
   const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
   assert.match(panel, /Press Enter to confirm: /);
 });
+
+test("an unrelated click drops the arm, and every Panel.qml click but the option row goes through disarm", () => {
+  const cards = [externalCard()];
+  const armed = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 })).state;
+  const after = M.disarm(armed);
+  assert.equal(after.armed, null);
+  assert.equal(after.selected, "m1/e");
+  assert.equal(M.disarm(after), after, "nothing to drop");
+  assert.equal(M.pickOption(after, cards[0], "abandon", 1100).effect.kind, "none", "the next tap arms again");
+  const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
+  const clicks = panel.split("\n").filter((l) => l.includes("onClicked:"));
+  assert.ok(clicks.length >= 10);
+  for (const l of clicks) {
+    if (l.includes("pickOption")) continue;
+    assert.match(l, /disarm\(\)|onClicked: \{\s*$/, l.trim());
+  }
+  assert.match(panel, /onClicked: \{\n\s*panel\.disarm\(\);/);
+});

@@ -48,6 +48,12 @@ Item {
     function close() { host.close(); }
     function toggle() { host.toggle(); }
 
+    // Anything the user does but the second step of a confirm option
+    // disarms it (keys do this in model.mjs; clicks come through here).
+    function disarm() {
+        if (keyState.armed) keyState = Model.disarm(keyState);
+    }
+
     function selectAndReveal(key) {
         settingsOpen = false;
         const shown = Model.revealCard(key, cards, machineFilter, doneOpen);
@@ -301,7 +307,7 @@ Item {
 
         MouseArea {
             anchors.fill: parent
-            onClicked: cardItem.inbox.keyState = Object.assign({}, cardItem.inbox.keyState, { selected: cardItem.card.key })
+            onClicked: { cardItem.inbox.disarm(); cardItem.inbox.keyState = Object.assign({}, cardItem.inbox.keyState, { selected: cardItem.card.key }) }
         }
 
         ColumnLayout {
@@ -376,7 +382,7 @@ Item {
 
                 Ui.Button {
                     text: "Cancel"
-                    onClicked: cardItem.inbox.service.send("cancel", { action: cardItem.card.action.id }, cardItem.inbox.report)
+                    onClicked: { cardItem.inbox.disarm(); cardItem.inbox.service.send("cancel", { action: cardItem.card.action.id }, cardItem.inbox.report) }
                 }
             }
 
@@ -468,7 +474,7 @@ Item {
 
                 Ui.Button {
                     text: panel.settingsOpen ? "Inbox" : "Settings"
-                    onClicked: panel.settingsOpen = !panel.settingsOpen
+                    onClicked: { panel.disarm(); panel.settingsOpen = !panel.settingsOpen }
                 }
             }
 
@@ -516,7 +522,7 @@ Item {
                         required property var modelData
                         text: modelData.name + " · " + modelData.label
                         selected: panel.machineFilter === modelData.key
-                        onClicked: panel.machineFilter = selected ? "" : modelData.key
+                        onClicked: { panel.disarm(); panel.machineFilter = selected ? "" : modelData.key }
                     }
                 }
             }
@@ -544,7 +550,7 @@ Item {
                         visible: panel.groups.done.length > 0
                         color: panel.muted
                         text: (panel.doneOpen ? "▾ " : "▸ ") + "Done (" + panel.groups.done.length + ")"
-                        MouseArea { anchors.fill: parent; onClicked: panel.doneOpen = !panel.doneOpen }
+                        MouseArea { anchors.fill: parent; onClicked: { panel.disarm(); panel.doneOpen = !panel.doneOpen } }
                     }
                     Repeater { model: panel.doneOpen ? panel.groups.done : []; delegate: CardItem { required property var modelData; inbox: panel; card: modelData } }
                 }
@@ -567,7 +573,7 @@ Item {
                 Ui.Button {
                     visible: Model.keyringLocked(panel.service.settings)
                     text: "Unlock keyring"
-                    onClicked: panel.service.send("unlock_secrets", {}, panel.report)
+                    onClicked: { panel.disarm(); panel.service.send("unlock_secrets", {}, panel.report) }
                 }
 
                 Repeater {
@@ -609,7 +615,7 @@ Item {
 
                         Ui.Button {
                             text: "Retry"
-                            onClicked: panel.service.send("retry_machine", { machine: modelData.key }, panel.report)
+                            onClicked: { panel.disarm(); panel.service.send("retry_machine", { machine: modelData.key }, panel.report) }
                         }
 
                         Ui.Button {
@@ -619,6 +625,7 @@ Item {
                             text: confirming ? "Remove? Click again" : "Remove"
                             visible: modelData.endpoint.kind === "tcp"
                             onClicked: {
+                                panel.disarm();
                                 if (!confirming) {
                                     confirming = true;
                                     return;
@@ -649,7 +656,7 @@ Item {
 
                     Ui.Button {
                         text: "Add"
-                        onClicked: panel.submitPairing()
+                        onClicked: { panel.disarm(); panel.submitPairing() }
                     }
                 }
 
@@ -657,28 +664,28 @@ Item {
                     Layout.fillWidth: true
                     label: "Show idle agents"
                     checked: panel.service.settings ? panel.service.settings.show_idle : false
-                    onClicked: panel.service.send("set_show", { what: "idle", on: !checked }, panel.report)
+                    onClicked: { panel.disarm(); panel.service.send("set_show", { what: "idle", on: !checked }, panel.report) }
                 }
 
                 Ui.Toggle {
                     Layout.fillWidth: true
                     label: "Show subagents"
                     checked: panel.service.settings ? panel.service.settings.show_subagents : false
-                    onClicked: panel.service.send("set_show", { what: "subagents", on: !checked }, panel.report)
+                    onClicked: { panel.disarm(); panel.service.send("set_show", { what: "subagents", on: !checked }, panel.report) }
                 }
 
                 Ui.Toggle {
                     Layout.fillWidth: true
                     label: "Show hook-only agents"
                     checked: panel.service.settings ? panel.service.settings.show_hook_only : false
-                    onClicked: panel.service.send("set_show", { what: "hook_only", on: !checked }, panel.report)
+                    onClicked: { panel.disarm(); panel.service.send("set_show", { what: "hook_only", on: !checked }, panel.report) }
                 }
 
                 Ui.Toggle {
                     Layout.fillWidth: true
                     label: "Notifications"
                     checked: panel.service.settings ? panel.service.settings.notifications : true
-                    onClicked: panel.service.send("set_notifications", { on: !checked }, panel.report)
+                    onClicked: { panel.disarm(); panel.service.send("set_notifications", { on: !checked }, panel.report) }
                 }
             }
             }

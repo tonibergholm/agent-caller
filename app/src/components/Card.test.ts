@@ -473,3 +473,20 @@ test("a resolved notice shows the producer's message", () => {
   const { container } = render(Card, props(c));
   expect(container.querySelector("[role=status]")?.textContent).toContain("The plan changed. Review it again.");
 });
+
+test("a lingering external card shows its notice and no place to answer", () => {
+  const c = external();
+  c.answerable = false;
+  c.agent.pending = null;
+  c.notice = { tone: "warning", text: "crashed mid-action" };
+  const { container } = render(Card, props(c));
+  expect(container.querySelector(".readonly")).toBeNull();
+  expect(container.querySelector("[role=status]")?.textContent).toContain("crashed mid-action");
+});
+
+test("a non-external card without a request still points to the terminal", () => {
+  const c = card({ key: "m/x" });
+  c.agent.pending = null;
+  render(Card, props(c));
+  expect(screen.getByText("Answer in terminal")).toBeTruthy();
+});

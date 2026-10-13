@@ -190,8 +190,9 @@
     {:else if card.live && !card.busy && pending.status !== "answering"}
       <div class="readonly">{readonlyLabel}</div>
     {/if}
-  {:else if card.live && !card.busy}
-    <!-- A needs-you card whose request is gone: the terminal is still where to answer. -->
+  {:else if card.live && !card.busy && !external}
+    <!-- A needs-you card whose request is gone: the terminal is still where to answer.
+         An external card kept for its resolution notice has nowhere to answer. -->
     <div class="readonly">{readonlyLabel}</div>
   {/if}
 

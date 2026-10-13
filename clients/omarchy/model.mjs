@@ -567,6 +567,11 @@ export function pruneKeyState(st, cards) {
   return next;
 }
 
+/** Any action other than completing a confirm option drops the arm. */
+export function disarm(st) {
+  return st.armed ? Object.assign({}, st, { armed: null }) : st;
+}
+
 /** `openCard`: select that card and close any reply box. */
 export function selectCard(key) {
   return { selected: key, replyFor: null };

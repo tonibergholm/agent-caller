@@ -305,11 +305,16 @@
   </div>
 {/snippet}
 
+<!-- A click anywhere but the armed option itself drops the arm; the click
+     that arms or sends runs after this capture handler. -->
 <main
   class="panel"
   class:mobile
   hidden={paused}
   inert={paused}
+  onclickcapture={(e) => {
+    if (st.armed && !(e.target instanceof Element && e.target.closest(".option.armed"))) st = { ...st, armed: null };
+  }}
   style:scroll-padding-top="{topH}px"
   style:scroll-padding-bottom="{footH}px"
 >
