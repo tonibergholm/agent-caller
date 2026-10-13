@@ -294,7 +294,13 @@ final class FoundationPlanEngine: PlanEngine, @unchecked Sendable {
             return warm?.instructions == instructions ? warm?.session : nil
         }
         let session = prepared ?? FoundationPlanEngine.session(instructions)
+        // Xcode 27 renamed the label (`sampling:` stays as a deprecated alias
+        // there); the CI runner's older SDK has only `sampling:`.
+        #if compiler(>=6.4)
         let options = GenerationOptions(samplingMode: .greedy, maximumResponseTokens: 512)
+        #else
+        let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: 512)
+        #endif
         do {
             let response = try await session.respond(to: input, generating: GuidedPlan.self,
                                                      includeSchemaInPrompt: true, options: options)
