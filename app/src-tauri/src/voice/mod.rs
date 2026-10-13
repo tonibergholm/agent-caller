@@ -3,6 +3,8 @@
 pub mod commands;
 #[cfg(target_os = "macos")]
 pub mod bridge;
+#[cfg(target_os = "macos")]
+pub mod model;
 pub mod hud;
 pub mod permissions;
 pub mod settings;
@@ -25,6 +27,8 @@ pub struct VoiceState {
     pub trigger_error: Mutex<Option<String>>,
     #[cfg(target_os = "macos")]
     pub speech: bridge::Speech,
+    #[cfg(target_os = "macos")]
+    pub model: Arc<model::MacIntentModel>,
 }
 
 /// HUD states go to the HUD webview; selections go to the inbox panel.
@@ -79,7 +83,18 @@ pub fn dispatch(app: &AppHandle, ev: bridge::BridgeEvent) {
         E::Assets { .. } => emit_status(app),
         E::System => voice.controller.system_stop(),
         E::Capture { generation, on } => voice.controller.capture(generation, on),
-        E::Overflow => voice.controller.overflow(),
+        E::Overflow => {
+            voice.controller.overflow();
+            // The lost events may include the last availability report.
+            voice.model.overflowed();
+        }
+        E::ModelReply { id, reply } => {
+            voice.model.deliver(id, reply);
+        }
+        E::ModelCaps(state) => {
+            voice.model.set_state(state);
+            emit_status(app);
+        }
         // Only the current tap's events count, checked and delivered under
         // one lock with tap replacement (S26).
         E::Hold { tap, down } => {

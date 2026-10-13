@@ -15,6 +15,7 @@ export const STATUS_OK: VoiceStatus = {
   hold_key_active: true,
   relaunch_for_hold_key: false,
   toggle_error: null,
+  model: { state: "available" },
 };
 
 export function card(overrides: Partial<CardView> = {}): CardView {

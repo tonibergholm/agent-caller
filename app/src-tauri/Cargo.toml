@@ -22,6 +22,7 @@ acd-protocol = { path = "../../crates/acd-protocol" }
 acd-voice = { path = "../../crates/acd-voice" }
 acd-voice-client = { path = "../../crates/acd-voice-client" }
 anyhow = "1"
+async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "=2.12.1", features = ["tray-icon"] }
@@ -43,3 +44,6 @@ objc2-foundation = { version = "=0.3.2", features = ["block2", "NSBundle", "NSNo
 # Notification permission (notify.rs). Same versions notify-rust already locks.
 objc2-user-notifications = { version = "=0.3.2", features = ["UNUserNotificationCenter", "UNNotificationSettings", "block2"] }
 objc2-app-kit = { version = "=0.3.2", features = ["NSApplication"] }
+
+[dev-dependencies]
+acd-voice = { path = "../../crates/acd-voice", features = ["testing"] }

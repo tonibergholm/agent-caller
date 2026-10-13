@@ -185,7 +185,11 @@ pub fn voice_open_privacy(window: WebviewWindow, kind: super::permissions::Permi
 #[tauri::command]
 pub fn voice_status(app: AppHandle) -> super::status::VoiceStatus {
     #[cfg(target_os = "macos")]
-    super::trigger::refresh(&app);
+    {
+        super::trigger::refresh(&app);
+        // Swift reports only changes (plan V16), so this cannot loop.
+        tauri::Manager::state::<super::VoiceState>(&app).model.query();
+    }
     super::status::current(&app)
 }
 
