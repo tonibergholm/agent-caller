@@ -176,7 +176,7 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
                     let tcp = match tokio::net::TcpStream::connect(addr).await {
                         Ok(s) => s,
                         Err(e) => {
-                            last = e.to_string();
+                            last = connect_reason(&e);
                             continue;
                         }
                     };
@@ -230,6 +230,20 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
     })
     .await
     .unwrap_or_else(|_| Err(End::Offline("connection timed out".into())))
+}
+
+/// Plain words for the connect failures people hit most. The raw text
+/// ("Connection refused (os error 61)") says nothing about what to check.
+fn connect_reason(e: &std::io::Error) -> String {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        ConnectionRefused => "connection refused. Is acd running on that machine?".into(),
+        TimedOut => "connection timed out".into(),
+        HostUnreachable | NetworkUnreachable => {
+            "cannot reach that machine. Is Tailscale on?".into()
+        }
+        _ => e.to_string(),
+    }
 }
 
 fn credential_hash(token: &str) -> [u8; 32] {
@@ -731,5 +745,27 @@ pub fn spawn_machine(cfg: MachineConfig) -> MachineHandle {
         events,
         ctl,
         cancel,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connect_reason;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn connect_failures_read_in_plain_words() {
+        let refused = Error::from_raw_os_error(if cfg!(target_os = "macos") { 61 } else { 111 });
+        assert_eq!(refused.kind(), ErrorKind::ConnectionRefused);
+        let text = connect_reason(&refused);
+        assert!(text.contains("Is acd running"), "{text}");
+        assert!(!text.contains("os error"), "{text}");
+        assert!(connect_reason(&Error::from(ErrorKind::HostUnreachable)).contains("Tailscale"));
+        assert!(connect_reason(&Error::from(ErrorKind::NetworkUnreachable)).contains("Tailscale"));
+        assert_eq!(connect_reason(&Error::from(ErrorKind::TimedOut)), "connection timed out");
+        assert_eq!(
+            connect_reason(&Error::other("boom")),
+            "boom"
+        );
     }
 }

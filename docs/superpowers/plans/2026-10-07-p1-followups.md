@@ -132,7 +132,6 @@ Historical flakes and environment caveats (not reproduced in this audit):
 - Ad-hoc signed rebuilds can prompt for Keychain access. `just app-install`
   supports `APPLE_SIGNING_IDENTITY` for a stable identity; signing and
   distribution are not automated releases.
-- The `acd pair` output remains in the user's clipboard after import.
 - Test the hotkey failed-registration path; it requires a live shortcut manager.
 - `mark_seen` has no test outside a runtime.
 - Concurrent `set_hotkey` calls can race.

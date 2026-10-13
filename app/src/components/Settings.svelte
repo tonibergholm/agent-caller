@@ -472,6 +472,12 @@
               ? "The hold key is off. Turn voice off and on to try again."
               : "The hold key needs Input Monitoring."}
         </p>
+        {#if status.input_monitoring === "denied"}
+          <p class="note">
+            Already on in System Settings? The grant then belongs to another build of Agent Caller. Quit the app, run
+            <code>tccutil reset ListenEvent dev.agentcaller.inbox</code> in Terminal, open the app and grant it again.
+          </p>
+        {/if}
       {/if}
 
       <label>

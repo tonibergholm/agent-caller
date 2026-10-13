@@ -7,6 +7,19 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ## [Unreleased]
 
+### Changed
+
+- A machine that refuses the connection, times out, or cannot be reached now
+  says so in plain words ("connection refused. Is acd running on that
+  machine?", "cannot reach that machine. Is Tailscale on?") instead of the
+  raw system error.
+- Adding a machine from the clipboard clears the clipboard once the machine
+  is saved, on the Mac app and on iOS. The pairing line carries the client
+  token.
+- Settings shows how to clear a stale grant when Input Monitoring reads
+  Denied. A grant given to another build of the app can stay in the way
+  even though System Settings lists the app as on.
+
 ## [0.8.0] - 2026-10-13
 
 First public pre-release. The macOS binaries are ad-hoc signed and the Mac

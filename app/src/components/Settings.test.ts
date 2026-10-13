@@ -474,6 +474,20 @@ test("nothing permission-related shows before the first status arrives", async (
   expect(await screen.findByRole("button", { name: "Ask for Microphone" })).toBeTruthy();
 });
 
+test("a denied Input Monitoring says how to clear a grant from another build", async () => {
+  const api = fakeApi({ voice: on, status: { ...STATUS_OK, input_monitoring: "denied", hold_key_active: false } });
+  render(Settings, { api });
+  expect(await screen.findByText(/grant then belongs to another build/)).toBeTruthy();
+  expect(screen.getByText("tccutil reset ListenEvent dev.agentcaller.inbox")).toBeTruthy();
+});
+
+test("a granted Input Monitoring shows no reset hint", async () => {
+  const api = fakeApi({ voice: on, status: { ...STATUS_OK, hold_key_active: true } });
+  render(Settings, { api });
+  await screen.findByRole("combobox", { name: "Hold key" });
+  expect(screen.queryByText(/grant then belongs to another build/)).toBeNull();
+});
+
 test("a shortcut registration error is shown once, with a closing stop", async () => {
   const api = fakeApi({ voice: on, status: { ...STATUS_OK, toggle_error: "Could not register Control+Alt+M: in use" } });
   render(Settings, { api });
