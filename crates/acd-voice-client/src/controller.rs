@@ -110,6 +110,10 @@ struct Core {
     next_speech: u64,
     /// Test hook: a shorter cap than `speak::speech_cap`.
     speech_cap: Option<Duration>,
+    /// Which requests were announced (plan V14), and whether a wake-up for a
+    /// waiting alert is already scheduled.
+    alerts: acd_voice::speak::Alerts,
+    alert_timer: bool,
 }
 
 pub struct Controller {
@@ -172,6 +176,8 @@ impl Controller {
                 speech: Default::default(),
                 next_speech: 0,
                 speech_cap: None,
+                alerts: Default::default(),
+                alert_timer: false,
             }),
             presentation: Mutex::new(None),
             model,
@@ -185,6 +191,7 @@ impl Controller {
             speaker: Mutex::new(None),
         });
         this.runtime.spawn(forward_outcomes(Arc::downgrade(&this), outcomes));
+        this.runtime.spawn(watch_view(Arc::downgrade(&this), this.inbox.view()));
         this
     }
 
@@ -195,6 +202,11 @@ impl Controller {
             return false;
         }
         *current = Some(presentation);
+        drop(current);
+        // A machine filter change takes effect for queued alerts at once.
+        // Eligibility never depends on `presentation.visible` (see
+        // `speak::alert_cards`), so nothing waits for the panel to republish.
+        self.alert_tick_soon();
         true
     }
 
@@ -211,6 +223,8 @@ impl Controller {
         }
         core.enabled = on;
         self.invalidate(&mut core);
+        drop(core);
+        self.alert_tick_soon();
     }
 
     /// Test hook: whether a result is held back until the recording ends.
@@ -885,5 +899,15 @@ async fn forward_outcomes(this: Weak<Controller>, mut rx: broadcast::Receiver<Ac
             Err(broadcast::error::RecvError::Lagged(_)) => this.act_quiet(|exec, port| exec.outcomes_lost(port)),
             Err(broadcast::error::RecvError::Closed) => return,
         }
+    }
+}
+
+/// Every inbox change may bring a request to announce (spec §7).
+async fn watch_view(this: Weak<Controller>, mut rx: watch::Receiver<acd_client::view::InboxView>) {
+    while rx.changed().await.is_ok() {
+        let Some(this) = this.upgrade() else {
+            return;
+        };
+        this.alert_tick();
     }
 }

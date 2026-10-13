@@ -1,10 +1,10 @@
 //! Spoken output (voice spec §7, plan V10 to V13).
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use acd_voice::hud::Hud;
 use acd_voice::plan::Reaction;
-use acd_voice::speak::{self, Speaker, SpeechSettings};
+use acd_voice::speak::{self, Due, Speaker, SpeechSettings};
 use acd_voice::text::VoiceText;
 
 use super::{Controller, Core};
@@ -24,6 +24,7 @@ impl Controller {
     /// Spec §8: alerts, voice and rate.
     pub fn set_speech(&self, settings: SpeechSettings) {
         self.core.lock().unwrap().speech = settings;
+        self.alert_tick_soon();
     }
 
     /// Test hook: a shorter cap than `speak::speech_cap`.
@@ -43,6 +44,9 @@ impl Controller {
         if let Some(seq) = s.seq {
             self.sink.speech_ended(seq);
         }
+        drop(core);
+        // A waiting alert may go now that the speaker is free.
+        self.alert_tick_soon();
     }
 
     /// The HUD's Stop button or Esc on it (`Some(seq)`: the state it
@@ -120,6 +124,54 @@ impl Controller {
         core.speaking = None;
         if let Some(speaker) = self.speaker() {
             speaker.stop();
+        }
+    }
+}
+
+impl Controller {
+    /// Runs `alert_tick` on the runtime, off any lock the caller holds.
+    pub(super) fn alert_tick_soon(&self) {
+        let me = self.me.clone();
+        self.runtime.spawn(async move {
+            if let Some(this) = me.upgrade() {
+                this.alert_tick();
+            }
+        });
+    }
+
+    /// Looks for requests to announce (plan V14). The snapshot is frozen
+    /// before the core lock is taken, as `hold` does.
+    pub(super) fn alert_tick(&self) {
+        let snapshot = self.freeze(false);
+        let mut core = self.core.lock().unwrap();
+        let speaker = self.speaker();
+        let Some(speaker) = speaker.filter(|_| core.enabled && core.speech.alerts) else {
+            core.alerts.reset();
+            return;
+        };
+        core.alerts.observe(&snapshot);
+        let busy = core.recorder.active().is_some()
+            || core.unadmitted.is_some()
+            || !core.exec.is_idle()
+            || core.speaking.is_some();
+        match core.alerts.due(&snapshot, Instant::now(), busy) {
+            Due::Speak(text) => {
+                let generation = self.start_speech(&mut core, &speaker, &text);
+                core.speaking = Some(Speaking { generation, seq: None });
+                tracing::info!(target: "acd_voice", chars = text.char_len(), "alert spoken");
+            }
+            Due::Wait(after) if !core.alert_timer => {
+                core.alert_timer = true;
+                let me = self.me.clone();
+                self.runtime.spawn(async move {
+                    tokio::time::sleep(after).await;
+                    if let Some(this) = me.upgrade() {
+                        this.core.lock().unwrap().alert_timer = false;
+                        this.alert_tick();
+                    }
+                });
+            }
+            Due::Wait(_) | Due::Nothing => {}
         }
     }
 }
