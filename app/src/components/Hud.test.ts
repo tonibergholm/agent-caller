@@ -86,7 +86,7 @@ test("a proposal replaced before the DOM flush is never acknowledged", async () 
   await tick();
   expect(api.calls.filter((c) => c[0] === "voiceShown")).toEqual([["voiceShown", 21]]);
   api.hud!({ seq: ++seq, id: 22, hud: { state: "countdown", proposal: proposal({ level: "countdown" }), proposal_id: 22, action_id: null } });
-  api.hud!({ seq: ++seq, id: null, hud: { state: "speaking", text: "Nothing needs you." } });
+  api.hud!({ seq: ++seq, id: null, hud: { state: "speaking", text: "Nothing needs you.", audio: false } });
   await tick();
   await tick();
   expect(api.calls.filter((c) => c[0] === "voiceShown")).toEqual([["voiceShown", 21]]);
@@ -96,8 +96,8 @@ test("an older state arriving late is dropped", async () => {
   const api = fakeApi();
   render(Hud, { api, view: view() });
   await tick();
-  api.hud!({ seq: 10, id: null, hud: { state: "speaking", text: "newer" } });
-  api.hud!({ seq: 9, id: null, hud: { state: "speaking", text: "older" } });
+  api.hud!({ seq: 10, id: null, hud: { state: "speaking", text: "newer", audio: false } });
+  api.hud!({ seq: 9, id: null, hud: { state: "speaking", text: "older", audio: false } });
   await tick();
   expect(screen.getByText("newer")).toBeTruthy();
   expect(screen.queryByText("older")).toBeNull();
@@ -201,7 +201,7 @@ test("Esc or Cancel while thinking cancels that utterance; Enter and digits do n
 });
 
 test("states that do not wait for input ignore keys", async () => {
-  const api = await show({ state: "speaking", text: "2 need you." });
+  const api = await show({ state: "speaking", text: "2 need you.", audio: false });
   await userEvent.keyboard("{Escape}{Enter}1");
   expect(api.calls).toEqual([]);
 });
@@ -224,7 +224,7 @@ test("outcomes and spoken text are shown", async () => {
   await show({ state: "done", proposal: null, outcome: { kind: "not_sent", reason: "answered_elsewhere" } });
   expect(screen.getByText("Answered elsewhere.")).toBeTruthy();
   cleanup();
-  await show({ state: "speaking", text: "2 need you. On minos: Claude, Fix: bash approval." });
+  await show({ state: "speaking", text: "2 need you. On minos: Claude, Fix: bash approval.", audio: false });
   expect(screen.getByText(/2 need you/)).toBeTruthy();
 });
 
@@ -297,7 +297,7 @@ test("a stale clear is ignored and the current clear hides the state", async () 
   const api = fakeApi();
   render(Hud, { api, view: view() });
   await tick();
-  api.hud!({ seq: 50, id: null, hud: { state: "speaking", text: "kept" } });
+  api.hud!({ seq: 50, id: null, hud: { state: "speaking", text: "kept", audio: false } });
   await tick();
   api.hudClear!(49);
   api.hudClear!(51);
@@ -326,7 +326,7 @@ test("a fit is sent only for the state still on screen", async () => {
   // measurement ran: the older measurement is dropped.
   api.hud!({ seq: first + 1, id: null, hud: { state: "error", refusal: "did_not_understand", transcript: "y" } });
   flushSync();
-  api.hud!({ seq: first + 2, id: null, hud: { state: "speaking", text: "z" } });
+  api.hud!({ seq: first + 2, id: null, hud: { state: "speaking", text: "z", audio: false } });
   flushSync();
   await tick();
   await tick();

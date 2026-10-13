@@ -119,8 +119,9 @@ pub enum Hud {
     Sending { proposal: ProposalView, too_late_to_cancel: bool },
     Done { proposal: Option<ProposalView>, outcome: OutcomeView },
     Error { refusal: Refusal, transcript: Option<VoiceText> },
-    /// Step 1 shows the text; TTS comes in delivery step 4.
-    Speaking { text: VoiceText },
+    /// Templated text (spec §7). `audio`: the speaker is saying it, and the
+    /// HUD fades from the end of speech, not on a timer (plan V11).
+    Speaking { text: VoiceText, audio: bool },
 }
 
 impl Hud {
@@ -134,7 +135,7 @@ impl Hud {
     /// It fades on its own: 1.5 s after a step fires or ends, or after
     /// speech. Listening does not fade. A later outcome is shown again as `Done`.
     pub fn fades(&self) -> bool {
-        matches!(self, Hud::Sending { .. } | Hud::Done { .. } | Hud::Error { .. } | Hud::Speaking { .. })
+        matches!(self, Hud::Sending { .. } | Hud::Done { .. } | Hud::Error { .. } | Hud::Speaking { audio: false, .. })
     }
 
     /// The id the HUD sends back with Esc, a click or a digit, so an input

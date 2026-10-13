@@ -93,7 +93,7 @@ export type Hud =
   | { state: "sending"; proposal: ProposalView; too_late_to_cancel: boolean }
   | { state: "done"; proposal: ProposalView | null; outcome: OutcomeView }
   | { state: "error"; refusal: Refusal; transcript: string | null }
-  | { state: "speaking"; text: string };
+  | { state: "speaking"; text: string; audio: boolean };
 
 /** `id` is the input id of the shown state (`Hud::input_id`): sent back with Esc, a click or a digit. */
 export type HudEvent = { seq: number; id: number | null; hud: Hud };
