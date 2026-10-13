@@ -15,6 +15,12 @@ tauri-build = { version = "=2.7.1", features = [] }
 # Builds and links app/src-tauri/swift (plan S1). Same version Tauri already locks.
 swift-rs = { version = "=1.0.8", features = ["build"] }
 
+[features]
+# The by-hand model contract check (plan Task 5) links the real Swift bridge
+# into the test binary, which `cargo test` runs without an rpath to the Swift
+# runtime. Off by default, so the normal test binary never loads Swift.
+model-contract = []
+
 [dependencies]
 acd-app-core = { path = "../../crates/acd-app-core" }
 acd-client = { path = "../../crates/acd-client" }
