@@ -274,18 +274,19 @@ the app then asks for Microphone, Speech Recognition and Input Monitoring
 - Say anything else in your own words, such as "tell the minos Claude to run
   the tests", "read me the build request", "what's waiting on studio" or
   "show the docs agent". An on-device Apple model (Apple Intelligence, macOS 26
-  or later) turns it into one step; nothing leaves the Mac. A step the model
-  produced is always confirmed on the HUD first, and the request, target and
-  option are checked by the app, not the model. Expect about two seconds, and
-  up to four for the first phrase after a pause. If Apple Intelligence is off
+  or later) turns it into one step; nothing leaves the Mac. Anything it asks
+  to send or to answer is always confirmed on the HUD first. Reading,
+  summaries and selecting a card run at once and change nothing. The request,
+  target and option are checked by the app, not the model. Expect about two
+  seconds, and up to four for the first phrase after a pause. If Apple Intelligence is off
   or not ready, Settings and the HUD say why and the phrases above still work.
 - Replies you ask for are spoken ("read it", "what's blocked"): the text is
   built from templates, never taken from a model. Stop it with the HUD's Stop
   button or Esc; pressing the hold key, locking the screen, turning voice off
   and quitting also stop it. In Settings you can choose the voice and the
   speed, and turn on **spoken alerts**: one short alert per new request that
-  needs you, at most one every 5 seconds, never while you are talking, and
-  nothing for requests that were already waiting.
+  needs you, at most one every 5 seconds, never while you are talking or the
+  screen is locked, and nothing for requests that were already waiting.
 - Speech is recognised on the Mac. Only English is supported. A recording
   stops at 60 seconds, and one under 0.3 seconds or without speech is
   ignored.

@@ -11,17 +11,19 @@ config and the `acd/1` protocol may change without a major version bump.
 
 - Voice, free-form commands on macOS: anything that is not a fixed phrase goes
   to Apple's on-device model, which proposes one step. The app validates it
-  against the request, agent and options on screen, and every step the model
-  produced is confirmed on the HUD before it is sent. Needs Apple
-  Intelligence; when it is off or not ready the HUD and Settings say so and
-  the fixed phrases still work. The model asks which agent only through the
-  app's own name matching: it does not return candidate agents. A 40-phrase
+  against the request, agent and options on screen. Anything it asks to send
+  or to answer is confirmed on the HUD first; reading, summaries and selecting
+  a card run at once. Needs Apple Intelligence; when it is off or not ready the
+  HUD and Settings say so and the fixed phrases still work. The model does not
+  suggest candidate agents: when a phrase is ambiguous the app asks which one
+  from its own name matching, or the model's best guess is confirmed. A 40-phrase
   typed-text check of the shipped build scored 19 of 20 on each of two sets
   (see `docs/research/2026-10-13-voice-model-quality.md`).
 - Voice, spoken output on macOS: replies ("read it", summaries) are spoken from
   templates, with a Stop button and Esc, and the voice and speed are chosen in
-  Settings. Optional spoken alerts for new requests (off by default). Speech
-  stops when you press the hold key, lock the screen, turn voice off or quit.
+  Settings. Optional spoken alerts for new requests (off by default; none while
+  you talk or the screen is locked). Speech stops when you press the hold key,
+  lock the screen, turn voice off or quit.
 
 ### Changed
 
