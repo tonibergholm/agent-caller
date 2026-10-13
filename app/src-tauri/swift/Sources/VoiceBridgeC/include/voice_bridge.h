@@ -30,6 +30,9 @@
 #define VB_ERR_INPUT_MONITORING_DENIED 8
 #define VB_ERR_TAP_FAILED 9
 #define VB_ERR_NOT_INITIALIZED 10
+#define VB_ERR_MODEL_UNAVAILABLE 11 /* vb_event.value holds the VB_MA_* reason */
+#define VB_ERR_MODEL_TIMEOUT 12
+#define VB_ERR_MODEL_FAILED 13      /* any other model error; never its text (spec §6.3) */
 
 /* vb_event.kind, and what each kind sets. */
 #define VB_EV_PARTIAL 1u      /* generation; text: the live transcript so far */
@@ -45,6 +48,8 @@
 #define VB_EV_PROBE 11u       /* text: a JSON report with no transcript (Task 1A) */
 #define VB_EV_CAPTURE 12u     /* generation; value: 1 the microphone started, 0 it stopped (S18) */
 #define VB_EV_OVERFLOW 13u    /* events were dropped since the last delivery (S5) */
+#define VB_EV_MODEL 14u       /* generation: the request id; code: VB_OK or VB_ERR_MODEL_*; value: VB_MA_* when unavailable; text: the plan JSON, VB_OK only */
+#define VB_EV_MODEL_CAPS 15u  /* code: VB_MA_*; sent only when it changed (plan V16) */
 
 /* Permissions (vb_event.code for VB_EV_PERMISSION). */
 #define VB_PERM_MICROPHONE 1u
@@ -64,6 +69,15 @@
 #define VB_UA_TRANSCRIBER_UNSUPPORTED 3u
 #define VB_UA_LOCALE_UNSUPPORTED 4u
 #define VB_UA_ASSETS_MISSING 5u
+
+/* Intent model availability (vb_event.code for VB_EV_MODEL_CAPS). */
+#define VB_MA_AVAILABLE 0u
+#define VB_MA_OS_TOO_OLD 1u
+#define VB_MA_SDK_TOO_OLD 2u
+#define VB_MA_DEVICE_NOT_ELIGIBLE 3u
+#define VB_MA_INTELLIGENCE_OFF 4u
+#define VB_MA_NOT_READY 5u
+#define VB_MA_UNKNOWN 6u
 
 /* System events (vb_event.code for VB_EV_SYSTEM). */
 #define VB_SYS_SCREEN_LOCKED 1u
@@ -133,5 +147,41 @@ void vb_session_cancel(uint64_t generation);
  * VB_EV_TAP_DISABLED carries it in vb_event.generation (S26). */
 int32_t vb_tap_start(uint16_t keycode, uint64_t down_mask, uint64_t *out_tap);
 void vb_tap_stop(void);
+
+/*
+ * Intent model (plan V1 to V6). Ids are the caller's, non-zero, and separate
+ * from session generations. Text arguments are borrowed UTF-8, not
+ * NUL-terminated; Swift copies them before returning. Every function returns
+ * at once.
+ */
+
+/* Plans one step: `instructions` become the session's instructions, `input`
+ * its prompt. A fresh model session per call. VB_OK, VB_ERR_NOT_INITIALIZED,
+ * or VB_ERR_FAILED (id 0, an id still in flight, or text that is not UTF-8).
+ * Later one VB_EV_MODEL for `id`, unless it was cancelled or an overflow
+ * (VB_EV_OVERFLOW) dropped it. Swift tries to give up on its own
+ * timeout_ms + 1000 ms after the call, but a model that ignores cancellation
+ * keeps the call running: Rust's own timeout is the real bound (plan V5). */
+int32_t vb_model_plan(uint64_t id, const uint8_t *instructions, size_t instructions_len,
+                      const uint8_t *input, size_t input_len, uint32_t timeout_ms);
+
+/* Cancels request `id`; no new VB_EV_MODEL is produced. One already queued
+ * may still be delivered after this returns, so the caller drops replies for
+ * ids it no longer waits for. Unknown ids are ignored. */
+void vb_model_cancel(uint64_t id);
+
+/* Voice off, quit: cancels every request and drops the prewarmed session.
+ * Lock and sleep do the same inside Swift. */
+void vb_model_cancel_all(void);
+
+/* Prepares one unused session with these instructions, if the model is
+ * available. The next vb_model_plan with the same instructions uses it. */
+void vb_model_prewarm(const uint8_t *instructions, size_t instructions_len);
+
+/* Reads availability; VB_EV_MODEL_CAPS follows if it changed, or always
+ * when `force` is non-zero (Rust forces it after an overflow, which may have
+ * dropped the last report). Settings refreshes never force, so they cannot
+ * loop (plan V16). */
+void vb_model_query(uint32_t force);
 
 #endif
