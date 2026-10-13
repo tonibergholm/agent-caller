@@ -27,17 +27,38 @@ final class PlanContractTests: XCTestCase {
     }
 
     #if canImport(FoundationModels)
-    func testTheGuidedTypeHasTheContractFieldsAndSteps() throws {
+    /// Task 5b: one guided case per step, each writing exactly the JSON in the
+    /// fixture, which Rust checks against its schema and decoder.
+    func testEveryGuidedCaseWritesTheWireJsonInTheFixture() throws {
         guard #available(macOS 26.0, *) else { throw XCTSkip("needs macOS 26") }
-        let guided = GuidedPlan(step: "answer_text", agent: "a2", request: "r1", option: "3",
-                                text: "run the tests", machine: "minos", candidates: ["a1", "a2"])
-        XCTAssertEqual(guided.wire, full)
+        let expected = try JSONDecoder().decode([String].self, from: Data(try fixture("plan-cases.json").utf8))
+        let cases: [GuidedStep] = [
+            .answer(.init(request: "r1", option: "2")),
+            .answer_text(.init(request: "r1", text: "use the blue one")),
+            .send(.init(agent: "a2", text: "run the tests")),
+            .read(.init(request: "r1")),
+            .summarize(.init(machine: "minos")),
+            .summarize_all,
+            .select(.init(agent: "a2")),
+            .cancel,
+            .none,
+        ]
+        XCTAssertEqual(cases.map { GuidedPlan(want: "w", step: $0).wire.encoded() }, expected)
+    }
+
+    func testTheGuidedSchemaNamesEveryFieldAndCase() throws {
+        guard #available(macOS 26.0, *) else { throw XCTSkip("needs macOS 26") }
         let schema = String(decoding: try JSONEncoder().encode(GuidedPlan.generationSchema), as: UTF8.self)
-        // Inspect `schema` once when this first runs; if the field names are not
-        // quoted keys in it, assert on the shape it has and note it in the PR.
-        for name in ["step", "agent", "request", "option", "text", "machine", "candidates"] + PlanJSON.steps {
+        for name in ["want", "step", "agent", "request", "option", "text", "machine",
+                     "answer", "answer_text", "send", "read", "summarize", "summarize_all", "select", "cancel", "none"] {
             XCTAssertTrue(schema.contains("\"\(name)\""), name)
         }
+    }
+
+    /// The restatement is the model's own scratch space: it never reaches Rust.
+    func testTheRestatementIsNotPartOfTheWireJson() throws {
+        guard #available(macOS 26.0, *) else { throw XCTSkip("needs macOS 26") }
+        XCTAssertFalse(GuidedPlan(want: "SECRET-WORDS", step: .none).wire.encoded().contains("SECRET"))
     }
     #endif
 }

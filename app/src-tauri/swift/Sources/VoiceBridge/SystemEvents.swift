@@ -20,6 +20,8 @@ final class SystemEvents {
             Sessions.shared.cancelAll()
             // Spec §6.3: model work is discarded on lock and sleep too.
             ModelRequests.shared.cancelAll()
+            // Spec §6.2: locking the screen or sleep stops speech too.
+            Speaker.shared.stop()
         }
         let workspace = NSWorkspace.shared.notificationCenter
         tokens.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
