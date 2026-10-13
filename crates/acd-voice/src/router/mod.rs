@@ -137,7 +137,7 @@ pub async fn route(
     let (prompt, ids) = prompt::build(snapshot, transcript, opts.prompt);
     match model.plan(&prompt).await {
         Ok(raw) => validate::validate(snapshot, &ids, transcript, &raw),
-        Err(ModelError::Unavailable) => Routed::Refused(Refusal::ModelUnavailable),
+        Err(ModelError::Unavailable(why)) => Routed::Refused(Refusal::model_unavailable(why)),
         Err(ModelError::Timeout | ModelError::Failed) => Routed::Refused(Refusal::ModelFailed),
     }
 }

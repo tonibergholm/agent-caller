@@ -35,6 +35,12 @@ config and the `acd/1` protocol may change without a major version bump.
   Denied. A grant given to another build of the app can stay in the way
   even though System Settings lists the app as on.
 
+### Fixed
+
+- `acd status | head` no longer panics when the reader stops early.
+- A clean stop no longer logs `TLS listener task ended` as an error, and a
+  failure that stops `acd run` is printed before the shutdown wait.
+
 ## [0.8.0] - 2026-10-13
 
 First public pre-release. The macOS binaries are ad-hoc signed and the Mac

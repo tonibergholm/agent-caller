@@ -385,3 +385,12 @@ test("permission errors open their System Settings pane; others offer none", asy
   expect(screen.getByText("Recording stopped after 60 seconds. Nothing was sent.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Open System Settings" })).toBeNull();
 });
+
+test("an unavailable model says why", async () => {
+  await show({ state: "error", refusal: "model_off", transcript: null });
+  expect(screen.getByText("Apple Intelligence is off. Simple commands still work.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Open System Settings" })).toBeNull();
+  cleanup();
+  await show({ state: "error", refusal: "model_not_ready", transcript: null });
+  expect(screen.getByText("The on-device model is not ready yet. Simple commands still work.")).toBeTruthy();
+});

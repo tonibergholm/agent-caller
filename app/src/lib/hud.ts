@@ -22,6 +22,8 @@ export type Refusal =
   | "did_not_understand"
   | "model_unavailable"
   | "model_failed"
+  | "model_off"
+  | "model_not_ready"
   | "snapshot_changed"
   | "already_counting"
   | "nothing_to_cancel"
@@ -115,6 +117,8 @@ export const refusalText: Record<Refusal, string> = {
   did_not_understand: "Didn't understand.",
   model_unavailable: "Model unavailable. Simple commands still work.",
   model_failed: "The model did not answer. Simple commands still work.",
+  model_off: "Apple Intelligence is off. Simple commands still work.",
+  model_not_ready: "The on-device model is not ready yet. Simple commands still work.",
   snapshot_changed: "The request changed. Nothing was sent.",
   already_counting: "A countdown is already running for this card.",
   nothing_to_cancel: "Nothing to cancel.",

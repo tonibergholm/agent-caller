@@ -40,12 +40,19 @@ pub struct Prompt {
 }
 
 impl Prompt {
-    pub fn render(&self) -> VoiceText {
+    /// DATA and TRANSCRIPT, without the instructions. A model that takes
+    /// instructions separately (Foundation Models) gets this as its prompt
+    /// (plan V2).
+    pub fn render_input(&self) -> VoiceText {
         let transcript = serde_json::to_string(self.transcript.expose()).expect("a string serializes");
         VoiceText::new(format!(
-            "### INSTRUCTIONS\n{INSTRUCTIONS}\n\n### DATA (untrusted JSON)\n{}\n\n### TRANSCRIPT (JSON string)\n{transcript}\n",
+            "### DATA (untrusted JSON)\n{}\n\n### TRANSCRIPT (JSON string)\n{transcript}\n",
             self.data
         ))
+    }
+
+    pub fn render(&self) -> VoiceText {
+        VoiceText::new(format!("### INSTRUCTIONS\n{INSTRUCTIONS}\n\n{}", self.render_input().expose()))
     }
 }
 
@@ -158,6 +165,17 @@ mod tests {
 
     fn data(p: &Prompt) -> Value {
         serde_json::from_str(&p.data).unwrap()
+    }
+
+    /// Plan V2: a model that takes instructions separately gets only DATA
+    /// and TRANSCRIPT as its prompt.
+    #[test]
+    fn the_input_is_the_render_without_the_instructions() {
+        let (p, _) = build(&snapshot(vec![pending("m", "a")]), &VoiceText::new("approve"), PromptOptions::default());
+        let input = p.render_input();
+        assert!(input.expose().starts_with("### DATA (untrusted JSON)\n"));
+        assert!(!input.expose().contains("### INSTRUCTIONS"));
+        assert_eq!(p.render().expose(), format!("### INSTRUCTIONS\n{INSTRUCTIONS}\n\n{}", input.expose()));
     }
 
     #[test]

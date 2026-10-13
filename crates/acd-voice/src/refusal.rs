@@ -34,6 +34,10 @@ pub enum Refusal {
     /// The plan is malformed, invalid or uses unknown ids.
     DidNotUnderstand,
     ModelUnavailable,
+    /// Apple Intelligence is off in System Settings (plan V7).
+    ModelOff,
+    /// The on-device model is not ready yet (plan V7).
+    ModelNotReady,
     /// Timeout or error; the provider's text is never shown.
     ModelFailed,
     /// The card, agent, request or connection changed before enqueue.
@@ -68,6 +72,18 @@ pub enum Refusal {
     RecordingTooLong,
     /// The hold key stopped working: the system disabled the event tap.
     HoldKeyOff,
+}
+
+impl Refusal {
+    /// The HUD's refusal for an unavailable model (spec §9, plan V7).
+    pub fn model_unavailable(why: crate::router::model::ModelUnavailable) -> Self {
+        use crate::router::model::ModelUnavailable as U;
+        match why {
+            U::IntelligenceOff => Refusal::ModelOff,
+            U::NotReady => Refusal::ModelNotReady,
+            U::NotMac | U::OsTooOld | U::SdkTooOld | U::DeviceNotEligible | U::Unknown => Refusal::ModelUnavailable,
+        }
+    }
 }
 
 impl From<crate::listen::ListenError> for Refusal {

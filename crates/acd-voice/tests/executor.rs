@@ -852,6 +852,9 @@ fn listening_is_part_of_the_frontend_contract() {
         (Refusal::SpeechAssetsMissing, "speech_assets_missing"),
         (Refusal::RecordingTooLong, "recording_too_long"),
         (Refusal::HoldKeyOff, "hold_key_off"),
+        // The HUD's text map in app/src/lib/hud.ts is keyed by these names.
+        (Refusal::ModelOff, "model_off"),
+        (Refusal::ModelNotReady, "model_not_ready"),
     ] {
         assert_eq!(serde_json::to_value(r).unwrap(), s);
     }

@@ -351,6 +351,32 @@ fn stop_server_for_tests(name: &str) -> bool {
     }
 }
 
+/// A listener that ends while the daemon runs is a failure; one that ends
+/// during a clean stop is the teardown.
+fn listener_end_is_failure(stopping: &std::sync::atomic::AtomicBool) -> bool {
+    !stopping.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The "a stop has begun" flag. It is also set when `run` returns early with
+/// an error, because the listener tasks are torn down on that path too.
+#[derive(Default)]
+struct StopFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl StopFlag {
+    fn flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.0.clone()
+    }
+    fn set(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Drop for StopFlag {
+    fn drop(&mut self) {
+        self.set();
+    }
+}
+
 async fn released(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.wait_for(|stop| *stop).await;
 }
@@ -633,9 +659,14 @@ pub async fn run(dir: &Path) -> Result<()> {
             retire_core.set_source_status(Source::Hooks, status);
         }
     });
+    // Set once a stop has begun, or `run` returns on any path, so the teardown
+    // of a listener is not logged as a failure.
+    let stop_guard = StopFlag::default();
+    let stopping = stop_guard.flag();
     for (addr, listener) in listeners {
         tracing::info!(%addr, "listening");
         let app = app.clone();
+        let stopping = stopping.clone();
         let mut tls_listener = core_tls::TlsListener::new(
             listener,
             tls_rx.clone(),
@@ -655,7 +686,11 @@ pub async fn run(dir: &Path) -> Result<()> {
                         tracing::error!(%addr, error = %e, "server stopped");
                     }
                 }
-                () = ended => tracing::error!(%addr, "TLS listener task ended"),
+                () = ended => {
+                    if listener_end_is_failure(&stopping) {
+                        tracing::error!(%addr, "TLS listener task ended");
+                    }
+                }
             }
             format!("listener {addr}")
         });
@@ -754,6 +789,7 @@ pub async fn run(dir: &Path) -> Result<()> {
             Some(EXIT_SERVER_STOPPED)
         }
     };
+    stop_guard.set();
     tls_watch.abort();
     // Fail open: every held hook request gets an empty reply, and the hook
     // servers finish those replies and close before acd exits.
@@ -779,6 +815,23 @@ pub async fn run(dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_listener_ending_is_a_failure_only_while_the_daemon_runs() {
+        let guard = StopFlag::default();
+        let flag = guard.flag();
+        assert!(listener_end_is_failure(&flag));
+        guard.set();
+        assert!(!listener_end_is_failure(&flag));
+    }
+
+    #[test]
+    fn leaving_run_on_an_error_path_counts_as_a_stop() {
+        let guard = StopFlag::default();
+        let flag = guard.flag();
+        drop(guard);
+        assert!(!listener_end_is_failure(&flag));
+    }
 
     #[test]
     fn claude_roots_are_the_recorded_roots_then_the_default() {
