@@ -215,3 +215,34 @@ async fn http_answers(sock: &std::path::Path) -> Value {
     let text = String::from_utf8_lossy(&bytes).into_owned();
     serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap()
 }
+
+#[tokio::test]
+async fn an_expired_answer_names_the_producer_in_the_notice() {
+    let mut rig = rig().await;
+    put(
+        &rig.sock,
+        json!({"lease_ms": 900000, "items": [item("k1")]}),
+    )
+    .await;
+    let request = rig.cards()[0].agent.pending.clone().unwrap();
+    rig.core
+        .handle(
+            "client",
+            ClientMessage::RequestAnswer {
+                id: "c1".into(),
+                request_id: request.id.clone(),
+                revision: Some(request.revision),
+                option_id: Some("abandon".into()),
+                text: None,
+            },
+        )
+        .await;
+    rig.clock.fetch_add(180_000, Ordering::SeqCst);
+    rig.adapter.sweep();
+    let cards = rig.cards();
+    assert_eq!(cards.len(), 1, "the card lingers for the notice");
+    assert_eq!(
+        cards[0].notice.as_ref().map(|n| n.text.as_str()),
+        Some("No outcome reported by autopilot before the answer expired; check it there.")
+    );
+}

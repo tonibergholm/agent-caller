@@ -168,13 +168,21 @@ impl Producer {
             .map(|q| (q.key.clone(), q.request_id.clone()))
             .collect();
         for (key, request_id) in expired {
-            if let Some(agent_key) = self.tracked.get(&key).map(|t| t.agent_key.clone()) {
-                self.linger(&agent_key, now);
+            let agent_key = self.tracked.get(&key).map(|t| t.agent_key.clone());
+            if let Some(agent_key) = &agent_key {
+                self.linger(agent_key, now);
             }
             if txn.request(&request_id).is_some() {
-                txn.apply(Observation::RequestEndedById {
+                let who = agent_key
+                    .and_then(|a| txn.agent(&agent_id(pid, &a)).map(|a| a.title.clone()))
+                    .unwrap_or_else(|| pid.to_owned());
+                txn.apply(Observation::RequestEndedWithReason {
                     request_id,
                     by: ResolvedBy::Uncertain,
+                    reason: None,
+                    message: Some(format!(
+                        "No outcome reported by {who} before the answer expired; check it there."
+                    )),
                 });
             }
             tracing::info!(producer = pid, key = %key, "external answer expired; request uncertain");
@@ -315,16 +323,24 @@ impl State {
                 }
             }
         }
+        // The cap holds even when every idle producer still has a lingering
+        // card: the oldest goes, cards included.
         let dormant = self.producers.values().filter(|p| !p.live).count();
         for _ in MAX_DORMANT..dormant {
             let oldest = self
                 .producers
                 .iter()
-                .filter(|(_, p)| !p.live && p.lingering.is_empty())
+                .filter(|(_, p)| !p.live)
                 .min_by_key(|(_, p)| p.last_active_ms)
                 .map(|(pid, _)| pid.clone());
-            if let Some(pid) = oldest {
-                self.producers.remove(&pid);
+            if let Some(pid) = oldest
+                && let Some(p) = self.producers.remove(&pid)
+            {
+                for agent_key in p.agents {
+                    txn.apply(Observation::AgentGone {
+                        agent_id: agent_id(&pid, &agent_key),
+                    });
+                }
             }
         }
     }

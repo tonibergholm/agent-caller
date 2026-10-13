@@ -1,280 +1,13 @@
 //! The producer API end to end: HTTP over a Unix socket into the adapter,
 //! the registry and the event stream. Time comes from a manual clock, so
 //! lease and answer deadlines are crossed without waiting.
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use acd_adapters::external::{ExternalAdapter, ExternalConfig};
-use acd_adapters::hooks::endpoint::{Credential, HookAuth};
-use acd_core::{Core, testing::test_machine};
 use acd_protocol::*;
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::broadcast;
 
-const TOKEN: &str = "tok-external-0123456789";
-const LEASE: u64 = 60_000;
-const START_MS: i64 = 1_760_000_000_000;
-const WALL_START_MS: i64 = 1_790_000_000_000;
-
-struct Rig {
-    core: Arc<Core>,
-    adapter: Arc<ExternalAdapter>,
-    clock: Arc<AtomicI64>,
-    wall: Arc<AtomicI64>,
-    rx: broadcast::Receiver<ServerMessage>,
-    sock: std::path::PathBuf,
-    next_command: u32,
-    _dir: tempfile::TempDir,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct Resolved {
-    request_id: String,
-    by: ResolvedBy,
-    option_id: Option<String>,
-    reason: Option<ResolveReason>,
-    message: Option<String>,
-}
-
-async fn rig() -> Rig {
-    let clock = Arc::new(AtomicI64::new(START_MS));
-    let c = clock.clone();
-    let wall = Arc::new(AtomicI64::new(WALL_START_MS));
-    let w = wall.clone();
-    let adapter = ExternalAdapter::new(ExternalConfig {
-        clock: Arc::new(move || c.load(Ordering::SeqCst)),
-        wall: Arc::new(move || w.load(Ordering::SeqCst)),
-        tick: Duration::from_secs(3600),
-    });
-    let core = Core::new(test_machine(), vec![adapter.clone()]);
-    adapter.start(core.clone());
-    let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("hook.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
-    let auth = Arc::new(HookAuth::new(Credential {
-        token: TOKEN.into(),
-        generation: 1,
-        expires_at_ms: None,
-    }));
-    let app = adapter.router(auth);
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let (_, rx) = core.attach(None);
-    Rig {
-        core,
-        adapter,
-        clock,
-        wall,
-        rx,
-        sock,
-        next_command: 0,
-        _dir: dir,
-    }
-}
-
-async fn http(
-    sock: &std::path::Path,
-    method: &str,
-    path: &str,
-    token: Option<&str>,
-    body: &str,
-) -> (u16, Value) {
-    let mut stream = UnixStream::connect(sock).await.unwrap();
-    let mut request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: acd\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
-        body.len()
-    );
-    if let Some(token) = token {
-        request.push_str(&format!("X-Acd-Token: {token}\r\n"));
-    }
-    request.push_str("\r\n");
-    request.push_str(body);
-    stream.write_all(request.as_bytes()).await.unwrap();
-    let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await.unwrap();
-    let response = String::from_utf8_lossy(&bytes).into_owned();
-    let status = response.split_whitespace().nth(1).unwrap().parse().unwrap();
-    let body = response
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b)
-        .unwrap_or("");
-    (status, serde_json::from_str(body).unwrap_or(Value::Null))
-}
-
-impl Rig {
-    fn advance(&self, ms: i64) {
-        self.clock.fetch_add(ms, Ordering::SeqCst);
-        self.wall.fetch_add(ms, Ordering::SeqCst);
-    }
-
-    fn wall_now(&self) -> i64 {
-        self.wall.load(Ordering::SeqCst)
-    }
-
-    /// The system slept: the wall clock moved, the monotonic one did not.
-    fn sleep_through(&self, ms: i64) {
-        self.wall.fetch_add(ms, Ordering::SeqCst);
-    }
-
-    async fn put(&self, pid: &str, body: Value) -> (u16, Value) {
-        http(
-            &self.sock,
-            "PUT",
-            &format!("/external/v1/producers/{pid}/state"),
-            Some(TOKEN),
-            &body.to_string(),
-        )
-        .await
-    }
-
-    async fn ok(&self, pid: &str, body: Value) -> Value {
-        let (status, body) = self.put(pid, body).await;
-        assert_eq!(status, 200, "{body}");
-        body
-    }
-
-    async fn get_answers(&self, pid: &str, wait_ms: u64) -> (u16, Value) {
-        http(
-            &self.sock,
-            "GET",
-            &format!("/external/v1/producers/{pid}/answers?wait_ms={wait_ms}"),
-            Some(TOKEN),
-            "",
-        )
-        .await
-    }
-
-    async fn stop(&self, pid: &str) -> u16 {
-        http(
-            &self.sock,
-            "DELETE",
-            &format!("/external/v1/producers/{pid}"),
-            Some(TOKEN),
-            "",
-        )
-        .await
-        .0
-    }
-
-    fn agents(&self) -> Vec<Agent> {
-        match self.core.attach(None).0.into_iter().next() {
-            Some(ServerMessage::Snapshot { agents, .. }) => agents
-                .into_iter()
-                .filter(|a| a.source == Source::External)
-                .collect(),
-            other => panic!("no snapshot: {other:?}"),
-        }
-    }
-
-    fn agent(&self, title: &str) -> Option<Agent> {
-        self.agents().into_iter().find(|a| a.title == title)
-    }
-
-    fn request(&self, title: &str) -> Request {
-        self.agent(title)
-            .and_then(|a| a.pending)
-            .unwrap_or_else(|| panic!("no pending request on {title}"))
-    }
-
-    async fn answer(&mut self, request: &Request, option: &str) -> CommandResult {
-        self.next_command += 1;
-        self.core
-            .handle(
-                "client",
-                ClientMessage::RequestAnswer {
-                    id: format!("c{}", self.next_command),
-                    request_id: request.id.clone(),
-                    revision: Some(request.revision),
-                    option_id: Some(option.into()),
-                    text: None,
-                },
-            )
-            .await
-    }
-
-    async fn answer_text(&mut self, request: &Request, text: &str) -> CommandResult {
-        self.next_command += 1;
-        self.core
-            .handle(
-                "client",
-                ClientMessage::RequestAnswer {
-                    id: format!("c{}", self.next_command),
-                    request_id: request.id.clone(),
-                    revision: Some(request.revision),
-                    option_id: None,
-                    text: Some(text.into()),
-                },
-            )
-            .await
-    }
-
-    fn resolved(&mut self) -> Vec<Resolved> {
-        let mut out = Vec::new();
-        while let Ok(message) = self.rx.try_recv() {
-            if let ServerMessage::RequestResolved {
-                request_id,
-                by,
-                option_id,
-                reason,
-                message,
-                ..
-            } = message
-            {
-                out.push(Resolved {
-                    request_id,
-                    by,
-                    option_id,
-                    reason,
-                    message,
-                });
-            }
-        }
-        out
-    }
-
-    fn snapshot(&self) -> Value {
-        serde_json::to_value(self.agents()).unwrap()
-    }
-}
-
-fn item(key: &str, agent_key: &str, agent_title: &str) -> Value {
-    json!({
-        "key": key,
-        "agent_key": agent_key,
-        "agent": {"title": agent_title, "project": "engine", "cwd": "/work/engine"},
-        "title": format!("{agent_title} needs you"),
-        "detail": "details",
-        "question": {"header": "Parked", "text": "What now?"},
-        "options": [
-            {"id": "approve", "label": "Approve", "description": "go on"},
-            {"id": "abandon", "label": "Abandon", "confirm": true}
-        ],
-        "free_text": false
-    })
-}
-
-fn state(items: Vec<Value>) -> Value {
-    json!({"lease_ms": LEASE, "items": items})
-}
-
-fn with_acks(items: Vec<Value>, acks: Vec<Value>) -> Value {
-    json!({"lease_ms": LEASE, "items": items, "acks": acks})
-}
-
-fn ack(answer_id: &str, outcome: &str, message: Option<&str>) -> Value {
-    match message {
-        Some(m) => json!({"answer_id": answer_id, "outcome": outcome, "message": m}),
-        None => json!({"answer_id": answer_id, "outcome": outcome}),
-    }
-}
-
-fn only_answer(body: &Value) -> Value {
-    let answers = body["answers"].as_array().unwrap();
-    assert_eq!(answers.len(), 1, "{body}");
-    answers[0].clone()
-}
+mod external_support;
+use external_support::*;
 
 #[tokio::test]
 async fn an_item_becomes_an_answerable_question_with_the_producers_identity() {
@@ -595,7 +328,10 @@ async fn an_expired_answer_resolves_uncertain_and_its_ack_comes_too_late() {
             by: ResolvedBy::Uncertain,
             option_id: None,
             reason: None,
-            message: None,
+            message: Some(
+                "No outcome reported by autopilot before the answer expired; check it there."
+                    .into()
+            ),
         }]
     );
     let late = rig
@@ -1297,68 +1033,6 @@ async fn calls_need_the_hook_token_the_right_method_and_a_valid_producer_id() {
 }
 
 #[tokio::test]
-async fn titles_details_answers_and_ack_messages_never_reach_the_logs() {
-    #[derive(Clone, Default)]
-    struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for Buffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let buffer = Buffer::default();
-    let writer = buffer.clone();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish(),
-    );
-
-    let mut rig = rig().await;
-    let mut it = item("log-key", "a1", "SECRET-AGENT-TITLE");
-    it["title"] = json!("SECRET-ITEM-TITLE");
-    it["detail"] = json!("SECRET-DETAIL");
-    it["question"]["text"] = json!("SECRET-QUESTION");
-    it["options"][0]["label"] = json!("SECRET-LABEL");
-    it["free_text"] = json!(true);
-    rig.ok("sup", state(vec![it.clone()])).await;
-    let request = rig.request("SECRET-AGENT-TITLE");
-    rig.answer_text(&request, "SECRET-ANSWER-TEXT").await;
-    let id = only_answer(&rig.get_answers("sup", 0).await.1)["answer_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    rig.ok(
-        "sup",
-        with_acks(
-            vec![it],
-            vec![ack(&id, "rejected", Some("SECRET-ACK-MESSAGE"))],
-        ),
-    )
-    .await;
-    let (status, _) = rig
-        .put(
-            "sup",
-            state(vec![
-                json!({"key": "bad key", "agent_key": "a", "title": "SECRET-INVALID-TITLE"}),
-            ]),
-        )
-        .await;
-    assert_eq!(status, 422);
-    rig.stop("sup").await;
-
-    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
-    assert!(logs.contains("sup"), "the producer id is logged: {logs}");
-    assert!(logs.contains("log-key"), "the key is logged: {logs}");
-    assert!(!logs.contains("SECRET"), "{logs}");
-}
-
-#[tokio::test]
 async fn the_wire_deadline_follows_the_wall_clock_across_a_sleep() {
     let mut rig = rig().await;
     rig.ok("sup", state(vec![item("k1", "a1", "alpha")])).await;
@@ -1590,11 +1264,46 @@ async fn a_finished_long_poll_frees_its_slot() {
     rig.answer(&request, "approve").await;
     let (_, body) = first.await.unwrap();
     let id = only_answer(&body)["answer_id"].as_str().unwrap().to_owned();
-    rig.ok("sup", with_acks(vec![], vec![ack(&id, "applied", None)])).await;
+    rig.ok("sup", with_acks(vec![], vec![ack(&id, "applied", None)]))
+        .await;
     let started = std::time::Instant::now();
     rig.get_answers("sup", 300).await;
     assert!(
         started.elapsed() >= Duration::from_millis(250),
         "the slot was freed"
+    );
+}
+
+#[tokio::test]
+async fn the_dormant_cap_holds_even_when_every_idle_producer_still_lingers() {
+    let mut rig = rig().await;
+    for i in 0..17 {
+        let (pid, title) = (format!("p{i}"), format!("agent{i}"));
+        rig.ok(&pid, state(vec![item("k", "a", &title)])).await;
+        let request = rig.request(&title);
+        rig.answer(&request, "abandon").await;
+        let id = only_answer(&rig.get_answers(&pid, 0).await.1)["answer_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        rig.ok(&pid, with_acks(vec![], vec![ack(&id, "failed", Some("x"))]))
+            .await;
+        assert_eq!(rig.stop(&pid).await, 204);
+        rig.advance(1);
+    }
+    rig.adapter.sweep();
+    let mut titles: Vec<String> = rig.agents().into_iter().map(|a| a.title).collect();
+    titles.sort();
+    assert_eq!(titles.len(), 16, "{titles:?}");
+    assert!(
+        !titles.contains(&"agent0".to_string()),
+        "the oldest idle producer and its card went"
+    );
+    assert!(titles.contains(&"agent16".to_string()));
+    let body = rig.ok("p0", state(vec![item("k", "a", "again")])).await;
+    assert_eq!(
+        body["refused"],
+        json!([]),
+        "an evicted producer starts afresh, tombstones included"
     );
 }

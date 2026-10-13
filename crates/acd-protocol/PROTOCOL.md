@@ -502,7 +502,9 @@ card's meaning, so a new occurrence is a new key. Tombstones live in
 memory, the most recent 4096 per producer, and are lost on a daemon
 restart; the producer's own record of resolved occurrences is the authority
 and it never lists a key it has recorded as resolved. A producer that lost
-its lease keeps its tombstones; at most 16 such producers are remembered.
+its lease keeps its tombstones; at most 16 such producers are remembered; past that the longest idle one is
+forgotten, with any card it still kept for a notice. An answer that expires
+without an ack resolves `uncertain` with a `message` naming the agent.
 
 **`PUT /external/v1/producers/{pid}/state`** is the heartbeat, upsert, ack
 and fetch in one call.
