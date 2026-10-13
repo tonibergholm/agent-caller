@@ -270,8 +270,23 @@ the app then asks for Microphone, Speech Recognition and Input Monitoring
   focus; otherwise just release the key (a very short recording is
   ignored).
 - Say "approve", "deny", "yes always", "option 2", "cancel", "next" or
-  "previous". There is no intent model yet (a later step), so any other
-  phrasing shows "Model unavailable".
+  "previous": these work without a model.
+- Say anything else in your own words, such as "tell the minos Claude to run
+  the tests", "read me the build request", "what's waiting on studio" or
+  "show the docs agent". An on-device Apple model (Apple Intelligence, macOS 26
+  or later) turns it into one step; nothing leaves the Mac. Anything it asks
+  to send or to answer is always confirmed on the HUD first. Reading,
+  summaries and selecting a card run at once and change nothing. The request,
+  target and option are checked by the app, not the model. Expect about two
+  seconds, and up to four for the first phrase after a pause. If Apple Intelligence is off
+  or not ready, Settings and the HUD say why and the phrases above still work.
+- Replies you ask for are spoken ("read it", "what's blocked"): the text is
+  built from templates, never taken from a model. Stop it with the HUD's Stop
+  button or Esc; pressing the hold key, locking the screen, turning voice off
+  and quitting also stop it. In Settings you can choose the voice and the
+  speed, and turn on **spoken alerts**: one short alert per new request that
+  needs you, at most one every 5 seconds, never while you are talking or the
+  screen is locked, and nothing for requests that were already waiting.
 - Speech is recognised on the Mac. Only English is supported. A recording
   stops at 60 seconds, and one under 0.3 seconds or without speech is
   ignored.
@@ -390,7 +405,7 @@ it, and the workspace is not run through `cargo fmt` yet.
 
 ## Not in v1
 
-Voice on Linux and Windows, spoken replies, a phone client and push
+Voice on Linux and Windows, a phone client and push
 notifications, a self-hosted relay, starting new agents, transcript
 browsing, multi-select answers, and a Windows desktop client. The protocol advertises
 `capabilities` so these can arrive without breaking clients.
