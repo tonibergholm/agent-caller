@@ -208,7 +208,7 @@ final class Session: @unchecked Sendable {
 /// never held while calling into a session. Lock order: `transition`, then
 /// a session's lock, then `lock` or the bridge's lock.
 final class Sessions: @unchecked Sendable {
-    static let shared = Sessions(bridge: .shared, admission: .shared, make: Sessions.live)
+    static let shared = Sessions(bridge: .shared, admission: .shared, make: Sessions.live, silence: { Speaker.shared.silenceForCapture() })
 
     private let transition = NSLock()
     private let lock = NSLock()
@@ -216,13 +216,16 @@ final class Sessions: @unchecked Sendable {
     private let bridge: Bridge
     private let admission: MicAdmission
     private let make: (UInt64) -> Session?
+    /// Stops the app's own speech before a microphone opens (plan V12, V19).
+    private let silence: () -> Void
     /// Test hook: called when a session's work ended.
     var onDone: ((UInt64) -> Void)?
 
-    init(bridge: Bridge, admission: MicAdmission, make: @escaping (UInt64) -> Session?) {
+    init(bridge: Bridge, admission: MicAdmission, make: @escaping (UInt64) -> Session?, silence: @escaping () -> Void = {}) {
         self.bridge = bridge
         self.admission = admission
         self.make = make
+        self.silence = silence
     }
 
     var count: Int {
@@ -262,6 +265,8 @@ final class Sessions: @unchecked Sendable {
         startsWaiting -= 1
         waitingLock.unlock()
         defer { transition.unlock() }
+        // Review Focus 3: the app's voice stops before any microphone opens.
+        silence()
         guard admission.claimForSessions() else { return VB_ERR_BUSY }
         guard let session = make(generation) else {
             releaseIfEmpty()
