@@ -180,16 +180,35 @@ async fn typed_answers_need_a_free_text_request() {
 
 #[tokio::test]
 async fn model_failures_are_classified() {
+    use acd_voice::router::model::ModelUnavailable as U;
     let s = snapshot(vec![pending("m", "a")]);
     for (error, refusal) in [
         (ModelError::Timeout, Refusal::ModelFailed),
         (ModelError::Failed, Refusal::ModelFailed),
-        (ModelError::Unavailable, Refusal::ModelUnavailable),
+        (ModelError::Unavailable(U::IntelligenceOff), Refusal::ModelOff),
+        (ModelError::Unavailable(U::NotReady), Refusal::ModelNotReady),
+        (ModelError::Unavailable(U::DeviceNotEligible), Refusal::ModelUnavailable),
+        (ModelError::Unavailable(U::Unknown), Refusal::ModelUnavailable),
     ] {
         let m = FakeIntentModel::failing(error);
         let r = route(&s, &VoiceText::new("do it"), Some(&m as &dyn IntentModel), &RouteOptions::default()).await;
-        assert_eq!(r, Routed::Refused(refusal));
+        assert_eq!(r, Routed::Refused(refusal), "{error:?}");
     }
+}
+
+/// Guided output may carry explicit nulls and fields the step does not use.
+/// Rust still decides: the unused text is ignored, and an answer stays confirmed.
+/// "do the thing" is not a fast-path phrase, so every case reaches the model.
+#[tokio::test]
+async fn nulls_and_unused_fields_from_guided_generation_are_validated() {
+    let s = select(snapshot(vec![pending("m", "a")]), "m/a");
+    let read = r#"{"step":"read","agent":null,"request":"r1","option":null,"text":null,"machine":null,"candidates":null}"#;
+    assert_eq!(proposal(model(&s, "do the thing", read).await).step, Step::Read { card: "m/a".into() });
+    let extra = r#"{"step":"answer","request":"r1","option":"1","text":"approve it all","machine":"m"}"#;
+    let p = proposal(model(&s, "do the thing", extra).await);
+    assert_eq!((p.step, p.level), (answer("m/a", "r-a", "allow"), Level::Confirm));
+    let invented = r#"{"step":"select","agent":"a7"}"#;
+    assert_eq!(model(&s, "do the thing", invented).await, Routed::Refused(Refusal::DidNotUnderstand));
 }
 
 #[tokio::test]

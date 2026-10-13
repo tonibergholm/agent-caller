@@ -65,11 +65,36 @@ pub fn plan_schema() -> serde_json::Value {
     serde_json::to_value(schemars::schema_for!(ModelPlan)).expect("the schema serializes")
 }
 
+/// Why the model cannot run (spec §9). Classified; no platform text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelUnavailable {
+    NotMac,
+    OsTooOld,
+    /// Built without the macOS 26 SDK (S16).
+    SdkTooOld,
+    DeviceNotEligible,
+    /// Apple Intelligence is off in System Settings.
+    IntelligenceOff,
+    /// The model is still downloading or preparing.
+    NotReady,
+    Unknown,
+}
+
+/// What Settings shows about the intent model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", content = "reason", rename_all = "snake_case")]
+pub enum ModelState {
+    Checking,
+    Available,
+    Unavailable(ModelUnavailable),
+}
+
 /// Classified model failures; provider bodies are never kept (spec §6.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelError {
-    Unavailable,
+    Unavailable(ModelUnavailable),
     Timeout,
     Failed,
 }
@@ -78,6 +103,16 @@ pub enum ModelError {
 pub trait IntentModel: Send + Sync {
     /// The model's raw JSON reply. It is untrusted and never logged.
     async fn plan(&self, prompt: &Prompt) -> Result<VoiceText, ModelError>;
+    /// Whether request details may go in the prompt: always for an
+    /// on-device model (spec §5.4), never by default.
+    fn receives_details(&self) -> bool {
+        false
+    }
+    /// A recording started: the model may load now. Returns at once.
+    fn prewarm(&self) {}
+    /// Voice off, lock, sleep or a bridge overflow: cancel every request and
+    /// drop every session (spec §6.3). Returns at once and never calls back.
+    fn discard(&self) {}
 }
 
 /// Returns a fixed reply, including malformed and malicious ones (spec §10).
@@ -85,19 +120,36 @@ pub trait IntentModel: Send + Sync {
 pub struct FakeIntentModel {
     reply: Result<String, ModelError>,
     prompts: std::sync::Mutex<Vec<String>>,
+    details: bool,
+    prewarms: std::sync::atomic::AtomicUsize,
+    discards: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(any(test, feature = "testing"))]
 impl FakeIntentModel {
+    fn with(reply: Result<String, ModelError>) -> Self {
+        Self { reply, prompts: Default::default(), details: false, prewarms: Default::default(), discards: Default::default() }
+    }
     pub fn replying(json: &str) -> Self {
-        Self { reply: Ok(json.to_owned()), prompts: Default::default() }
+        Self::with(Ok(json.to_owned()))
     }
     pub fn failing(error: ModelError) -> Self {
-        Self { reply: Err(error), prompts: Default::default() }
+        Self::with(Err(error))
+    }
+    /// Behaves as an on-device model: it receives request details.
+    pub fn on_device(mut self) -> Self {
+        self.details = true;
+        self
     }
     /// Every prompt it was given, rendered.
     pub fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
+    }
+    pub fn prewarms(&self) -> usize {
+        self.prewarms.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn discards(&self) -> usize {
+        self.discards.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -107,6 +159,15 @@ impl IntentModel for FakeIntentModel {
     async fn plan(&self, prompt: &Prompt) -> Result<VoiceText, ModelError> {
         self.prompts.lock().unwrap().push(prompt.render().expose().to_owned());
         self.reply.clone().map(VoiceText::new)
+    }
+    fn receives_details(&self) -> bool {
+        self.details
+    }
+    fn prewarm(&self) {
+        self.prewarms.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn discard(&self) {
+        self.discards.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
