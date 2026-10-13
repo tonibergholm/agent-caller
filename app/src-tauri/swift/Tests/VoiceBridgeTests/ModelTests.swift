@@ -8,29 +8,49 @@ final class FakePlanEngine: PlanEngine, @unchecked Sendable {
     private var reply: Result<String, PlanFailure> = .success("{\"step\":\"none\"}")
     private var counts = (plans: 0, finished: 0, prewarms: 0, discards: 0)
     private var open = false
+    private var gatedValue = false
+    private var ignoresCancelValue = false
     /// A gated plan waits until `release`, or until its task is cancelled
     /// (a `Gate` would ignore cancellation, and a task group waits for it).
-    var gated = false
+    var gated: Bool {
+        get { lock.withLock { gatedValue } }
+        set { lock.withLock { gatedValue = newValue } }
+    }
     /// Models a `respond` that ignores task cancellation (review item 11b).
-    var ignoresCancel = false
+    var ignoresCancel: Bool {
+        get { lock.withLock { ignoresCancelValue } }
+        set { lock.withLock { ignoresCancelValue = newValue } }
+    }
+    /// Runs inside `prewarm`, to model a discard that lands mid-prewarm.
+    var duringPrewarm: (@Sendable () -> Void)? {
+        get { lock.withLock { duringPrewarmValue } }
+        set { lock.withLock { duringPrewarmValue = newValue } }
+    }
+    private var duringPrewarmValue: (@Sendable () -> Void)?
 
     func release() { lock.withLock { open = true } }
     func set(code: UInt32) { lock.withLock { self.code = code } }
     func set(reply: Result<String, PlanFailure>) { lock.withLock { self.reply = reply } }
     var finished: Int { lock.withLock { counts.finished } }
+    /// Engine calls that began (a request cancelled before it starts never gets here).
+    var plans: Int { lock.withLock { counts.plans } }
     var prewarms: Int { lock.withLock { counts.prewarms } }
     var discards: Int { lock.withLock { counts.discards } }
 
     func availability() -> UInt32 { lock.withLock { code } }
-    func prewarm(instructions: String) { lock.withLock { counts.prewarms += 1 } }
+    func prewarm(instructions: String) {
+        lock.withLock { counts.prewarms += 1 }
+        duringPrewarm?()
+    }
     func discard() { lock.withLock { counts.discards += 1 } }
     func plan(instructions: String, input: String) async throws -> String {
         lock.withLock { counts.plans += 1 }
         defer { lock.withLock { counts.finished += 1 } }
-        while gated && !lock.withLock({ open }) && (ignoresCancel || !Task.isCancelled) {
+        let ignores = ignoresCancel
+        while gated && !lock.withLock({ open }) && (ignores || !Task.isCancelled) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        if !ignoresCancel { try Task.checkCancellation() }
+        if !ignores { try Task.checkCancellation() }
         return try lock.withLock { reply }.get()
     }
 }
@@ -75,6 +95,7 @@ final class ModelTests: XCTestCase {
         let (requests, engine, bridge, got) = rig()
         engine.gated = true
         _ = requests.start(8, instructions: "I", input: "D", timeoutMs: 5_000)
+        until("the plan began") { engine.plans == 1 }
         requests.cancel(8)
         until("the plan ended") { engine.finished == 1 }
         bridge.events.sync {}
@@ -131,9 +152,11 @@ final class ModelTests: XCTestCase {
     func testSwiftGivesUpAfterTheTimeoutPlusASecond() {
         let (requests, engine, bridge, got) = rig()
         engine.gated = true
+        let started = Date()
         _ = requests.start(4, instructions: "I", input: "D", timeoutMs: 0)
         until("timeout reply") { bridge.events.sync {}; return !replies(got).isEmpty }
         XCTAssertEqual(replies(got)[0].code, UInt32(VB_ERR_MODEL_TIMEOUT))
+        XCTAssertGreaterThan(Date().timeIntervalSince(started), 0.9, "the backstop is timeoutMs + 1000 ms")
     }
 
     /// Spec §6.3: voice off, lock, sleep and quit discard model work.
@@ -142,6 +165,7 @@ final class ModelTests: XCTestCase {
         engine.gated = true
         _ = requests.start(5, instructions: "I", input: "D", timeoutMs: 5_000)
         _ = requests.start(6, instructions: "I", input: "D", timeoutMs: 5_000)
+        until("both plans began") { engine.plans == 2 }
         requests.cancelAll()
         XCTAssertEqual(requests.countForTest, 0)
         XCTAssertEqual(engine.discards, 1, "the prewarmed session is dropped")
@@ -172,9 +196,9 @@ final class ModelTests: XCTestCase {
         engine.ignoresCancel = true
         _ = requests.start(1, instructions: "I", input: "D", timeoutMs: 5_000)
         _ = requests.start(2, instructions: "I", input: "D", timeoutMs: 5_000)
+        until("both slots taken") { requests.runningForTest == 2 }
         requests.cancel(1)
         requests.cancel(2)
-        until("both slots taken") { requests.runningForTest == 2 }
         _ = requests.start(3, instructions: "I", input: "D", timeoutMs: 5_000)
         until("refused") { bridge.events.sync {}; return !replies(got).isEmpty }
         XCTAssertEqual(replies(got).map(\.generation), [3])
@@ -185,6 +209,61 @@ final class ModelTests: XCTestCase {
         _ = requests.start(4, instructions: "I", input: "D", timeoutMs: 5_000)
         until("answered") { bridge.events.sync {}; return replies(got).count == 2 }
         XCTAssertEqual(replies(got)[1].code, UInt32(VB_OK))
+        XCTAssertEqual(replies(got).map(\.generation), [3, 4], "the two cancelled requests never replied")
+    }
+
+    /// Review: a model that ignores cancellation and then finishes must not
+    /// reply for a request that was cancelled (the `live` guard).
+    func testACancelledRequestThatIgnoresCancellationStillNeverReplies() {
+        let (requests, engine, bridge, got) = rig()
+        engine.gated = true
+        engine.ignoresCancel = true
+        _ = requests.start(9, instructions: "I", input: "D", timeoutMs: 5_000)
+        until("running") { requests.runningForTest == 1 }
+        requests.cancel(9)
+        engine.release()
+        until("the plan ended") { engine.finished == 1 && requests.runningForTest == 0 }
+        bridge.events.sync {}
+        XCTAssertTrue(replies(got).isEmpty)
+        XCTAssertEqual(requests.countForTest, 0)
+    }
+
+    /// Review: an id still in flight is refused, so its task stays cancellable.
+    func testAnIdAlreadyInFlightIsRefused() {
+        let (requests, engine, bridge, got) = rig()
+        engine.gated = true
+        XCTAssertEqual(requests.start(5, instructions: "I", input: "D", timeoutMs: 5_000), VB_OK)
+        XCTAssertEqual(requests.start(5, instructions: "I", input: "D", timeoutMs: 5_000), VB_ERR_FAILED)
+        until("the plan began") { engine.plans == 1 }
+        requests.cancel(5)
+        until("the plan ended") { engine.finished == 1 }
+        bridge.events.sync {}
+        XCTAssertTrue(replies(got).isEmpty)
+    }
+
+    /// Review: a prewarm still running when a discard lands is dropped too
+    /// (spec §6.3: sessions are discarded).
+    func testAPrewarmThatOverlapsADiscardLeavesNoSession() {
+        let (requests, engine, _, _) = rig()
+        engine.duringPrewarm = { requests.cancelAll() }
+        requests.prewarm(instructions: "I")
+        XCTAssertEqual(engine.discards, 2, "cancelAll's own, and the one for the session made meanwhile")
+    }
+
+    /// `copyText` is the one place C bytes become Swift text (spec §6.3).
+    func testCopyTextHandlesEmptyNilAndInvalidBytes() {
+        XCTAssertEqual(copyText(nil, 0), "")
+        XCTAssertNil(copyText(nil, 3))
+        XCTAssertNil([0xff, 0xfe].withUnsafeBufferPointer { copyText($0.baseAddress, 2) })
+        XCTAssertNil([0x61, 0xc3].withUnsafeBufferPointer { copyText($0.baseAddress, 2) }, "a cut multi-byte character")
+        XCTAssertEqual(Array("é".utf8).withUnsafeBufferPointer { copyText($0.baseAddress, 2) }, "é")
+    }
+
+    func testTheCEntryPointRefusesBadTextAndAnUninitializedBridge() {
+        guard !Bridge.shared.isInitialized else { return }
+        let bytes: [UInt8] = [0x61]
+        XCTAssertEqual(bytes.withUnsafeBufferPointer { vb_model_plan(1, $0.baseAddress, 1, $0.baseAddress, 1, 5_000) },
+                       VB_ERR_NOT_INITIALIZED)
     }
 
     /// Plan V4: model replies are not session events; no recording needs to be live.

@@ -56,6 +56,9 @@ final class ModelRequests: @unchecked Sendable {
     private var live: Set<UInt64> = []
     private var tasks: [UInt64: Task<Void, Never>] = [:]
     private var reported: UInt32?
+    /// Bumped by `cancelAll`, so a prewarm that was still running during a
+    /// discard does not leave a session behind (spec §6.3).
+    private var epoch: UInt64 = 0
     /// Engine calls still running, cancelled or not (review item 11b).
     private var running = 0
     static let maxRunning = 2
@@ -82,7 +85,9 @@ final class ModelRequests: @unchecked Sendable {
 
     func start(_ id: UInt64, instructions: String, input: String, timeoutMs: UInt32) -> Int32 {
         guard id != 0 else { return VB_ERR_FAILED }
-        lock.withLock { _ = live.insert(id) }
+        // An id still in flight is refused: a second start would overwrite
+        // the first task's handle, which could then no longer be cancelled.
+        guard lock.withLock({ live.insert(id).inserted }) else { return VB_ERR_FAILED }
         let task = Task.detached { [self] in
             await run(id, instructions: instructions, input: input, timeoutMs: timeoutMs)
         }
@@ -106,6 +111,7 @@ final class ModelRequests: @unchecked Sendable {
     /// Voice off, lock, sleep, quit (spec §6.3).
     func cancelAll() {
         let all = lock.withLock { () -> [Task<Void, Never>] in
+            epoch += 1
             live.removeAll()
             defer { tasks.removeAll() }
             return Array(tasks.values)
@@ -117,7 +123,11 @@ final class ModelRequests: @unchecked Sendable {
     func prewarm(instructions: String) {
         let code = engine.availability()
         report(code)
-        if code == VB_MA_AVAILABLE { engine.prewarm(instructions: instructions) }
+        guard code == VB_MA_AVAILABLE else { return }
+        let started = lock.withLock { epoch }
+        engine.prewarm(instructions: instructions)
+        // A discard ran while the session was being made: drop it too.
+        if lock.withLock({ epoch }) != started { engine.discard() }
     }
 
     func query(force: Bool = false) {
@@ -125,6 +135,9 @@ final class ModelRequests: @unchecked Sendable {
     }
 
     private func run(_ id: UInt64, instructions: String, input: String, timeoutMs: UInt32) async {
+        // Cancelled before it started (cancel or cancelAll won the race): do
+        // no work. `cancel` already removed it from `live` and `tasks`.
+        guard !Task.isCancelled else { return }
         var event = Event(generation: id, kind: VB_EV_MODEL)
         let code = engine.availability()
         report(code)
@@ -144,7 +157,10 @@ final class ModelRequests: @unchecked Sendable {
                 }
                 event.code = UInt32(VB_OK)
             } catch is CancellationError {
-                return
+                // `cancel` and `cancelAll` took the id out of `live` first, so
+                // the guard below stays silent. A cancellation nobody asked
+                // for (the id is still live) is a failure, not silence.
+                event.code = UInt32(VB_ERR_MODEL_FAILED)
             } catch PlanFailure.unavailable(let why) {
                 report(why)
                 event.code = UInt32(VB_ERR_MODEL_UNAVAILABLE)
@@ -166,12 +182,14 @@ final class ModelRequests: @unchecked Sendable {
     /// always with `force`: after an overflow Rust cannot know whether the
     /// last report arrived, so it asks again with force (review item 6).
     private func report(_ code: UInt32, force: Bool = false) {
-        let send = lock.withLock { () -> Bool in
-            guard force || reported != code else { return false }
+        // Emitted under the lock: two reports with different codes must reach
+        // Rust in the order `reported` took them (the bridge only takes its
+        // own lock, so there is no cycle).
+        lock.withLock {
+            guard force || reported != code else { return }
             reported = code
-            return true
+            bridge.emit(Event(kind: VB_EV_MODEL_CAPS, code: code))
         }
-        if send { bridge.emit(Event(kind: VB_EV_MODEL_CAPS, code: code)) }
     }
 
     static func within(ms: UInt64, _ work: @escaping @Sendable () async throws -> String) async throws -> String {
