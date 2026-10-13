@@ -341,7 +341,7 @@ Item {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     color: modelData.pickable ? cardItem.inbox.fg : cardItem.inbox.muted
-                    text: modelData.number + ". " + (modelData.armed ? "Tap again to " : "") + modelData.label + (modelData.rule ? "  (" + modelData.rule + ")" : "")
+                    text: modelData.number + ". " + (modelData.armed ? "Press Enter to confirm: " : "") + modelData.label + (modelData.rule ? "  (" + modelData.rule + ")" : "")
 
                     MouseArea {
                         anchors.fill: parent

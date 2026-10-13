@@ -486,7 +486,7 @@ test("an option that needs confirmation arms on the first press and is sent by t
   assert.deepEqual(first.state.armed, { cardKey: "m1/e", requestId: "r1", revision: 1, optionId: "abandon", at: 1000 });
   const rows = M.optionRows(cards[0], first.state.armed, 1500);
   assert.deepEqual(rows.map((r) => [r.id, r.confirm, r.armed]), [["go", false, false], ["abandon", true, true]]);
-  const second = M.onKey(cards, first.state, key("2", { at: 2000 }));
+  const second = M.onKey(cards, first.state, key("Enter", { at: 2000 }));
   assert.deepEqual(second.effect, { kind: "pick", cardKey: "m1/e", requestId: "r1", optionId: "abandon", revision: 1 });
   assert.equal(second.state.armed, null);
   assert.equal(M.onKey(cards, { selected: "m1/e", replyFor: null }, key("1")).effect.kind, "pick", "an option without confirm sends at once");
@@ -495,9 +495,9 @@ test("an option that needs confirmation arms on the first press and is sent by t
 test("a second press outside the window, on another option, or after any other key does not send", () => {
   const cards = [externalCard()];
   const armed = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 })).state;
-  const late = M.onKey(cards, armed, key("2", { at: 1000 + M.CONFIRM_MS + 1 }));
-  assert.equal(late.effect.kind, "none");
-  assert.equal(late.state.armed.at, 1000 + M.CONFIRM_MS + 1, "it arms again instead");
+  const late = M.onKey(cards, armed, key("Enter", { at: 1000 + M.CONFIRM_MS + 1 }));
+  assert.equal(late.effect.kind, "none", "Enter after the window sends nothing");
+  assert.equal(late.state.armed, null);
   assert.equal(M.optionRows(cards[0], armed.armed, 1000 + M.CONFIRM_MS + 1).find((r) => r.id === "abandon").armed, false);
   assert.equal(M.onKey(cards, armed, key("1", { at: 1100 })).effect.optionId, "go");
   assert.equal(M.onKey(cards, armed, key("1", { at: 1100 })).state.armed, null);
@@ -535,7 +535,7 @@ test("typing in a text field disarms an armed option", () => {
   const armed = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 })).state;
   const typed = M.onKey(cards, armed, key("x", { field: { kind: "reply", cardKey: "m1/e" }, at: 1100 }));
   assert.equal(typed.state.armed, null);
-  assert.equal(M.onKey(cards, typed.state, key("2", { at: 1200 })).effect.kind, "none");
+  assert.equal(M.onKey(cards, typed.state, key("Enter", { at: 1200 })).effect.kind, "none");
 });
 
 test("a held key neither arms nor confirms an option", () => {
@@ -548,7 +548,28 @@ test("a held key neither arms nor confirms an option", () => {
   const repeat = M.onKey(cards, armed, key("2", { at: 1100, repeat: true }));
   assert.equal(repeat.effect.kind, "none");
   assert.deepEqual(repeat.state.armed, armed.armed);
-  assert.equal(M.onKey(cards, armed, key("2", { at: 1100 })).effect.kind, "pick");
+  assert.equal(M.onKey(cards, armed, key("Enter", { at: 1100 })).effect.kind, "pick");
   assert.equal(M.fromQt(0x32, "2", 0, false, null, true).repeat, true);
   assert.equal(M.fromQt(0x32, "2", 0, false, null).repeat, false);
+});
+
+test("a digit only arms a confirm option: the same digit again is a no-op and Enter completes it", () => {
+  const cards = [externalCard()];
+  const fresh = { selected: "m1/e", replyFor: null };
+  const armed = M.onKey(cards, fresh, key("2", { at: 1000 })).state;
+  for (const at of [1001, 1500, 2000]) {
+    const again = M.onKey(cards, armed, key("2", { at }));
+    assert.equal(again.effect.kind, "none", "digit at " + at);
+    assert.deepEqual(again.state.armed, armed.armed, "still armed, unmoved");
+  }
+  assert.deepEqual(M.onKey(cards, armed, key("Enter", { at: 1600 })).effect, { kind: "pick", cardKey: "m1/e", requestId: "r1", optionId: "abandon", revision: 1 });
+  assert.equal(M.onKey(cards, fresh, key("Enter", { at: 1600 })).effect.kind, "none", "Enter alone sends nothing");
+  const other = M.onKey(cards, armed, key("1", { at: 1100 }));
+  assert.equal(other.effect.optionId, "go");
+  assert.equal(M.fromQt(0, "\r", 0, false, null).key, "Enter", "a catcher text key of Return is Enter");
+});
+
+test("the armed row tells the user to press Enter", () => {
+  const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
+  assert.match(panel, /Press Enter to confirm: /);
 });

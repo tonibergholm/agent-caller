@@ -350,7 +350,7 @@ export const QT = {
 export function fromQt(key, text, modifiers, composing, field, repeat = false) {
   const name =
     key === QT.Key_Escape ? "Escape"
-    : key === QT.Key_Return || key === QT.Key_Enter ? "Enter"
+    : key === QT.Key_Return || key === QT.Key_Enter || text === "\r" || text === "\n" ? "Enter"
     : key === QT.Key_Up ? "ArrowUp"
     : key === QT.Key_Down ? "ArrowDown"
     : text;
@@ -382,6 +382,16 @@ export function onKey(visible, st, ev) {
     return { state: rest, effect: NONE };
   }
   const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+  // The host's key catcher reports no auto-repeat, so a digit only arms a
+  // confirm option; Enter completes it. A digit pressed again is a no-op.
+  if (k === "Enter" && st.armed) {
+    const armedCard = visible.find((c) => c.key === st.armed.cardKey);
+    const row = armedCard ? optionRows(armedCard).find((r) => r.id === st.armed.optionId) : undefined;
+    if (armedCard && row && row.pickable && row.confirm && armedHolds(st.armed, armedCard) && (ev.at ?? 0) - st.armed.at <= CONFIRM_MS) {
+      return pickOption(st, armedCard, row.id, st.armed.at);
+    }
+    return { state: rest, effect: NONE };
+  }
   const idx = visible.findIndex((c) => c.key === st.selected);
   if (k === "j" || k === "ArrowDown" || k === "k" || k === "ArrowUp") {
     if (visible.length === 0) return none;
@@ -395,8 +405,11 @@ export function onKey(visible, st, ev) {
   if (/^[1-9]$/.test(k)) {
     const row = optionRows(card).find((r) => r.number === Number(k));
     if (!row) return { state: rest, effect: NONE };
-    // A held key must neither arm nor confirm: only a fresh press counts.
-    if (row.confirm && ev.repeat) return { state: st, effect: NONE };
+    if (row.confirm) {
+      if (st.armed && armedHolds(st.armed, card) && st.armed.optionId === row.id) return { state: st, effect: NONE };
+      if (ev.repeat) return { state: st, effect: NONE };
+      return pickOption(Object.assign({}, st, { armed: null }), card, row.id, ev.at ?? 0);
+    }
     return pickOption(st, card, row.id, ev.at ?? 0);
   }
   if (k === "t" && card.free_text_answerable) return { state: rest, effect: { kind: "focusAnswer", cardKey: card.key } };
