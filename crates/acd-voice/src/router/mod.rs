@@ -194,7 +194,7 @@ fn apply(snapshot: &Snapshot, template: &Template, resolved: &Resolved, origin: 
     let Some(card) = snapshot.card(&resolved.card) else {
         return Routed::Refused(Refusal::NoSuchTarget);
     };
-    let (mut effect, mut by_number) = (None, false);
+    let (mut effect, mut by_number, mut confirm) = (None, false, false);
     let step = match template {
         Template::Answer(by) => {
             let Some(req) = card.pending.as_ref() else {
@@ -211,6 +211,7 @@ fn apply(snapshot: &Snapshot, template: &Template, resolved: &Resolved, origin: 
                 return Routed::Refused(Refusal::NoSuchOption);
             }
             effect = Some(req.options[i].effect);
+            confirm = req.options[i].confirm;
             by_number = matches!(by, OptionBy::Number(_));
             Step::Answer {
                 card: card.key.clone(),
@@ -248,7 +249,8 @@ fn apply(snapshot: &Snapshot, template: &Template, resolved: &Resolved, origin: 
             origin,
             provenance: Some(resolved.provenance),
             off_screen: resolved.off_screen,
-            level,
+            // An option that asks for a second tap never rides a countdown alone.
+            level: if confirm { Level::Confirm } else { level },
         }),
         Err(r) => Routed::Refused(r),
     }

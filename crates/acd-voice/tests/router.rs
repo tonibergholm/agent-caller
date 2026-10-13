@@ -396,3 +396,14 @@ async fn stripping_cannot_turn_an_empty_name_set_into_a_name() {
     let p = proposal(model(&s, "tell studio to deploy minos", ok).await);
     assert_eq!(p.step.card(), Some("studio/b"));
 }
+
+#[tokio::test]
+async fn an_option_that_asks_for_a_second_tap_is_never_a_countdown() {
+    let mut s = select(snapshot(vec![pending("m", "a")]), "m/a");
+    let card = s.cards.iter_mut().find(|c| c.key == "m/a").unwrap();
+    card.pending.as_mut().unwrap().options[1].confirm = true;
+    let deny = proposal(fast(&s, "option 2").await);
+    assert_eq!((deny.step, deny.level), (answer("m/a", "r-a", "deny"), Level::Confirm));
+    let yes = proposal(fast(&s, "yes").await);
+    assert_eq!(yes.level, Level::Countdown, "the other options keep their level");
+}

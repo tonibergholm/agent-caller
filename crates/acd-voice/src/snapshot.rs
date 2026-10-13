@@ -56,6 +56,8 @@ pub struct OptionSnap {
     pub effect: Effect,
     /// acd-client lists it in `selectable_options`.
     pub selectable: bool,
+    /// The option needs a second, deliberate tap: voice never sends it on a countdown alone.
+    pub confirm: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -263,6 +265,7 @@ pub mod fixtures {
             description: (effect == Effect::AllowAlways).then(|| "Bash(npm test:*)".to_owned()),
             effect,
             selectable: effect != Effect::Unknown,
+            confirm: false,
         }
     }
 
