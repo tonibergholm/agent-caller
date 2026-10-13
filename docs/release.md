@@ -185,8 +185,8 @@ app on, and relaunch it.
 Check a download against the published checksums:
 
 ```sh
-shasum -a 256 acd-0.8.0-aarch64-apple-darwin.tar.gz
-grep acd-0.8.0-aarch64-apple-darwin.tar.gz SHA256SUMS
+shasum -a 256 acd-0.9.0-aarch64-apple-darwin.tar.gz
+grep acd-0.9.0-aarch64-apple-darwin.tar.gz SHA256SUMS
 ```
 
 The two hashes must match. `scripts/install.sh` runs this check for you.
