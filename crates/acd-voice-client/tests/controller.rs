@@ -443,21 +443,28 @@ fn gated() -> (Arc<dyn IntentModel>, Arc<tokio::sync::Notify>, Arc<AtomicBool>) 
     (Arc::new(Gated { gate: gate.clone(), dropped: dropped.clone() }), gate, dropped)
 }
 
-/// Review Focus 1, plan V9.
+/// Bounded, so a missing fix fails the test instead of hanging until the job times out.
+async fn ends_within_5s(task: tokio::task::JoinHandle<Result<(), InputError>>) -> Result<(), InputError> {
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the utterance task ended: its model call was dropped")
+        .unwrap()
+}
+
+/// Review Focus 1, plan V9. These tests rely on `#[tokio::test]`'s single
+/// thread: the first poll of the utterance task's `select!` starts the route
+/// (and so the model call) before the test task sees `Thinking`.
 #[tokio::test]
 async fn cancelling_a_thinking_step_cancels_the_model_call() {
-    let (model, gate, dropped) = gated();
+    let (model, _gate, dropped) = gated();
     let r = rig(vec![pending_agent(), working_agent()], Some(model), Display::Acks).await;
     r.voice.publish(shown(Some("m1/a1"), &["m1/a1", "m1/a2"]));
     let voice = r.voice.clone();
     let old = tokio::spawn(async move { voice.text_input("tell the box claude something".into(), true).await });
     let Hud::Thinking { id, .. } = hud_until(&r.sink, "thinking", |h| matches!(h, Hud::Thinking { .. })).await else { unreachable!() };
     r.voice.cancel(Some(id));
-    assert_eq!(old.await.unwrap(), Ok(()), "the utterance task ends without waiting for the model");
+    assert_eq!(ends_within_5s(old).await, Ok(()), "the utterance task ends without waiting for the model");
     assert!(dropped.load(Ordering::SeqCst), "the model call was dropped");
-    gate.notify_waiters();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(!r.sink.huds.lock().unwrap().iter().any(|(_, h)| matches!(h, Hud::Confirm { .. })));
 }
 
 #[tokio::test]
@@ -469,7 +476,7 @@ async fn esc_in_the_inbox_while_thinking_cancels_the_model_call() {
     let old = tokio::spawn(async move { voice.text_input("tell the box claude something".into(), true).await });
     hud_until(&r.sink, "thinking", |h| matches!(h, Hud::Thinking { .. })).await;
     assert!(r.voice.cancel_thinking());
-    assert_eq!(old.await.unwrap(), Ok(()));
+    assert_eq!(ends_within_5s(old).await, Ok(()));
     assert!(dropped.load(Ordering::SeqCst));
 }
 

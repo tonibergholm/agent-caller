@@ -324,13 +324,13 @@ impl Executor {
         }
     }
 
-    /// Whether no step is active and a notice may take the HUD.
     /// The utterance whose route result is still awaited, if any. A model
     /// call for any other utterance can be dropped (plan V9).
     pub fn routing(&self) -> Option<u64> {
         matches!(self.state, State::Thinking(_)).then_some(self.utterance)
     }
 
+    /// Whether no step is active and a notice may take the HUD.
     pub fn is_idle(&self) -> bool {
         matches!(self.state, State::Idle | State::Shown)
     }

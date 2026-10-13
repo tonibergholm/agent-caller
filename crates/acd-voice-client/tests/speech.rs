@@ -868,8 +868,27 @@ async fn a_press_while_thinking_cancels_the_model_call() {
     let old = tokio::spawn(async move { voice.text_input("tell the box claude something".into(), true).await });
     hud_until(&r.sink, "thinking", |h| matches!(h, Hud::Thinking { .. })).await;
     r.voice.hold(true, true);
-    assert_eq!(old.await.unwrap(), Ok(()));
+    let ended = tokio::time::timeout(Duration::from_secs(5), old)
+        .await
+        .expect("the utterance task ended: its model call was dropped");
+    assert_eq!(ended.unwrap(), Ok(()));
     assert!(dropped.load(Ordering::SeqCst));
+}
+
+/// The model loads only for a recording that really starts.
+#[tokio::test]
+async fn no_prewarm_when_speech_cannot_listen() {
+    let fake = Arc::new(FakeIntentModel::replying(r#"{"step":"none"}"#));
+    let model: Arc<dyn IntentModel> = fake.clone();
+    let (r, speech) = speech_rig_with(vec![pending_agent()], Some(model), Display::Acks).await;
+    *speech.caps.lock().unwrap() =
+        Some(Capabilities { unavailable: Some(Unavailable::AssetsMissing), streams_partials: false, sample_rate: 0 });
+    r.voice.hold(true, true);
+    *speech.caps.lock().unwrap() = None;
+    *speech.refuse.lock().unwrap() = Some(ListenError::MicrophoneDenied);
+    r.voice.hold(false, true);
+    r.voice.hold(true, true);
+    assert_eq!(fake.prewarms(), 0, "neither an unavailable recognizer nor a refused start prewarms");
 }
 
 #[tokio::test]

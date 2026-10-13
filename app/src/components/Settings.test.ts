@@ -512,11 +512,16 @@ test("a slower, older status response never replaces a newer one", async () => {
 });
 
 test("the Voice section says whether free-form commands can use Apple Intelligence", async () => {
-  render(Settings, { api: fakeApi({ status: { ...STATUS_OK, model: { state: "unavailable", reason: "intelligence_off" } } }) });
+  render(Settings, { api: fakeApi({ voice: on, status: { ...STATUS_OK, model: { state: "unavailable", reason: "intelligence_off" } } }) });
   expect(
     await screen.findByText("Turn on Apple Intelligence in System Settings for free-form commands. Simple commands still work."),
   ).toBeTruthy();
   cleanup();
-  render(Settings, { api: fakeApi() });
+  render(Settings, { api: fakeApi({ voice: on }) });
   expect(await screen.findByText("Free-form commands use Apple Intelligence on this Mac.")).toBeTruthy();
+  cleanup();
+  // Voice off: the model line is not shown (nothing to announce yet).
+  render(Settings, { api: fakeApi() });
+  await screen.findByRole("checkbox", { name: /Voice control/ });
+  expect(screen.queryByText("Free-form commands use Apple Intelligence on this Mac.")).toBeNull();
 });
