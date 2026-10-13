@@ -144,7 +144,7 @@ an update keeps an old item's class. Release gate: confirm on a device that a
 secret stored before this change is replaced with the new class on the next
 pairing, and that the machine stays Online after a relaunch.
 
-Checked on a real device (iPhone 16 Pro, iOS 27, 2026-10-13, debug build, a
+Checked on a real device (iPhone 16 Pro, iOS 27.0.1, 2026-10-13, debug build, a
 scratch daemon reached over Tailscale):
 
 - Install and launch, with a free personal team.
