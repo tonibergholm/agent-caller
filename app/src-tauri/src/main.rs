@@ -60,6 +60,7 @@ fn main() {
             voice::commands::voice_confirm,
             voice::commands::voice_choose,
             voice::commands::voice_cancel,
+            voice::commands::voice_stop_speech,
             voice::commands::voice_hud_fit,
             voice::commands::voice_probe,
             voice::commands::voice_open_privacy,
@@ -106,6 +107,7 @@ fn main() {
             let speech = Arc::new(voice::bridge::MacSpeech::new());
             #[cfg(target_os = "macos")]
             controller.attach_speech(speech.clone());
+            controller.set_speech(voice_settings.speech());
             app.manage(voice::VoiceState {
                 controller,
                 settings: std::sync::Mutex::new(voice_settings),
@@ -115,12 +117,17 @@ fn main() {
                 speech,
                 #[cfg(target_os = "macos")]
                 model,
+                #[cfg(target_os = "macos")]
+                voices: std::sync::Mutex::new(Vec::new()),
             });
             tray::build(app.handle())?;
             panel::create(app.handle())?;
             voice::hud::create(app.handle())?;
             #[cfg(target_os = "macos")]
             if let Some((link, events)) = voice::bridge::start() {
+                // Speech needs the bridge: without it nothing would report the
+                // end of speech, and a reply would wait for its cap.
+                app.state::<voice::VoiceState>().controller.attach_speaker(Arc::new(voice::speaker::MacSpeaker));
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(voice::bridge::pump(link, events, move |ev| voice::dispatch(&handle, ev)));
             }
@@ -175,7 +182,12 @@ fn main() {
             api, code: None, ..
         } => api.prevent_exit(),
         // Keep a drag made just before quitting.
-        RunEvent::Exit => panel::save_now(handle),
+        RunEvent::Exit => {
+            // Spec §6.3: speech stops and model work is dropped on quit.
+            #[cfg(target_os = "macos")]
+            voice::shutdown(handle);
+            panel::save_now(handle);
+        }
         _ => {}
     });
 }

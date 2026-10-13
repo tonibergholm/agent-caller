@@ -88,6 +88,8 @@
     if (shownId !== null) quiet(api.voiceCancel(shownId));
   };
   const choose = (choiceId: number, i: number) => quiet(api.voiceChoose(choiceId, i));
+  // Stops what the app is saying for the state on screen (plan V12).
+  const stopSpeech = () => quiet(api.voiceStopSpeech(seen.seq));
 
   const summary = $derived.by(() => {
     switch (hud.state) {
@@ -117,6 +119,11 @@
     // Enter on a focused button activates that button natively (Cancel must not confirm).
     if (e.key === "Enter" && e.target instanceof HTMLElement && e.target.closest("button")) return;
     if (!wantsKey(hud) || e.isComposing || e.keyCode === 229 || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === "Escape" && hud.state === "speaking") {
+      e.preventDefault();
+      stopSpeech();
+      return;
+    }
     if (e.key === "Escape") {
       e.preventDefault();
       cancel();
@@ -208,6 +215,8 @@
       <div class="buttons"><button onclick={cancel}>Cancel <kbd>Esc</kbd></button></div>
     {:else if hud.state === "which_one" || hud.state === "thinking"}
       <div class="buttons"><button onclick={cancel}>Cancel <kbd>Esc</kbd></button></div>
+    {:else if hud.state === "speaking" && hud.audio}
+      <div class="buttons"><button onclick={stopSpeech}>Stop <kbd>Esc</kbd></button></div>
     {/if}
   </main>
 {/if}

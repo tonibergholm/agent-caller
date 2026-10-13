@@ -141,27 +141,36 @@ pub fn present(app: &AppHandle, seq: u64, hud: &Hud) -> bool {
         return false;
     }
     if hud.fades() {
-        let handle = app.clone();
-        let after = fade_delay(hud);
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(after).await;
-            let inner = handle.clone();
-            // The check runs on the main thread, in order with `present`'s
-            // closures, so a newer state cannot be hidden by a late fade.
-            if let Err(error) = handle.run_on_main_thread(move || {
-                if !fade_applies(LAST_SEQ.load(Ordering::SeqCst), seq) {
-                    return;
-                }
-                apply(&inner, true, false);
-                if let Err(error) = inner.emit("voice://hud-clear", seq) {
-                    tracing::error!(%error, "could not emit the HUD fade");
-                }
-            }) {
-                tracing::error!(%error, "could not dispatch the HUD fade");
-            }
-        });
+        schedule_fade(app, seq, fade_delay(hud));
     }
     true
+}
+
+/// Hides the HUD `after` from now, unless a newer state replaced `seq`.
+pub fn schedule_fade(app: &AppHandle, seq: u64, after: Duration) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(after).await;
+        let inner = handle.clone();
+        // The check runs on the main thread, in order with `present`'s
+        // closures, so a newer state cannot be hidden by a late fade.
+        if let Err(error) = handle.run_on_main_thread(move || {
+            if !fade_applies(LAST_SEQ.load(Ordering::SeqCst), seq) {
+                return;
+            }
+            apply(&inner, true, false);
+            if let Err(error) = inner.emit("voice://hud-clear", seq) {
+                tracing::error!(%error, "could not emit the HUD fade");
+            }
+        }) {
+            tracing::error!(%error, "could not dispatch the HUD fade");
+        }
+    });
+}
+
+/// Spec §4.4: 1.5 s after speech ends.
+pub fn fade_after_speech(app: &AppHandle, seq: u64) {
+    schedule_fade(app, seq, FADE_AFTER);
 }
 
 /// D18: spoken text stays 1.5 s plus 50 ms per character, within 3–15 s.
@@ -323,6 +332,7 @@ fn position(window: &WebviewWindow) {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use acd_voice::text::VoiceText;
 

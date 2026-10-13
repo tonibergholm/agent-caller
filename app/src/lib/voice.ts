@@ -19,7 +19,18 @@ export type VoiceSettings = {
   hold_key: HoldKey;
   /** null turns the toggle shortcut off. */
   toggle_shortcut: string | null;
+  /** Spoken alerts for new requests (spec §7, §8). */
+  alerts: boolean;
+  /** A system voice id; null is the system's English voice. */
+  speech_voice: string | null;
+  speech_rate: SpeechRate;
 };
+
+/** Mirrors acd_voice::speak::Rate. */
+export type SpeechRate = "slow" | "normal" | "fast";
+
+/** Mirrors voice::status::VoiceOption: a voice Settings can offer. */
+export type VoiceOption = { id: string; name: string; language: string };
 
 export const DEFAULT_VOICE_TOGGLE = "Control+Alt+V";
 
@@ -28,6 +39,9 @@ export const VOICE_OFF: VoiceSettings = {
   debug_input: false,
   hold_key: "right_option",
   toggle_shortcut: DEFAULT_VOICE_TOGGLE,
+  alerts: false,
+  speech_voice: null,
+  speech_rate: "normal",
 };
 
 /** Mirrors the app's voice::permissions::Permission. */
@@ -74,6 +88,8 @@ export type VoiceStatus = {
   toggle_error: string | null;
   /** The on-device intent model; free-form commands need it (spec §9). */
   model: ModelState;
+  /** The English voices Settings can offer (spec §8). */
+  voices: VoiceOption[];
 };
 
 /** Spec §9: "Not available on this Mac" with the reason. */

@@ -51,6 +51,12 @@ pub const VB_EV_CAPTURE: u32 = 12;
 pub const VB_EV_OVERFLOW: u32 = 13;
 pub const VB_EV_MODEL: u32 = 14;
 pub const VB_EV_MODEL_CAPS: u32 = 15;
+pub const VB_EV_SPOKEN: u32 = 16;
+pub const VB_EV_VOICES: u32 = 17;
+
+pub const VB_RATE_SLOW: u32 = 0;
+pub const VB_RATE_NORMAL: u32 = 1;
+pub const VB_RATE_FAST: u32 = 2;
 
 pub const VB_MA_AVAILABLE: u32 = 0;
 pub const VB_MA_OS_TOO_OLD: u32 = 1;
@@ -145,6 +151,9 @@ pub(crate) mod ffi {
         pub fn vb_model_cancel_all();
         pub fn vb_model_prewarm(instructions: *const u8, instructions_len: usize);
         pub fn vb_model_query(force: u32);
+        pub fn vb_speech_say(generation: u64, text: *const u8, text_len: usize, voice: *const u8, voice_len: usize, rate: u32);
+        pub fn vb_speech_stop();
+        pub fn vb_speech_voices(force: u32);
     }
 }
 
@@ -174,6 +183,10 @@ pub enum BridgeEvent {
     ModelReply { id: u64, reply: Result<VoiceText, ModelError> },
     /// Model availability changed (plan V6, V16).
     ModelCaps(ModelState),
+    /// Speech `generation` ended (plan V10). Finished or failed are handled alike.
+    Spoken { generation: u64 },
+    /// The English voices, for Settings (plan V16).
+    Voices(Vec<super::status::VoiceOption>),
 }
 
 /// Copies `ev` into an owned event; `None` for kinds the app ignores.
@@ -219,6 +232,8 @@ pub unsafe fn decode(ev: &VbEvent) -> Option<BridgeEvent> {
         VB_EV_PROBE => Some(BridgeEvent::Probe(text())),
         VB_EV_MODEL => Some(BridgeEvent::ModelReply { id: g, reply: model_reply(ev.code as i32, ev.value, text) }),
         VB_EV_MODEL_CAPS => Some(BridgeEvent::ModelCaps(model_state(ev.code))),
+        VB_EV_SPOKEN => Some(BridgeEvent::Spoken { generation: g }),
+        VB_EV_VOICES => Some(BridgeEvent::Voices(serde_json::from_str(&text()).unwrap_or_default())),
         _ => None,
     }
 }
@@ -515,6 +530,19 @@ mod tests {
         }
         let secret = VbEvent { code: VB_OK as u32, ..with_text(VB_EV_MODEL, 9, b"SECRET") };
         assert!(!format!("{:?}", unsafe { decode(&secret) }).contains("SECRET"));
+    }
+
+    #[test]
+    fn speech_events_decode() {
+        let ev = VbEvent { kind: VB_EV_SPOKEN, generation: 3, value: 1, ..VbEvent::EMPTY };
+        assert_eq!(unsafe { decode(&ev) }, Some(BridgeEvent::Spoken { generation: 3 }));
+        let json = br#"[{"id":"v1","language":"en-US","name":"Ava"}]"#;
+        let voices = unsafe { decode(&with_text(VB_EV_VOICES, 0, json)) };
+        assert_eq!(
+            voices,
+            Some(BridgeEvent::Voices(vec![super::super::status::VoiceOption { id: "v1".into(), name: "Ava".into(), language: "en-US".into() }]))
+        );
+        assert_eq!(unsafe { decode(&with_text(VB_EV_VOICES, 0, b"not json")) }, Some(BridgeEvent::Voices(vec![])));
     }
 
     fn with_text(kind: u32, generation: u64, text: &[u8]) -> VbEvent {

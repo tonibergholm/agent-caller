@@ -165,11 +165,18 @@ export function outcomeText(o: OutcomeView): string {
 
 /**
  * States whose keys the HUD acts on when it has key: those waiting for input,
- * and thinking and listening, which Esc cancels after a click on the HUD
- * (spec §4.4, plan S25). Rust's `Hud::wants_key` stays false for listening.
+ * and thinking, listening and speaking with audio, which Esc cancels or stops
+ * after a click on the HUD (spec §4.4, plan S25, V12). Rust's `Hud::wants_key`
+ * stays false for listening and speaking. Text shown without audio has
+ * nothing to stop and ignores keys.
  */
 export const wantsKey = (h: Hud): boolean =>
-  h.state === "thinking" || h.state === "listening" || h.state === "confirm" || h.state === "which_one" || h.state === "countdown";
+  h.state === "thinking" ||
+  h.state === "listening" ||
+  (h.state === "speaking" && h.audio) ||
+  h.state === "confirm" ||
+  h.state === "which_one" ||
+  h.state === "countdown";
 
 /** The proposal the HUD must acknowledge once it is on screen (D22). */
 export function awaitingDisplay(h: Hud): number | null {

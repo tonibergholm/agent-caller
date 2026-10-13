@@ -1,9 +1,17 @@
 //! What Settings shows about voice (spec §6.4, §8, §9). No voice content.
 use acd_voice::listen::{Capabilities, Unavailable};
 use acd_voice::router::model::ModelState;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::permissions::{Permission, PermissionState, SPEECH_PERMISSION_REQUIRED, TAP_NEEDS_RELAUNCH};
+
+/// A voice Settings can offer. Names come from the system, not from voice content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceOption {
+    pub id: String,
+    pub name: String,
+    pub language: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VoiceStatus {
@@ -22,8 +30,13 @@ pub struct VoiceStatus {
     pub toggle_error: Option<String>,
     /// The on-device intent model (spec §9). Free-form commands need it.
     pub model: ModelState,
+    /// The English voices Settings can offer (spec §8).
+    pub voices: Vec<VoiceOption>,
 }
 
+/// A plain constructor: every argument is one field of the status, and the
+/// two production callers (macOS and the rest) spell them all out.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     caps: Capabilities,
     locale: Option<String>,
@@ -32,6 +45,7 @@ pub fn build(
     hold_key_wanted: bool,
     toggle_error: Option<String>,
     model: ModelState,
+    voices: Vec<VoiceOption>,
 ) -> VoiceStatus {
     let input_monitoring = perm(Permission::InputMonitoring);
     VoiceStatus {
@@ -48,6 +62,7 @@ pub fn build(
             && input_monitoring == PermissionState::Granted,
         toggle_error,
         model,
+        voices,
     }
 }
 
@@ -68,6 +83,7 @@ pub fn current(app: &tauri::AppHandle) -> VoiceStatus {
         settings.enabled && settings.hold_key != HoldKey::Off,
         voice.trigger_error.lock().unwrap().clone(),
         voice.model.state(),
+        voice.voices.lock().unwrap().clone(),
     )
 }
 
@@ -83,6 +99,7 @@ pub fn current(_app: &tauri::AppHandle) -> VoiceStatus {
         false,
         None,
         ModelState::Unavailable(acd_voice::router::model::ModelUnavailable::NotMac),
+        Vec::new(),
     )
 }
 
@@ -109,6 +126,7 @@ mod tests {
             true,
             None,
             ModelState::Unavailable(ModelUnavailable::IntelligenceOff),
+            Vec::new(),
         );
         assert_eq!(s.unavailable, None);
         assert_eq!(s.locale.as_deref(), Some("en_GB"));
@@ -126,6 +144,7 @@ mod tests {
             true,
             Some("Could not register".into()),
             ModelState::Available,
+            Vec::new(),
         );
         assert_eq!(serde_json::to_value(&s).unwrap()["unavailable"], "assets_missing");
         assert_eq!(s.toggle_error.as_deref(), Some("Could not register"));
@@ -135,10 +154,10 @@ mod tests {
     #[test]
     fn a_relaunch_is_asked_for_only_when_it_would_help() {
         let granted = |_| PermissionState::Granted;
-        let s = build(caps(None), None, granted, false, true, None, ModelState::Available);
+        let s = build(caps(None), None, granted, false, true, None, ModelState::Available, Vec::new());
         assert_eq!(s.relaunch_for_hold_key, TAP_NEEDS_RELAUNCH);
-        assert!(!build(caps(None), None, granted, true, true, None, ModelState::Available).relaunch_for_hold_key, "running already");
-        assert!(!build(caps(None), None, granted, false, false, None, ModelState::Available).relaunch_for_hold_key, "no hold key wanted");
-        assert!(!build(caps(None), None, |_| PermissionState::Denied, false, true, None, ModelState::Available).relaunch_for_hold_key);
+        assert!(!build(caps(None), None, granted, true, true, None, ModelState::Available, Vec::new()).relaunch_for_hold_key, "running already");
+        assert!(!build(caps(None), None, granted, false, false, None, ModelState::Available, Vec::new()).relaunch_for_hold_key, "no hold key wanted");
+        assert!(!build(caps(None), None, |_| PermissionState::Denied, false, true, None, ModelState::Available, Vec::new()).relaunch_for_hold_key);
     }
 }
