@@ -184,12 +184,9 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - **Codex and other providers' free text.** Typed T3 answers are live-verified for Claude only. Codex questions stay option-only unless T3 sends `allowCustomAnswer: true`; "OpenCode sets false" is unverified.
 - **T3 keepalive.** No paused-clock test for the busy cap; the slow-decode test does not reach `block_in_place`; a reader busy past the cap closes with "T3 did not answer a ping" (a distinct reason would help); `write_timeout` covers a whole frame, not write progress.
 - **T3 cursor retention.** A busy root thread re-pulls a ~24 MB snapshot after each `release()`; keep the cursor for Working-class releases.
-- **`acd status | head`** panics on a broken pipe.
 - **herdr machines.** herdr's own SSH machines could reach remote panes without a per-machine acd; acd would still be needed on each machine for the hook endpoint.
 
 - **TLS listener `ended()` is single-shot.** A second call returns a future that never resolves, and `TlsListener::accept` now waits forever on a dead accept task. The daemon calls `ended()` once, before the listener moves, so it cannot wedge today. Other `TlsListener::new` callers (tests) never select on it. Make the signal cloneable (`watch`) or document it on `accept`.
-- **Shutdown log noise.** The teardown race that used to panic can now take the `ended` branch and log `TLS listener task ended` at error level during a clean SIGTERM. Skip the log once a stop has begun.
-- **Run error printed after shutdown.** `main.rs` prints the `run` error only after `rt.shutdown_timeout`, so a panic in another task during shutdown can exit 70 and hide the real error. Log the error before shutdown.
 - **Startup path-check ordering.** `check_path(hook.sock)` runs before the hook endpoint bind; no test pins which error wins when the hook port is taken and `hook.sock` is invalid. An existing socket path is probed twice (check, then bind), up to about 2 s per path.
 
 ### Mac app
@@ -252,9 +249,6 @@ Items not named here stay in their section as accepted residuals.
 
 **Fix before 1.0** (daily use, or wrong output a user would see):
 
-- `acd status | head` panics on a broken pipe.
-- Shutdown: the clean-SIGTERM `TLS listener task ended` error log, and the
-  run error printed only after `rt.shutdown_timeout`.
 - Omarchy: Show idle is not saved across restarts (decide for both clients),
   J/K does not scroll the card list to the selection, and a flapping machine
   notifies the same request again on reconnect (Mac app and Omarchy; keep a
