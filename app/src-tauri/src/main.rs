@@ -92,16 +92,20 @@ fn main() {
             let voice_path = app.path().app_config_dir()?.join("voice.json");
             let voice_settings = voice::settings::VoiceSettings::load(&voice_path);
             let sink = Arc::new(voice::TauriSink::new(app.handle().clone()));
-            // Step 1 has no intent model (D14): the fast path only.
+            // Step 3: Apple's on-device model on macOS (plan V6); elsewhere the fast path only.
+            #[cfg(target_os = "macos")]
+            let model = Arc::new(voice::model::MacIntentModel::new(Arc::new(voice::model::SwiftModelPort), voice::model::MODEL_TIMEOUT));
+            #[cfg(target_os = "macos")]
+            let intent: Option<Arc<dyn acd_voice::router::model::IntentModel>> = Some(model.clone());
+            #[cfg(not(target_os = "macos"))]
+            let intent: Option<Arc<dyn acd_voice::router::model::IntentModel>> = None;
             let controller = tauri::async_runtime::block_on(async {
-                acd_voice_client::Controller::start(inbox.clone(), None, sink, voice_settings.enabled)
+                acd_voice_client::Controller::start(inbox.clone(), intent, sink, voice_settings.enabled)
             });
             #[cfg(target_os = "macos")]
             let speech = Arc::new(voice::bridge::MacSpeech::new());
             #[cfg(target_os = "macos")]
             controller.attach_speech(speech.clone());
-            #[cfg(target_os = "macos")]
-            let model = Arc::new(voice::model::MacIntentModel::new(Arc::new(voice::model::SwiftModelPort), voice::model::MODEL_TIMEOUT));
             app.manage(voice::VoiceState {
                 controller,
                 settings: std::sync::Mutex::new(voice_settings),

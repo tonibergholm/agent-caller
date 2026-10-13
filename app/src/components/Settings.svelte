@@ -8,6 +8,7 @@
   import {
     HOLD_KEYS,
     VOICE_OFF,
+    modelText,
     unavailableText,
     type HoldKey,
     type PermissionKind,
@@ -437,6 +438,9 @@
       {/if}
     {:else if status.locale}
       <p class="note">Speech: {status.locale}, transcribed on this Mac{status.streams_partials ? ", with live text" : ""}.</p>
+    {/if}
+    {#if statusLoaded}
+      <p class="note" role="status">{modelText(status.model)}</p>
     {/if}
 
     {#if statusLoaded}

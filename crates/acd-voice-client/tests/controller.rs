@@ -436,3 +436,79 @@ async fn esc_in_the_inbox_cancels_a_thinking_step() {
     assert!(matches!(r.sink.last(), Some(Hud::Done { outcome: OutcomeView::Cancelled, .. })), "the late answer never lands");
     assert!(frames(&r.f, "request.answer").is_empty());
 }
+
+fn gated() -> (Arc<dyn IntentModel>, Arc<tokio::sync::Notify>, Arc<AtomicBool>) {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    (Arc::new(Gated { gate: gate.clone(), dropped: dropped.clone() }), gate, dropped)
+}
+
+/// Review Focus 1, plan V9.
+#[tokio::test]
+async fn cancelling_a_thinking_step_cancels_the_model_call() {
+    let (model, gate, dropped) = gated();
+    let r = rig(vec![pending_agent(), working_agent()], Some(model), Display::Acks).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1", "m1/a2"]));
+    let voice = r.voice.clone();
+    let old = tokio::spawn(async move { voice.text_input("tell the box claude something".into(), true).await });
+    let Hud::Thinking { id, .. } = hud_until(&r.sink, "thinking", |h| matches!(h, Hud::Thinking { .. })).await else { unreachable!() };
+    r.voice.cancel(Some(id));
+    assert_eq!(old.await.unwrap(), Ok(()), "the utterance task ends without waiting for the model");
+    assert!(dropped.load(Ordering::SeqCst), "the model call was dropped");
+    gate.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!r.sink.huds.lock().unwrap().iter().any(|(_, h)| matches!(h, Hud::Confirm { .. })));
+}
+
+#[tokio::test]
+async fn esc_in_the_inbox_while_thinking_cancels_the_model_call() {
+    let (model, _gate, dropped) = gated();
+    let r = rig(vec![pending_agent(), working_agent()], Some(model), Display::Acks).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1", "m1/a2"]));
+    let voice = r.voice.clone();
+    let old = tokio::spawn(async move { voice.text_input("tell the box claude something".into(), true).await });
+    hud_until(&r.sink, "thinking", |h| matches!(h, Hud::Thinking { .. })).await;
+    assert!(r.voice.cancel_thinking());
+    assert_eq!(old.await.unwrap(), Ok(()));
+    assert!(dropped.load(Ordering::SeqCst));
+}
+
+/// Spec §5.4, plan V8.
+#[tokio::test]
+async fn an_on_device_model_gets_request_details_and_others_do_not() {
+    for (local, expected) in [(true, true), (false, false)] {
+        let fake = FakeIntentModel::replying(r#"{"step":"none"}"#);
+        let fake = Arc::new(if local { fake.on_device() } else { fake });
+        let model: Arc<dyn IntentModel> = fake.clone();
+        let r = rig(vec![pending_agent()], Some(model), Display::Acks).await;
+        r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+        r.voice.text_input("what does it want".into(), true).await.unwrap();
+        assert_eq!(fake.prompts()[0].contains("\"detail\":\"npm test\""), expected, "local={local}");
+    }
+}
+
+/// Review Focus 2, spec §9, plan V7.
+#[tokio::test]
+async fn an_unavailable_model_names_the_reason_and_the_fast_path_still_works() {
+    use acd_voice::router::model::ModelUnavailable;
+    let model: Arc<dyn IntentModel> = Arc::new(FakeIntentModel::failing(ModelError::Unavailable(ModelUnavailable::IntelligenceOff)));
+    let r = rig(vec![pending_agent()], Some(model), Display::Acks).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.text_input("tell it to go on".into(), true).await.unwrap();
+    hud_until(&r.sink, "refused", |h| *h == Hud::Error { refusal: Refusal::ModelOff, transcript: None }).await;
+    r.voice.text_input("approve".into(), true).await.unwrap();
+    hud_until(&r.sink, "countdown", countdown_started).await;
+}
+
+/// Spec §6.3: voice off, lock and overflow discard model sessions.
+#[tokio::test]
+async fn voice_off_lock_and_overflow_discard_the_model() {
+    let fake = Arc::new(FakeIntentModel::replying(r#"{"step":"none"}"#));
+    let model: Arc<dyn IntentModel> = fake.clone();
+    let r = rig(vec![pending_agent()], Some(model), Display::Acks).await;
+    r.voice.set_enabled(false);
+    r.voice.set_enabled(true);
+    r.voice.system_stop();
+    r.voice.overflow();
+    assert_eq!(fake.discards(), 4, "off, on, lock and overflow each invalidate");
+}

@@ -510,3 +510,13 @@ test("a slower, older status response never replaces a newer one", async () => {
   expect(screen.queryByRole("button", { name: "Ask for Microphone" })).toBeNull();
   expect(screen.getByText("Denied")).toBeTruthy();
 });
+
+test("the Voice section says whether free-form commands can use Apple Intelligence", async () => {
+  render(Settings, { api: fakeApi({ status: { ...STATUS_OK, model: { state: "unavailable", reason: "intelligence_off" } } }) });
+  expect(
+    await screen.findByText("Turn on Apple Intelligence in System Settings for free-form commands. Simple commands still work."),
+  ).toBeTruthy();
+  cleanup();
+  render(Settings, { api: fakeApi() });
+  expect(await screen.findByText("Free-form commands use Apple Intelligence on this Mac.")).toBeTruthy();
+});

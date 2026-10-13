@@ -95,3 +95,25 @@ export const HOLD_KEYS: [HoldKey, string][] = [
   ["fn", "Fn"],
   ["off", "Off"],
 ];
+
+const modelReason: Record<ModelUnavailable, string> = {
+  not_mac: "Free-form commands need macOS.",
+  os_too_old: "Free-form commands need macOS 26 or later. Simple commands still work.",
+  sdk_too_old: "Free-form commands are not in this build: it was built without the macOS 26 SDK. Simple commands still work.",
+  device_not_eligible: "This Mac can't run Apple Intelligence. Simple commands still work.",
+  intelligence_off: "Turn on Apple Intelligence in System Settings for free-form commands. Simple commands still work.",
+  not_ready: "Apple Intelligence is still getting ready. Simple commands work meanwhile.",
+  unknown: "Apple Intelligence is not available. Simple commands still work.",
+};
+
+/** Spec §9: the model's availability, with the reason. */
+export function modelText(m: ModelState): string {
+  switch (m.state) {
+    case "checking":
+      return "Checking Apple Intelligence…";
+    case "available":
+      return "Free-form commands use Apple Intelligence on this Mac.";
+    case "unavailable":
+      return modelReason[m.reason];
+  }
+}
