@@ -28,6 +28,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - if: matrix.os == 'macos-latest'
+        run: |
+          rustup target add aarch64-apple-ios-sim aarch64-apple-ios
+          cargo clippy -p acd-app-core --target aarch64-apple-ios-sim --locked -- -D warnings
+          cargo clippy -p acd-app-core --target aarch64-apple-ios --locked -- -D warnings
       - if: matrix.os == 'ubuntu-latest'
         run: node --test 'clients/omarchy/tests/*.test.mjs'
       - if: matrix.os == 'ubuntu-latest'

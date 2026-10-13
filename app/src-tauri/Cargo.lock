@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "acd-app-core"
+version = "0.1.0"
+dependencies = [
+ "acd-client",
+ "security-framework",
+ "tokio",
+]
+
+[[package]]
 name = "acd-client"
 version = "0.1.0"
 dependencies = [
@@ -80,6 +89,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "agent-caller-app"
 version = "0.1.0"
 dependencies = [
+ "acd-app-core",
  "acd-client",
  "acd-protocol",
  "acd-voice",
@@ -91,7 +101,6 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-user-notifications",
- "security-framework",
  "serde",
  "serde_json",
  "swift-rs",

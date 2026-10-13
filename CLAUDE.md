@@ -12,6 +12,7 @@ protocol. The reference client is a Tauri menubar app for macOS.
 - `crates/acd-adapters`: sources. `herdr/` (screen and keys), `t3/` (T3
   Code), `hooks/` (Claude Code and Codex hooks).
 - `crates/acd-client`: client library used by the app and `acd-inbox`.
+- `crates/acd-app-core`: app core shared by the Mac app and the iOS shell (inbox setup, pairing import, Keychain store, commands). No Tauri.
 - `crates/acd-voice`: voice command rules (routing, safety, recording,
   HUD states). No platform code.
 - `crates/acd-voice-client`: the voice controller that ties those rules to
@@ -26,6 +27,7 @@ protocol. The reference client is a Tauri menubar app for macOS.
 - `app/`: Svelte frontend and `app/src-tauri` backend, with the Swift
   speech bridge in `app/src-tauri/swift`. It is excluded from the Cargo
   workspace.
+- `apps/ios/`: iOS shell (`apps/ios/src-tauri`) for the foreground inbox over Tailscale. Own Cargo workspace, like `app/src-tauri`.
 - `tests/fixtures/`: recorded herdr screens and other fixtures.
 
 ## Docs

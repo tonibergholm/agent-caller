@@ -1,9 +1,7 @@
 mod commands;
 mod frame;
 mod hotkey;
-mod keychain;
 mod notify;
-mod pairing;
 mod panel;
 mod settings_window;
 mod tray;
@@ -11,11 +9,8 @@ mod voice;
 
 use std::sync::Arc;
 
-use acd_client::{
-    Timing,
-    inbox::{Inbox, InboxOptions},
-    settings::{CachedSecrets, DEFAULT_HOTKEY, Settings},
-};
+use acd_app_core::{commands::AppState, setup};
+use acd_client::settings::DEFAULT_HOTKEY;
 use tauri::{Emitter, Manager, RunEvent};
 
 fn main() {
@@ -81,23 +76,17 @@ fn main() {
             // on every start is the first-run request.
             notify::request_authorization();
             let path = app.path().app_config_dir()?.join("settings.json");
-            let settings = Settings::load_or_init(&path)?;
-            let inbox = Inbox::new(
-                settings,
-                Arc::new(CachedSecrets::new(keychain::KeychainSecrets::new(
-                    keychain::SERVICE_NAME,
-                ))),
-                InboxOptions {
-                    timing: Timing::default(),
-                    settings_path: Some(path),
-                    client_name: "agent-caller-mac".into(),
-                    client_version: env!("CARGO_PKG_VERSION").into(),
+            let inbox = setup::open_inbox(
+                &path,
+                acd_app_core::keychain::cached_secrets(),
+                tauri::async_runtime::handle().inner(),
+                setup::OpenOptions {
+                    client_name: "agent-caller-mac",
+                    client_version: env!("CARGO_PKG_VERSION"),
+                    local_machine: true,
                 },
-            );
-            tauri::async_runtime::block_on(async {
-                inbox.start();
-            });
-            app.manage(commands::AppState {
+            )?;
+            app.manage(AppState {
                 inbox: inbox.clone(),
             });
             let voice_path = app.path().app_config_dir()?.join("voice.json");

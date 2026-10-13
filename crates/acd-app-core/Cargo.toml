@@ -1,0 +1,21 @@
+[package]
+name = "acd-app-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Shared by the Mac app (app/src-tauri) and the iOS shell (apps/ios). No Tauri
+# dependency: the shells pass in the runtime handle and the clipboard text.
+[dependencies]
+acd-client.workspace = true
+tokio.workspace = true
+
+# Keychain store. Apple targets only, so the Linux build of the workspace does
+# not compile it. Pinned like app/src-tauri was.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+security-framework = "=3.7.0"
+
+[dev-dependencies]
+acd-protocol.workspace = true
+tempfile.workspace = true
