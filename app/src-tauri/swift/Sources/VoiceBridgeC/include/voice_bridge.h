@@ -50,7 +50,7 @@
 #define VB_EV_OVERFLOW 13u    /* events were dropped since the last delivery (S5) */
 #define VB_EV_MODEL 14u       /* generation: the request id; code: VB_OK or VB_ERR_MODEL_*; value: VB_MA_* when unavailable; text: the plan JSON, VB_OK only */
 #define VB_EV_MODEL_CAPS 15u  /* code: VB_MA_*; sent only when it changed (plan V16) */
-#define VB_EV_SPOKEN 16u  /* generation: the utterance; value: 1 finished, 0 failed. Nothing after vb_speech_stop. */
+#define VB_EV_SPOKEN 16u  /* generation: the utterance; value: 1 finished, 0 failed (also text that is not UTF-8). Nothing after vb_speech_stop, nor after a capture start (vb_session_start silences speech first, without an event: Rust has stopped it already). */
 #define VB_EV_VOICES 17u  /* text: JSON array of {"id","name","language"}, English voices; sent only when it changed */
 
 /* Permissions (vb_event.code for VB_EV_PERMISSION). */

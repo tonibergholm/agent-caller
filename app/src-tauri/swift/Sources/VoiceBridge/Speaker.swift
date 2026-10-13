@@ -86,6 +86,10 @@ final class Speaker: @unchecked Sendable {
     static let shared = Speaker(engine: AVSynth(), bridge: .shared)
     /// How long a capture start waits for the synthesizer to go quiet.
     static let drainMs = 150
+    /// After it reports quiet, a short fixed moment for the audio output: the
+    /// flag follows the synthesizer, not the speaker hardware (a probe showed
+    /// it turn false about 1 ms after a stop).
+    static let tailMs = 40
 
     private let engine: SynthEngine
     private let bridge: Bridge
@@ -131,11 +135,17 @@ final class Speaker: @unchecked Sendable {
     /// Bounded, so a synthesizer that never reports quiet cannot hold the
     /// microphone back.
     func silenceForCapture() {
+        // Read on the speech queue, where the synthesizer is used (its flags are nonatomic).
+        let wasSpeaking = queue.sync { engine.isSpeaking }
         stop()
-        let deadline = Date().addingTimeInterval(Double(Speaker.drainMs) / 1000)
-        while engine.isSpeaking && Date() < deadline {
+        // Nothing was playing: nothing to wait for.
+        guard wasSpeaking else { return }
+        // Monotonic, so a clock change cannot stretch the wait.
+        let deadline = DispatchTime.now() + .milliseconds(Speaker.drainMs)
+        while queue.sync(execute: { engine.isSpeaking }) && DispatchTime.now() < deadline {
             usleep(5_000)
         }
+        usleep(UInt32(Speaker.tailMs) * 1000)
     }
 
     /// `force`: report even if unchanged (Rust asks after an overflow).
@@ -167,7 +177,12 @@ final class Speaker: @unchecked Sendable {
 @_cdecl("vb_speech_say")
 public func vb_speech_say(_ generation: UInt64, _ text: UnsafePointer<UInt8>?, _ textLen: Int,
                           _ voice: UnsafePointer<UInt8>?, _ voiceLen: Int, _ rate: UInt32) {
-    guard generation != 0, let t = copyText(text, textLen), let v = copyText(voice, voiceLen) else { return }
+    guard generation != 0 else { return }
+    guard let t = copyText(text, textLen), let v = copyText(voice, voiceLen) else {
+        // Text that is not UTF-8: report it as failed, so Rust does not wait for its cap.
+        Bridge.shared.emit(Event(generation: generation, kind: VB_EV_SPOKEN, value: 0))
+        return
+    }
     Speaker.shared.say(generation, text: t, voice: v.isEmpty ? nil : v, rate: rate)
 }
 

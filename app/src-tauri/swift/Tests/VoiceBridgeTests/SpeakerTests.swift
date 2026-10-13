@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 import VoiceBridgeC
 @testable import VoiceBridge
@@ -16,7 +17,12 @@ final class FakeSynth: SynthEngine, @unchecked Sendable {
             pending.append(done)
         }
     }
-    func stop() { lock.withLock { log.append("stop") } }
+    /// Whether `stop` turns `isSpeaking` false at once, as AVSpeechSynthesizer does.
+    var quietsOnStop = false
+    func stop() {
+        lock.withLock { log.append("stop") }
+        if quietsOnStop { set(speaking: false) }
+    }
     private var speaking = false
     func set(speaking: Bool) { lock.withLock { self.speaking = speaking } }
     var isSpeaking: Bool { lock.withLock { speaking } }
@@ -111,13 +117,32 @@ final class SpeakerTests: XCTestCase {
         synth.set(speaking: false)
         var started = Date()
         speaker.silenceForCapture()
-        XCTAssertLessThan(Date().timeIntervalSince(started), 0.05, "quiet: no wait")
-        synth.set(speaking: true) // a synthesizer that never reports quiet
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.02, "nothing was playing: no wait")
+        // Speaking, and it reports quiet at once on stop (what the real one does):
+        // only the short fixed tail is waited.
+        synth.set(speaking: true)
+        synth.quietsOnStop = true
         started = Date()
         speaker.silenceForCapture()
-        let waited = Date().timeIntervalSince(started)
+        var waited = Date().timeIntervalSince(started)
+        XCTAssertGreaterThanOrEqual(waited, Double(Speaker.tailMs) / 1000 - 0.005, "the output tail")
+        XCTAssertLessThan(waited, 0.12)
+        // A synthesizer that never reports quiet: bounded by `drainMs` plus the tail.
+        synth.set(speaking: true)
+        synth.quietsOnStop = false
+        started = Date()
+        speaker.silenceForCapture()
+        waited = Date().timeIntervalSince(started)
         XCTAssertGreaterThanOrEqual(waited, 0.14)
         XCTAssertLessThan(waited, 0.5, "bounded")
         XCTAssertEqual(synth.calls.suffix(1), ["stop"])
+    }
+
+    /// The rates in the header map to AVSpeech rates (owner decision 5); an unknown code is normal.
+    func testRatesMapToAVSpeechRates() {
+        XCTAssertEqual(Speaker.avRate(UInt32(VB_RATE_SLOW)), 0.42, accuracy: 0.0001)
+        XCTAssertEqual(Speaker.avRate(UInt32(VB_RATE_NORMAL)), AVSpeechUtteranceDefaultSpeechRate)
+        XCTAssertEqual(Speaker.avRate(UInt32(VB_RATE_FAST)), 0.58, accuracy: 0.0001)
+        XCTAssertEqual(Speaker.avRate(99), AVSpeechUtteranceDefaultSpeechRate)
     }
 }
