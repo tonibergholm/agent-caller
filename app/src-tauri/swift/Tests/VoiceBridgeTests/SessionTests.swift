@@ -3,7 +3,18 @@ import XCTest
 import VoiceBridgeC
 @testable import VoiceBridge
 
+/// What happened first, across fakes (Review Focus 3).
+final class OrderLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String] = []
+    func add(_ s: String) { lock.withLock { items.append(s) } }
+    var all: [String] { lock.withLock { items } }
+    func contains(_ s: String) -> Bool { lock.withLock { items.contains(s) } }
+    func prefix(_ n: Int) -> ArraySlice<String> { lock.withLock { items.prefix(n) } }
+}
+
 final class FakeCapture: AudioCapture, @unchecked Sendable {
+    var order: OrderLog?
     private let lock = NSLock()
     private var sink: AsyncStream<Chunk>.Continuation?
     private var startCount = 0
@@ -25,6 +36,7 @@ final class FakeCapture: AudioCapture, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         startCount += 1
+        order?.add("capture")
         let (stream, sink) = AsyncStream.makeStream(of: Chunk.self)
         self.sink = sink
         return stream
@@ -111,6 +123,7 @@ final class SessionTests: XCTestCase {
         let bridge = Bridge()
         let box = Box()
         let work = FakeWork()
+        let order = OrderLog()
         let admission: MicAdmission
         /// Runs inside each session right after capture starts (S18).
         var onCaptureStarted: ((Session) -> Void)?
@@ -118,14 +131,15 @@ final class SessionTests: XCTestCase {
         private var made: [FakeCapture] = []
         private var finished: Set<UInt64> = []
         lazy var sessions: Sessions = {
-            let s = Sessions(bridge: bridge, admission: admission) { [weak self] g in
+            let s = Sessions(bridge: bridge, admission: admission, make: { [weak self] g in
                 guard let self else { return nil }
                 let capture = FakeCapture()
+                capture.order = self.order
                 self.lock.lock(); self.made.append(capture); self.lock.unlock()
                 let session = Session(generation: g, capture: capture, work: self.work, bridge: self.bridge)
                 session.onCaptureStartedForTest = self.onCaptureStarted
                 return session
-            }
+            }, silence: { [weak self] in self?.order.add("silence") })
             s.onDone = { [weak self] g in self?.lock.lock(); self?.finished.insert(g); self?.lock.unlock() }
             return s
         }()
@@ -143,6 +157,14 @@ final class SessionTests: XCTestCase {
             return box.all.contains { $0.kind == VB_EV_CAPTURE && $0.value == 1 }
         }
         func kinds() -> [UInt32] { bridge.events.sync {}; return box.all.map(\.kind) }
+    }
+
+    /// Review Focus 3: the app's own voice stops before the microphone opens.
+    func testStartStopsSpeechBeforeCapture() {
+        let rig = Rig()
+        XCTAssertEqual(rig.sessions.start(1, maxMs: 60_000), VB_OK)
+        until("capture started") { rig.order.contains("capture") }
+        XCTAssertEqual(Array(rig.order.prefix(2)), ["silence", "capture"])
     }
 
     /// Plan S4: stop ends capture before it returns; the finishing session

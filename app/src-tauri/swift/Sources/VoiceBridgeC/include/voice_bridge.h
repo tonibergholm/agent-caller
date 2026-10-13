@@ -50,6 +50,8 @@
 #define VB_EV_OVERFLOW 13u    /* events were dropped since the last delivery (S5) */
 #define VB_EV_MODEL 14u       /* generation: the request id; code: VB_OK or VB_ERR_MODEL_*; value: VB_MA_* when unavailable; text: the plan JSON, VB_OK only */
 #define VB_EV_MODEL_CAPS 15u  /* code: VB_MA_*; sent only when it changed (plan V16) */
+#define VB_EV_SPOKEN 16u  /* generation: the utterance; value: 1 finished, 0 failed. Nothing after vb_speech_stop. */
+#define VB_EV_VOICES 17u  /* text: JSON array of {"id","name","language"}, English voices; sent only when it changed */
 
 /* Permissions (vb_event.code for VB_EV_PERMISSION). */
 #define VB_PERM_MICROPHONE 1u
@@ -78,6 +80,11 @@
 #define VB_MA_INTELLIGENCE_OFF 4u
 #define VB_MA_NOT_READY 5u
 #define VB_MA_UNKNOWN 6u
+
+/* Speaking rates (vb_speech_say). */
+#define VB_RATE_SLOW 0u
+#define VB_RATE_NORMAL 1u
+#define VB_RATE_FAST 2u
 
 /* System events (vb_event.code for VB_EV_SYSTEM). */
 #define VB_SYS_SCREEN_LOCKED 1u
@@ -183,5 +190,18 @@ void vb_model_prewarm(const uint8_t *instructions, size_t instructions_len);
  * dropped the last report). Settings refreshes never force, so they cannot
  * loop (plan V16). */
 void vb_model_query(uint32_t force);
+
+/* Speaks `text` as `generation` (non-zero), replacing any speech. `voice` is
+ * a voice identifier, or empty for the system's English voice. Text is
+ * borrowed and copied before return. VB_EV_SPOKEN follows when it ends. */
+void vb_speech_say(uint64_t generation, const uint8_t *text, size_t text_len,
+                   const uint8_t *voice, size_t voice_len, uint32_t rate);
+
+/* Stops all speech before it returns (plan V12): the microphone may open
+ * next. No VB_EV_SPOKEN follows for the stopped speech. */
+void vb_speech_stop(void);
+
+/* Reports the English voices; VB_EV_VOICES follows if they changed, or always when `force` is non-zero (after an overflow). */
+void vb_speech_voices(uint32_t force);
 
 #endif

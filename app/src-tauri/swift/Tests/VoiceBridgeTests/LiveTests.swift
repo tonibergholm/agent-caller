@@ -1,5 +1,6 @@
 import AVFoundation
 import XCTest
+import VoiceBridgeC
 @testable import VoiceBridge
 
 /// Run by hand on a Mac (spec §10): `swift test --package-path app/src-tauri/swift --filter LiveTests`.
@@ -63,5 +64,36 @@ final class LiveTests: XCTestCase {
         _ = try capture.start(to: format) {}
         capture.stop()
         capture.stop() // twice is safe
+    }
+
+    /// Spec §10 "synthesis runs", plan V17: off the main thread, at volume 0.
+    func testSynthesisRunsOffTheMainThread() throws {
+        let synth = AVSynth()
+        synth.volume = 0
+        let done = expectation(description: "spoken")
+        DispatchQueue(label: "live.speaker").async {
+            synth.speak("test", voice: nil, rate: AVSpeechUtteranceDefaultSpeechRate) { finished in
+                XCTAssertTrue(finished)
+                done.fulfill()
+            }
+        }
+        wait(for: [done], timeout: 10)
+    }
+
+    /// Plan V17: `say` and `stop` must not need the main thread. The main
+    /// thread is blocked here, as a sync Tauri command waiting on the
+    /// controller's lock would block it. A timeout means a hidden main-thread
+    /// hop, and a deadlock in the app.
+    func testSayAndStopNeverWaitForTheMainThread() throws {
+        let synth = AVSynth()
+        synth.volume = 0
+        let speaker = Speaker(engine: synth, bridge: Bridge())
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue(label: "live.lock-holder").async {
+            speaker.say(1, text: "test", voice: nil, rate: VB_RATE_NORMAL)
+            speaker.stop()
+            finished.signal()
+        }
+        XCTAssertEqual(finished.wait(timeout: .now() + 5), .success, "say or stop waited for the main thread")
     }
 }
