@@ -100,6 +100,8 @@ fn main() {
             let speech = Arc::new(voice::bridge::MacSpeech::new());
             #[cfg(target_os = "macos")]
             controller.attach_speech(speech.clone());
+            #[cfg(target_os = "macos")]
+            let model = Arc::new(voice::model::MacIntentModel::new(Arc::new(voice::model::SwiftModelPort), voice::model::MODEL_TIMEOUT));
             app.manage(voice::VoiceState {
                 controller,
                 settings: std::sync::Mutex::new(voice_settings),
@@ -107,6 +109,8 @@ fn main() {
                 trigger_error: std::sync::Mutex::new(None),
                 #[cfg(target_os = "macos")]
                 speech,
+                #[cfg(target_os = "macos")]
+                model,
             });
             tray::build(app.handle())?;
             panel::create(app.handle())?;

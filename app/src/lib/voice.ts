@@ -46,6 +46,19 @@ export type Unavailable =
   | "locale_unsupported"
   | "assets_missing";
 
+/** Mirrors acd_voice::router::model::ModelUnavailable. */
+export type ModelUnavailable =
+  | "not_mac"
+  | "os_too_old"
+  | "sdk_too_old"
+  | "device_not_eligible"
+  | "intelligence_off"
+  | "not_ready"
+  | "unknown";
+
+/** Mirrors acd_voice::router::model::ModelState. */
+export type ModelState = { state: "checking" } | { state: "available" } | { state: "unavailable"; reason: ModelUnavailable };
+
 /** Mirrors voice::status::VoiceStatus. */
 export type VoiceStatus = {
   unavailable: Unavailable | null;
@@ -59,6 +72,8 @@ export type VoiceStatus = {
   relaunch_for_hold_key: boolean;
   /** Why the voice shortcut could not be registered; the old one stays live. */
   toggle_error: string | null;
+  /** The on-device intent model; free-form commands need it (spec §9). */
+  model: ModelState;
 };
 
 /** Spec §9: "Not available on this Mac" with the reason. */

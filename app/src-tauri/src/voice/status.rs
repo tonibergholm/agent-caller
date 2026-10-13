@@ -1,5 +1,6 @@
 //! What Settings shows about voice (spec §6.4, §8, §9). No voice content.
 use acd_voice::listen::{Capabilities, Unavailable};
+use acd_voice::router::model::ModelState;
 use serde::Serialize;
 
 use super::permissions::{Permission, PermissionState, SPEECH_PERMISSION_REQUIRED, TAP_NEEDS_RELAUNCH};
@@ -19,6 +20,8 @@ pub struct VoiceStatus {
     /// Why the voice shortcut could not be registered. The previous voice
     /// shortcut stays live.
     pub toggle_error: Option<String>,
+    /// The on-device intent model (spec §9). Free-form commands need it.
+    pub model: ModelState,
 }
 
 pub fn build(
@@ -28,6 +31,7 @@ pub fn build(
     hold_key_active: bool,
     hold_key_wanted: bool,
     toggle_error: Option<String>,
+    model: ModelState,
 ) -> VoiceStatus {
     let input_monitoring = perm(Permission::InputMonitoring);
     VoiceStatus {
@@ -43,6 +47,7 @@ pub fn build(
             && !hold_key_active
             && input_monitoring == PermissionState::Granted,
         toggle_error,
+        model,
     }
 }
 
@@ -62,6 +67,7 @@ pub fn current(app: &tauri::AppHandle) -> VoiceStatus {
         super::trigger::hold_active(),
         settings.enabled && settings.hold_key != HoldKey::Off,
         voice.trigger_error.lock().unwrap().clone(),
+        voice.model.state(),
     )
 }
 
@@ -69,12 +75,21 @@ pub fn current(app: &tauri::AppHandle) -> VoiceStatus {
 #[cfg(not(target_os = "macos"))]
 pub fn current(_app: &tauri::AppHandle) -> VoiceStatus {
     let caps = Capabilities { unavailable: Some(Unavailable::NotMac), streams_partials: false, sample_rate: 0 };
-    build(caps, None, |_| PermissionState::NotDetermined, false, false, None)
+    build(
+        caps,
+        None,
+        |_| PermissionState::NotDetermined,
+        false,
+        false,
+        None,
+        ModelState::Unavailable(acd_voice::router::model::ModelUnavailable::NotMac),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acd_voice::router::model::{ModelState, ModelUnavailable};
 
     fn caps(unavailable: Option<Unavailable>) -> Capabilities {
         Capabilities { unavailable, streams_partials: true, sample_rate: 16_000 }
@@ -93,6 +108,7 @@ mod tests {
             false,
             true,
             None,
+            ModelState::Unavailable(ModelUnavailable::IntelligenceOff),
         );
         assert_eq!(s.unavailable, None);
         assert_eq!(s.locale.as_deref(), Some("en_GB"));
@@ -101,6 +117,7 @@ mod tests {
         assert_eq!(s.speech.is_some(), SPEECH_PERMISSION_REQUIRED, "Speech Recognition shows only if needed (S14)");
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["input_monitoring"], "not_determined");
+        assert_eq!(v["model"], serde_json::json!({"state": "unavailable", "reason": "intelligence_off"}));
         let s = build(
             caps(Some(Unavailable::AssetsMissing)),
             None,
@@ -108,6 +125,7 @@ mod tests {
             true,
             true,
             Some("Could not register".into()),
+            ModelState::Available,
         );
         assert_eq!(serde_json::to_value(&s).unwrap()["unavailable"], "assets_missing");
         assert_eq!(s.toggle_error.as_deref(), Some("Could not register"));
@@ -117,10 +135,10 @@ mod tests {
     #[test]
     fn a_relaunch_is_asked_for_only_when_it_would_help() {
         let granted = |_| PermissionState::Granted;
-        let s = build(caps(None), None, granted, false, true, None);
+        let s = build(caps(None), None, granted, false, true, None, ModelState::Available);
         assert_eq!(s.relaunch_for_hold_key, TAP_NEEDS_RELAUNCH);
-        assert!(!build(caps(None), None, granted, true, true, None).relaunch_for_hold_key, "running already");
-        assert!(!build(caps(None), None, granted, false, false, None).relaunch_for_hold_key, "no hold key wanted");
-        assert!(!build(caps(None), None, |_| PermissionState::Denied, false, true, None).relaunch_for_hold_key);
+        assert!(!build(caps(None), None, granted, true, true, None, ModelState::Available).relaunch_for_hold_key, "running already");
+        assert!(!build(caps(None), None, granted, false, false, None, ModelState::Available).relaunch_for_hold_key, "no hold key wanted");
+        assert!(!build(caps(None), None, |_| PermissionState::Denied, false, true, None, ModelState::Available).relaunch_for_hold_key);
     }
 }

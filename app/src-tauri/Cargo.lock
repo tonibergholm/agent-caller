@@ -95,6 +95,7 @@ dependencies = [
  "acd-voice",
  "acd-voice-client",
  "anyhow",
+ "async-trait",
  "block2",
  "mac-notification-sys",
  "objc2",

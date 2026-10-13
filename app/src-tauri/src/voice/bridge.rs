@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use acd_voice::listen::{Capabilities, ListenError, ListenEvent, SpeechInput, Unavailable};
+use acd_voice::router::model::{ModelError, ModelState, ModelUnavailable};
 use acd_voice::text::VoiceText;
 use tokio::sync::mpsc;
 
@@ -30,6 +31,10 @@ pub const VB_ERR_INPUT_MONITORING_DENIED: i32 = 8;
 pub const VB_ERR_TAP_FAILED: i32 = 9;
 #[allow(dead_code)]
 pub const VB_ERR_NOT_INITIALIZED: i32 = 10;
+pub const VB_ERR_MODEL_UNAVAILABLE: i32 = 11;
+pub const VB_ERR_MODEL_TIMEOUT: i32 = 12;
+#[allow(dead_code)]
+pub const VB_ERR_MODEL_FAILED: i32 = 13;
 
 pub const VB_EV_PARTIAL: u32 = 1;
 pub const VB_EV_FINAL: u32 = 2;
@@ -44,6 +49,17 @@ pub const VB_EV_ASSETS: u32 = 10;
 pub const VB_EV_PROBE: u32 = 11;
 pub const VB_EV_CAPTURE: u32 = 12;
 pub const VB_EV_OVERFLOW: u32 = 13;
+pub const VB_EV_MODEL: u32 = 14;
+pub const VB_EV_MODEL_CAPS: u32 = 15;
+
+pub const VB_MA_AVAILABLE: u32 = 0;
+pub const VB_MA_OS_TOO_OLD: u32 = 1;
+pub const VB_MA_SDK_TOO_OLD: u32 = 2;
+pub const VB_MA_DEVICE_NOT_ELIGIBLE: u32 = 3;
+pub const VB_MA_INTELLIGENCE_OFF: u32 = 4;
+pub const VB_MA_NOT_READY: u32 = 5;
+#[allow(dead_code)]
+pub const VB_MA_UNKNOWN: u32 = 6;
 
 #[allow(dead_code)]
 pub const VB_PERM_MICROPHONE: u32 = 1;
@@ -124,6 +140,11 @@ pub(crate) mod ffi {
         pub fn vb_install_assets();
         pub fn vb_tap_start(keycode: u16, down_mask: u64, out_tap: *mut u64) -> i32;
         pub fn vb_tap_stop();
+        pub fn vb_model_plan(id: u64, instructions: *const u8, instructions_len: usize, input: *const u8, input_len: usize, timeout_ms: u32) -> i32;
+        pub fn vb_model_cancel(id: u64);
+        pub fn vb_model_cancel_all();
+        pub fn vb_model_prewarm(instructions: *const u8, instructions_len: usize);
+        pub fn vb_model_query(force: u32);
     }
 }
 
@@ -149,6 +170,10 @@ pub enum BridgeEvent {
     Overflow,
     /// A spike report: statuses, counts and timings, no transcript.
     Probe(String),
+    /// A plan request's reply (plan V4). `Debug` shows the reply's length only.
+    ModelReply { id: u64, reply: Result<VoiceText, ModelError> },
+    /// Model availability changed (plan V6, V16).
+    ModelCaps(ModelState),
 }
 
 /// Copies `ev` into an owned event; `None` for kinds the app ignores.
@@ -192,7 +217,34 @@ pub unsafe fn decode(ev: &VbEvent) -> Option<BridgeEvent> {
         VB_EV_CAPTURE => Some(BridgeEvent::Capture { generation: g, on: ev.value != 0 }),
         VB_EV_OVERFLOW => Some(BridgeEvent::Overflow),
         VB_EV_PROBE => Some(BridgeEvent::Probe(text())),
+        VB_EV_MODEL => Some(BridgeEvent::ModelReply { id: g, reply: model_reply(ev.code as i32, ev.value, text) }),
+        VB_EV_MODEL_CAPS => Some(BridgeEvent::ModelCaps(model_state(ev.code))),
         _ => None,
+    }
+}
+
+pub fn model_unavailable(code: u32) -> ModelUnavailable {
+    match code {
+        VB_MA_OS_TOO_OLD => ModelUnavailable::OsTooOld,
+        VB_MA_SDK_TOO_OLD => ModelUnavailable::SdkTooOld,
+        VB_MA_DEVICE_NOT_ELIGIBLE => ModelUnavailable::DeviceNotEligible,
+        VB_MA_INTELLIGENCE_OFF => ModelUnavailable::IntelligenceOff,
+        VB_MA_NOT_READY => ModelUnavailable::NotReady,
+        _ => ModelUnavailable::Unknown,
+    }
+}
+
+pub fn model_state(code: u32) -> ModelState {
+    if code == VB_MA_AVAILABLE { ModelState::Available } else { ModelState::Unavailable(model_unavailable(code)) }
+}
+
+/// The text is read only for a successful reply.
+pub fn model_reply(code: i32, reason: u32, text: impl FnOnce() -> String) -> Result<VoiceText, ModelError> {
+    match code {
+        VB_OK => Ok(VoiceText::new(text())),
+        VB_ERR_MODEL_UNAVAILABLE => Err(ModelError::Unavailable(model_unavailable(reason))),
+        VB_ERR_MODEL_TIMEOUT => Err(ModelError::Timeout),
+        _ => Err(ModelError::Failed),
     }
 }
 
@@ -430,6 +482,40 @@ mod tests {
         assert_eq!(unsafe { decode(&VbEvent { kind: 999, ..VbEvent::EMPTY }) }, None);
     }
 
+
+    #[test]
+    fn model_events_decode_and_never_show_the_reply() {
+        use acd_voice::router::model::{ModelError, ModelState, ModelUnavailable};
+        let ok = VbEvent { code: VB_OK as u32, ..with_text(VB_EV_MODEL, 9, b"{\"step\":\"none\"}") };
+        assert_eq!(
+            unsafe { decode(&ok) },
+            Some(BridgeEvent::ModelReply { id: 9, reply: Ok(VoiceText::new("{\"step\":\"none\"}")) })
+        );
+        let off = VbEvent { kind: VB_EV_MODEL, generation: 9, code: VB_ERR_MODEL_UNAVAILABLE as u32, value: VB_MA_INTELLIGENCE_OFF, ..VbEvent::EMPTY };
+        assert_eq!(
+            unsafe { decode(&off) },
+            Some(BridgeEvent::ModelReply { id: 9, reply: Err(ModelError::Unavailable(ModelUnavailable::IntelligenceOff)) })
+        );
+        let timeout = VbEvent { kind: VB_EV_MODEL, generation: 9, code: VB_ERR_MODEL_TIMEOUT as u32, ..VbEvent::EMPTY };
+        assert_eq!(unsafe { decode(&timeout) }, Some(BridgeEvent::ModelReply { id: 9, reply: Err(ModelError::Timeout) }));
+        let other = VbEvent { kind: VB_EV_MODEL, generation: 9, code: 77, ..VbEvent::EMPTY };
+        assert_eq!(unsafe { decode(&other) }, Some(BridgeEvent::ModelReply { id: 9, reply: Err(ModelError::Failed) }));
+        let caps = |code| VbEvent { kind: VB_EV_MODEL_CAPS, code, ..VbEvent::EMPTY };
+        assert_eq!(unsafe { decode(&caps(VB_MA_AVAILABLE)) }, Some(BridgeEvent::ModelCaps(ModelState::Available)));
+        for (code, why) in [
+            (VB_MA_OS_TOO_OLD, ModelUnavailable::OsTooOld),
+            (VB_MA_SDK_TOO_OLD, ModelUnavailable::SdkTooOld),
+            (VB_MA_DEVICE_NOT_ELIGIBLE, ModelUnavailable::DeviceNotEligible),
+            (VB_MA_INTELLIGENCE_OFF, ModelUnavailable::IntelligenceOff),
+            (VB_MA_NOT_READY, ModelUnavailable::NotReady),
+            (VB_MA_UNKNOWN, ModelUnavailable::Unknown),
+            (99, ModelUnavailable::Unknown),
+        ] {
+            assert_eq!(unsafe { decode(&caps(code)) }, Some(BridgeEvent::ModelCaps(ModelState::Unavailable(why))), "{code}");
+        }
+        let secret = VbEvent { code: VB_OK as u32, ..with_text(VB_EV_MODEL, 9, b"SECRET") };
+        assert!(!format!("{:?}", unsafe { decode(&secret) }).contains("SECRET"));
+    }
 
     fn with_text(kind: u32, generation: u64, text: &[u8]) -> VbEvent {
         VbEvent { kind, generation, text: text.as_ptr(), text_len: text.len(), ..VbEvent::EMPTY }

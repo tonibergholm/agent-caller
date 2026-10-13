@@ -59,6 +59,7 @@
     hold_key_active: false,
     relaunch_for_hold_key: false,
     toggle_error: null,
+    model: { state: "checking" },
   });
   let toggleDraft = $state("");
   /** The stored voice settings arrived; until then the keys below would show defaults. */
