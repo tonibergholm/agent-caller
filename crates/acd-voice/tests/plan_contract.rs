@@ -51,6 +51,26 @@ fn the_step_names_are_every_variant() {
     assert_eq!(decoded.len(), steps.len());
 }
 
+/// The nine plans the Swift guided type can write (one per case; Task 5b).
+/// Swift checks that each case writes exactly this text (PlanContractTests).
+#[test]
+fn every_guided_case_writes_a_valid_plan() {
+    let schema = plan_schema();
+    let v = jsonschema::validator_for(&schema).unwrap();
+    let cases: Vec<String> = serde_json::from_str(&fixture("plan-cases.json")).unwrap();
+    assert_eq!(cases.len(), 9);
+    let mut steps = Vec::new();
+    for text in &cases {
+        let plan: Value = serde_json::from_str(text).unwrap();
+        assert!(v.is_valid(&plan), "{text}");
+        let decoded: ModelPlan = serde_json::from_str(text).unwrap();
+        steps.push(wire(decoded.step));
+    }
+    steps.sort_unstable();
+    steps.dedup();
+    assert_eq!(steps.len(), 8, "every step has a case: {steps:?}");
+}
+
 /// Both sides of the step list: the fixture Swift checks its `.anyOf` list
 /// against must name exactly the steps the schema allows, once each.
 #[test]

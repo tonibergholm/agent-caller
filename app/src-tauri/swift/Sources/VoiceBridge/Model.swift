@@ -226,30 +226,99 @@ final class UnavailableEngine: PlanEngine, @unchecked Sendable {
 }
 
 #if canImport(FoundationModels)
-/// The guided type (plan V3): the property names are the wire names.
+/// The guided type (plan V3, Task 5b): one case per step, each carrying only
+/// that step's own fields. A flat struct with optional fields made the model
+/// fill every field (an `agent` and a `request` that pointed at different
+/// cards in 18 of 20 plans), which Rust rightly refuses; a case cannot do that.
+/// `wire` turns a case into Rust's `ModelPlan` JSON.
+@available(macOS 26.0, *)
+@Generable
+enum GuidedStep {
+    /// The user asks to tell, ask or message an agent something.
+    case send(SendArgs)
+    /// The user asks to hear a waiting request read out.
+    case read(ReadArgs)
+    /// The user asks what is waiting, how many things need them, or what is going on at one machine.
+    case summarize(SummarizeArgs)
+    /// The user asks what is waiting across everything, with no machine named.
+    case summarize_all
+    /// The user asks to show, open, focus or go to one agent.
+    case select(SelectArgs)
+    /// The user dictates a free-text answer to a question that is waiting.
+    case answer_text(AnswerTextArgs)
+    /// The user approves, allows, denies or picks an option for a request that is waiting.
+    case answer(AnswerArgs)
+    /// Only when the user asks to cancel or undo their previous voice command.
+    case cancel
+    /// Anything else: the command is not about the inbox or its agents.
+    case none
+
+    @Generable(description: "The user approves, allows, denies or picks an option for a request that is waiting.")
+    struct AnswerArgs {
+        @Guide(description: "The id of the waiting request, from DATA: r1, r2, ...")
+        var request: String
+        @Guide(description: "The id of the option to choose, as listed for that request: 1 to 9. Pick the option whose label or effect matches what the user said.",
+               .anyOf(["1", "2", "3", "4", "5", "6", "7", "8", "9"]))
+        var option: String
+    }
+    @Generable(description: "The user dictates a free-text answer to a question that is waiting.")
+    struct AnswerTextArgs {
+        @Guide(description: "The id of the waiting request, from DATA: r1, r2, ...")
+        var request: String
+        @Guide(description: "The answer, in the user's words.")
+        var text: String
+    }
+    @Generable(description: "The user asks to tell, ask or message an agent something.")
+    struct SendArgs {
+        @Guide(description: "The id of the agent, from DATA: a1, a2, ...")
+        var agent: String
+        @Guide(description: "What to tell the agent, in the user's words, without the words that name the agent.")
+        var text: String
+    }
+    @Generable(description: "The user asks to hear a waiting request read out.")
+    struct ReadArgs {
+        @Guide(description: "The id of the waiting request, from DATA: r1, r2, ...")
+        var request: String
+    }
+    @Generable(description: "The user asks what is waiting, how many things need them, or what is going on at one machine.")
+    struct SummarizeArgs {
+        @Guide(description: "The machine's name, exactly as in DATA.")
+        var machine: String
+    }
+    @Generable(description: "The user asks to show, open, focus or go to one agent.")
+    struct SelectArgs {
+        @Guide(description: "The id of the agent, from DATA: a1, a2, ...")
+        var agent: String
+    }
+
+    /// Rust's `ModelPlan`: only the case's own fields are set.
+    var wire: PlanJSON {
+        switch self {
+        case .answer(let a): return PlanJSON(step: "answer", request: a.request, option: a.option)
+        case .answer_text(let a): return PlanJSON(step: "answer_text", request: a.request, text: a.text)
+        case .send(let a): return PlanJSON(step: "send", agent: a.agent, text: a.text)
+        case .read(let a): return PlanJSON(step: "read", request: a.request)
+        case .summarize(let a): return PlanJSON(step: "summarize", machine: a.machine)
+        case .summarize_all: return PlanJSON(step: "summarize")
+        case .select(let a): return PlanJSON(step: "select", agent: a.agent)
+        case .cancel: return PlanJSON(step: "cancel")
+        case .none: return PlanJSON(step: "none")
+        }
+    }
+}
+
+/// The guided reply: a one-sentence restatement first (guided generation
+/// decodes in property order, so the model commits to what the user wants
+/// before it picks the step), then the step. `want` is dropped; Rust never
+/// sees it (spec §6.3: the reply's words are not kept).
 @available(macOS 26.0, *)
 @Generable
 struct GuidedPlan {
-    // Same list as PlanJSON.steps; PlanContractTests checks the schema has them.
-    @Guide(description: "The one step for the spoken command.",
-           .anyOf(["answer", "answer_text", "send", "cancel", "read", "summarize", "select", "none"]))
-    var step: String
-    @Guide(description: "An agent id from DATA, such as a1.")
-    var agent: String?
-    @Guide(description: "A request id from DATA, such as r1.")
-    var request: String?
-    @Guide(description: "For answer: the option's id as listed, 1 to 9.", .anyOf(["1", "2", "3", "4", "5", "6", "7", "8", "9"]))
-    var option: String?
-    @Guide(description: "For answer_text and send: what the user asked to say, in the user's words.")
-    var text: String?
-    @Guide(description: "For summarize: a machine name from DATA.")
-    var machine: String?
-    @Guide(description: "When unsure which agent is meant: agent ids from DATA.")
-    var candidates: [String]?
+    @Guide(description: "One short sentence: the verb the user said and which agent or request it is about.")
+    var want: String
+    var step: GuidedStep
 
-    var wire: PlanJSON {
-        PlanJSON(step: step, agent: agent, request: request, option: option, text: text, machine: machine, candidates: candidates)
-    }
+    var wire: PlanJSON { step.wire }
 }
 
 /// Apple's on-device model. `lock` guards `warm`.
@@ -265,10 +334,18 @@ final class FoundationPlanEngine: PlanEngine, @unchecked Sendable {
     /// (so this comment spells it with spaces) and a bare default model.
     private static var onDevice: SystemLanguageModel { SystemLanguageModel.default }
 
+    /// This interface's own wording, added to Rust's instructions: the model
+    /// sees one case per step, a summary with no machine is its own case, and
+    /// there is no `candidates` field.
+    private static let interfaceNote =
+        "In this interface summarize always takes a machine and is only for a machine the user named. "
+        + "Use summarize_all for \"what needs me\", \"how many things are waiting\" and \"give me a summary\". "
+        + "Candidates are not offered: choose the most likely agent."
+
     private static func session(_ instructions: String) -> LanguageModelSession {
         // `model:` typed as `SystemLanguageModel` picks the macOS 26
         // initializer, not the macOS 27 `init(model: some LanguageModel, ...)`.
-        LanguageModelSession(model: onDevice, tools: [], instructions: instructions)
+        LanguageModelSession(model: onDevice, tools: [], instructions: instructions + "\n" + interfaceNote)
     }
 
     func availability() -> UInt32 {
