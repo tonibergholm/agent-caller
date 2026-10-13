@@ -110,15 +110,15 @@ export function onKey(
 
   if (ev.inField) {
     if (ev.key === "Enter" && !ev.shift && ev.field?.kind === "voice") {
-      return { state: st, effect: { kind: "submitVoice" } };
+      return { state: rest, effect: { kind: "submitVoice" } };
     }
     if (ev.key === "Enter" && !ev.shift && ev.field?.kind === "answer" && ev.field.cardKey !== null) {
-      return { state: st, effect: { kind: "submitAnswer", cardKey: ev.field.cardKey } };
+      return { state: rest, effect: { kind: "submitAnswer", cardKey: ev.field.cardKey } };
     }
     if (ev.key === "Enter" && !ev.shift && ev.field?.kind !== "answer" && st.replyFor !== null) {
-      return { state: st, effect: { kind: "submitReply", cardKey: st.replyFor } };
+      return { state: rest, effect: { kind: "submitReply", cardKey: st.replyFor } };
     }
-    return none;
+    return { state: rest, effect: NONE };
   }
 
   if (ev.key === "/" && ev.voiceField) return { state: rest, effect: { kind: "focusVoice" } };

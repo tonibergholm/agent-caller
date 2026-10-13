@@ -374,11 +374,11 @@ export function onKey(visible, st, ev) {
   const rest = st.armed ? Object.assign({}, st, { armed: null }) : st;
   if (ev.key === "Escape") return { state: rest, effect: { kind: "escape" } };
   if (ev.field) {
-    if (ev.key !== "Enter" || ev.shift) return none;
-    if (ev.field.kind === "answer" && ev.field.cardKey) return { state: st, effect: { kind: "submitAnswer", cardKey: ev.field.cardKey } };
-    if (ev.field.kind === "reply" && st.replyFor) return { state: st, effect: { kind: "submitReply", cardKey: st.replyFor } };
-    if (ev.field.kind === "pairing") return { state: st, effect: { kind: "submitPairing" } };
-    return none;
+    if (ev.key !== "Enter" || ev.shift) return { state: rest, effect: NONE };
+    if (ev.field.kind === "answer" && ev.field.cardKey) return { state: rest, effect: { kind: "submitAnswer", cardKey: ev.field.cardKey } };
+    if (ev.field.kind === "reply" && st.replyFor) return { state: rest, effect: { kind: "submitReply", cardKey: st.replyFor } };
+    if (ev.field.kind === "pairing") return { state: rest, effect: { kind: "submitPairing" } };
+    return { state: rest, effect: NONE };
   }
   const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
   const idx = visible.findIndex((c) => c.key === st.selected);

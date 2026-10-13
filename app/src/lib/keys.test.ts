@@ -148,6 +148,12 @@ describe("options that need a second tap", () => {
     expect(after.effect).toEqual({ kind: "none" });
   });
 
+  test("typing in a text field disarms", () => {
+    const r = onKey(v, { ...armedState, replyFor: "m/e" }, k("x", { inField: true, at: 1100 }));
+    expect(r.state.armed ?? null).toBeNull();
+    expect(onKey(v, r.state, k("2", { at: 1200 })).effect).toEqual({ kind: "none" });
+  });
+
   test("an armed option never sends for a different request or revision", () => {
     const stale = { ...armedState, armed: { ...armedState.armed, revision: 0 } };
     expect(onKey(v, stale, k("2", { at: 1100 })).effect).toEqual({ kind: "none" });

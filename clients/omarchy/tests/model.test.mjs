@@ -529,3 +529,11 @@ test("the panel sends picks through the model so a click cannot skip the confirm
   assert.match(panel, /cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/);
   assert.doesNotMatch(panel, /run\(\{ kind: "pick"/);
 });
+
+test("typing in a text field disarms an armed option", () => {
+  const cards = [externalCard()];
+  const armed = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 })).state;
+  const typed = M.onKey(cards, armed, key("x", { field: { kind: "reply", cardKey: "m1/e" }, at: 1100 }));
+  assert.equal(typed.state.armed, null);
+  assert.equal(M.onKey(cards, typed.state, key("2", { at: 1200 })).effect.kind, "none");
+});
