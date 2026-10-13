@@ -142,8 +142,8 @@ Clean stop. Same effect as lease expiry (§5).
 - When a client answers, the request moves to answering and the answer
   is queued for the producer with an `answer_id`, the request revision
   and `expires_at_ms = answered_at + answer_timeout_ms`, counted on a monotonic
-  clock and stamped on the wire as wall clock now plus time left, so a
-  system sleep does not shift it.
+  clock and stamped on the wire as wall clock now plus the awake time left; it may differ
+  between re-offers, so producers keep the earliest value they saw.
 - Answers are re-offered on every call until acked or expired. The
   producer dedupes by `answer_id`, records the answer durably before
   acting, and **must not act after `expires_at_ms`**. It acks an

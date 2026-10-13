@@ -543,7 +543,9 @@ Answer   {answer_id, key, revision, option_id|null, text|null, expires_at_ms}
   removed, except one whose request just resolved `uncertain` or with a
   `rejected`/`failed` ack: it stays for 15 s with no request, so a client
   can show the resolution message on its card, and is then removed. A new
-  item for the same `agent_key` ends the wait.
+  item for the same `agent_key` ends the wait. The linger survives
+  `DELETE` and the end of the lease. During it the agent counts as needing
+  the user (intended: the message is the thing to read).
 - Each item becomes a `kind: "question"` request with one single-select
   question, `effect: "choose"` options and `answer_path: "external"`. With
   no options and `free_text: false` the path is `none` and the request is
@@ -562,9 +564,10 @@ hook socket shares its 128-connection cap with the hook routes.
 **Answers.** When a client answers, the request moves to `answering` and
 the answer is queued with an `answer_id`, the request revision and
 `expires_at_ms`, the wall-clock deadline in epoch milliseconds. acd counts
-the window on a monotonic clock and stamps each offer with the wall clock
-now plus the time left, so a system sleep does not shift the deadline a
-producer sees. The window is `answer_timeout_ms` from the moment of the
+the window on a monotonic clock, which stands still while the machine
+sleeps, and stamps each offer with the wall clock now plus the awake time
+left. `expires_at_ms` may therefore differ between re-offers of the same
+`answer_id`; a producer keeps the earliest value it saw. The window is `answer_timeout_ms` from the moment of the
 answer. It is offered on every call until acked or expired. The producer dedupes by `answer_id`, records
 the answer durably before acting and must not act after `expires_at_ms`;
 it acks an expired answer `failed`. An answer to a producer without a live

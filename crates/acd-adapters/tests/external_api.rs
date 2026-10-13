@@ -1473,3 +1473,36 @@ async fn bidi_and_separator_characters_in_producer_text_are_refused() {
         "emoji joiners stay allowed"
     );
 }
+
+#[tokio::test]
+async fn a_lingering_card_outlives_delete_until_its_linger_ends() {
+    let mut rig = rig().await;
+    rig.ok(
+        "sup",
+        state(vec![item("k1", "a1", "alpha"), item("k2", "a2", "beta")]),
+    )
+    .await;
+    let alpha = rig.request("alpha");
+    rig.answer(&alpha, "abandon").await;
+    let id = only_answer(&rig.get_answers("sup", 0).await.1)["answer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    rig.ok(
+        "sup",
+        with_acks(
+            vec![item("k2", "a2", "beta")],
+            vec![ack(&id, "failed", Some("crashed mid-action"))],
+        ),
+    )
+    .await;
+    assert_eq!(rig.stop("sup").await, 204);
+    let titles: Vec<String> = rig.agents().into_iter().map(|a| a.title).collect();
+    assert_eq!(titles, ["alpha"], "beta went with the lease, alpha lingers");
+    rig.advance(14_999);
+    rig.adapter.sweep();
+    assert!(rig.agent("alpha").is_some());
+    rig.advance(1);
+    rig.adapter.sweep();
+    assert!(rig.agents().is_empty());
+}

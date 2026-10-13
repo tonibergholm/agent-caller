@@ -179,7 +179,15 @@ impl Producer {
     }
 
     fn expire_lease(&mut self, pid: &str, txn: &mut Txn<'_>) {
-        for agent_key in self.agents.drain() {
+        // A lingering agent has no request left; it goes when its linger ends.
+        let gone: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|a| !self.lingering.contains_key(a.as_str()))
+            .cloned()
+            .collect();
+        for agent_key in gone {
+            self.agents.remove(&agent_key);
             txn.apply(Observation::AgentGone {
                 agent_id: agent_id(pid, &agent_key),
             });
@@ -191,7 +199,6 @@ impl Producer {
         for q in self.queued.drain(..) {
             self.finished.insert(&q.answer_id);
         }
-        self.lingering.clear();
         self.live = false;
         tracing::info!(producer = pid, "external producer lease ended");
     }
@@ -309,7 +316,7 @@ impl State {
             let oldest = self
                 .producers
                 .iter()
-                .filter(|(_, p)| !p.live)
+                .filter(|(_, p)| !p.live && p.lingering.is_empty())
                 .min_by_key(|(_, p)| p.last_active_ms)
                 .map(|(pid, _)| pid.clone());
             if let Some(pid) = oldest {
