@@ -5,6 +5,8 @@
   "identifier": "dev.agentcaller.inbox.ios",
   "build": {
     "frontendDist": "../../../app/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm --prefix ../../app run dev:ios",
     "beforeBuildCommand": "npm --prefix ../../app run build:ios"
   },
   "app": {
