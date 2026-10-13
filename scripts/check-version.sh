@@ -59,6 +59,13 @@ check "app/src-tauri/tauri.conf.json" "$(json_field app/src-tauri/tauri.conf.jso
 check "app/src-tauri/Cargo.lock (agent-caller-app)" \
 	"$(awk '/^name = "agent-caller-app"$/ { getline; gsub(/^[^"]*"|"[^"]*$/, ""); print; exit }' app/src-tauri/Cargo.lock)"
 
+check "apps/ios/src-tauri/Cargo.toml [package]" "$(toml_value "[package]" version apps/ios/src-tauri/Cargo.toml)"
+check "apps/ios/src-tauri/Cargo.lock (agent-caller-ios)" \
+	"$(awk '/^name = "agent-caller-ios"$/ { getline; gsub(/^[^"]*"|"[^"]*$/, ""); print; exit }' apps/ios/src-tauri/Cargo.lock)"
+check "apps/ios/src-tauri/tauri.conf.json" "$(json_field apps/ios/src-tauri/tauri.conf.json version)"
+check "apps/ios/package.json" "$(json_field apps/ios/package.json version)"
+check "clients/omarchy/manifest.json" "$(json_field clients/omarchy/manifest.json version)"
+
 for manifest in crates/*/Cargo.toml; do
 	if ! grep -q '^version\.workspace = true' "$manifest"; then
 		die "$manifest does not inherit the version (expected 'version.workspace = true')"

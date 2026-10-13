@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acd"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "acd-adapters",
  "acd-core",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "acd-adapters"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "acd-adapters",
  "acd-core",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "acd-app-core"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "acd-client",
  "acd-protocol",
@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "acd-client"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "acd-client",
  "acd-core",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "acd-core"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "acd-core",
  "acd-protocol",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "acd-inbox"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "acd-client",
  "acd-inbox",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "acd-protocol"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "acd-securefs"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "acd-voice"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "acd-protocol",
  "acd-voice",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "acd-voice-client"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "acd-client",
  "acd-protocol",
