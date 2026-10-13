@@ -10,6 +10,7 @@ use acd_voice::listen::{self, Heard, Hold, Limits, ListenEvent, Progress, Record
 use acd_voice::plan::{Executor, Reaction};
 use acd_voice::refusal::Refusal;
 use acd_voice::router::model::IntentModel;
+use acd_voice::router::prompt::PromptOptions;
 use acd_voice::router::{RouteOptions, route};
 use acd_voice::snapshot::{Presentation, Snapshot};
 use acd_voice::text::VoiceText;
@@ -112,6 +113,10 @@ pub struct Controller {
     /// Mirrors `Core::session` for `select!`; written only under the core
     /// lock, so a receiver made under that lock sees every later change.
     session_tx: watch::Sender<u64>,
+    /// The utterance whose route is still awaited, or `None` (plan V9). Sent
+    /// after every executor change, so a step that stops thinking drops its
+    /// model call at once.
+    routing_tx: watch::Sender<Option<u64>>,
     seq: AtomicU64,
     /// Test hook: runs with no lock held, just before admission.
     admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -129,6 +134,8 @@ impl Controller {
         enabled: bool,
     ) -> Arc<Self> {
         let outcomes = inbox.action_outcomes();
+        // Spec §5.4: an on-device model receives request details (plan V8).
+        let include_details = model.as_ref().is_some_and(|m| m.receives_details());
         let this = Arc::new_cyclic(|me| Self {
             me: me.clone(),
             runtime: tokio::runtime::Handle::current(),
@@ -151,8 +158,9 @@ impl Controller {
             presentation: Mutex::new(None),
             model,
             sink,
-            opts: RouteOptions::default(),
+            opts: RouteOptions { prompt: PromptOptions { include_details }, ..RouteOptions::default() },
             session_tx: watch::channel(0).0,
+            routing_tx: watch::channel(None).0,
             seq: AtomicU64::new(0),
             admission_hook: Mutex::new(None),
             speech: Mutex::new(None),
@@ -258,24 +266,28 @@ impl Controller {
             }
             let session = core.session;
             let changes = self.session_tx.subscribe();
+            let routing = self.routing_tx.subscribe();
             // A HUD that waits for input takes the utterance as its answer (D21).
             if let Some(r) = core.exec.reply(&self.port, &transcript, self.opts.locale) {
+                self.sync_routing(&core.exec);
                 self.emit(&mut core.exec, r);
                 Err("reply")
             } else {
                 match core.exec.begin(&self.port, snapshot.clone(), transcript.clone(), self.opts.locale) {
                     Ok((n, thinking)) => {
+                        self.sync_routing(&core.exec);
                         self.emit(&mut core.exec, thinking);
-                        Ok((session, n, changes))
+                        Ok((session, n, changes, routing))
                     }
                     Err(refused) => {
+                        self.sync_routing(&core.exec);
                         self.emit(&mut core.exec, *refused);
                         Err("refused")
                     }
                 }
             }
         };
-        let (session, n, mut changes) = match admitted {
+        let (session, n, mut changes, mut routing) = match admitted {
             Ok(admitted) => admitted,
             Err(route) => {
                 tracing::info!(target: "acd_voice", chars = transcript.char_len(), source = source.tag(), route, "utterance routed");
@@ -286,6 +298,11 @@ impl Controller {
             routed = route(&snapshot, &transcript, self.model.as_deref(), &self.opts) => routed,
             // Voice was turned off or on: drop the work, cancelling any model call (B4).
             _ = changes.changed() => return Ok(()),
+            // The step stopped thinking (cancel, Esc, a press): drop the model call (V9).
+            _ = routing.wait_for(|r| *r != Some(n)) => {
+                tracing::info!(target: "acd_voice", "thinking step ended: model call dropped");
+                return Ok(());
+            }
         };
         let mut core = self.core.lock().unwrap();
         if core.session != session || !core.enabled {
@@ -486,6 +503,11 @@ impl Controller {
         core.session += 1;
         self.session_tx.send_replace(core.session);
         core.exec.reset(&self.port);
+        self.sync_routing(&core.exec);
+        // Spec §6.3: model sessions are discarded with the rest.
+        if let Some(model) = &self.model {
+            model.discard();
+        }
         self.emit(&mut core.exec, Reaction { hud: Hud::Hidden, select: None });
     }
 
@@ -513,6 +535,7 @@ impl Controller {
         // A press always cancels a running voice countdown first (spec
         // §4.4), whether or not anything can listen.
         let (id, over) = core.exec.listen(&self.port);
+        self.sync_routing(&core.exec);
         core.epoch += 1;
         core.unadmitted = None;
         let (Some(input), None) = (input, unavailable) else {
@@ -531,6 +554,10 @@ impl Controller {
             let r = core.exec.listen_failed(Refusal::from(e));
             self.emit(&mut core.exec, r);
             return;
+        }
+        // The press is the cue to load the model (spec §6.3 keeps sessions short).
+        if let Some(model) = &self.model {
+            model.prewarm();
         }
         core.frozen = Some(snapshot);
         core.over = over.clone();
@@ -570,6 +597,7 @@ impl Controller {
         core.over = None;
         tracing::info!(target: "acd_voice", "recording cancelled");
         let r = core.exec.resume();
+        self.sync_routing(&core.exec);
         let r = core.deferred.take().unwrap_or(r);
         self.emit(&mut core.exec, r);
     }
@@ -588,6 +616,7 @@ impl Controller {
         core.epoch += 1;
         tracing::info!(target: "acd_voice", "transcript cancelled before admission");
         let r = core.exec.resume();
+        self.sync_routing(&core.exec);
         let r = core.deferred.take().unwrap_or(r);
         self.emit(&mut core.exec, r);
         true
@@ -617,6 +646,7 @@ impl Controller {
             Heard::Ignored(why) => {
                 tracing::info!(target: "acd_voice", ignored = ?why, "recording ignored");
                 let r = core.exec.resume();
+                self.sync_routing(&core.exec);
                 self.emit(&mut core.exec, deferred.unwrap_or(r));
                 return;
             }
@@ -683,7 +713,9 @@ impl Controller {
         if self.cancel_unadmitted(&mut core, id) {
             return;
         }
-        if let Some(reaction) = core.exec.cancel(&self.port, id) {
+        let reaction = core.exec.cancel(&self.port, id);
+        self.sync_routing(&core.exec);
+        if let Some(reaction) = reaction {
             self.emit(&mut core.exec, reaction);
         }
     }
@@ -692,7 +724,9 @@ impl Controller {
     /// when nothing is, so the panel handles Esc itself.
     pub fn cancel_thinking(&self) -> bool {
         let mut core = self.core.lock().unwrap();
-        match core.exec.cancel_thinking(&self.port) {
+        let cancelled = core.exec.cancel_thinking(&self.port);
+        self.sync_routing(&core.exec);
+        match cancelled {
             Some(reaction) => {
                 self.emit(&mut core.exec, reaction);
                 true
@@ -706,7 +740,9 @@ impl Controller {
     /// happened (B3).
     fn act(&self, f: impl FnOnce(&mut Executor, &AcdPort) -> Option<Reaction>) {
         let mut core = self.core.lock().unwrap();
-        if let Some(reaction) = f(&mut core.exec, &self.port) {
+        let reaction = f(&mut core.exec, &self.port);
+        self.sync_routing(&core.exec);
+        if let Some(reaction) = reaction {
             self.emit(&mut core.exec, reaction);
         }
     }
@@ -716,7 +752,9 @@ impl Controller {
     /// the HUD keeps showing Listening; the reaction waits in `deferred`.
     fn act_quiet(&self, f: impl FnOnce(&mut Executor, &AcdPort) -> Option<Reaction>) {
         let mut core = self.core.lock().unwrap();
-        let Some(reaction) = f(&mut core.exec, &self.port) else {
+        let reaction = f(&mut core.exec, &self.port);
+        self.sync_routing(&core.exec);
+        let Some(reaction) = reaction else {
             return;
         };
         if core.recorder.active().is_some() || core.unadmitted.is_some() {
@@ -726,7 +764,16 @@ impl Controller {
         }
     }
 
+    /// Publishes which utterance still waits for its route (V9). Call it
+    /// after anything that may change the executor's state. A missed call is
+    /// not a correctness bug (`Executor::routed` drops a stale result); it
+    /// would leave the Swift request running until the model timeout.
+    fn sync_routing(&self, exec: &Executor) {
+        self.routing_tx.send_replace(exec.routing());
+    }
+
     fn emit(&self, exec: &mut Executor, mut reaction: Reaction) {
+        self.sync_routing(exec);
         loop {
             if let Some(card) = &reaction.select {
                 self.sink.select(card);
@@ -741,7 +788,9 @@ impl Controller {
                 return;
             }
             // The HUD cannot show it: fail closed (D22).
-            match exec.display_failed(id) {
+            let failed = exec.display_failed(id);
+            self.sync_routing(exec);
+            match failed {
                 Some(r) => reaction = r,
                 None => return,
             }
