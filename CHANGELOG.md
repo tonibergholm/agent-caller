@@ -9,6 +9,20 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Added
 
+- Voice, free-form commands on macOS: anything that is not a fixed phrase goes
+  to Apple's on-device model, which proposes one step. The app validates it
+  against the request, agent and options on screen, and every step the model
+  produced is confirmed on the HUD before it is sent. Needs Apple
+  Intelligence; when it is off or not ready the HUD and Settings say so and
+  the fixed phrases still work. The model asks which agent only through the
+  app's own name matching: it does not return candidate agents. A 40-phrase
+  typed-text check of the shipped build scored 19 of 20 on each of two sets
+  (see `docs/research/2026-10-13-voice-model-quality.md`).
+- Voice, spoken output on macOS: replies ("read it", summaries) are spoken from
+  templates, with a Stop button and Esc, and the voice and speed are chosen in
+  Settings. Optional spoken alerts for new requests (off by default). Speech
+  stops when you press the hold key, lock the screen, turn voice off or quit.
+
 - External source: a local program can put questions in the inbox over
   `hook.sock` and act on the answers itself (`PUT`, `GET` and `DELETE` under
   `/external/v1/producers/{pid}`, never on TCP). acd only queues the answer;
@@ -23,6 +37,9 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Changed
 
+- Esc in the inbox panel now also stops speech while the app is speaking. It
+  still runs what it did before, so one Esc can stop speech and undo the
+  newest inbox countdown.
 - A machine that refuses the connection, times out, or cannot be reached now
   says so in plain words ("connection refused. Is acd running on that
   machine?", "cannot reach that machine. Is Tailscale on?") instead of the
