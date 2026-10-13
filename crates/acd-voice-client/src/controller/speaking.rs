@@ -19,11 +19,21 @@ impl Controller {
     /// Attaches the platform's speech output (spec §4.1).
     pub fn attach_speaker(&self, speaker: Arc<dyn Speaker>) {
         *self.speaker.lock().unwrap() = Some(speaker);
+        // Alerts could not take their baseline without a speaker: do it now,
+        // or the first request after startup would become the baseline.
+        self.alert_tick_soon();
     }
 
     /// Spec §8: alerts, voice and rate.
     pub fn set_speech(&self, settings: SpeechSettings) {
-        self.core.lock().unwrap().speech = settings;
+        let mut core = self.core.lock().unwrap();
+        core.speech = settings;
+        // Turning alerts off stops one that is playing (it has no HUD state
+        // to hide, so only this does it).
+        if !core.speech.alerts && core.speaking.is_some_and(|s| s.seq.is_none()) {
+            self.stop_speech(&mut core);
+        }
+        drop(core);
         self.alert_tick_soon();
     }
 
@@ -149,6 +159,11 @@ impl Controller {
             core.alerts.reset();
             return;
         };
+        // Locked or asleep: nothing is observed either, so what arrives meanwhile
+        // is news when the screen is back (spec §6.2).
+        if core.locked {
+            return;
+        }
         core.alerts.observe(&snapshot);
         let busy = core.recorder.active().is_some()
             || core.unadmitted.is_some()

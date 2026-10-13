@@ -90,6 +90,7 @@
 #define VB_SYS_SCREEN_LOCKED 1u
 #define VB_SYS_WILL_SLEEP 2u
 #define VB_SYS_SCREENS_SLEEP 3u
+#define VB_SYS_UNLOCKED 4u     /* the screen unlocked or the Mac woke: alerts may speak again (a normal queued event, not the latched lock code) */
 
 typedef struct vb_event {
     uint64_t generation; /* the session's generation; 0 when not a session event */

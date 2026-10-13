@@ -114,6 +114,9 @@ struct Core {
     /// waiting alert is already scheduled.
     alerts: acd_voice::speak::Alerts,
     alert_timer: bool,
+    /// The screen is locked or the Mac asleep (spec §6.2): no alert is spoken
+    /// until it is back. Set by `system_stop`, cleared by `system_resume`.
+    locked: bool,
 }
 
 pub struct Controller {
@@ -178,6 +181,7 @@ impl Controller {
                 speech_cap: None,
                 alerts: Default::default(),
                 alert_timer: false,
+                locked: false,
             }),
             presentation: Mutex::new(None),
             model,
@@ -473,7 +477,20 @@ impl Controller {
         let mut core = self.core.lock().unwrap();
         tracing::info!(target: "acd_voice", "voice invalidated for lock or sleep");
         core.hold = Hold::default();
+        core.locked = true;
         self.invalidate(&mut core);
+    }
+
+    /// The screen unlocked or the Mac woke (spec §6.2): alerts may speak
+    /// again, and a request that arrived meanwhile is announced.
+    pub fn system_resume(&self) {
+        let mut core = self.core.lock().unwrap();
+        if !core.locked {
+            return;
+        }
+        core.locked = false;
+        drop(core);
+        self.alert_tick_soon();
     }
 
     /// A message that is not a step, such as "the hold key stopped working"

@@ -16,10 +16,10 @@ use tokio::sync::oneshot;
 use super::bridge::{VB_ERR_NOT_INITIALIZED, VB_OK, ffi};
 
 /// How long a plan may take (plan V5; owner decision 1). The slowest cold
-/// call measured on the on-device model was 4.0 s with the restatement step
+/// call measured on the on-device model was 4.2 s with the restatement step
 /// (docs/research/2026-10-13-voice-model-quality.md). The plan's rule (the
-/// slowest cold call plus 1 s, capped at 8 s) gives 5.0 s; 6 s keeps a
-/// margin of a second for a slow machine.
+/// slowest cold call plus 1 s, capped at 8 s) gives 5.2 s; 6 s keeps a
+/// margin of 0.8 s for a slow machine.
 pub const MODEL_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// The C calls, behind a trait so tests run without Swift. Every call

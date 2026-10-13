@@ -96,6 +96,10 @@ final class Speaker: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.agentcaller.voice.speaker")
     private let voicesQueue = DispatchQueue(label: "dev.agentcaller.voice.voices")
     private var current: UInt64 = 0
+    /// When speech that was playing was last cut, on `queue`. `silenceForCapture`
+    /// measures the audio tail from here: Rust stops speech before it calls
+    /// Swift, so Swift's own look finds nothing playing.
+    private var cutAt: DispatchTime?
     private var lastVoices: [VoiceInfo]?
 
     init(engine: SynthEngine, bridge: Bridge) {
@@ -124,28 +128,35 @@ final class Speaker: @unchecked Sendable {
     /// Returns after the synthesizer was told to stop.
     func stop() {
         queue.sync {
+            if current != 0 || engine.isSpeaking { cutAt = .now() }
             current = 0
             engine.stop()
         }
     }
 
-    /// Before a capture opens (review item 11c): stop, then wait at most
-    /// `drainMs` for the synthesizer to report it is no longer speaking, so
-    /// the transcriber does not hear the tail of the app's own voice.
-    /// Bounded, so a synthesizer that never reports quiet cannot hold the
-    /// microphone back.
+    /// Before a capture opens (review item 11c, final review): make sure speech
+    /// is stopped, then wait until `drainMs` at most for the synthesizer to
+    /// report it is no longer speaking, and until `tailMs` have passed since the
+    /// speech was cut, so the transcriber does not hear the tail of the app's
+    /// own voice. The wait is measured from the cut, whoever made it: on a press
+    /// Rust stops speech first, a moment before this runs. Bounded, so a
+    /// synthesizer that never reports quiet cannot hold the microphone back, and
+    /// nothing to wait for when no speech was cut lately.
     func silenceForCapture() {
-        // Read on the speech queue, where the synthesizer is used (its flags are nonatomic).
-        let wasSpeaking = queue.sync { engine.isSpeaking }
         stop()
-        // Nothing was playing: nothing to wait for.
-        guard wasSpeaking else { return }
+        // Read on the speech queue, where the synthesizer is used (its flags are nonatomic).
+        guard let cut = queue.sync(execute: { cutAt }),
+              DispatchTime.now() < cut + .milliseconds(Speaker.drainMs) else { return }
         // Monotonic, so a clock change cannot stretch the wait.
-        let deadline = DispatchTime.now() + .milliseconds(Speaker.drainMs)
-        while queue.sync(execute: { engine.isSpeaking }) && DispatchTime.now() < deadline {
+        let quietBy = cut + .milliseconds(Speaker.drainMs)
+        while queue.sync(execute: { engine.isSpeaking }) && DispatchTime.now() < quietBy {
             usleep(5_000)
         }
-        usleep(UInt32(Speaker.tailMs) * 1000)
+        let tailEnd = cut + .milliseconds(Speaker.tailMs)
+        let now = DispatchTime.now()
+        if now < tailEnd {
+            usleep(UInt32((tailEnd.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000))
+        }
     }
 
     /// `force`: report even if unchanged (Rust asks after an overflow).

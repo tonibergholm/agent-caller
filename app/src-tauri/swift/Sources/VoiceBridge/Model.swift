@@ -120,14 +120,18 @@ final class ModelRequests: @unchecked Sendable {
         engine.discard()
     }
 
-    func prewarm(instructions: String) {
+    /// The discard counter now. `vb_model_prewarm` reads it before it detaches,
+    /// so a `cancelAll` that lands before the prewarm task starts still counts.
+    var currentEpoch: UInt64 { lock.withLock { epoch } }
+
+    func prewarm(instructions: String, requestedAt epoch: UInt64? = nil) {
         let code = engine.availability()
         report(code)
         guard code == VB_MA_AVAILABLE else { return }
-        let started = lock.withLock { epoch }
+        let started = epoch ?? currentEpoch
         engine.prewarm(instructions: instructions)
         // A discard ran while the session was being made: drop it too.
-        if lock.withLock({ epoch }) != started { engine.discard() }
+        if currentEpoch != started { engine.discard() }
     }
 
     func query(force: Bool = false) {
@@ -450,7 +454,8 @@ public func vb_model_cancel_all() {
 @_cdecl("vb_model_prewarm")
 public func vb_model_prewarm(_ instructions: UnsafePointer<UInt8>?, _ len: Int) {
     guard let i = copyText(instructions, len) else { return }
-    Task.detached { ModelRequests.shared.prewarm(instructions: i) }
+    let requestedAt = ModelRequests.shared.currentEpoch
+    Task.detached { ModelRequests.shared.prewarm(instructions: i, requestedAt: requestedAt) }
 }
 
 @_cdecl("vb_model_query")

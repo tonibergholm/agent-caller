@@ -10,6 +10,24 @@ final class SystemEvents {
     static let shared = SystemEvents()
     private var tokens: [NSObjectProtocol] = []
 
+    /// Whether alerts may speak again. Only a screen verified as not locked
+    /// counts; locked and unknown both stay closed (review finding: a wake
+    /// notification arrives while the lock screen is still up).
+    nonisolated static func mayResume(screenLocked: Bool?) -> Bool {
+        screenLocked == false
+    }
+
+    /// The session dictionary's lock flag. `nil` dictionary: unknown. A readable
+    /// dictionary without the key is a screen that is not locked.
+    nonisolated static func screenLocked(from session: [String: Any]?) -> Bool? {
+        guard let session else { return nil }
+        return (session["CGSSessionScreenIsLocked"] as? Bool) ?? false
+    }
+
+    nonisolated static func currentScreenLocked() -> Bool? {
+        screenLocked(from: CGSessionCopyCurrentDictionary() as? [String: Any])
+    }
+
     func start() {
         guard tokens.isEmpty else { return }
         let report: @Sendable (UInt32) -> Void = { code in
@@ -23,6 +41,21 @@ final class SystemEvents {
             Sessions.shared.cancelAll()
             // Spec §6.3: model work is discarded on lock and sleep too.
             ModelRequests.shared.cancelAll()
+        }
+        // Unlock and wake tell Rust that alerts may speak again (spec §6.2). A
+        // normal queued event: the lock code above is latched and never dropped,
+        // this one only lifts the hold.
+        let resumed: @Sendable () -> Void = {
+            Bridge.shared.emit(Event(kind: VB_EV_SYSTEM, code: VB_SYS_UNLOCKED))
+        }
+        // A wake or a return to the session is not an unlock: the lock screen may
+        // still be up. Check once the system settled, and only a screen that is
+        // verified unlocked resumes; the explicit unlock notification below
+        // resumes a locked one.
+        let woke: @Sendable () -> Void = {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                if SystemEvents.mayResume(screenLocked: SystemEvents.currentScreenLocked()) { resumed() }
+            }
         }
         let workspace = NSWorkspace.shared.notificationCenter
         tokens.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
@@ -38,6 +71,20 @@ final class SystemEvents {
             forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
         ) { _ in
             report(VB_SYS_SCREEN_LOCKED)
+        })
+        tokens.append(workspace.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { _ in
+            woke()
+        })
+        tokens.append(workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { _ in
+            woke()
+        })
+        tokens.append(workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+            woke()
+        })
+        tokens.append(DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
+        ) { _ in
+            resumed()
         })
     }
 }
