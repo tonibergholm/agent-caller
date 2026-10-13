@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import * as M from "../model.mjs";
 
 const pending = (opts = {}) => ({
@@ -443,4 +444,88 @@ test("openCard reveals a card the machine filter or collapsed Done hides", () =>
   assert.deepEqual(M.revealCard("m2/d", cards, "m2", false), { machineFilter: "m2", doneOpen: true });
   assert.deepEqual(M.revealCard("m1/a", cards, "m1", false), { machineFilter: "m1", doneOpen: false });
   assert.deepEqual(M.revealCard("zz", cards, "m2", false), { machineFilter: "m2", doneOpen: false });
+});
+
+const externalCard = (key = "m1/e", extra = {}) => ({
+  ...card(key),
+  free_text_answerable: true,
+  selectable_options: ["go", "abandon"],
+  agent: {
+    id: "e", source: "external", kind: "other", title: "native autopilot", project: "engine", cwd: "/w/engine",
+    state: "needs_you",
+    pending: pending({
+      kind: "question", answer_path: "external", title: "ENG-12 parked", detail: "Repair exhausted", free_text: true,
+      options: [
+        { id: "go", label: "Go", description: null, effect: "choose" },
+        { id: "abandon", label: "Abandon", description: null, effect: "choose", confirm: true },
+      ],
+    }),
+  },
+  ...extra,
+});
+
+test("an external card is labelled with its producer and headed by what it asks", () => {
+  const meta = M.cardMeta(externalCard());
+  assert.equal(meta.badge, "native autopilot");
+  assert.equal(meta.title, "ENG-12 parked");
+  assert.equal(meta.tag, "QUESTION");
+  const none = externalCard();
+  none.agent.pending = null;
+  assert.equal(M.cardMeta(none).title, "native autopilot", "without a request the producer's title is the heading");
+});
+
+test("a typed answer is offered on an external question", () => {
+  const cards = [externalCard()];
+  assert.deepEqual(M.onKey(cards, { selected: "m1/e", replyFor: null }, key("t")).effect, { kind: "focusAnswer", cardKey: "m1/e" });
+});
+
+test("an option that needs confirmation arms on the first press and is sent by the second", () => {
+  const cards = [externalCard()];
+  const first = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 }));
+  assert.equal(first.effect.kind, "none");
+  assert.deepEqual(first.state.armed, { cardKey: "m1/e", requestId: "r1", revision: 1, optionId: "abandon", at: 1000 });
+  const rows = M.optionRows(cards[0], first.state.armed, 1500);
+  assert.deepEqual(rows.map((r) => [r.id, r.confirm, r.armed]), [["go", false, false], ["abandon", true, true]]);
+  const second = M.onKey(cards, first.state, key("2", { at: 2000 }));
+  assert.deepEqual(second.effect, { kind: "pick", cardKey: "m1/e", requestId: "r1", optionId: "abandon", revision: 1 });
+  assert.equal(second.state.armed, null);
+  assert.equal(M.onKey(cards, { selected: "m1/e", replyFor: null }, key("1")).effect.kind, "pick", "an option without confirm sends at once");
+});
+
+test("a second press outside the window, on another option, or after any other key does not send", () => {
+  const cards = [externalCard()];
+  const armed = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 })).state;
+  const late = M.onKey(cards, armed, key("2", { at: 1000 + M.CONFIRM_MS + 1 }));
+  assert.equal(late.effect.kind, "none");
+  assert.equal(late.state.armed.at, 1000 + M.CONFIRM_MS + 1, "it arms again instead");
+  assert.equal(M.optionRows(cards[0], armed.armed, 1000 + M.CONFIRM_MS + 1).find((r) => r.id === "abandon").armed, false);
+  assert.equal(M.onKey(cards, armed, key("1", { at: 1100 })).effect.optionId, "go");
+  assert.equal(M.onKey(cards, armed, key("1", { at: 1100 })).state.armed, null);
+  for (const other of ["j", "Escape", "r", "t"]) {
+    const after = M.onKey(cards, armed, key(other, { at: 1100 })).state;
+    assert.equal(after.armed, null, other);
+    assert.equal(M.onKey(cards, after, key("2", { at: 1200 })).effect.kind, "none", "the press after " + other + " arms again");
+  }
+});
+
+test("a click goes through the same two steps and an armed option never outlives its request", () => {
+  const c = externalCard();
+  const st = { selected: "m1/e", replyFor: null };
+  const first = M.pickOption(st, c, "abandon", 1000);
+  assert.equal(first.effect.kind, "none");
+  const second = M.pickOption(first.state, c, "abandon", 1500);
+  assert.equal(second.effect.kind, "pick");
+  const moved = externalCard();
+  moved.agent.pending.revision = 2;
+  assert.equal(M.pruneKeyState(first.state, [moved]).armed, null, "a changed request disarms");
+  assert.equal(M.pruneKeyState(first.state, []).armed, null, "a gone card disarms");
+  assert.equal(M.pruneKeyState(first.state, [c]).armed.optionId, "abandon");
+  assert.equal(M.pickOption(first.state, moved, "abandon", 1500).effect.kind, "none", "the old arm cannot send the new revision");
+  assert.equal(M.pickOption(st, c, "nope", 1000).effect.kind, "none");
+});
+
+test("the panel sends picks through the model so a click cannot skip the confirmation", () => {
+  const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
+  assert.match(panel, /cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/);
+  assert.doesNotMatch(panel, /run\(\{ kind: "pick"/);
 });

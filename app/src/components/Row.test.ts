@@ -23,3 +23,11 @@ test("macOS: the row title keeps the directory as a tooltip", () => {
   const { container } = render(Row, { card: working(), selected: false, now: 0, oncancel: () => {} });
   expect(container.querySelector(".title")?.getAttribute("title")).toBe("/work/app");
 });
+
+test("an external row shows the producer's title as its source", () => {
+  const c = working();
+  c.agent.source = "external";
+  c.agent.title = "native autopilot";
+  const { container } = render(Row, { card: c, selected: false, now: 0, oncancel: () => {} });
+  expect(container.querySelector(".source")?.textContent).toBe("native autopilot");
+});

@@ -184,6 +184,13 @@ Item {
         }
     }
 
+    // A click on an option: one that needs confirmation arms first (model.mjs).
+    function pickOption(card, optionId) {
+        const r = Model.pickOption(keyState, card, optionId, Date.now());
+        keyState = r.state;
+        if (r.effect.kind !== "none") run(r.effect, null);
+    }
+
     // Every key goes through model.mjs: `field` says which text field has
     // focus, and `composing` is that field's IME state (spec section 7).
     function keyEvent(event, field, composing, input) {
@@ -284,7 +291,7 @@ Item {
         required property var inbox
         required property var card
         readonly property var meta: Model.cardMeta(card)
-        readonly property var rows: Model.optionRows(card)
+        readonly property var rows: Model.optionRows(card, inbox.keyState.armed || null, inbox.now)
         readonly property bool selected: inbox.keyState.selected === card.key
 
         width: parent ? parent.width : 0
@@ -334,12 +341,12 @@ Item {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     color: modelData.pickable ? cardItem.inbox.fg : cardItem.inbox.muted
-                    text: modelData.number + ". " + modelData.label + (modelData.rule ? "  (" + modelData.rule + ")" : "")
+                    text: modelData.number + ". " + (modelData.armed ? "Tap again to " : "") + modelData.label + (modelData.rule ? "  (" + modelData.rule + ")" : "")
 
                     MouseArea {
                         anchors.fill: parent
                         enabled: optionRow.modelData.pickable
-                        onClicked: cardItem.inbox.run({ kind: "pick", cardKey: cardItem.card.key, requestId: cardItem.card.agent.pending.id, optionId: optionRow.modelData.id, revision: cardItem.card.agent.pending.revision }, null)
+                        onClicked: cardItem.inbox.pickOption(cardItem.card, optionRow.modelData.id)
                     }
                 }
             }

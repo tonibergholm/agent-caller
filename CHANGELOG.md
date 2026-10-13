@@ -7,6 +7,20 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ## [Unreleased]
 
+### Added
+
+- External source: a local program can put questions in the inbox over
+  `hook.sock` and act on the answers itself (`PUT`, `GET` and `DELETE` under
+  `/external/v1/producers/{pid}`, never on TCP). acd only queues the answer;
+  the producer reports `applied`, `rejected` or `failed`. See
+  [PROTOCOL.md](crates/acd-protocol/PROTOCOL.md) section 8.
+- Protocol additions in `acd/1`: `source` and `answer_path` `external`,
+  `sources.external` on the machine, reason `rejected` and an optional
+  `message` on `request.resolved`, and `confirm` on request options. A
+  client shows the message on the resolved card. The Mac app, iOS and the
+  Omarchy plugin ask for a second tap before sending a `confirm` option, name
+  an external producer by its agent title and take typed answers for it.
+
 ### Changed
 
 - A machine that refuses the connection, times out, or cannot be reached now

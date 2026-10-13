@@ -399,3 +399,77 @@ test("an offline card dims its content but not the offline note", () => {
   expect(css).toMatch(/\.card\.offline > :not\(\.offline-note\)[^{]*\{[^}]*opacity:\s*0\.5/);
   expect(css).not.toMatch(/\.card\.offline\s*\{[^}]*opacity/);
 });
+
+function external() {
+  const c = card({ key: "m/x", answerable: true, selectable_options: ["approve", "abandon"] });
+  c.agent.source = "external";
+  c.agent.title = "native autopilot";
+  c.agent.pending = {
+    ...c.agent.pending!,
+    kind: "question",
+    answer_path: "external",
+    title: "ENG-12 parked",
+    detail: "Repair exhausted",
+    questions: [{ id: "q1", header: "Parked", text: "What now?", multi_select: false, options: [] }],
+    options: [
+      { id: "approve", label: "Approve", description: null, effect: "choose" },
+      { id: "abandon", label: "Abandon", description: null, effect: "choose", confirm: true },
+    ],
+  };
+  return c;
+}
+
+test("an external card names the producer as its source and asks with the item title", () => {
+  const { container } = render(Card, props(external()));
+  expect(container.querySelector(".source")?.textContent).toBe("native autopilot");
+  expect(container.querySelector(".title")?.textContent?.trim()).toBe("ENG-12 parked");
+});
+
+test("a read-only external request says where to answer", () => {
+  const c = external();
+  c.answerable = false;
+  c.agent.pending = { ...c.agent.pending!, answer_path: "none" };
+  const { container } = render(Card, props(c));
+  expect(screen.getByText("Answer in native autopilot")).toBeTruthy();
+  expect(container.textContent).not.toMatch(/answer in terminal/i);
+});
+
+test("an option that needs confirmation arms on the first tap and sends on the second", async () => {
+  const onpick = vi.fn();
+  const onarm = vi.fn();
+  const c = external();
+  const base = { ...props(c), onpick, onarm };
+  const { unmount } = render(Card, base);
+  await userEvent.click(screen.getByRole("button", { name: /abandon/i }));
+  expect(onarm).toHaveBeenCalledWith("abandon", c.agent.pending!.id, 1);
+  expect(onpick).not.toHaveBeenCalled();
+  unmount();
+
+  render(Card, { ...base, armed: "abandon" });
+  const armed = screen.getByRole("button", { name: /tap again to abandon/i });
+  await userEvent.click(armed);
+  expect(onpick).toHaveBeenCalledWith("abandon", c.agent.pending!.id, 1);
+});
+
+test("an option without confirm sends on the first tap", async () => {
+  const onpick = vi.fn();
+  const onarm = vi.fn();
+  render(Card, { ...props(external()), onpick, onarm });
+  await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+  expect(onpick).toHaveBeenCalledTimes(1);
+  expect(onarm).not.toHaveBeenCalled();
+});
+
+test("an external question takes a typed answer when free text is on", () => {
+  const c = external();
+  c.free_text_answerable = true;
+  const { container } = render(Card, props(c));
+  expect(container.querySelector("textarea[data-field=answer]")).not.toBeNull();
+});
+
+test("a resolved notice shows the producer's message", () => {
+  const c = external();
+  c.notice = { tone: "warning", text: "The plan changed. Review it again." };
+  const { container } = render(Card, props(c));
+  expect(container.querySelector("[role=status]")?.textContent).toContain("The plan changed. Review it again.");
+});

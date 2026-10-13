@@ -716,3 +716,53 @@ test("Esc in the typed command field leaves the field before it closes the panel
   await userEvent.keyboard("{Escape}");
   expect(api.calls).toEqual([["escape"], ["escape"], ["hide"]]);
 });
+
+function destructive() {
+  const c = card({ key: "m/e", answerable: true, selectable_options: ["go", "abandon"] });
+  c.agent.source = "external";
+  c.agent.pending = {
+    ...c.agent.pending!,
+    options: [
+      { id: "go", label: "Go", description: null, effect: "choose" },
+      { id: "abandon", label: "Abandon", description: null, effect: "choose", confirm: true },
+    ],
+  };
+  return c;
+}
+
+test("a confirm option needs two clicks and the first sends nothing", async () => {
+  const api = fakeApi();
+  const c = destructive();
+  render(Panel, { view: view({ cards: [c] }), api });
+  await userEvent.click(screen.getByRole("button", { name: /abandon/i }));
+  expect(api.calls).toEqual([]);
+  await userEvent.click(screen.getByRole("button", { name: /tap again to abandon/i }));
+  expect(api.calls).toEqual([["pick", "m/e", c.agent.pending!.id, "abandon", 1]]);
+  expect(screen.queryByRole("button", { name: /tap again/i })).toBeNull();
+});
+
+test("the keyboard and the mouse share one arm", async () => {
+  const api = fakeApi();
+  const c = destructive();
+  render(Panel, { view: view({ cards: [c] }), api });
+  await userEvent.keyboard("2");
+  expect(api.calls).toEqual([]);
+  expect(screen.getByRole("button", { name: /tap again to abandon/i })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: /tap again to abandon/i }));
+  expect(api.calls).toEqual([["pick", "m/e", c.agent.pending!.id, "abandon", 1]]);
+});
+
+test("an armed option disarms when the request changes", async () => {
+  const api = fakeApi();
+  const c = destructive();
+  const { rerender } = render(Panel, { view: view({ cards: [c] }), api });
+  await userEvent.keyboard("2");
+  expect(screen.getByRole("button", { name: /tap again to abandon/i })).toBeTruthy();
+  const next = destructive();
+  next.agent.pending!.revision = 2;
+  await rerender({ view: view({ cards: [next] }), api });
+  await tick();
+  expect(screen.queryByRole("button", { name: /tap again/i })).toBeNull();
+  await userEvent.keyboard("2");
+  expect(api.calls).toEqual([]);
+});

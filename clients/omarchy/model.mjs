@@ -6,7 +6,10 @@ export const MAX_LINE = 4 * 1024 * 1024;
 export const ANSWER_MAX_BYTES = 16 * 1024;
 export const REPLY_MAX_BYTES = 64 * 1024;
 export const UNDO_MS = 2000;
+const NONE = { kind: "none" };
 export const UNCERTAIN_TEXT = "Check the terminal";
+/** How long an option that needs a second tap stays armed. */
+export const CONFIRM_MS = 5000;
 
 /**
  * UTF-8 length of a JS string, in pure JS: QML's host has no TextEncoder
@@ -203,20 +206,52 @@ const KIND = { claude: "Claude", codex: "Codex" };
 export function cardMeta(card) {
   const a = card.agent;
   const project = a.project ?? (a.cwd ? a.cwd.split("/").filter(Boolean).pop() ?? null : null);
-  const badge = a.source === "herdr" ? "herdr" : a.source === "t3" ? "T3" : null;
-  return { kind: KIND[a.kind] ?? "agent", machine: card.machine_name, project, title: a.title, badge, tag: requestTag(card) };
+  // An external producer names itself through the agent title, so the heading says what is asked.
+  const external = a.source === "external";
+  const badge = a.source === "herdr" ? "herdr" : a.source === "t3" ? "T3" : external ? a.title : null;
+  const title = external && a.pending ? a.pending.title : a.title;
+  return { kind: KIND[a.kind] ?? "agent", machine: card.machine_name, project, title, badge, tag: requestTag(card) };
 }
 
-/** Options as the panel lists them (plan D30). */
-export function optionRows(card) {
+/** Whether `armed` still names an option of the request this card shows. */
+export function armedHolds(armed, card) {
+  const p = card.agent.pending;
+  return !!armed && !!p && card.key === armed.cardKey && p.id === armed.requestId && p.revision === armed.revision && p.options.some((o) => o.id === armed.optionId);
+}
+
+/**
+ * Options as the panel lists them (plan D30). `armed` and `now` mark the
+ * option of this card that waits for its second tap.
+ */
+export function optionRows(card, armed = null, now = 0) {
   const p = card.agent.pending;
   if (!p) return [];
+  const live = armedHolds(armed, card) && now - armed.at <= CONFIRM_MS;
   return p.options.map((o, i) => {
     const rule = o.effect === "allow_always" && o.description?.trim() ? o.description : null;
     const pickable =
       card.answerable && i < 9 && card.selectable_options.includes(o.id) && (o.effect !== "allow_always" || rule !== null);
-    return { number: i + 1, id: o.id, label: o.label, rule, pickable };
+    const confirm = o.confirm === true;
+    return { number: i + 1, id: o.id, label: o.label, rule, pickable, confirm, armed: pickable && confirm && live && armed.optionId === o.id };
   });
+}
+
+/**
+ * Picking an option: one that needs confirmation arms on the first tap and
+ * is sent by the second, on the same request and revision, within
+ * `CONFIRM_MS`. Anything else the user does in between disarms it.
+ */
+export function pickOption(st, card, optionId, at) {
+  const rest = st.armed ? Object.assign({}, st, { armed: null }) : st;
+  const p = card.agent.pending;
+  const row = optionRows(card).find((r) => r.id === optionId);
+  if (!p || !row || !row.pickable) return { state: rest, effect: NONE };
+  const second = armedHolds(st.armed, card) && st.armed.optionId === optionId && at - st.armed.at <= CONFIRM_MS;
+  if (row.confirm && !second) {
+    const armed = { cardKey: card.key, requestId: p.id, revision: p.revision, optionId, at };
+    return { state: Object.assign({}, st, { armed }), effect: NONE };
+  }
+  return { state: rest, effect: { kind: "pick", cardKey: card.key, requestId: p.id, optionId, revision: p.revision } };
 }
 
 /**
@@ -325,18 +360,19 @@ export function fromQt(key, text, modifiers, composing, field) {
     ctrl: (modifiers & QT.ControlModifier) !== 0,
     alt: (modifiers & QT.AltModifier) !== 0,
     meta: (modifiers & QT.MetaModifier) !== 0,
+    at: Date.now(),
     composing: !!composing,
     field: field ?? null,
   };
 }
 
-const NONE = { kind: "none" };
-
 /** Keys (omarchy spec §7), as app/src/lib/keys.ts, over the cards in display order. */
 export function onKey(visible, st, ev) {
   const none = { state: st, effect: NONE };
   if (ev.composing || ev.ctrl || ev.alt || ev.meta) return none;
-  if (ev.key === "Escape") return { state: st, effect: { kind: "escape" } };
+  // Any key but the second tap of an armed option disarms it.
+  const rest = st.armed ? Object.assign({}, st, { armed: null }) : st;
+  if (ev.key === "Escape") return { state: rest, effect: { kind: "escape" } };
   if (ev.field) {
     if (ev.key !== "Enter" || ev.shift) return none;
     if (ev.field.kind === "answer" && ev.field.cardKey) return { state: st, effect: { kind: "submitAnswer", cardKey: ev.field.cardKey } };
@@ -351,20 +387,19 @@ export function onKey(visible, st, ev) {
     const down = k === "j" || k === "ArrowDown";
     const next = idx < 0 ? 0 : Math.min(visible.length - 1, Math.max(0, idx + (down ? 1 : -1)));
     const selected = visible[next].key;
-    return { state: Object.assign({}, st, { selected }), effect: selected === st.selected ? NONE : { kind: "select", key: selected } };
+    return { state: Object.assign({}, rest, { selected }), effect: selected === st.selected ? NONE : { kind: "select", key: selected } };
   }
   const card = idx >= 0 ? visible[idx] : undefined;
-  if (!card) return none;
+  if (!card) return { state: rest, effect: NONE };
   if (/^[1-9]$/.test(k)) {
     const row = optionRows(card).find((r) => r.number === Number(k));
-    if (!row || !row.pickable) return none;
-    const p = card.agent.pending;
-    return { state: st, effect: { kind: "pick", cardKey: card.key, requestId: p.id, optionId: row.id, revision: p.revision } };
+    if (!row) return { state: rest, effect: NONE };
+    return pickOption(st, card, row.id, ev.at ?? 0);
   }
-  if (k === "t" && card.free_text_answerable) return { state: st, effect: { kind: "focusAnswer", cardKey: card.key } };
-  if (k === "r" && card.can_reply) return { state: st, effect: { kind: "openReply", cardKey: card.key } };
-  if (k === "e" && card.can_mark_seen) return { state: st, effect: { kind: "markSeen", cardKey: card.key } };
-  return none;
+  if (k === "t" && card.free_text_answerable) return { state: rest, effect: { kind: "focusAnswer", cardKey: card.key } };
+  if (k === "r" && card.can_reply) return { state: rest, effect: { kind: "openReply", cardKey: card.key } };
+  if (k === "e" && card.can_mark_seen) return { state: rest, effect: { kind: "markSeen", cardKey: card.key } };
+  return { state: rest, effect: NONE };
 }
 
 // acd_protocol::text: controls other than \n and \t, bidi controls, line and paragraph separators.
@@ -508,8 +543,12 @@ export function planAnswer(editor, cards, text) {
 
 /** A reply box belongs to its card: it closes when the card leaves the view. */
 export function pruneKeyState(st, cards) {
-  if (st.replyFor !== null && !cards.some((c) => c.key === st.replyFor)) return Object.assign({}, st, { replyFor: null });
-  return st;
+  let next = st;
+  if (next.replyFor !== null && !cards.some((c) => c.key === next.replyFor)) next = Object.assign({}, next, { replyFor: null });
+  if (next.armed && !armedHolds(next.armed, cards.find((c) => c.key === next.armed.cardKey) ?? { key: "", agent: { pending: null } })) {
+    next = Object.assign({}, next, { armed: null });
+  }
+  return next;
 }
 
 /** `openCard`: select that card and close any reply box. */

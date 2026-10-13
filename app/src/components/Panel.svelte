@@ -4,7 +4,7 @@
   import type { InboxView } from "../lib/bindings/InboxView";
   import type { Api } from "../lib/ipc";
   import { statusKind, statusReason, statusText } from "../lib/format";
-  import { fromEvent, normalize, onKey, type Effect, type KeyState } from "../lib/keys";
+  import { CONFIRM_MS, fromEvent, normalize, onKey, type Effect, type KeyState } from "../lib/keys";
   import { dotKind, listedMachines, sections } from "../lib/panel";
   import { isMobile } from "../lib/platform";
   import type { Presentation } from "../lib/voice";
@@ -81,6 +81,11 @@
 
   $effect(() => {
     if (st.replyFor === null) replyText = "";
+  });
+
+  // A second tap that does not come within the window disarms the option.
+  $effect(() => {
+    if (st.armed && now - st.armed.at > CONFIRM_MS) st = { ...st, armed: null };
   });
 
   // A typed command is voice text: drop it when the field goes away.
@@ -247,8 +252,13 @@
         selected={st.selected === c.key}
         {now}
         bind:answer={() => answers[draftKey(c)] ?? "", (v) => (answers[draftKey(c)] = v)}
+        armed={st.armed?.cardKey === c.key ? st.armed.optionId : null}
+        onarm={(optionId, requestId, revision) => {
+          st = { ...st, selected: c.key, armed: { cardKey: c.key, requestId, revision, optionId, at: Date.now() } };
+        }}
         onpick={(optionId, requestId, revision) => {
           // Id and revision come from the request the card rendered at click time.
+          if (st.armed) st = { ...st, armed: null };
           act(run({ kind: "pick", cardKey: c.key, requestId, optionId, revision }));
         }}
         oncancel={(actionId) => act(api.cancel(actionId))}
