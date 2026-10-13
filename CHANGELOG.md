@@ -7,8 +7,6 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-10-13
-
 ### Added
 
 - Voice, free-form commands on macOS: anything that is not a fixed phrase goes
@@ -25,6 +23,16 @@ config and the `acd/1` protocol may change without a major version bump.
   Settings. Optional spoken alerts for new requests (off by default). Speech
   stops when you press the hold key, lock the screen, turn voice off or quit.
 
+### Changed
+
+- Esc in the inbox panel now also stops speech while the app is speaking. It
+  still runs what it did before, so one Esc can stop speech and undo the
+  newest inbox countdown.
+
+## [0.9.0] - 2026-10-13
+
+### Added
+
 - External source: a local program can put questions in the inbox over
   `hook.sock` and act on the answers itself (`PUT`, `GET` and `DELETE` under
   `/external/v1/producers/{pid}`, never on TCP). acd only queues the answer;
@@ -39,9 +47,6 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Changed
 
-- Esc in the inbox panel now also stops speech while the app is speaking. It
-  still runs what it did before, so one Esc can stop speech and undo the
-  newest inbox countdown.
 - A machine that refuses the connection, times out, or cannot be reached now
   says so in plain words ("connection refused. Is acd running on that
   machine?", "cannot reach that machine. Is Tailscale on?") instead of the
