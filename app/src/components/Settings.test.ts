@@ -525,3 +525,44 @@ test("the Voice section says whether free-form commands can use Apple Intelligen
   await screen.findByRole("checkbox", { name: /Voice control/ });
   expect(screen.queryByText("Free-form commands use Apple Intelligence on this Mac.")).toBeNull();
 });
+
+test("spoken alerts are off by default and turn on through the api", async () => {
+  const api = fakeApi({ voice: { ...VOICE_OFF, enabled: true } });
+  render(Settings, { api });
+  const box = (await screen.findByRole("checkbox", { name: "Speak an alert when an agent needs you" })) as HTMLInputElement;
+  expect(box.checked).toBe(false);
+  await userEvent.click(box);
+  expect(api.calls).toContainEqual(["setVoiceSettings", { ...VOICE_OFF, enabled: true, alerts: true }]);
+});
+
+test("the voice list offers the system voice and the English voices", async () => {
+  const api = fakeApi({ voice: { ...VOICE_OFF, enabled: true } });
+  render(Settings, { api });
+  const select = (await screen.findByRole("combobox", { name: "Voice" })) as HTMLSelectElement;
+  // The list comes with the status, which can arrive just after the select first renders.
+  await waitFor(() => expect([...select.options].map((o) => o.text)).toEqual(["System English voice", "Ava (en-US)"]));
+  await userEvent.selectOptions(select, "com.apple.voice.Ava");
+  expect(api.calls).toContainEqual(["setVoiceSettings", { ...VOICE_OFF, enabled: true, speech_voice: "com.apple.voice.Ava" }]);
+});
+
+test("a saved voice that is gone shows as the system voice", async () => {
+  render(Settings, { api: fakeApi({ voice: { ...VOICE_OFF, enabled: true, speech_voice: "gone" } }) });
+  const select = (await screen.findByRole("combobox", { name: "Voice" })) as HTMLSelectElement;
+  expect(select.value).toBe("");
+});
+
+test("the speaking rate is saved", async () => {
+  const api = fakeApi({ voice: { ...VOICE_OFF, enabled: true } });
+  render(Settings, { api });
+  const select = (await screen.findByRole("combobox", { name: "Speaking rate" })) as HTMLSelectElement;
+  expect(select.value).toBe("normal");
+  await userEvent.selectOptions(select, "fast");
+  expect(api.calls).toContainEqual(["setVoiceSettings", { ...VOICE_OFF, enabled: true, speech_rate: "fast" }]);
+});
+
+test("speech settings are disabled while voice is off", async () => {
+  render(Settings, { api: fakeApi() });
+  const box = (await screen.findByRole("checkbox", { name: "Speak an alert when an agent needs you" })) as HTMLInputElement;
+  expect(box.disabled).toBe(true);
+  expect((screen.getByRole("combobox", { name: "Voice" }) as HTMLSelectElement).disabled).toBe(true);
+});
