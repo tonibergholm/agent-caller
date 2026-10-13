@@ -115,7 +115,7 @@ async fn state(
         Ok(Ok(body)) => body,
         Ok(Err(_)) => {
             ctx.adapter.sweep();
-            return rejected("body: longer than 256 KiB");
+            return rejected("body: unreadable or longer than 256 KiB");
         }
         Err(_) => {
             ctx.adapter.sweep();
