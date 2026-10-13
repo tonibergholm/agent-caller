@@ -73,9 +73,21 @@ pub fn alert_cards(s: &Snapshot) -> Vec<&CardSnap> {
         .collect()
 }
 
+/// The requests an alert may announce now.
 fn keys(s: &Snapshot) -> Vec<(String, String)> {
     alert_cards(s)
         .into_iter()
+        .filter_map(|c| c.pending.as_ref().map(|r| (c.key.clone(), r.id.clone())))
+        .collect()
+}
+
+/// Every request that is waiting, whether or not an alert may name it now.
+/// The baseline and the seen set use this one, so a request that was already
+/// waiting is never announced later because something made it eligible: an
+/// offline machine reconnecting, the machine filter clearing, subagents shown.
+fn waiting(s: &Snapshot) -> Vec<(String, String)> {
+    s.cards
+        .iter()
         .filter_map(|c| c.pending.as_ref().map(|r| (c.key.clone(), r.id.clone())))
         .collect()
 }
@@ -105,19 +117,23 @@ impl Alerts {
 
     /// Queues requests not seen before. The first call only takes a baseline.
     pub fn observe(&mut self, s: &Snapshot) {
-        let now = keys(s);
+        let now = waiting(s);
         let Some(seen) = &mut self.seen else {
             self.seen = Some(now.into_iter().collect());
             return;
         };
-        for key in now.iter() {
-            if seen.insert(key.clone()) {
+        let eligible = keys(s);
+        for key in &now {
+            // Remembered either way; queued only if an alert may name it now.
+            if seen.insert(key.clone()) && eligible.contains(key) {
                 self.queue.push(key.clone());
             }
         }
         if seen.len() > SEEN_MAX {
             seen.retain(|k| now.contains(k));
         }
+        // Bounded even if `due` is not called: only live, eligible requests wait.
+        self.queue.retain(|k| eligible.contains(k));
     }
 
     /// What to say now. Queued requests that no longer need the user are
@@ -268,6 +284,78 @@ mod tests {
         assert!(matches!(a.due(&next, t0 + ALERT_RETRY, false), Due::Speak(_)), "a new request on the same card counts");
     }
 
+    /// Review: a request that was already waiting is never announced later
+    /// because it became eligible (a machine reconnecting).
+    #[test]
+    fn a_request_waiting_on_an_offline_machine_is_not_announced_on_reconnect() {
+        let t0 = Instant::now();
+        let mut offline = pending("minos", "a");
+        offline.online = false;
+        let mut a = Alerts::default();
+        a.observe(&snapshot(vec![offline]));
+        let back = snapshot(vec![pending("minos", "a")]);
+        a.observe(&back);
+        assert_eq!(a.due(&back, t0, false), Due::Nothing);
+    }
+
+    /// Same for a machine filter that clears, and for subagents that are shown.
+    #[test]
+    fn clearing_the_filter_or_showing_subagents_announces_nothing_old() {
+        let t0 = Instant::now();
+        let mut sub = pending("m", "sub");
+        sub.role = AgentRole::Subagent;
+        let mut s = snapshot(vec![pending("m", "a"), pending("other", "b"), sub]);
+        s.presentation.machine_filter = Some("m".into());
+        s.show_subagents = false;
+        let mut a = Alerts::default();
+        a.observe(&s);
+        s.presentation.machine_filter = None;
+        s.show_subagents = true;
+        a.observe(&s);
+        assert_eq!(a.due(&s, t0, false), Due::Nothing);
+    }
+
+    /// A request that arrives while its machine is filtered out is not
+    /// announced when the filter clears either: alerts respect visibility
+    /// when the request arrives (spec §7).
+    #[test]
+    fn a_request_that_arrived_while_filtered_out_stays_quiet() {
+        let t0 = Instant::now();
+        let mut a = Alerts::default();
+        let mut s = snapshot(vec![pending("m", "a")]);
+        s.presentation.machine_filter = Some("m".into());
+        a.observe(&s);
+        let mut with_other = snapshot(vec![pending("m", "a"), pending("other", "b")]);
+        with_other.presentation.machine_filter = Some("m".into());
+        a.observe(&with_other);
+        with_other.presentation.machine_filter = None;
+        a.observe(&with_other);
+        assert_eq!(a.due(&with_other, t0, false), Due::Nothing);
+    }
+
+    #[test]
+    fn the_queue_stays_bounded_without_due() {
+        let mut a = Alerts::default();
+        a.observe(&snapshot(vec![]));
+        for i in 0..50 {
+            a.observe(&snapshot(vec![with_request("m", "a", &format!("r{i}"))]));
+        }
+        assert!(a.queue.len() <= 1, "only the live request waits, not {}", a.queue.len());
+    }
+
+    /// The machine filter holds the machine's key, which the panel publishes
+    /// (not its display name): a card whose two differ proves which is compared.
+    #[test]
+    fn the_filter_compares_the_machine_key_not_its_name() {
+        let mut c = pending("k1", "a");
+        c.machine_name = "Minos".into();
+        let mut s = snapshot(vec![c]);
+        s.presentation.machine_filter = Some("k1".into());
+        assert_eq!(alerted(&s), ["k1/a"]);
+        s.presentation.machine_filter = Some("Minos".into());
+        assert!(alerted(&s).is_empty());
+    }
+
     fn alerted(s: &Snapshot) -> Vec<&str> {
         alert_cards(s).iter().map(|c| c.key.as_str()).collect()
     }
@@ -323,9 +411,14 @@ mod tests {
         a.observe(&snapshot(vec![]));
         let s = snapshot(vec![pending("minos", "a")]);
         a.observe(&s);
+        assert!(matches!(a.due(&s, t0, false), Due::Speak(_)));
         a.reset();
         a.observe(&s);
-        assert_eq!(a.due(&s, t0, false), Due::Nothing, "turning alerts on again takes a new baseline");
+        assert_eq!(a.due(&s, t0 + ms(1), false), Due::Nothing, "turning alerts on again takes a new baseline");
+        // The gap was forgotten too: a request that arrives next is spoken at once.
+        let more = snapshot(vec![pending("minos", "a"), pending("minos", "b")]);
+        a.observe(&more);
+        assert!(matches!(a.due(&more, t0 + ms(2), false), Due::Speak(_)), "reset cleared the 5 s gap");
     }
 
     #[test]
@@ -336,6 +429,13 @@ mod tests {
             a.observe(&snapshot(vec![with_request("m", "a", &format!("r{i}"))]));
         }
         assert!(a.seen_len() <= SEEN_MAX);
+        // Trimming forgets what is gone, never what is still waiting: the live
+        // request is not announced a second time.
+        let live = snapshot(vec![with_request("m", "a", &format!("r{}", SEEN_MAX + 9))]);
+        let t0 = Instant::now();
+        let _ = a.due(&live, t0, false);
+        a.observe(&live);
+        assert_eq!(a.due(&live, t0 + ALERT_GAP + ALERT_GAP, false), Due::Nothing);
     }
 
     #[test]
@@ -348,6 +448,8 @@ mod tests {
     #[test]
     fn rates_serialize_in_snake_case_and_default_to_normal() {
         assert_eq!(serde_json::to_string(&Rate::Slow).unwrap(), "\"slow\"");
+        assert_eq!(serde_json::to_string(&Rate::Fast).unwrap(), "\"fast\"");
+        assert_eq!(serde_json::from_str::<Rate>("\"normal\"").unwrap(), Rate::Normal);
         assert_eq!(Rate::default(), Rate::Normal);
         assert_eq!(SpeechSettings::default(), SpeechSettings { alerts: false, voice: None, rate: Rate::Normal });
     }
