@@ -33,8 +33,7 @@ Give a machine only if the user named one.\n\
 - cancel: only to cancel or undo the user's previous voice command. Never for deny, decline, stop or no.\n\
 - none: only when the command has nothing to do with the inbox or its agents.\n\
 A machine name, an agent's kind (Claude, Codex) or a word from its title names an agent. \
-If the user names none and DATA has a selected agent, that is the one.\n\
-If you cannot tell which agent is meant, give candidates (agent ids) instead of agent or request.";
+If the user names none and DATA has a selected agent, that is the one.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PromptOptions {
@@ -195,7 +194,8 @@ mod tests {
         for step in ["answer", "answer_text", "send", "read", "summarize", "select", "cancel", "none"] {
             assert!(INSTRUCTIONS.contains(&format!("- {step}:")), "{step}");
         }
-        assert!(!INSTRUCTIONS.lines().any(|l| l == "### INSTRUCTIONS"), "a header line would split the prompt");
+        assert!(!INSTRUCTIONS.lines().any(|l| l.starts_with("### ")), "a header line would split the prompt");
+        assert!(!INSTRUCTIONS.contains("candidates"), "no model offers candidates today (plan Task 5b)");
     }
 
     #[test]

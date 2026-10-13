@@ -17,8 +17,9 @@ use super::bridge::{VB_ERR_NOT_INITIALIZED, VB_OK, ffi};
 
 /// How long a plan may take (plan V5; owner decision 1). The slowest cold
 /// call measured on the on-device model was 4.0 s with the restatement step
-/// (docs/research/2026-10-13-voice-model-quality.md); the plan's rule (slowest
-/// cold call plus 1 s, capped at 8 s) rounds to 6 s.
+/// (docs/research/2026-10-13-voice-model-quality.md). The plan's rule (the
+/// slowest cold call plus 1 s, capped at 8 s) gives 5.0 s; 6 s keeps a
+/// margin of a second for a slow machine.
 pub const MODEL_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// The C calls, behind a trait so tests run without Swift. Every call
@@ -477,7 +478,11 @@ mod tests {
         /// right step and agent, and Rust's rule (a blocked agent cannot take a
         /// message) refuses it, or the user is asked to confirm. Both are right.
         fn send_to_blocked(r: &Routed, card: &str) -> bool {
-            confirmed_on(r, card) || matches!(r, Routed::Refused(Refusal::CannotReply))
+            let message = matches!(r, Routed::Proposal(p)
+                if p.level == Level::Confirm
+                    && p.step.card() == Some(card)
+                    && matches!(p.step, Step::Send { .. } | Step::AnswerText { .. }));
+            message || matches!(r, Routed::Refused(Refusal::CannotReply))
         }
 
         /// The development set: the wording the prompt was first tried on.

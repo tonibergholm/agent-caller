@@ -335,12 +335,16 @@ final class FoundationPlanEngine: PlanEngine, @unchecked Sendable {
     private static var onDevice: SystemLanguageModel { SystemLanguageModel.default }
 
     /// This interface's own wording, added to Rust's instructions: the model
-    /// sees one case per step, a summary with no machine is its own case, and
-    /// there is no `candidates` field.
+    /// sees one case per step and a summary with no machine is its own case.
+    /// There is no `candidates` field in this interface (the wire format keeps
+    /// it for models that offer it): the model picks the most likely agent and
+    /// Rust, which resolves names itself, asks which one when the transcript is
+    /// ambiguous. The cases without a payload (`summarize_all`, `cancel`,
+    /// `none`) cannot carry a description in the schema, so what they mean is
+    /// said here and in Rust's instructions.
     private static let interfaceNote =
         "In this interface summarize always takes a machine and is only for a machine the user named. "
-        + "Use summarize_all for \"what needs me\", \"how many things are waiting\" and \"give me a summary\". "
-        + "Candidates are not offered: choose the most likely agent."
+        + "Use summarize_all for \"what needs me\", \"how many things are waiting\" and \"give me a summary\"."
 
     private static func session(_ instructions: String) -> LanguageModelSession {
         // `model:` typed as `SystemLanguageModel` picks the macOS 26
