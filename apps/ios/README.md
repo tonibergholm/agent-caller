@@ -130,7 +130,12 @@ identity.
 Free-team limits, from Apple's comparison page (checked 2026-10-12): a device
 install and its provisioning profile expire after 7 days, so the app must be
 rebuilt and reinstalled after that. A free account registers up to 3 devices
-and 3 apps per device.
+and 3 apps per device. Devices registered under an earlier or lapsed paid
+membership count against the 3 and a free account cannot remove them. Xcode
+then fails with "Your development team has reached the maximum number of
+registered iPhone devices", and the install fails with "This provisioning
+profile cannot be installed on this device". Use a different Apple ID (a new
+Personal Team has its own 3 devices), or pay for the Developer Program.
 
 Secrets: on iOS, machine secrets are stored `AccessibleWhenUnlockedThisDeviceOnly`
 (not backed up, not moved to another device). `KeychainSecrets::write` in
