@@ -24,7 +24,7 @@ The Mac app is the reference client. Any other client (a CLI, a phone app)
 can speak `acd/1` to the same daemon. The protocol is in
 [`crates/acd-protocol/PROTOCOL.md`](crates/acd-protocol/PROTOCOL.md).
 
-> **Status: pre-release (0.1.0).** Each release is published on
+> **Status: pre-release (0.8.0).** Each release is published on
 > [GitHub Releases](https://github.com/tonibergholm/agent-caller/releases)
 > as a pre-release. The macOS binaries are ad-hoc signed, and the Mac app is
 > not notarized, so macOS asks you to confirm its first launch. The Linux
@@ -125,8 +125,8 @@ the archive for your machine, checks its SHA-256 against `SHA256SUMS`, and
 installs the binaries into `~/.local/bin`:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/tonibergholm/agent-caller/v0.1.0/scripts/install.sh
-sh install.sh --tag v0.1.0
+curl -fsSLO https://raw.githubusercontent.com/tonibergholm/agent-caller/v0.8.0/scripts/install.sh
+sh install.sh --tag v0.8.0
 ```
 
 Open the `.dmg` and drag the app to Applications. Because the app is not

@@ -7,7 +7,7 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-12
+## [0.8.0] - 2026-10-13
 
 First public pre-release. The macOS binaries are ad-hoc signed and the Mac
 app is not notarized. The Linux binaries are unsigned. See
@@ -42,6 +42,12 @@ app is not notarized. The Linux binaries are unsigned. See
 - `acd-inbox` for Linux on x86_64 and aarch64, built for the Omarchy inbox
   (Omarchy 4 on x86_64 is the tested platform), with a user service, an installer
   and a shell plugin that shows the same inbox in the shell bar.
+- An iOS client, built from source (`apps/ios/`, see its README). It is a
+  foreground inbox: it shows requests and sends answers while the app is open,
+  over Tailscale, with a touch layout of the same panel. It has no push
+  notifications and no relay. It is signed with a free personal team, so
+  installs last 7 days. It is verified in the simulator only; Keychain access,
+  touch and Tailscale on a real iPhone are not yet checked.
 
 ### Known limits
 
@@ -53,7 +59,8 @@ app is not notarized. The Linux binaries are unsigned. See
   between acd's screen check and its keystroke.
 - Voice has no intent model yet. Other phrasing shows "Model unavailable".
   Spoken replies, voice on Linux and voice on Windows are not built.
-- The release does not include a Windows client or a Windows build.
+- The release does not include a Windows client, an Android client or a
+  Windows build. The iOS client is not in the release files.
 - The Mac app and the macOS `acd` binary are ad-hoc signed and not notarized
   unless the maintainer configured a Developer ID certificate for the release.
   The Linux binaries are unsigned.

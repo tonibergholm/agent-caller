@@ -49,6 +49,10 @@ Notes on the choices:
    - `app/package.json` and the two `version` fields in
      `app/package-lock.json`
    - `app/src-tauri/tauri.conf.json`
+   - `apps/ios/src-tauri/Cargo.toml`, the `agent-caller-ios` entry in
+     `apps/ios/src-tauri/Cargo.lock`, `apps/ios/src-tauri/tauri.conf.json`
+     and `apps/ios/package.json`
+   - `clients/omarchy/manifest.json`
 3. In `CHANGELOG.md`, add a `## [X.Y.Z] - YYYY-MM-DD` section above the
    entries in `[Unreleased]`, and move those entries into it.
 4. Run `scripts/check-version.sh vX.Y.Z`. It prints the version when every
@@ -164,8 +168,8 @@ Extracting with `tar` in Terminal does not add the flag, and
 Check a download against the published checksums:
 
 ```sh
-shasum -a 256 acd-0.1.0-aarch64-apple-darwin.tar.gz
-grep acd-0.1.0-aarch64-apple-darwin.tar.gz SHA256SUMS
+shasum -a 256 acd-0.8.0-aarch64-apple-darwin.tar.gz
+grep acd-0.8.0-aarch64-apple-darwin.tar.gz SHA256SUMS
 ```
 
 The two hashes must match. `scripts/install.sh` runs this check for you.

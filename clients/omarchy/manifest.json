@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "tonibergholm.agentcaller",
   "name": "Agent Caller",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "author": "Toni Bergholm",
   "license": "MIT",
   "description": "Answer coding agents that need you.",

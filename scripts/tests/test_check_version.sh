@@ -15,11 +15,15 @@ DRIFT=9.9.9-drift
 # VERSION to the workspace version of that copy.
 prepare_tree() {
 	_tree=$WORK/tree
-	mkdir -p "$_tree/app/src-tauri" "$_tree/crates"
+	mkdir -p "$_tree/app/src-tauri" "$_tree/apps/ios/src-tauri" "$_tree/clients/omarchy" "$_tree/crates"
 	cp "$ROOT/CHANGELOG.md" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$_tree/"
 	cp "$ROOT/app/package.json" "$ROOT/app/package-lock.json" "$_tree/app/"
 	cp "$ROOT/app/src-tauri/Cargo.toml" "$ROOT/app/src-tauri/Cargo.lock" \
 		"$ROOT/app/src-tauri/tauri.conf.json" "$_tree/app/src-tauri/"
+	cp "$ROOT/apps/ios/package.json" "$_tree/apps/ios/"
+	cp "$ROOT/apps/ios/src-tauri/Cargo.toml" "$ROOT/apps/ios/src-tauri/Cargo.lock" \
+		"$ROOT/apps/ios/src-tauri/tauri.conf.json" "$_tree/apps/ios/src-tauri/"
+	cp "$ROOT/clients/omarchy/manifest.json" "$_tree/clients/omarchy/"
 	for _m in "$ROOT"/crates/*/Cargo.toml; do
 		_d=$(basename "$(dirname "$_m")")
 		mkdir -p "$_tree/crates/$_d"
@@ -100,6 +104,33 @@ test_rejects_tauri_conf_drift() {
 	check_in_tree
 	assert_eq "$R_RC" 1 "exit status"
 	assert_contains "$R_ERR" "tauri.conf.json is '$DRIFT'"
+}
+
+test_rejects_ios_conf_drift() {
+	prepare_tree
+	replace "$WORK/tree/apps/ios/src-tauri/tauri.conf.json" "\"version\": \"$VERSION\"" "\"version\": \"$DRIFT\""
+	check_in_tree
+	assert_eq "$R_RC" 1 "exit status"
+	assert_contains "$R_ERR" "apps/ios/src-tauri/tauri.conf.json is '$DRIFT'"
+}
+
+test_rejects_ios_cargo_lock_drift() {
+	prepare_tree
+	replace "$WORK/tree/apps/ios/src-tauri/Cargo.lock" \
+		"name = \"agent-caller-ios\"
+version = \"$VERSION\"" "name = \"agent-caller-ios\"
+version = \"$DRIFT\""
+	check_in_tree
+	assert_eq "$R_RC" 1 "exit status"
+	assert_contains "$R_ERR" "agent-caller-ios) is '$DRIFT'"
+}
+
+test_rejects_omarchy_manifest_drift() {
+	prepare_tree
+	replace "$WORK/tree/clients/omarchy/manifest.json" "\"version\": \"$VERSION\"" "\"version\": \"$DRIFT\""
+	check_in_tree
+	assert_eq "$R_RC" 1 "exit status"
+	assert_contains "$R_ERR" "clients/omarchy/manifest.json is '$DRIFT'"
 }
 
 test_rejects_app_cargo_toml_drift() {
