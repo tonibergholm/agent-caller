@@ -153,3 +153,46 @@ async fn a_typed_command_stops_a_speaking_alert() {
     r.voice.text_input("what is waiting".into(), true).await.unwrap();
     assert!(speaker.calls()[before..].contains(&Said::Stop));
 }
+
+/// Final review: spec §6.2 says locking stops speech. An alert for a request that
+/// arrives while the screen is locked must not be read aloud on a locked Mac; it
+/// is announced once the screen is back.
+#[tokio::test]
+async fn an_alert_waits_while_the_screen_is_locked() {
+    let (r, speaker) = speaking_rig(vec![working_agent()]).await;
+    alerts_on(&r).await;
+    r.voice.system_stop();
+    r.c.send(json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":needing_you("a2","r2")})).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(speaker.says(), 0, "nothing is spoken while locked");
+    r.voice.system_resume();
+    assert_eq!(said(&speaker, 1).await, "Box Claude needs you: bash approval");
+}
+
+/// Final review: turning alerts off stops an alert that is already playing.
+#[tokio::test]
+async fn turning_alerts_off_stops_a_speaking_alert() {
+    use acd_voice::speak::fake::Said;
+    let (r, speaker) = speaking_rig(vec![working_agent()]).await;
+    alerts_on(&r).await;
+    r.c.send(json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":needing_you("a2","r2")})).await;
+    said(&speaker, 1).await;
+    let before = speaker.calls().len();
+    r.voice.set_speech(SpeechSettings { alerts: false, ..SpeechSettings::default() });
+    assert!(speaker.calls()[before..].contains(&Said::Stop));
+}
+
+/// Final review: the app sets the speech settings before the speaker exists
+/// (the bridge starts later). Attaching the speaker takes the baseline, so the
+/// next request is news instead of becoming the baseline itself.
+#[tokio::test]
+async fn attaching_the_speaker_after_the_settings_still_takes_a_baseline() {
+    let r = rig(vec![working_agent()], None, Display::Acks).await;
+    r.voice.set_speech(SpeechSettings { alerts: true, ..SpeechSettings::default() });
+    tokio::time::sleep(Duration::from_millis(100)).await; // no speaker yet: nothing to baseline
+    let speaker = std::sync::Arc::new(FakeSpeaker::default());
+    r.voice.attach_speaker(speaker.clone());
+    tokio::time::sleep(Duration::from_millis(150)).await; // the baseline is taken here
+    r.c.send(json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":needing_you("a2","r2")})).await;
+    assert_eq!(said(&speaker, 1).await, "Box Claude needs you: bash approval");
+}

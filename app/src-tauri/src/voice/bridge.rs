@@ -97,6 +97,7 @@ pub const VB_SYS_SCREEN_LOCKED: u32 = 1;
 pub const VB_SYS_WILL_SLEEP: u32 = 2;
 #[allow(dead_code)]
 pub const VB_SYS_SCREENS_SLEEP: u32 = 3;
+pub const VB_SYS_UNLOCKED: u32 = 4;
 
 /// Mirrors `struct vb_event`; the layout is pinned by tests on both sides.
 #[repr(C)]
@@ -172,6 +173,8 @@ pub enum BridgeEvent {
     /// The screen locked or the Mac is going to sleep; Swift already
     /// dropped the session.
     System,
+    /// The screen unlocked or the Mac woke (spec §6.2): alerts may speak again.
+    SystemResumed,
     Assets { ok: bool },
     /// Swift's microphone started or stopped (S18).
     Capture { generation: u64, on: bool },
@@ -225,6 +228,7 @@ pub unsafe fn decode(ev: &VbEvent) -> Option<BridgeEvent> {
         VB_EV_HOLD => Some(BridgeEvent::Hold { tap: g, down: ev.value != 0 }),
         VB_EV_OTHER_KEY => Some(BridgeEvent::OtherKey { tap: g }),
         VB_EV_TAP_DISABLED => Some(BridgeEvent::TapDisabled { tap: g, reenabled: ev.value != 0 }),
+        VB_EV_SYSTEM if ev.code == VB_SYS_UNLOCKED => Some(BridgeEvent::SystemResumed),
         VB_EV_SYSTEM => Some(BridgeEvent::System),
         VB_EV_ASSETS => Some(BridgeEvent::Assets { ok: ev.code == VB_OK as u32 }),
         VB_EV_CAPTURE => Some(BridgeEvent::Capture { generation: g, on: ev.value != 0 }),
@@ -613,6 +617,9 @@ mod tests {
             Some(BridgeEvent::TapDisabled { tap: 9, reenabled: false })
         );
         assert_eq!(unsafe { decode(&e(VB_EV_SYSTEM, VB_SYS_SCREEN_LOCKED, 0)) }, Some(BridgeEvent::System));
+        // Unlock and wake are their own event (final review): alerts resume.
+        assert_eq!(unsafe { decode(&e(VB_EV_SYSTEM, VB_SYS_UNLOCKED, 0)) }, Some(BridgeEvent::SystemResumed));
+        assert_eq!(VB_SYS_UNLOCKED, 4, "the header's number");
         assert_eq!(unsafe { decode(&e(VB_EV_ASSETS, 0, 0)) }, Some(BridgeEvent::Assets { ok: true }));
         assert_eq!(unsafe { decode(&e(VB_EV_ASSETS, VB_ERR_FAILED as u32, 0)) }, Some(BridgeEvent::Assets { ok: false }));
     }

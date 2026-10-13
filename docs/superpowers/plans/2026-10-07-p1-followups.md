@@ -289,3 +289,17 @@ Items not named here stay in their section as accepted residuals.
   failed mutation, deadline), installer stderr tail, uninstall provenance.
 - Voice: pump stalls, nested Confirm under Listening, dropped-chunk wording.
 - Harness races in `just e2e`.
+
+### Voice steps 3 and 4 (final review, 2026-10-13)
+
+- A saved machine filter is ignored by alerts until the panel first publishes its
+  presentation after launch (`machine_filter` defaults to none before that), so
+  an alert for a filtered-out machine could be spoken in that first moment.
+- Swift appends a short interface note to Rust's `INSTRUCTIONS` (plan V2 says
+  Rust is the single source); it is fixed text, not agent text.
+- A model `select` runs without confirmation (spec §6.1) and can pick any visible
+  card; a following fast-path "approve" then acts on the selected card with the
+  2 s countdown and the full command on the HUD. Same risk as selecting with the
+  keyboard; noted, not changed.
+- Run-to-run: the 19/20 and 19/20 phrase result is two runs on one Mac, small
+  sets, typed text.

@@ -92,6 +92,7 @@ pub fn dispatch(app: &AppHandle, ev: bridge::BridgeEvent) {
         }
         E::Assets { .. } => emit_status(app),
         E::System => voice.controller.system_stop(),
+        E::SystemResumed => voice.controller.system_resume(),
         E::Capture { generation, on } => voice.controller.capture(generation, on),
         E::Overflow => {
             voice.controller.overflow();

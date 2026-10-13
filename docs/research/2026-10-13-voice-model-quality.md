@@ -159,12 +159,14 @@ removed the contradictory plans. Consequences:
 
 ## Latency and the timeout
 
-Warm p50 is 2.2 s and p95 2.5 s, up from 1.2 s and 1.3 s, because the model now
-writes the `want` sentence. The cold first call took 3.7 s to 4.0 s. The plan's
-rule (the larger of warm p95 plus 1 s and the slowest cold call plus 1 s, capped
-at 8 s) gives 5.0 s. `MODEL_TIMEOUT` is **6 s**: the plan's value rounded up for a
-margin on a slower machine, not what the rule says. A press prewarms the model
-(Task 4), which shortens the first call after an idle period.
+Warm p50 is 2.0 s to 2.2 s and p95 2.3 s to 2.6 s, up from 1.2 s and 1.3 s,
+because the model now writes the `want` sentence. The cold first call took
+2.3 s to 4.2 s across the runs of the shipped build (the slowest was 4.2 s). The
+plan's rule (the larger of warm p95 plus 1 s and the slowest cold call plus 1 s,
+capped at 8 s) gives 5.2 s. `MODEL_TIMEOUT` is **6 s**: the plan's value rounded
+up, which leaves 0.8 s over the slowest cold call measured, not what the rule
+says exactly. A press prewarms the model (Task 4), which shortens the first call
+after an idle period.
 
 ## Not done
 

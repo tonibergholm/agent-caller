@@ -250,6 +250,17 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(engine.discards, 2, "cancelAll's own, and the one for the session made meanwhile")
     }
 
+    /// Final review: a prewarm whose task starts after a discard (the epoch it was
+    /// requested at is stale) leaves no session behind either.
+    func testAPrewarmRequestedBeforeADiscardIsDroppedWhenItRunsLate() {
+        let (requests, engine, _, _) = rig()
+        let requestedAt = requests.currentEpoch
+        requests.cancelAll()                    // lands before the prewarm task starts
+        requests.prewarm(instructions: "I", requestedAt: requestedAt)
+        XCTAssertEqual(engine.prewarms, 1)
+        XCTAssertEqual(engine.discards, 2, "cancelAll's own, and the stale prewarm's session")
+    }
+
     /// `copyText` is the one place C bytes become Swift text (spec §6.3).
     func testCopyTextHandlesEmptyNilAndInvalidBytes() {
         XCTAssertEqual(copyText(nil, 0), "")

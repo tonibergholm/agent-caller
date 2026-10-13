@@ -24,6 +24,12 @@ final class SystemEvents {
             // Spec §6.3: model work is discarded on lock and sleep too.
             ModelRequests.shared.cancelAll()
         }
+        // Unlock and wake tell Rust that alerts may speak again (spec §6.2). A
+        // normal queued event: the lock code above is latched and never dropped,
+        // this one only lifts the hold.
+        let resumed: @Sendable () -> Void = {
+            Bridge.shared.emit(Event(kind: VB_EV_SYSTEM, code: VB_SYS_UNLOCKED))
+        }
         let workspace = NSWorkspace.shared.notificationCenter
         tokens.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
             report(VB_SYS_WILL_SLEEP)
@@ -38,6 +44,20 @@ final class SystemEvents {
             forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
         ) { _ in
             report(VB_SYS_SCREEN_LOCKED)
+        })
+        tokens.append(workspace.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { _ in
+            resumed()
+        })
+        tokens.append(workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { _ in
+            resumed()
+        })
+        tokens.append(workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+            resumed()
+        })
+        tokens.append(DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
+        ) { _ in
+            resumed()
         })
     }
 }

@@ -138,6 +138,35 @@ final class SpeakerTests: XCTestCase {
         XCTAssertEqual(synth.calls.suffix(1), ["stop"])
     }
 
+    /// Final review: on a press Rust stops speech first, a moment before Swift's
+    /// capture start runs `silenceForCapture`. The tail is measured from that cut,
+    /// not from when Swift looks, or the normal path would wait for nothing.
+    func testTheTailIsWaitedWhenRustStoppedSpeechJustBefore() {
+        let (speaker, synth, _, _) = rig()
+        synth.set(speaking: true)
+        speaker.say(1, text: "a long summary", voice: nil, rate: VB_RATE_NORMAL)
+        synth.quietsOnStop = true // the real synthesizer reports quiet at once
+        speaker.stop()            // Rust's stop, before the capture start
+        let cut = Date()
+        speaker.silenceForCapture()
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(cut), Double(Speaker.tailMs) / 1000 - 0.008,
+                                    "the audio tail is waited from the cut")
+        XCTAssertLessThan(Date().timeIntervalSince(cut), 0.15)
+    }
+
+    /// No speech was cut lately: nothing to wait for.
+    func testNoWaitWhenSpeechWasCutLongAgo() {
+        let (speaker, synth, _, _) = rig()
+        synth.set(speaking: true)
+        speaker.say(1, text: "a", voice: nil, rate: VB_RATE_NORMAL)
+        synth.quietsOnStop = true
+        speaker.stop()
+        Thread.sleep(forTimeInterval: Double(Speaker.drainMs) / 1000 + 0.05)
+        let started = Date()
+        speaker.silenceForCapture()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.02)
+    }
+
     /// The rates in the header map to AVSpeech rates (owner decision 5); an unknown code is normal.
     func testRatesMapToAVSpeechRates() {
         XCTAssertEqual(Speaker.avRate(UInt32(VB_RATE_SLOW)), 0.42, accuracy: 0.0001)
