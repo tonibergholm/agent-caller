@@ -145,11 +145,12 @@ impl IntentModel for MacIntentModel {
                     pending.answered = true;
                     reply
                 }
-                // Discarded (voice off, lock, overflow): Swift was told already.
-                Ok(Err(_)) => {
-                    pending.answered = true;
-                    Err(ModelError::Failed)
-                }
+                // Discarded (voice off, lock, overflow). Not `answered`: a
+                // discard can land after the id was registered and before
+                // Swift started the request, and then Swift's `cancelAll`
+                // missed it. The extra cancel is harmless (Swift ignores
+                // unknown ids).
+                Ok(Err(_)) => Err(ModelError::Failed),
                 Err(_) => Err(ModelError::Timeout),
             }
         };
@@ -196,11 +197,16 @@ mod tests {
         cancel_alls: AtomicUsize,
         prewarms: AtomicUsize,
         queries: Mutex<Vec<bool>>,
+        /// Runs inside `plan`, to model a discard that lands before Swift starts the request.
+        during_plan: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     }
 
     impl ModelPort for FakePort {
         fn plan(&self, id: u64, instructions: &str, input: &str, timeout_ms: u32) -> i32 {
             self.plans.lock().unwrap().push((id, instructions.to_owned(), input.to_owned(), timeout_ms));
+            if let Some(hook) = self.during_plan.lock().unwrap().as_ref() {
+                hook();
+            }
             *self.code.lock().unwrap()
         }
         fn cancel(&self, id: u64) {
@@ -302,6 +308,19 @@ mod tests {
         *port.code.lock().unwrap() = super::super::bridge::VB_ERR_FAILED;
         assert_eq!(model.plan(&prompt("x")).await, Err(ModelError::Failed));
         assert!(port.cancels.lock().unwrap().is_empty());
+    }
+
+    /// Review: a discard between registering the id and the Swift start must
+    /// still cancel that request, or it runs on after voice off or a lock.
+    #[tokio::test]
+    async fn a_discard_before_swift_started_the_request_still_cancels_it() {
+        let _serial = SERIAL.lock().await;
+        let (model, port) = rig(Duration::from_secs(5));
+        let m = model.clone();
+        *port.during_plan.lock().unwrap() = Some(Box::new(move || m.discard()));
+        assert_eq!(model.plan(&prompt("x")).await, Err(ModelError::Failed));
+        let id = port.plans.lock().unwrap()[0].0;
+        assert_eq!(*port.cancels.lock().unwrap(), [id], "the request is cancelled in Swift");
     }
 
     #[tokio::test]
