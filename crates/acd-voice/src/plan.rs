@@ -491,7 +491,7 @@ impl Executor {
         });
         self.state = State::Shown;
         match text {
-            Some(text) => show(Hud::Speaking { text }),
+            Some(text) => show(Hud::Speaking { text, audio: false }),
             None => self.error(Refusal::NothingToRead),
         }
     }

@@ -108,12 +108,31 @@ pub fn alert(card: &CardSnap) -> Option<VoiceText> {
     )))
 }
 
+/// One alert for every request since the last one (plan V14): the first
+/// named, the rest counted.
+pub fn alerts(cards: &[&CardSnap]) -> Option<VoiceText> {
+    let first = alert(cards.first()?)?;
+    Some(match cards.len() - 1 {
+        0 => first,
+        1 => VoiceText::new(format!("{}. 1 more needs you.", first.expose())),
+        n => VoiceText::new(format!("{}. {n} more need you.", first.expose())),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::snapshot::fixtures::*;
     use crate::snapshot::Group;
     use acd_protocol::{AgentRole, Effect};
+
+    #[test]
+    fn several_alerts_name_the_first_and_count_the_rest() {
+        let (a, b, c) = (pending("minos", "a"), pending("minos", "b"), pending("studio", "c"));
+        assert_eq!(alerts(&[&a]).unwrap().expose(), "minos Claude needs you: bash approval");
+        assert_eq!(alerts(&[&a, &b, &c]).unwrap().expose(), "minos Claude needs you: bash approval. 2 more need you.");
+        assert!(alerts(&[]).is_none());
+    }
 
     #[test]
     fn labels_follow_the_panel_type_tag() {

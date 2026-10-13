@@ -534,7 +534,7 @@ async fn read_summarize_and_select_change_nothing() {
     let port = FakePort::with(&[&a]);
     let mut exec = Executor::new();
     let r = say(&mut exec, &port, &s, "read it").await;
-    assert_eq!(r.hud, Hud::Speaking { text: VoiceText::new("Bash approval. npm test") });
+    assert_eq!(r.hud, Hud::Speaking { text: VoiceText::new("Bash approval. npm test"), audio: false });
     let r = say(&mut exec, &port, &s, "next").await;
     assert_eq!(r.select.as_deref(), Some("m/b"));
     assert!(port.enqueued().is_empty());
@@ -611,8 +611,13 @@ fn the_hud_json_shape_is_the_frontend_contract() {
     // Thinking is cancelled from the inbox or the HUD's button; it never
     // takes key, or every typed command would bounce focus.
     assert!(!Hud::Thinking { transcript: VoiceText::new("x"), id: 1 }.wants_key());
-    assert!(!Hud::Listening { id: 1, partial: None, over: None }.wants_key() && !Hud::Speaking { text: VoiceText::new("x") }.wants_key());
-    assert!(Hud::Speaking { text: VoiceText::new("x") }.fades());
+    let quiet = Hud::Speaking { text: VoiceText::new("x"), audio: false };
+    let voiced = Hud::Speaking { text: VoiceText::new("x"), audio: true };
+    assert!(!Hud::Listening { id: 1, partial: None, over: None }.wants_key() && !quiet.wants_key() && !voiced.wants_key());
+    assert!(quiet.fades(), "no audio: the D18 timer");
+    assert!(!voiced.fades(), "audio: it fades from the end of speech (V11)");
+    let v = serde_json::to_value(&voiced).unwrap();
+    assert_eq!(v, serde_json::json!({"state": "speaking", "text": "x", "audio": true}));
 }
 
 #[tokio::test]

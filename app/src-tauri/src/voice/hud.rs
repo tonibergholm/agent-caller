@@ -167,7 +167,7 @@ pub fn present(app: &AppHandle, seq: u64, hud: &Hud) -> bool {
 /// D18: spoken text stays 1.5 s plus 50 ms per character, within 3–15 s.
 pub fn fade_delay(hud: &Hud) -> Duration {
     match hud {
-        Hud::Speaking { text } => Duration::from_millis(1500 + 50 * text.char_len() as u64)
+        Hud::Speaking { text, .. } => Duration::from_millis(1500 + 50 * text.char_len() as u64)
             .clamp(Duration::from_secs(3), Duration::from_secs(15)),
         // The recovery button sits on these; give time to read and click it.
         Hud::Error { refusal: Refusal::MicrophoneDenied | Refusal::SpeechDenied | Refusal::HoldKeyOff, .. } => {
@@ -386,12 +386,12 @@ mod tests {
     #[test]
     fn steps_fade_after_1_5_s_and_spoken_text_stays_long_enough_to_read() {
         assert_eq!(fade_delay(&Hud::Done { proposal: None, outcome: OutcomeView::Selected }), FADE_AFTER);
-        assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("short") }), Duration::from_secs(3));
+        assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("short"), audio: false }), Duration::from_secs(3));
         for refusal in [Refusal::MicrophoneDenied, Refusal::SpeechDenied, Refusal::HoldKeyOff] {
             assert_eq!(fade_delay(&Hud::Error { refusal, transcript: None }), PERMISSION_ERROR_FADE, "{refusal:?} has a button to click");
         }
         assert_eq!(fade_delay(&Hud::Error { refusal: Refusal::StillSending, transcript: None }), FADE_AFTER);
-        assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("x".repeat(100)) }), Duration::from_millis(6500));
-        assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("x".repeat(1000)) }), Duration::from_secs(15));
+        assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("x".repeat(100)), audio: false }), Duration::from_millis(6500));
+        assert_eq!(fade_delay(&Hud::Speaking { text: VoiceText::new("x".repeat(1000)), audio: false }), Duration::from_secs(15));
     }
 }

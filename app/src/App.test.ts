@@ -54,7 +54,7 @@ test("the hud label renders the HUD, never the panel", async () => {
   await new Promise((r) => setTimeout(r, 20));
   expect(screen.queryByText("Fix the build")).toBeNull();
   expect(api.presentations).toEqual([]);
-  api.hud!({ seq: 1, id: null, hud: { state: "speaking", text: "Nothing needs you." } });
+  api.hud!({ seq: 1, id: null, hud: { state: "speaking", text: "Nothing needs you.", audio: false } });
   expect(await screen.findByText("Nothing needs you.")).toBeTruthy();
 });
 
