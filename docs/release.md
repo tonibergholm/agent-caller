@@ -165,6 +165,23 @@ xattr -d com.apple.quarantine ~/.local/bin/acd
 Extracting with `tar` in Terminal does not add the flag, and
 `scripts/install.sh` downloads with `curl`, which does not add it either.
 
+macOS ties a privacy grant to the exact build of an ad-hoc signed app. If
+you granted a permission to an earlier build with the same bundle ID, such
+as a dev build, System Settings can show Agent Caller as enabled while the
+app reports the permission as Denied. Toggling it off and on does not fix
+this. Reset the old entry and grant it again (checked on 2026-10-13 for Input
+Monitoring on 0.8.0):
+
+```sh
+osascript -e 'quit app "Agent Caller"'
+tccutil reset ListenEvent dev.agentcaller.inbox
+open "/Applications/Agent Caller.app"
+```
+
+Use `Microphone` or `SpeechRecognition` in place of `ListenEvent` for those
+permissions. Then click **Open System Settings** when macOS asks, turn the
+app on, and relaunch it.
+
 Check a download against the published checksums:
 
 ```sh
