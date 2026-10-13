@@ -25,6 +25,7 @@ fn opt(id: &str, label: &str, effect: Effect, description: Option<String>) -> Re
         label: label.into(),
         description,
         effect,
+        confirm: false,
     }
 }
 /// Question text: newlines kept, other control characters dropped.

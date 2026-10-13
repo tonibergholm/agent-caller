@@ -971,15 +971,12 @@ impl Confirm {
         }
         // Otherwise the target stays: the watch monitors the dialog until it
         // is really gone. Never another key.
-        if let Some(reason) = reason {
-            core.observe(Observation::RequestEndedWithReason {
-                request_id,
-                by,
-                reason,
-            });
-        } else {
-            core.observe(Observation::RequestEndedById { request_id, by });
-        }
+        core.observe(Observation::RequestEndedWithReason {
+            request_id,
+            by,
+            reason,
+            message: None,
+        });
         let _ = self.hints.try_send(Hint::Pane(self.pane_id.clone()));
     }
 }

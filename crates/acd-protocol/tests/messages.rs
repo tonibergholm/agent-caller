@@ -243,6 +243,32 @@ fn request_resolved_reason_round_trips_and_is_optional() {
     ));
 }
 
+#[test]
+fn request_resolved_message_round_trips_and_is_optional() {
+    let with = r#"{"type":"request.resolved","epoch":"e1","seq":46,"request_id":"r9","agent_id":"a","by":"agent","reason":"rejected","message":"plan changed"}"#;
+    let m: ServerMessage = serde_json::from_str(with).unwrap();
+    match &m {
+        ServerMessage::RequestResolved {
+            by: ResolvedBy::Agent,
+            reason: Some(ResolveReason::Rejected),
+            message: Some(text),
+            ..
+        } => assert_eq!(text, "plan changed"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&m).unwrap(),
+        serde_json::from_str::<serde_json::Value>(with).unwrap()
+    );
+    let without = r#"{"type":"request.resolved","epoch":"e1","seq":44,"request_id":"r7","agent_id":"a","by":"inbox"}"#;
+    let m: ServerMessage = serde_json::from_str(without).unwrap();
+    assert!(matches!(
+        &m,
+        ServerMessage::RequestResolved { message: None, .. }
+    ));
+    assert!(!serde_json::to_string(&m).unwrap().contains("message"));
+}
+
 fn validator(schema: serde_json::Value) -> jsonschema::Validator {
     jsonschema::validator_for(&schema).unwrap()
 }

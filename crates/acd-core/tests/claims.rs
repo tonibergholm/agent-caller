@@ -32,6 +32,7 @@ fn perm(key: &str) -> RequestObs {
             label: "Yes".into(),
             description: None,
             effect: Effect::Allow,
+            confirm: false,
         }],
         questions: None,
         free_text: false,
@@ -232,6 +233,7 @@ fn inbox_end_after_claim_carries_the_claimed_option() {
         by: ResolvedBy::Inbox,
         option_id: Some("allow".into()),
         reason: None,
+        message: None,
     }));
 }
 
@@ -250,6 +252,7 @@ fn terminal_end_after_claim_stays_terminal() {
         by: ResolvedBy::Terminal,
         option_id: None,
         reason: None,
+        message: None,
     }));
 }
 
@@ -345,6 +348,7 @@ fn request_content_is_frozen_while_answering() {
             label: "x".into(),
             description: None,
             effect: Effect::Allow,
+            confirm: false,
         }],
         ..perm("k")
     };
@@ -389,5 +393,6 @@ fn release_clears_the_claim() {
         by: ResolvedBy::Terminal,
         option_id: None,
         reason: None,
+        message: None,
     }));
 }

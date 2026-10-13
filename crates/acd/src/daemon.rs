@@ -411,6 +411,7 @@ pub async fn run(dir: &Path) -> Result<()> {
             hooks: SourceStatus::unconfigured(),
             herdr: SourceStatus::unconfigured(),
             t3: SourceStatus::unconfigured(),
+            external: true,
         },
     };
     let extra = cfg

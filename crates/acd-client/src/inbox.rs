@@ -943,9 +943,10 @@ impl Inbox {
                 agent_id,
                 by,
                 reason,
+                message,
                 ..
             } => {
-                if let Some(n) = view::resolution_notice(by, reason) {
+                if let Some(n) = view::resolution_notice(by, reason, message.as_deref()) {
                     inner.notices.insert(
                         view::card_key(key, &agent_id),
                         (n, Instant::now() + self.opts.timing.notice_ttl),

@@ -74,11 +74,12 @@ pub enum Observation {
         request_id: String,
         by: ResolvedBy,
     },
-    /// `RequestEndedById` with a reason for clients.
+    /// `RequestEndedById` with a reason and a message for clients.
     RequestEndedWithReason {
         request_id: String,
         by: ResolvedBy,
-        reason: ResolveReason,
+        reason: Option<ResolveReason>,
+        message: Option<String>,
     },
     /// Like `RequestEndedById`, but only while the request is `open`: a no-op
     /// once it is claimed (`answering`) or resolved.
@@ -117,6 +118,7 @@ pub enum Change {
         by: ResolvedBy,
         option_id: Option<String>,
         reason: Option<ResolveReason>,
+        message: Option<String>,
     },
     MachineUpdated(Machine),
 }
@@ -246,13 +248,14 @@ impl Registry {
                 vec![]
             }
             Observation::RequestEndedById { request_id, by } => {
-                self.end_by_id(&request_id, by, None)
+                self.end_by_id(&request_id, by, None, None)
             }
             Observation::RequestEndedWithReason {
                 request_id,
                 by,
                 reason,
-            } => self.end_by_id(&request_id, by, Some(reason)),
+                message,
+            } => self.end_by_id(&request_id, by, reason, message),
             Observation::RequestEndedIfOpen { request_id, by } => {
                 let open = self
                     .requests
@@ -310,6 +313,7 @@ impl Registry {
         request_id: &str,
         by: ResolvedBy,
         reason: Option<ResolveReason>,
+        message: Option<String>,
     ) -> Vec<Change> {
         if !self.requests.contains_key(request_id) {
             return vec![];
@@ -320,23 +324,25 @@ impl Registry {
         ) {
             self.mark_gone_by_id(request_id);
         }
-        self.resolve_request_with(request_id, by, reason)
+        self.resolve_request_with(request_id, by, reason, message)
     }
 
     /// Resolves an unresolved request without a reason. See
     /// `resolve_request_with`.
     pub fn resolve_request(&mut self, request_id: &str, by: ResolvedBy) -> Vec<Change> {
-        self.resolve_request_with(request_id, by, None)
+        self.resolve_request_with(request_id, by, None, None)
     }
 
     /// Resolves an unresolved request. `by` is taken as reported: the adapter
     /// decides between `Inbox` and `Terminal`. An `Inbox` resolution of a
-    /// claimed request carries the claimed option. `reason` refines `by`.
+    /// claimed request carries the claimed option. `reason` refines `by`;
+    /// `message` is text a source reported for the user.
     pub fn resolve_request_with(
         &mut self,
         request_id: &str,
         by: ResolvedBy,
         reason: Option<ResolveReason>,
+        message: Option<String>,
     ) -> Vec<Change> {
         let Some(e) = self.requests.remove(request_id) else {
             return vec![];
@@ -356,6 +362,7 @@ impl Registry {
             by,
             option_id,
             reason,
+            message,
         }];
         if let Some(a) = self.agents.get_mut(&e.req.agent_id)
             && a.pending.as_ref().map(|p| p.id.as_str()) == Some(request_id)

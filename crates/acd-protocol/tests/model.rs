@@ -12,6 +12,7 @@ fn opt(id: &str, label: &str, effect: Effect) -> RequestOption {
         label: label.into(),
         description: None,
         effect,
+        confirm: false,
     }
 }
 
@@ -197,14 +198,57 @@ fn machine_serializes_to_wire_shape() {
                 state: SourceState::Disabled,
                 message: None,
             },
+            external: true,
         },
     };
     assert_eq!(
         serde_json::to_value(&m).unwrap(),
         json!({
             "id": "mac-1a2b3c4d", "name": "Mac", "acd_version": "0.1.0",
-            "sources": {"hooks": {"state": "unconfigured"}, "herdr": {"state": "ok"}, "t3": {"state": "disabled"}}
+            "sources": {"hooks": {"state": "unconfigured"}, "herdr": {"state": "ok"}, "t3": {"state": "disabled"}, "external": true}
         })
+    );
+}
+
+#[test]
+fn a_machine_from_an_older_daemon_has_no_external_source() {
+    let m: Machine = serde_json::from_value(json!({
+        "id": "m", "name": "M", "acd_version": "0.8.0",
+        "sources": {"hooks": {"state": "ok"}, "herdr": {"state": "ok"}, "t3": {"state": "ok"}}
+    }))
+    .unwrap();
+    assert!(!m.sources.external);
+}
+
+#[test]
+fn option_confirm_defaults_to_false_and_is_sent_only_when_set() {
+    let plain: RequestOption = serde_json::from_value(json!({
+        "id": "a", "label": "A", "description": null, "effect": "choose"
+    }))
+    .unwrap();
+    assert!(!plain.confirm);
+    assert!(serde_json::to_value(&plain).unwrap().get("confirm").is_none());
+    let confirm: RequestOption = serde_json::from_value(json!({
+        "id": "a", "label": "A", "description": null, "effect": "choose", "confirm": true
+    }))
+    .unwrap();
+    assert!(confirm.confirm);
+    assert_eq!(serde_json::to_value(&confirm).unwrap()["confirm"], json!(true));
+}
+
+#[test]
+fn external_values_decode_and_older_values_stay_unknown_safe() {
+    assert_eq!(
+        serde_json::from_value::<Source>(json!("external")).unwrap(),
+        Source::External
+    );
+    assert_eq!(
+        serde_json::from_value::<AnswerPath>(json!("external")).unwrap(),
+        AnswerPath::External
+    );
+    assert_eq!(
+        serde_json::from_value::<ResolveReason>(json!("rejected")).unwrap(),
+        ResolveReason::Rejected
     );
 }
 

@@ -288,12 +288,31 @@ pub fn notice_for_outcome(outcome: &Outcome) -> Option<Notice> {
 }
 
 pub const NOTICE_STRAY_KEYSTROKE: &str = "A stray keystroke may be in the input box";
+pub const NOTICE_REJECTED: &str = "The source rejected the answer";
 
-pub fn resolution_notice(by: ResolvedBy, reason: Option<ResolveReason>) -> Option<Notice> {
+/// `message` is text the source reported with the resolution; it replaces
+/// the generic notice when present.
+pub fn resolution_notice(
+    by: ResolvedBy,
+    reason: Option<ResolveReason>,
+    message: Option<&str>,
+) -> Option<Notice> {
     if by == ResolvedBy::Uncertain && reason == Some(ResolveReason::StrayKeystroke) {
         return Some(Notice {
             tone: NoticeTone::Warning,
             text: NOTICE_STRAY_KEYSTROKE.into(),
+        });
+    }
+    if let Some(text) = message.map(str::trim).filter(|m| !m.is_empty()) {
+        return Some(Notice {
+            tone: NoticeTone::Warning,
+            text: text.to_owned(),
+        });
+    }
+    if by == ResolvedBy::Agent && reason == Some(ResolveReason::Rejected) {
+        return Some(Notice {
+            tone: NoticeTone::Warning,
+            text: NOTICE_REJECTED.into(),
         });
     }
     match by {
@@ -523,6 +542,7 @@ mod tests {
                 hooks: SourceStatus::unconfigured(),
                 herdr: SourceStatus::unconfigured(),
                 t3: SourceStatus::unconfigured(),
+                external: false,
             },
         };
         session.welcome(
@@ -803,6 +823,7 @@ mod tests {
                 label: "?".into(),
                 description: None,
                 effect: Effect::Unknown,
+                confirm: false,
             },
         );
         let (e, s) = (entry("m"), state(true, ALL, vec![a]));
@@ -1020,40 +1041,69 @@ mod tests {
             NoticeTone::Info
         );
         assert_eq!(
-            resolution_notice(ResolvedBy::Uncertain, None).unwrap().text,
+            resolution_notice(ResolvedBy::Uncertain, None, None).unwrap().text,
             "Check the terminal"
         );
         assert_eq!(
-            resolution_notice(ResolvedBy::Lost, None).unwrap().text,
+            resolution_notice(ResolvedBy::Lost, None, None).unwrap().text,
             "Check the terminal"
         );
         assert_eq!(
-            resolution_notice(ResolvedBy::Unknown, None).unwrap().text,
+            resolution_notice(ResolvedBy::Unknown, None, None).unwrap().text,
             "Check the terminal"
         );
         assert_eq!(
-            resolution_notice(ResolvedBy::Terminal, None).unwrap().text,
+            resolution_notice(ResolvedBy::Terminal, None, None).unwrap().text,
             "Answered in the terminal"
         );
-        assert_eq!(resolution_notice(ResolvedBy::Inbox, None), None);
-        assert_eq!(resolution_notice(ResolvedBy::Agent, None), None);
-        assert_eq!(resolution_notice(ResolvedBy::Superseded, None), None);
+        assert_eq!(resolution_notice(ResolvedBy::Inbox, None, None), None);
+        assert_eq!(resolution_notice(ResolvedBy::Agent, None, None), None);
+        assert_eq!(
+            resolution_notice(ResolvedBy::Agent, Some(ResolveReason::Rejected), None)
+                .unwrap()
+                .text,
+            NOTICE_REJECTED
+        );
+        assert_eq!(resolution_notice(ResolvedBy::Superseded, None, None), None);
+    }
+
+    #[test]
+    fn a_source_message_replaces_the_generic_notice() {
+        let n = resolution_notice(
+            ResolvedBy::Agent,
+            Some(ResolveReason::Rejected),
+            Some("  plan changed  "),
+        )
+        .unwrap();
+        assert_eq!(n.text, "plan changed");
+        assert_eq!(n.tone, NoticeTone::Warning);
+        assert_eq!(
+            resolution_notice(ResolvedBy::Uncertain, None, Some("crashed mid-action"))
+                .unwrap()
+                .text,
+            "crashed mid-action"
+        );
+        assert_eq!(
+            resolution_notice(ResolvedBy::Uncertain, None, Some("  ")).unwrap().text,
+            NOTICE_CHECK_TERMINAL,
+            "a blank message falls back to the generic notice"
+        );
     }
 
     #[test]
     fn stray_keystroke_reason_has_its_own_notice() {
         let n =
-            resolution_notice(ResolvedBy::Uncertain, Some(ResolveReason::StrayKeystroke)).unwrap();
+            resolution_notice(ResolvedBy::Uncertain, Some(ResolveReason::StrayKeystroke), None).unwrap();
         assert_eq!(n.text, "A stray keystroke may be in the input box");
         assert_eq!(n.tone, NoticeTone::Warning);
         assert_eq!(
-            resolution_notice(ResolvedBy::Uncertain, Some(ResolveReason::Unknown))
+            resolution_notice(ResolvedBy::Uncertain, Some(ResolveReason::Unknown), None)
                 .unwrap()
                 .text,
             "Check the terminal"
         );
         assert_eq!(
-            resolution_notice(ResolvedBy::Inbox, Some(ResolveReason::StrayKeystroke)),
+            resolution_notice(ResolvedBy::Inbox, Some(ResolveReason::StrayKeystroke), None),
             None
         );
     }

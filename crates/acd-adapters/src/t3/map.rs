@@ -205,6 +205,7 @@ pub fn request_obs(
                             label: (*label).into(),
                             description: None,
                             effect: *effect,
+                            confirm: false,
                         })
                         .collect();
                     answer = TargetAnswer::Decision;
@@ -239,6 +240,7 @@ pub fn request_obs(
                                 .as_deref()
                                 .map(|d| clean_display(d, TITLE_CHARS)),
                             effect: Effect::Choose,
+                            confirm: false,
                         })
                         .collect(),
                 })

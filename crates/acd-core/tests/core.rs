@@ -93,6 +93,7 @@ async fn stale_revision_rejects_before_delivery_and_same_id_retries_corrected_re
             label: "No".into(),
             description: None,
             effect: Effect::Deny,
+            confirm: false,
         }],
         ..permission_obs("a1", "k1")
     }));

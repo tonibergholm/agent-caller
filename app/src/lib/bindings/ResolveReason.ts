@@ -3,4 +3,4 @@
 /**
  * Why a request resolved the way it did, when that matters to the user.
  */
-export type ResolveReason = "stray_keystroke" | "unknown";
+export type ResolveReason = "stray_keystroke" | "rejected" | "unknown";

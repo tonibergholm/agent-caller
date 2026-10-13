@@ -239,6 +239,9 @@ pub enum ServerMessage {
         option_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<ResolveReason>,
+        /// What the producer reported, at most 500 bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     #[serde(rename = "machine.updated")]
     MachineUpdated {

@@ -33,6 +33,7 @@ pub enum Applied {
         by: ResolvedBy,
         option_id: Option<String>,
         reason: Option<ResolveReason>,
+        message: Option<String>,
     },
     Resync(&'static str),
 }
@@ -163,6 +164,7 @@ impl Session {
                 by,
                 option_id,
                 reason,
+                message,
                 ..
             } => Applied::Resolved {
                 request_id: request_id.clone(),
@@ -170,6 +172,7 @@ impl Session {
                 by: *by,
                 option_id: option_id.clone(),
                 reason: *reason,
+                message: message.clone(),
             },
             _ => Applied::Ignored,
         }
@@ -190,6 +193,7 @@ mod tests {
                 hooks: SourceStatus::unconfigured(),
                 herdr: SourceStatus::unconfigured(),
                 t3: SourceStatus::unconfigured(),
+                external: false,
             },
         }
     }
@@ -355,14 +359,16 @@ mod tests {
                 agent_id: "a".into(),
                 by: ResolvedBy::Terminal,
                 option_id: None,
-                reason: None
+                reason: None,
+                message: None
             }),
             Applied::Resolved {
                 request_id: "r1".into(),
                 agent_id: "a".into(),
                 by: ResolvedBy::Terminal,
                 option_id: None,
-                reason: None
+                reason: None,
+                message: None
             }
         );
         let mut m2 = machine();

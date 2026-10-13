@@ -33,12 +33,14 @@ fn perm(agent_id: &str, key: &str, detail: &str) -> RequestObs {
                 label: "Yes".into(),
                 description: None,
                 effect: Effect::Allow,
+                confirm: false,
             },
             RequestOption {
                 id: "deny".into(),
                 label: "No".into(),
                 description: None,
                 effect: Effect::Deny,
+                confirm: false,
             },
         ],
         questions: None,
@@ -85,7 +87,8 @@ fn a_reason_reaches_the_resolution() {
     let ch = r.apply(Observation::RequestEndedWithReason {
         request_id: rid.clone(),
         by: ResolvedBy::Uncertain,
-        reason: ResolveReason::StrayKeystroke,
+        reason: Some(ResolveReason::StrayKeystroke),
+        message: None,
     });
     assert!(ch.iter().any(|c| matches!(c, Change::RequestResolved {
         request_id, by: ResolvedBy::Uncertain, reason: Some(ResolveReason::StrayKeystroke), .. } if *request_id == rid)));
@@ -93,7 +96,8 @@ fn a_reason_reaches_the_resolution() {
         r.apply(Observation::RequestEndedWithReason {
             request_id: rid,
             by: ResolvedBy::Uncertain,
-            reason: ResolveReason::StrayKeystroke,
+            reason: Some(ResolveReason::StrayKeystroke),
+            message: None,
         })
         .is_empty(),
         "a second end is a no-op"
@@ -195,12 +199,14 @@ fn option_and_question_order_are_semantic() {
             label: "One".into(),
             description: None,
             effect: Effect::Choose,
+            confirm: false,
         },
         RequestOption {
             id: "two".into(),
             label: "Two".into(),
             description: None,
             effect: Effect::Choose,
+            confirm: false,
         },
     ];
     obs.questions = Some(vec![Question {
