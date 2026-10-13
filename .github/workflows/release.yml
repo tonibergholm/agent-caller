@@ -32,7 +32,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check version fields and CHANGELOG
         id: version
         env:
@@ -80,7 +80,7 @@ jobs:
             runner: ubuntu-22.04-arm
             linux: true
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
         with:
           toolchain: stable
@@ -206,7 +206,7 @@ jobs:
           cp LICENSE "$stage/"
           tar -czf "dist/acd-$VERSION-$TARGET.tar.gz" -C "$stage" .
           tar -tzf "dist/acd-$VERSION-$TARGET.tar.gz"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-cli-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -219,14 +219,14 @@ jobs:
     needs: [prepare, ci]
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: app/src-tauri -> target
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -311,7 +311,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/dist"
           cp "$dmg" "$GITHUB_WORKSPACE/dist/agent-caller-$VERSION-aarch64-apple-darwin.dmg"
           ls -l "$GITHUB_WORKSPACE/dist"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-app-aarch64-apple-darwin
           path: dist/*.dmg
@@ -324,7 +324,7 @@ jobs:
     needs: [prepare, cli, app]
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
           path: dist
@@ -338,7 +338,7 @@ jobs:
       - name: Upload the complete set
         # One artifact with every file, so a dry run can be tested with
         # scripts/install.sh --from-dir. The publish job also downloads it.
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-all
           path: dist
@@ -354,10 +354,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist-all
           path: dist
