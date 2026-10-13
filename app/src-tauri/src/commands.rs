@@ -43,12 +43,22 @@ pub fn cancel_action(state: State<'_, AppState>, action_id: String) -> bool {
     core::cancel_action(&state.inbox, &action_id)
 }
 
-/// Esc in the inbox panel: cancels a recording first (plan S25), else
-/// undoes the newest countdown, else cancels a voice step that is still
-/// thinking. False when none ran.
+/// Esc in the inbox panel stops speech and also runs the usual chain, so
+/// one Esc never has to choose between them (plan V12).
+fn escape_all(stop_speech: impl FnOnce() -> bool, rest: impl FnOnce() -> bool) -> bool {
+    let stopped = stop_speech();
+    rest() || stopped
+}
+
+/// Esc in the inbox panel: stops speech, cancels a recording (plan S25),
+/// else undoes the newest countdown, else cancels a voice step that is
+/// still thinking. False when none ran.
 #[tauri::command]
 pub fn escape(state: State<'_, AppState>, voice: State<'_, crate::voice::VoiceState>) -> bool {
-    voice.controller.escape_listening() || core::escape(&state.inbox) || voice.controller.cancel_thinking()
+    escape_all(
+        || voice.controller.stop_speaking(None),
+        || voice.controller.escape_listening() || core::escape(&state.inbox) || voice.controller.cancel_thinking(),
+    )
 }
 
 #[tauri::command]
@@ -142,4 +152,19 @@ pub fn hide_panel(_state: State<'_, AppState>, app: AppHandle) {
 #[tauri::command]
 pub fn open_settings(_state: State<'_, AppState>, app: AppHandle) {
     crate::settings_window::open(&app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plan V12: one Esc stops speech and still cancels an inbox countdown.
+    #[test]
+    fn escape_stops_speech_and_still_runs_the_rest() {
+        let mut ran = false;
+        assert!(escape_all(|| true, || { ran = true; false }));
+        assert!(ran, "the inbox chain still ran");
+        assert!(escape_all(|| false, || true));
+        assert!(!escape_all(|| false, || false));
+    }
 }

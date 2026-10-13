@@ -201,7 +201,7 @@ test("Esc or Cancel while thinking cancels that utterance; Enter and digits do n
 });
 
 test("states that do not wait for input ignore keys", async () => {
-  const api = await show({ state: "speaking", text: "2 need you.", audio: false });
+  const api = await show({ state: "done", proposal: null, outcome: { kind: "delivered" } });
   await userEvent.keyboard("{Escape}{Enter}1");
   expect(api.calls).toEqual([]);
 });
@@ -393,4 +393,17 @@ test("an unavailable model says why", async () => {
   cleanup();
   await show({ state: "error", refusal: "model_not_ready", transcript: null });
   expect(screen.getByText("The on-device model is not ready yet. Simple commands still work.")).toBeTruthy();
+});
+
+test("Esc or Stop on spoken text stops speech for that state", async () => {
+  const api = await show({ state: "speaking", text: "2 need you.", audio: true });
+  await userEvent.keyboard("{Escape}");
+  expect(api.calls).toEqual([["voiceStopSpeech", seq]]);
+  await userEvent.click(screen.getByRole("button", { name: /^Stop/ }));
+  expect(api.calls).toEqual([["voiceStopSpeech", seq], ["voiceStopSpeech", seq]]);
+});
+
+test("text shown without audio has no Stop button", async () => {
+  await show({ state: "speaking", text: "2 need you.", audio: false });
+  expect(screen.queryByRole("button", { name: /^Stop/ })).toBeNull();
 });

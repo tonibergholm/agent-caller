@@ -5,6 +5,7 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
+use acd_voice::speak::{Rate, SpeechSettings};
 use serde::{Deserialize, Serialize};
 
 /// The voice toggle's default (plan S12). The inbox hotkey is Control+Alt+Space.
@@ -36,6 +37,14 @@ pub struct VoiceSettings {
     /// `None` turns the toggle off; a missing field means the default.
     #[serde(default = "default_toggle")]
     pub toggle_shortcut: Option<String>,
+    /// Spoken alerts for new requests (spec §7, §8). Off by default.
+    #[serde(default)]
+    pub alerts: bool,
+    /// A platform voice id; `None` is the system's English voice (plan V15).
+    #[serde(default)]
+    pub speech_voice: Option<String>,
+    #[serde(default)]
+    pub speech_rate: Rate,
 }
 
 fn default_toggle() -> Option<String> {
@@ -44,11 +53,29 @@ fn default_toggle() -> Option<String> {
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        Self { enabled: false, debug_input: false, hold_key: HoldKey::default(), toggle_shortcut: default_toggle() }
+        Self {
+            enabled: false,
+            debug_input: false,
+            hold_key: HoldKey::default(),
+            toggle_shortcut: default_toggle(),
+            alerts: false,
+            speech_voice: None,
+            speech_rate: Rate::default(),
+        }
     }
 }
 
 impl VoiceSettings {
+    /// A platform voice id is short; anything longer is not one (plan V15).
+    pub fn speech_voice_is_valid(&self) -> bool {
+        self.speech_voice.as_ref().is_none_or(|v| v.len() <= 200)
+    }
+
+    /// What the controller needs for spoken output.
+    pub fn speech(&self) -> SpeechSettings {
+        SpeechSettings { alerts: self.alerts, voice: self.speech_voice.clone(), rate: self.speech_rate }
+    }
+
     /// A missing or unreadable file means the defaults: voice off.
     pub fn load(path: &Path) -> Self {
         fs::read_to_string(path)
@@ -105,5 +132,32 @@ mod tests {
         let s = VoiceSettings::load(&path);
         assert_eq!((s.hold_key, s.toggle_shortcut), (HoldKey::Off, None), "turned off stays off");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Plan V15: spoken output settings default off and survive old files.
+    #[test]
+    fn speech_settings_default_and_load_from_an_old_file() {
+        use acd_voice::speak::{Rate, SpeechSettings};
+        let dir = std::env::temp_dir().join(format!("agent-caller-voice-speech-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("voice.json");
+        std::fs::write(&path, r#"{"enabled":true}"#).unwrap();
+        let s = VoiceSettings::load(&path);
+        assert_eq!(s.speech(), SpeechSettings { alerts: false, voice: None, rate: Rate::Normal });
+        let on = VoiceSettings { alerts: true, speech_voice: Some("com.apple.voice.Ava".into()), speech_rate: Rate::Fast, ..s };
+        on.save(&path).unwrap();
+        assert_eq!(VoiceSettings::load(&path), on);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"speech_rate\": \"fast\""), "{raw}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_voice_id_that_is_not_one_is_refused() {
+        let ok = VoiceSettings { speech_voice: Some("com.apple.voice.Ava".into()), ..VoiceSettings::default() };
+        assert!(ok.speech_voice_is_valid());
+        assert!(VoiceSettings::default().speech_voice_is_valid(), "the system voice");
+        let long = VoiceSettings { speech_voice: Some("x".repeat(201)), ..VoiceSettings::default() };
+        assert!(!long.speech_voice_is_valid());
     }
 }

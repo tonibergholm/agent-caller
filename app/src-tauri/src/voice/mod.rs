@@ -5,6 +5,8 @@ pub mod commands;
 pub mod bridge;
 #[cfg(target_os = "macos")]
 pub mod model;
+#[cfg(target_os = "macos")]
+pub mod speaker;
 pub mod hud;
 pub mod permissions;
 pub mod settings;
@@ -29,6 +31,9 @@ pub struct VoiceState {
     pub speech: bridge::Speech,
     #[cfg(target_os = "macos")]
     pub model: Arc<model::MacIntentModel>,
+    /// The English voices, as Swift last reported them (plan V16).
+    #[cfg(target_os = "macos")]
+    pub voices: Mutex<Vec<status::VoiceOption>>,
 }
 
 /// HUD states go to the HUD webview; selections go to the inbox panel.
@@ -46,6 +51,11 @@ impl TauriSink {
 impl HudSink for TauriSink {
     fn hud(&self, seq: u64, state: &Hud) -> bool {
         hud::present(&self.app, seq, state)
+    }
+
+    /// Runs under the controller's lock: only schedules (plan V11).
+    fn speech_ended(&self, seq: u64) {
+        hud::fade_after_speech(&self.app, seq);
     }
 
     fn select(&self, card_key: &str) {
@@ -85,8 +95,15 @@ pub fn dispatch(app: &AppHandle, ev: bridge::BridgeEvent) {
         E::Capture { generation, on } => voice.controller.capture(generation, on),
         E::Overflow => {
             voice.controller.overflow();
-            // The lost events may include the last availability report.
+            // The lost events may include the last availability report, and
+            // the last voices list.
             voice.model.overflowed();
+            speaker::query_voices(true);
+        }
+        E::Spoken { generation } => voice.controller.spoken(generation),
+        E::Voices(list) => {
+            *voice.voices.lock().unwrap() = list;
+            emit_status(app);
         }
         E::ModelReply { id, reply } => {
             voice.model.deliver(id, reply);
@@ -128,4 +145,12 @@ pub fn emit_status(app: &AppHandle) {
     if let Err(error) = app.emit("voice://status", ()) {
         tracing::error!(%error, "could not emit the voice status");
     }
+}
+
+/// The app is quitting (spec §6.3): stop speech and drop model work.
+#[cfg(target_os = "macos")]
+pub fn shutdown(app: &AppHandle) {
+    let voice = app.state::<VoiceState>();
+    acd_voice::router::model::IntentModel::discard(voice.model.as_ref());
+    acd_voice::speak::Speaker::stop(&speaker::MacSpeaker);
 }
