@@ -158,7 +158,7 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
             Endpoint::Local { config_dir } => {
                 let stream = tokio::net::UnixStream::connect(local::socket_path(config_dir))
                     .await
-                    .map_err(|e| End::Offline(e.to_string()))?;
+                    .map_err(|e| End::Offline(local_reason(&e)))?;
                 let (ws, _) = tokio_tungstenite::client_async(
                     "ws://localhost/",
                     Box::new(stream) as Box<dyn Io>,
@@ -176,7 +176,7 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
                     let tcp = match tokio::net::TcpStream::connect(addr).await {
                         Ok(s) => s,
                         Err(e) => {
-                            last = e.to_string();
+                            last = connect_reason(&e);
                             continue;
                         }
                     };
@@ -230,6 +230,29 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
     })
     .await
     .unwrap_or_else(|_| Err(End::Offline("connection timed out".into())))
+}
+
+/// Plain words for the connect failures people hit most. The raw text
+/// ("Connection refused (os error 61)") says nothing about what to check.
+fn connect_reason(e: &std::io::Error) -> String {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        ConnectionRefused => "connection refused. Is acd running on that machine?".into(),
+        TimedOut => "connection timed out".into(),
+        HostUnreachable | NetworkUnreachable => {
+            "cannot reach that machine. Is Tailscale on?".into()
+        }
+        _ => e.to_string(),
+    }
+}
+
+/// The local socket is missing or dead when the daemon is not running.
+fn local_reason(e: &std::io::Error) -> String {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        NotFound | ConnectionRefused => "acd is not running on this machine".into(),
+        _ => e.to_string(),
+    }
 }
 
 fn credential_hash(token: &str) -> [u8; 32] {
@@ -731,5 +754,40 @@ pub fn spawn_machine(cfg: MachineConfig) -> MachineHandle {
         events,
         ctl,
         cancel,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{connect_reason, local_reason};
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn connect_failures_read_in_plain_words() {
+        let refused = Error::from_raw_os_error(if cfg!(target_os = "macos") { 61 } else { 111 });
+        assert_eq!(refused.kind(), ErrorKind::ConnectionRefused);
+        let text = connect_reason(&refused);
+        assert!(text.contains("Is acd running"), "{text}");
+        assert!(!text.contains("os error"), "{text}");
+        assert!(connect_reason(&Error::from(ErrorKind::HostUnreachable)).contains("Tailscale"));
+        assert!(connect_reason(&Error::from(ErrorKind::NetworkUnreachable)).contains("Tailscale"));
+        assert_eq!(connect_reason(&Error::from(ErrorKind::TimedOut)), "connection timed out");
+        assert_eq!(
+            connect_reason(&Error::other("boom")),
+            "boom"
+        );
+    }
+
+    #[test]
+    fn a_missing_local_socket_says_acd_is_not_running() {
+        assert_eq!(
+            local_reason(&Error::from(ErrorKind::NotFound)),
+            "acd is not running on this machine"
+        );
+        assert_eq!(
+            local_reason(&Error::from(ErrorKind::ConnectionRefused)),
+            "acd is not running on this machine"
+        );
+        assert_eq!(local_reason(&Error::other("boom")), "boom");
     }
 }

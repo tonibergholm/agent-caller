@@ -88,8 +88,9 @@ Run `acd pair` on the daemon's machine and copy the line it prints. On the
 phone, open Settings (the gear in the header) and tap Add from clipboard. iOS
 may ask whether the app can read the clipboard; allow it. The clipboard
 route works with Universal Clipboard from a Mac. Only Tailscale addresses are
-accepted. The app stores the secret in the iOS Keychain. Clear the clipboard
-afterwards: the line contains the pairing secret.
+accepted. The app stores the secret in the iOS Keychain and clears the clipboard once
+the machine is saved: the line contains the pairing secret. If the import
+fails, the line stays on the clipboard for another try.
 
 ### Dev pairing in the simulator
 

@@ -82,10 +82,13 @@ pub fn import_pairing_from_clipboard(
     state: State<'_, AppState>,
 ) -> Result<MachineEntryView, String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
-    acd_app_core::pairing::import_text(
+    acd_app_core::pairing::import_and_clear(
         &state.inbox,
         tauri::async_runtime::handle().inner(),
         app.clipboard().read_text().ok(),
+        || {
+            let _ = app.clipboard().clear();
+        },
     )
 }
 
