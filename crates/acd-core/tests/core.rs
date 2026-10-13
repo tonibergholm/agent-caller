@@ -93,6 +93,7 @@ async fn stale_revision_rejects_before_delivery_and_same_id_retries_corrected_re
             label: "No".into(),
             description: None,
             effect: Effect::Deny,
+            confirm: false,
         }],
         ..permission_obs("a1", "k1")
     }));
@@ -530,4 +531,47 @@ async fn an_agent_id_over_the_command_limit_is_never_published() {
     let ok = "y".repeat(MAX_ID_BYTES);
     core.observe(Observation::AgentUpsert(agent_obs(&ok)));
     assert!(core.agent(&ok).is_some());
+}
+
+#[tokio::test]
+async fn a_transaction_publishes_its_changes_in_order_and_after_it_returns() {
+    let core = Core::new(test_machine(), vec![FakeAdapter::new()]);
+    let (_, mut rx) = core.attach(None);
+    let seen_inside = core.transact(|txn| {
+        txn.apply(Observation::AgentUpsert(agent_obs("a1")));
+        txn.apply(Observation::RequestSeen(permission_obs("a1", "k1")));
+        let rid = txn.agent("a1").and_then(|a| a.pending.as_ref()).unwrap().id.clone();
+        txn.apply(Observation::RequestEndedWithReason {
+            request_id: rid.clone(),
+            by: ResolvedBy::Agent,
+            reason: Some(ResolveReason::Rejected),
+            message: Some("plan changed".into()),
+        });
+        let after = (txn.request(&rid).is_none(), rx.try_recv().is_err());
+        (rid, after)
+    });
+    assert_eq!(seen_inside.1, (true, true), "resolved inside, nothing published yet");
+    let mut kinds = Vec::new();
+    let mut resolved = None;
+    while let Ok(message) = rx.try_recv() {
+        match message {
+            ServerMessage::AgentUpdated { .. } => kinds.push("agent"),
+            ServerMessage::RequestOpened { .. } => kinds.push("opened"),
+            ServerMessage::RequestResolved { request_id, by, reason, message, .. } => {
+                kinds.push("resolved");
+                resolved = Some((request_id, by, reason, message));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(kinds, ["agent", "opened", "agent", "resolved", "agent"]);
+    assert_eq!(
+        resolved,
+        Some((
+            seen_inside.0,
+            ResolvedBy::Agent,
+            Some(ResolveReason::Rejected),
+            Some("plan changed".to_string())
+        ))
+    );
 }

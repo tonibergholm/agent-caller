@@ -437,6 +437,7 @@ pub async fn run(dir: &Path) -> Result<()> {
             hooks: SourceStatus::unconfigured(),
             herdr: SourceStatus::unconfigured(),
             t3: SourceStatus::unconfigured(),
+            external: true,
         },
     };
     let extra = cfg
@@ -487,11 +488,17 @@ pub async fn run(dir: &Path) -> Result<()> {
         Some(t3.sessions()),
         Arc::new(acd_adapters::hooks::claude_sessions::SystemProc),
     );
-    let core = Core::new(machine, vec![herdr.clone(), t3.clone(), hooks.clone()]);
+    let external =
+        acd_adapters::external::ExternalAdapter::new(acd_adapters::external::ExternalConfig::default());
+    let core = Core::new(
+        machine,
+        vec![herdr.clone(), t3.clone(), hooks.clone(), external.clone()],
+    );
     herdr.set_evidence(hooks.evidence());
     herdr.start(core.clone());
     t3.start(core.clone());
     hooks.start(core.clone());
+    external.start(core.clone());
     let auth = Arc::new(Auth::new(token.clone()));
     let app = router(
         core.clone(),
@@ -530,8 +537,8 @@ pub async fn run(dir: &Path) -> Result<()> {
     local_socket::check_path(&socket_path(dir))?;
     local_socket::check_path(&hook_socket_path(dir))?;
     // D13: the hook endpoint binds first, so a taken hook port fails startup
-    // before any socket file exists. One router serves both hook listeners,
-    // so they share the hold cap and hold ids.
+    // before any socket file exists. The Unix router is the TCP router plus
+    // the producer routes, so both share the hold cap and hold ids.
     let hook_creds = Arc::new(HookCredentials::new(dir, &store));
     let hook_addr = SocketAddr::from(([127, 0, 0, 1], cfg.hook_port));
     let hook_listener = tokio::net::TcpListener::bind(hook_addr)
@@ -541,6 +548,11 @@ pub async fn run(dir: &Path) -> Result<()> {
     let (hook_unix, hook_sock_owned) = local_socket::bind(&lock, &hook_sock)?;
     let hook_unix = tokio::net::UnixListener::from_std(hook_unix)?;
     let hook_app = hooks.router(hook_creds.auth());
+    // The producer API is a write path: only the owner-only Unix socket
+    // gets its routes. The TCP hook listener keeps `hook_app` as it is.
+    let hook_unix_app = hook_app
+        .clone()
+        .merge(external.router(hook_creds.auth()));
 
     // Bind everything before serving; any failure is fatal except ::1 being
     // unavailable (IPv6 disabled).
@@ -590,7 +602,7 @@ pub async fn run(dir: &Path) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(1000)).await;
         } else {
             let listener = endpoint::capped_unix(hook_unix, max_connections);
-            if let Err(e) = axum::serve(listener, hook_app)
+            if let Err(e) = axum::serve(listener, hook_unix_app)
                 .with_graceful_shutdown(released(hooks_stopped))
                 .await
             {

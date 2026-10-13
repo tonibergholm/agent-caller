@@ -16,6 +16,8 @@
     answer = $bindable(""),
     onpick,
     oncancel,
+    armed = null,
+    onarm = () => {},
     onreply = () => {},
     onmarkseen = () => {},
     onanswer = () => {},
@@ -24,7 +26,10 @@
     selected: boolean;
     now: number;
     answer?: string;
+    /** The option waiting for its second tap, if any. */
+    armed?: string | null;
     onpick: (optionId: string, requestId: string, revision: number) => void;
+    onarm?: (optionId: string, requestId: string, revision: number) => void;
     oncancel: (actionId: string) => void;
     onreply?: () => void;
     onmarkseen?: () => void;
@@ -34,10 +39,22 @@
   const pending = $derived(card.agent.pending);
   const opened = $derived(age(pending?.opened_at, now));
   // Where the user answers a read-only request depends on where the agent lives.
+  // An external producer names itself through the agent title.
+  const external = $derived(card.agent.source === "external");
   const sourceLabel = $derived(
-    { herdr: "herdr", t3: "T3", hooks: "hooks", unknown: "unknown" }[card.agent.source],
+    card.agent.source === "external"
+      ? card.agent.title
+      : { herdr: "herdr", t3: "T3", hooks: "hooks", unknown: "unknown" }[card.agent.source],
   );
-  const readonlyLabel = $derived(card.agent.source === "t3" ? "Answer in T3" : "Answer in terminal");
+  const readonlyLabel = $derived(
+    card.agent.source === "t3"
+      ? "Answer in T3"
+      : external
+        ? `Answer in ${card.agent.title}`
+        : "Answer in terminal",
+  );
+  // The producer is already in the source label, so the heading says what is asked.
+  const heading = $derived(external && pending ? pending.title : card.agent.title);
   const place = $derived(card.agent.project ?? card.agent.cwd?.split("/").filter(Boolean).at(-1) ?? null);
 
   // Permission detail: a Codex "Reason:" line and a title that is not just the
@@ -88,7 +105,7 @@
 >
   <header class="head">
     <h3 class="title">
-      {card.agent.title}
+      {heading}
       {#if card.busy}<span class="spinner" aria-hidden="true"></span>{/if}
     </h3>
     {#if opened}<time class="time" datetime={pending?.opened_at}>{opened}</time>{/if}
@@ -151,12 +168,16 @@
             <button
               class="option {effectClass(o.effect, ok)}"
               class:primary={o.id === primaryId}
+              class:armed={armed === o.id}
               disabled={!ok}
               title={mobile ? undefined : ok ? (o.description ?? undefined) : "Not supported here"}
-              onclick={() => onpick(o.id, pending.id, pending.revision)}
+              onclick={() =>
+                o.confirm && armed !== o.id
+                  ? onarm(o.id, pending.id, pending.revision)
+                  : onpick(o.id, pending.id, pending.revision)}
             >
               <kbd>{i + 1}</kbd>
-              <span class="label">{o.label}</span>
+              <span class="label">{armed === o.id ? `Tap again to ${o.label}` : o.label}</span>
               {#if o.description}<span class="desc">{o.description}</span>{/if}
               {#if mobile && !ok}<span class="note">Not supported here</span>{/if}
             </button>
@@ -169,8 +190,9 @@
     {:else if card.live && !card.busy && pending.status !== "answering"}
       <div class="readonly">{readonlyLabel}</div>
     {/if}
-  {:else if card.live && !card.busy}
-    <!-- A needs-you card whose request is gone: the terminal is still where to answer. -->
+  {:else if card.live && !card.busy && !external}
+    <!-- A needs-you card whose request is gone: the terminal is still where to answer.
+         An external card kept for its resolution notice has nowhere to answer. -->
     <div class="readonly">{readonlyLabel}</div>
   {/if}
 
@@ -426,6 +448,11 @@
   }
   .option.primary:hover:not(:disabled) {
     background: var(--cyan-bright);
+  }
+  .option.armed {
+    color: var(--amber-text);
+    background: var(--amber-fill);
+    border-color: var(--amber-text);
   }
   .option.deny {
     color: var(--crimson-text);

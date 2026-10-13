@@ -63,6 +63,7 @@ fn card(c: &CardView, conn: Option<ConnStamp>, idle_hidden: bool) -> CardSnap {
                     description: o.description.clone(),
                     effect: o.effect,
                     selectable: c.selectable_options.contains(&o.id),
+                    confirm: o.confirm,
                 })
                 .collect(),
         }),

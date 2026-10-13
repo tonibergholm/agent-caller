@@ -4,7 +4,7 @@
   import type { InboxView } from "../lib/bindings/InboxView";
   import type { Api } from "../lib/ipc";
   import { statusKind, statusReason, statusText } from "../lib/format";
-  import { fromEvent, normalize, onKey, type Effect, type KeyState } from "../lib/keys";
+  import { CONFIRM_MS, fromEvent, normalize, onKey, type Effect, type KeyState } from "../lib/keys";
   import { dotKind, listedMachines, sections } from "../lib/panel";
   import { isMobile } from "../lib/platform";
   import type { Presentation } from "../lib/voice";
@@ -81,6 +81,11 @@
 
   $effect(() => {
     if (st.replyFor === null) replyText = "";
+  });
+
+  // A second tap that does not come within the window disarms the option.
+  $effect(() => {
+    if (st.armed && now - st.armed.at > CONFIRM_MS) st = { ...st, armed: null };
   });
 
   // A typed command is voice text: drop it when the field goes away.
@@ -247,8 +252,32 @@
         selected={st.selected === c.key}
         {now}
         bind:answer={() => answers[draftKey(c)] ?? "", (v) => (answers[draftKey(c)] = v)}
+        armed={st.armed?.cardKey === c.key ? st.armed.optionId : null}
+        onarm={(optionId, requestId, revision) => {
+          st = { ...st, selected: c.key, armed: { cardKey: c.key, requestId, revision, optionId, at: Date.now() } };
+        }}
         onpick={(optionId, requestId, revision) => {
+          // A confirm option is sent only by a second click inside the window,
+          // judged by the clock now: the timer does not run in a suspended WebView.
+          const option = c.agent.pending?.options.find((o) => o.id === optionId);
+          const a = st.armed;
+          const at = Date.now();
+          if (
+            option?.confirm &&
+            !(
+              a &&
+              a.cardKey === c.key &&
+              a.requestId === requestId &&
+              a.revision === revision &&
+              a.optionId === optionId &&
+              at - a.at <= CONFIRM_MS
+            )
+          ) {
+            st = { ...st, selected: c.key, armed: { cardKey: c.key, requestId, revision, optionId, at } };
+            return;
+          }
           // Id and revision come from the request the card rendered at click time.
+          if (st.armed) st = { ...st, armed: null };
           act(run({ kind: "pick", cardKey: c.key, requestId, optionId, revision }));
         }}
         oncancel={(actionId) => act(api.cancel(actionId))}
@@ -276,11 +305,16 @@
   </div>
 {/snippet}
 
+<!-- A click anywhere but the armed option itself drops the arm; the click
+     that arms or sends runs after this capture handler. -->
 <main
   class="panel"
   class:mobile
   hidden={paused}
   inert={paused}
+  onclickcapture={(e) => {
+    if (st.armed && !(e.target instanceof Element && e.target.closest(".option.armed"))) st = { ...st, armed: null };
+  }}
   style:scroll-padding-top="{topH}px"
   style:scroll-padding-bottom="{footH}px"
 >

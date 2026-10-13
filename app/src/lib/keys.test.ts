@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { onKey, normalize, type KeyInput } from "./keys";
+import { CONFIRM_MS, onKey, normalize, type KeyInput } from "./keys";
 import { view, card } from "./fixtures";
 
 const k = (key: string, o: Partial<KeyInput> = {}): KeyInput =>
@@ -103,5 +103,90 @@ describe("keyboard", () => {
     expect(onKey(v, st, k("Enter", { ...voice, shift: true })).effect).toEqual({ kind: "none" });
     expect(onKey(v, st, k("j", voice))).toEqual({ state: st, effect: { kind: "none" } });
     expect(onKey(v, st, k("1", voice)).effect).toEqual({ kind: "none" });
+  });
+});
+
+describe("options that need a second tap", () => {
+  const ext = card({ key: "m/e", answerable: true, selectable_options: ["go", "abandon"] });
+  ext.agent.pending = {
+    ...ext.agent.pending!,
+    options: [
+      { id: "go", label: "Go", description: null, effect: "choose" },
+      { id: "abandon", label: "Abandon", description: null, effect: "choose", confirm: true },
+    ],
+  };
+  const other = card({ key: "m/o", answerable: true, selectable_options: ["allow"] });
+  const v = view({ cards: [ext, other] });
+  const rid = ext.agent.pending!.id;
+  const armedState = { selected: "m/e", replyFor: null, armed: { cardKey: "m/e", requestId: rid, revision: 1, optionId: "abandon", at: 1000 } };
+
+  test("the first press arms and sends nothing", () => {
+    const r = onKey(v, { selected: "m/e", replyFor: null }, k("2", { at: 1000 }));
+    expect(r.effect).toEqual({ kind: "none" });
+    expect(r.state.armed).toEqual(armedState.armed);
+  });
+
+  test("the second press on the same option sends it and disarms", () => {
+    const r = onKey(v, armedState, k("2", { at: 2000 }));
+    expect(r.effect).toEqual({ kind: "pick", cardKey: "m/e", requestId: rid, optionId: "abandon", revision: 1 });
+    expect(r.state.armed ?? null).toBeNull();
+  });
+
+  test("a second press after the window only arms again", () => {
+    const r = onKey(v, armedState, k("2", { at: 1000 + CONFIRM_MS + 1 }));
+    expect(r.effect).toEqual({ kind: "none" });
+    expect(r.state.armed?.at).toBe(1000 + CONFIRM_MS + 1);
+  });
+
+  test("any other key disarms: another option, movement, Escape", () => {
+    expect(onKey(v, armedState, k("1", { at: 1500 }))).toMatchObject({ effect: { kind: "pick", optionId: "go" }, state: { armed: null } });
+    expect(onKey(v, armedState, k("j", { at: 1500 })).state.armed).toBeNull();
+    const esc = onKey(v, armedState, k("Escape", { at: 1500 }));
+    expect(esc.effect).toEqual({ kind: "escape" });
+    expect(esc.state.armed).toBeNull();
+    const after = onKey(v, onKey(v, armedState, k("j", { at: 1500 })).state, k("2", { at: 1600 }));
+    expect(after.effect).toEqual({ kind: "none" });
+  });
+
+  test("a held key neither arms nor confirms", () => {
+    const fresh = { selected: "m/e", replyFor: null };
+    const held = onKey(v, fresh, k("2", { at: 1000, repeat: true }));
+    expect(held.effect).toEqual({ kind: "none" });
+    expect(held.state.armed ?? null).toBeNull();
+    const second = onKey(v, armedState, k("2", { at: 1100, repeat: true }));
+    expect(second.effect).toEqual({ kind: "none" });
+    expect(second.state.armed).toEqual(armedState.armed);
+    expect(onKey(v, armedState, k("2", { at: 1100 })).effect.kind).toBe("pick");
+  });
+
+  test("a modified key or IME composition disarms before it is ignored", () => {
+    for (const extra of [{ ctrl: true }, { meta: true }, { alt: true }, { composing: true }, { keyCode: 229 }]) {
+      const r = onKey(v, armedState, k("2", { at: 1100, ...extra }));
+      expect(r.effect, JSON.stringify(extra)).toEqual({ kind: "none" });
+      expect(r.state.armed ?? null, JSON.stringify(extra)).toBeNull();
+      expect(onKey(v, r.state, k("2", { at: 1200 })).effect).toEqual({ kind: "none" });
+    }
+  });
+
+  test("typing in a text field disarms", () => {
+    const r = onKey(v, { ...armedState, replyFor: "m/e" }, k("x", { inField: true, at: 1100 }));
+    expect(r.state.armed ?? null).toBeNull();
+    expect(onKey(v, r.state, k("2", { at: 1200 })).effect).toEqual({ kind: "none" });
+  });
+
+  test("an armed option never sends for a different request or revision", () => {
+    const stale = { ...armedState, armed: { ...armedState.armed, revision: 0 } };
+    expect(onKey(v, stale, k("2", { at: 1100 })).effect).toEqual({ kind: "none" });
+    const changed = structuredClone(ext);
+    changed.agent.pending!.revision = 2;
+    expect(onKey(view({ cards: [changed, other] }), armedState, k("2", { at: 1100 })).effect).toEqual({ kind: "none" });
+  });
+
+  test("normalize drops an arm whose request changed or is gone", () => {
+    expect(normalize(v, armedState).armed).toEqual(armedState.armed);
+    const changed = structuredClone(ext);
+    changed.agent.pending!.revision = 2;
+    expect(normalize(view({ cards: [changed, other] }), armedState).armed ?? null).toBeNull();
+    expect(normalize(view({ cards: [other] }), armedState).armed ?? null).toBeNull();
   });
 });

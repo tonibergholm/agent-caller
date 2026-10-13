@@ -33,12 +33,14 @@ fn perm(agent_id: &str, key: &str, detail: &str) -> RequestObs {
                 label: "Yes".into(),
                 description: None,
                 effect: Effect::Allow,
+                confirm: false,
             },
             RequestOption {
                 id: "deny".into(),
                 label: "No".into(),
                 description: None,
                 effect: Effect::Deny,
+                confirm: false,
             },
         ],
         questions: None,
@@ -85,7 +87,8 @@ fn a_reason_reaches_the_resolution() {
     let ch = r.apply(Observation::RequestEndedWithReason {
         request_id: rid.clone(),
         by: ResolvedBy::Uncertain,
-        reason: ResolveReason::StrayKeystroke,
+        reason: Some(ResolveReason::StrayKeystroke),
+        message: None,
     });
     assert!(ch.iter().any(|c| matches!(c, Change::RequestResolved {
         request_id, by: ResolvedBy::Uncertain, reason: Some(ResolveReason::StrayKeystroke), .. } if *request_id == rid)));
@@ -93,7 +96,8 @@ fn a_reason_reaches_the_resolution() {
         r.apply(Observation::RequestEndedWithReason {
             request_id: rid,
             by: ResolvedBy::Uncertain,
-            reason: ResolveReason::StrayKeystroke,
+            reason: Some(ResolveReason::StrayKeystroke),
+            message: None,
         })
         .is_empty(),
         "a second end is a no-op"
@@ -195,12 +199,14 @@ fn option_and_question_order_are_semantic() {
             label: "One".into(),
             description: None,
             effect: Effect::Choose,
+            confirm: false,
         },
         RequestOption {
             id: "two".into(),
             label: "Two".into(),
             description: None,
             effect: Effect::Choose,
+            confirm: false,
         },
     ];
     obs.questions = Some(vec![Question {
@@ -965,4 +971,25 @@ fn typed_answers_with_bidi_or_control_characters_are_refused_at_claim() {
         r.claim(&rid, Answer::Text("fine\ntext".into()), None)
             .is_ok()
     );
+}
+
+#[test]
+fn a_message_reaches_the_resolution_and_a_plain_end_carries_none() {
+    let mut r = Registry::new("m".into());
+    r.apply(Observation::AgentUpsert(acd_core::testing::agent_obs("a")));
+    r.apply(Observation::RequestSeen(acd_core::testing::permission_obs("a", "k")));
+    let rid = r.agent("a").unwrap().pending.as_ref().unwrap().id.clone();
+    let ch = r.apply(Observation::RequestEndedWithReason {
+        request_id: rid.clone(),
+        by: ResolvedBy::Agent,
+        reason: Some(ResolveReason::Rejected),
+        message: Some("stale plan".into()),
+    });
+    assert!(ch.iter().any(|c| matches!(c, Change::RequestResolved {
+        by: ResolvedBy::Agent, reason: Some(ResolveReason::Rejected), message: Some(m), .. } if m == "stale plan")));
+
+    r.apply(Observation::RequestSeen(acd_core::testing::permission_obs("a", "k2")));
+    let rid = r.agent("a").unwrap().pending.as_ref().unwrap().id.clone();
+    let ch = r.apply(Observation::RequestEndedById { request_id: rid, by: ResolvedBy::Terminal });
+    assert!(ch.iter().any(|c| matches!(c, Change::RequestResolved { message: None, reason: None, .. })));
 }

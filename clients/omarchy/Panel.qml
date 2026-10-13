@@ -48,6 +48,12 @@ Item {
     function close() { host.close(); }
     function toggle() { host.toggle(); }
 
+    // Anything the user does but the second step of a confirm option
+    // disarms it (keys do this in model.mjs; clicks come through here).
+    function disarm() {
+        if (keyState.armed) keyState = Model.disarm(keyState);
+    }
+
     function selectAndReveal(key) {
         settingsOpen = false;
         const shown = Model.revealCard(key, cards, machineFilter, doneOpen);
@@ -184,11 +190,18 @@ Item {
         }
     }
 
+    // A click on an option: one that needs confirmation arms first (model.mjs).
+    function pickOption(card, optionId) {
+        const r = Model.pickOption(keyState, card, optionId, Date.now());
+        keyState = r.state;
+        if (r.effect.kind !== "none") run(r.effect, null);
+    }
+
     // Every key goes through model.mjs: `field` says which text field has
     // focus, and `composing` is that field's IME state (spec section 7).
     function keyEvent(event, field, composing, input) {
         message = "";
-        const r = Model.onKey(visibleCards, keyState, Model.fromQt(event.key, event.text, event.modifiers, composing, field));
+        const r = Model.onKey(visibleCards, keyState, Model.fromQt(event.key, event.text, event.modifiers, composing, field, event.isAutoRepeat === true));
         keyState = r.state;
         if (r.effect.kind !== "none") {
             run(r.effect, input);
@@ -258,7 +271,7 @@ Item {
     Timer {
         interval: 100
         repeat: true
-        running: panel.shown && panel.view !== null && panel.view.actions.length > 0
+        running: panel.shown && panel.view !== null && (panel.view.actions.length > 0 || !!panel.keyState.armed)
         onTriggered: panel.now = Date.now()
     }
 
@@ -284,7 +297,7 @@ Item {
         required property var inbox
         required property var card
         readonly property var meta: Model.cardMeta(card)
-        readonly property var rows: Model.optionRows(card)
+        readonly property var rows: Model.optionRows(card, inbox.keyState.armed || null, inbox.now)
         readonly property bool selected: inbox.keyState.selected === card.key
 
         width: parent ? parent.width : 0
@@ -294,7 +307,7 @@ Item {
 
         MouseArea {
             anchors.fill: parent
-            onClicked: cardItem.inbox.keyState = Object.assign({}, cardItem.inbox.keyState, { selected: cardItem.card.key })
+            onClicked: { cardItem.inbox.disarm(); cardItem.inbox.keyState = Object.assign({}, cardItem.inbox.keyState, { selected: cardItem.card.key }) }
         }
 
         ColumnLayout {
@@ -325,6 +338,15 @@ Item {
                 text: cardItem.card.agent.pending ? cardItem.meta.tag + "  " + cardItem.card.agent.pending.detail : ""
             }
 
+            Label {
+                readonly property var lines: Model.questionLines(cardItem.card)
+                visible: lines !== null
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                maximumLineCount: 6
+                text: lines ? [lines.header, lines.text].filter(x => x).join("\n") : ""
+            }
+
             Repeater {
                 model: cardItem.rows
 
@@ -334,12 +356,12 @@ Item {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     color: modelData.pickable ? cardItem.inbox.fg : cardItem.inbox.muted
-                    text: modelData.number + ". " + modelData.label + (modelData.rule ? "  (" + modelData.rule + ")" : "")
+                    text: modelData.number + ". " + (modelData.armed ? "Press Enter to confirm: " : "") + modelData.label + (modelData.rule ? "  (" + modelData.rule + ")" : "")
 
                     MouseArea {
                         anchors.fill: parent
                         enabled: optionRow.modelData.pickable
-                        onClicked: cardItem.inbox.run({ kind: "pick", cardKey: cardItem.card.key, requestId: cardItem.card.agent.pending.id, optionId: optionRow.modelData.id, revision: cardItem.card.agent.pending.revision }, null)
+                        onClicked: cardItem.inbox.pickOption(cardItem.card, optionRow.modelData.id)
                     }
                 }
             }
@@ -369,7 +391,7 @@ Item {
 
                 Ui.Button {
                     text: "Cancel"
-                    onClicked: cardItem.inbox.service.send("cancel", { action: cardItem.card.action.id }, cardItem.inbox.report)
+                    onClicked: { cardItem.inbox.disarm(); cardItem.inbox.service.send("cancel", { action: cardItem.card.action.id }, cardItem.inbox.report) }
                 }
             }
 
@@ -461,7 +483,7 @@ Item {
 
                 Ui.Button {
                     text: panel.settingsOpen ? "Inbox" : "Settings"
-                    onClicked: panel.settingsOpen = !panel.settingsOpen
+                    onClicked: { panel.disarm(); panel.settingsOpen = !panel.settingsOpen }
                 }
             }
 
@@ -509,7 +531,7 @@ Item {
                         required property var modelData
                         text: modelData.name + " · " + modelData.label
                         selected: panel.machineFilter === modelData.key
-                        onClicked: panel.machineFilter = selected ? "" : modelData.key
+                        onClicked: { panel.disarm(); panel.machineFilter = selected ? "" : modelData.key }
                     }
                 }
             }
@@ -537,7 +559,7 @@ Item {
                         visible: panel.groups.done.length > 0
                         color: panel.muted
                         text: (panel.doneOpen ? "▾ " : "▸ ") + "Done (" + panel.groups.done.length + ")"
-                        MouseArea { anchors.fill: parent; onClicked: panel.doneOpen = !panel.doneOpen }
+                        MouseArea { anchors.fill: parent; onClicked: { panel.disarm(); panel.doneOpen = !panel.doneOpen } }
                     }
                     Repeater { model: panel.doneOpen ? panel.groups.done : []; delegate: CardItem { required property var modelData; inbox: panel; card: modelData } }
                 }
@@ -560,7 +582,7 @@ Item {
                 Ui.Button {
                     visible: Model.keyringLocked(panel.service.settings)
                     text: "Unlock keyring"
-                    onClicked: panel.service.send("unlock_secrets", {}, panel.report)
+                    onClicked: { panel.disarm(); panel.service.send("unlock_secrets", {}, panel.report) }
                 }
 
                 Repeater {
@@ -602,7 +624,7 @@ Item {
 
                         Ui.Button {
                             text: "Retry"
-                            onClicked: panel.service.send("retry_machine", { machine: modelData.key }, panel.report)
+                            onClicked: { panel.disarm(); panel.service.send("retry_machine", { machine: modelData.key }, panel.report) }
                         }
 
                         Ui.Button {
@@ -612,6 +634,7 @@ Item {
                             text: confirming ? "Remove? Click again" : "Remove"
                             visible: modelData.endpoint.kind === "tcp"
                             onClicked: {
+                                panel.disarm();
                                 if (!confirming) {
                                     confirming = true;
                                     return;
@@ -642,7 +665,7 @@ Item {
 
                     Ui.Button {
                         text: "Add"
-                        onClicked: panel.submitPairing()
+                        onClicked: { panel.disarm(); panel.submitPairing() }
                     }
                 }
 
@@ -650,28 +673,28 @@ Item {
                     Layout.fillWidth: true
                     label: "Show idle agents"
                     checked: panel.service.settings ? panel.service.settings.show_idle : false
-                    onClicked: panel.service.send("set_show", { what: "idle", on: !checked }, panel.report)
+                    onClicked: { panel.disarm(); panel.service.send("set_show", { what: "idle", on: !checked }, panel.report) }
                 }
 
                 Ui.Toggle {
                     Layout.fillWidth: true
                     label: "Show subagents"
                     checked: panel.service.settings ? panel.service.settings.show_subagents : false
-                    onClicked: panel.service.send("set_show", { what: "subagents", on: !checked }, panel.report)
+                    onClicked: { panel.disarm(); panel.service.send("set_show", { what: "subagents", on: !checked }, panel.report) }
                 }
 
                 Ui.Toggle {
                     Layout.fillWidth: true
                     label: "Show hook-only agents"
                     checked: panel.service.settings ? panel.service.settings.show_hook_only : false
-                    onClicked: panel.service.send("set_show", { what: "hook_only", on: !checked }, panel.report)
+                    onClicked: { panel.disarm(); panel.service.send("set_show", { what: "hook_only", on: !checked }, panel.report) }
                 }
 
                 Ui.Toggle {
                     Layout.fillWidth: true
                     label: "Notifications"
                     checked: panel.service.settings ? panel.service.settings.notifications : true
-                    onClicked: panel.service.send("set_notifications", { on: !checked }, panel.report)
+                    onClicked: { panel.disarm(); panel.service.send("set_notifications", { on: !checked }, panel.report) }
                 }
             }
             }

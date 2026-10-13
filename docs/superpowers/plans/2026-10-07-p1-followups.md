@@ -114,6 +114,14 @@ Historical flakes and environment caveats (not reproduced in this audit):
   bound.
 - `herdr_e2e` failed once in a workspace run and passed on rerun (seen in
   Task 22).
+- Seen failing under full-workspace load on `external-source`; pass alone;
+  base not checked:
+  `crates/acd/tests/hooks_cli.rs` `a_stalled_acd_adds_at_most_1_s_to_a_lifecycle_hook`
+  and `the_shim_gives_up_when_stdin_never_closes`;
+  `crates/acd-adapters/tests/hooks_bounds.rs`
+  `queued_holds_cannot_delay_a_due_timer_past_one_batch`;
+  `crates/acd-adapters/tests/hooks_endpoint.rs`
+  `lifecycle_hooks_reply_at_once_without_a_consumer`.
 - `crates/acd/tests/hooks_cli.rs` `a_path_that_is_not_a_socket_is_never_replaced`
   failed once on Ubuntu CI (2026-10-12, PR #24, run 38209946246): the
   "not a socket" message was missing and a worker panicked at

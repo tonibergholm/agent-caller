@@ -838,6 +838,19 @@ async fn resolution_event_sets_terminal_notice() {
 }
 
 #[tokio::test]
+async fn a_producer_message_on_a_rejected_resolution_becomes_the_notice() {
+    let (_f, c, ib) = setup().await;
+    c.send(serde_json::json!({"type":"request.resolved","epoch":"e1","seq":2,"request_id":ANSWER_REQ,"agent_id":"a1","by":"agent","reason":"rejected","message":"The plan changed. Review it again."})).await;
+    view_until(&ib, "producer message", |v| {
+        v.cards
+            .first()
+            .and_then(|c| c.notice.as_ref())
+            .is_some_and(|n| n.text == "The plan changed. Review it again." && n.tone == NoticeTone::Warning)
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn replacement_cancels_machine_with_pending_submit_clone() {
     let (f, old_conn, ib) = setup().await;
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();

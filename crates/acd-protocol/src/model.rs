@@ -28,6 +28,8 @@ pub enum Source {
     Herdr,
     T3,
     Hooks,
+    /// A local producer that publishes its own questions over `hook.sock`.
+    External,
     #[serde(other)]
     Unknown,
 }
@@ -98,6 +100,8 @@ pub enum AnswerPath {
     Hook,
     Keys,
     T3,
+    /// The answer is queued for the producer that published the request.
+    External,
     None,
     #[serde(other)]
     Unknown,
@@ -136,6 +140,8 @@ pub enum ResolvedBy {
 pub enum ResolveReason {
     /// A key may have landed in the agent's input box (spec §6.2).
     StrayKeystroke,
+    /// The producer refused the answer before acting on it.
+    Rejected,
     #[serde(other)]
     Unknown,
 }
@@ -175,6 +181,10 @@ pub struct Sources {
     pub hooks: SourceStatus,
     pub herdr: SourceStatus,
     pub t3: SourceStatus,
+    /// Whether this daemon serves the producer API on `hook.sock`. Absent
+    /// from older daemons, which read as `false`.
+    #[serde(default)]
+    pub external: bool,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -193,6 +203,9 @@ pub struct RequestOption {
     pub label: String,
     pub description: Option<String>,
     pub effect: Effect,
+    /// Clients ask for a second tap before sending this option.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]

@@ -29,8 +29,8 @@ impl EventLog {
             Change::AgentUpdated(agent) => ServerMessage::AgentUpdated { epoch, seq, agent },
             Change::AgentRemoved(agent_id) => ServerMessage::AgentRemoved { epoch, seq, agent_id },
             Change::RequestOpened(request) => ServerMessage::RequestOpened { epoch, seq, request },
-            Change::RequestResolved { request_id, agent_id, by, option_id, reason } => {
-                ServerMessage::RequestResolved { epoch, seq, request_id, agent_id, by, option_id, reason }
+            Change::RequestResolved { request_id, agent_id, by, option_id, reason, message } => {
+                ServerMessage::RequestResolved { epoch, seq, request_id, agent_id, by, option_id, reason, message }
             }
             Change::MachineUpdated(machine) => ServerMessage::MachineUpdated { epoch, seq, machine },
         };

@@ -1,6 +1,16 @@
 import type { InboxView } from "./bindings/InboxView";
 
-export type KeyState = { selected: string | null; replyFor: string | null };
+/** How long an option that needs a second tap stays armed. */
+export const CONFIRM_MS = 5000;
+/** An option with `confirm` waiting for its second tap, fixed to the request the user saw. */
+export type Armed = {
+  cardKey: string;
+  requestId: string;
+  revision: number;
+  optionId: string;
+  at: number;
+};
+export type KeyState = { selected: string | null; replyFor: string | null; armed?: Armed | null };
 export type KeyInput = {
   key: string;
   shift: boolean;
@@ -9,6 +19,10 @@ export type KeyInput = {
   alt: boolean;
   composing: boolean;
   keyCode: number;
+  /** Event time in ms; absent means 0. */
+  at?: number;
+  /** The key is held down and auto-repeating. */
+  repeat?: boolean;
   inField: boolean;
   /** Which text field has focus: the reply box, a card's typed-answer input, or the voice command field. */
   field?: { kind: "reply" | "answer" | "voice"; cardKey: string | null };
@@ -48,6 +62,8 @@ export function fromEvent(e: KeyboardEvent): KeyInput {
     alt: e.altKey,
     composing: e.isComposing,
     keyCode: e.keyCode,
+    at: Date.now(),
+    repeat: e.repeat,
     inField: target?.tagName === "TEXTAREA",
     field:
       kind === "reply" || kind === "answer" || kind === "voice"
@@ -57,14 +73,28 @@ export function fromEvent(e: KeyboardEvent): KeyInput {
   };
 }
 
+/** Whether `armed` still names an option of the request on screen. */
+export function armedHolds(view: InboxView, armed: Armed | null | undefined): armed is Armed {
+  if (!armed) return false;
+  const pending = view.cards.find((c) => c.key === armed.cardKey)?.agent.pending;
+  return (
+    pending !== undefined &&
+    pending !== null &&
+    pending.id === armed.requestId &&
+    pending.revision === armed.revision &&
+    pending.options.some((o) => o.id === armed.optionId)
+  );
+}
+
 /** Keep the selection on a card that still exists; fall back to the first. */
 export function normalize(view: InboxView, st: KeyState): KeyState {
   const keys = view.cards.map((c) => c.key);
   const selected =
     st.selected !== null && keys.includes(st.selected) ? st.selected : (keys[0] ?? null);
   const replyFor = st.replyFor !== null && keys.includes(st.replyFor) ? st.replyFor : null;
-  if (selected === st.selected && replyFor === st.replyFor) return st;
-  return { selected, replyFor };
+  const armed = armedHolds(view, st.armed) ? st.armed : null;
+  if (selected === st.selected && replyFor === st.replyFor && armed === (st.armed ?? null)) return st;
+  return armed === null ? { selected, replyFor } : { selected, replyFor, armed };
 }
 
 export function onKey(
@@ -74,24 +104,30 @@ export function onKey(
 ): { state: KeyState; effect: Effect } {
   const none = { state: st, effect: NONE };
   // Guards first: IME composition and modifiers are never shortcuts.
-  if (ev.composing || ev.keyCode === 229 || ev.meta || ev.ctrl || ev.alt) return none;
+  if (ev.composing || ev.keyCode === 229 || ev.meta || ev.ctrl || ev.alt) {
+    // Ignored as a shortcut, but still not the second tap of an armed option.
+    return st.armed ? { state: { ...st, armed: null }, effect: NONE } : none;
+  }
 
-  if (ev.key === "Escape") return { state: st, effect: { kind: "escape" } };
+  // Any key but the second tap of an armed option disarms it.
+  const rest: KeyState = st.armed ? { ...st, armed: null } : st;
+
+  if (ev.key === "Escape") return { state: rest, effect: { kind: "escape" } };
 
   if (ev.inField) {
     if (ev.key === "Enter" && !ev.shift && ev.field?.kind === "voice") {
-      return { state: st, effect: { kind: "submitVoice" } };
+      return { state: rest, effect: { kind: "submitVoice" } };
     }
     if (ev.key === "Enter" && !ev.shift && ev.field?.kind === "answer" && ev.field.cardKey !== null) {
-      return { state: st, effect: { kind: "submitAnswer", cardKey: ev.field.cardKey } };
+      return { state: rest, effect: { kind: "submitAnswer", cardKey: ev.field.cardKey } };
     }
     if (ev.key === "Enter" && !ev.shift && ev.field?.kind !== "answer" && st.replyFor !== null) {
-      return { state: st, effect: { kind: "submitReply", cardKey: st.replyFor } };
+      return { state: rest, effect: { kind: "submitReply", cardKey: st.replyFor } };
     }
-    return none;
+    return { state: rest, effect: NONE };
   }
 
-  if (ev.key === "/" && ev.voiceField) return { state: st, effect: { kind: "focusVoice" } };
+  if (ev.key === "/" && ev.voiceField) return { state: rest, effect: { kind: "focusVoice" } };
 
   const key = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
   const idx = view.cards.findIndex((c) => c.key === st.selected);
@@ -103,20 +139,40 @@ export function onKey(
     const next = idx < 0 ? 0 : Math.min(view.cards.length - 1, Math.max(0, idx + (down ? 1 : -1)));
     const selected = view.cards[next].key;
     return {
-      state: { ...st, selected },
+      state: { ...rest, selected },
       effect: selected === st.selected ? NONE : { kind: "select", key: selected },
     };
   }
 
-  if (!card) return none;
+  if (!card) return { state: rest, effect: NONE };
 
   if (/^[1-9]$/.test(key)) {
     const pending = card.agent.pending;
-    if (!card.answerable || !pending) return none;
+    const idle = { state: rest, effect: NONE };
+    if (!card.answerable || !pending) return idle;
     const option = pending.options[Number(key) - 1];
-    if (!option || !card.selectable_options.includes(option.id)) return none;
+    if (!option || !card.selectable_options.includes(option.id)) return idle;
+    // A held key must neither arm nor confirm: only a fresh press counts.
+    if (option.confirm && ev.repeat) return { state: st, effect: NONE };
+    const at = ev.at ?? 0;
+    const second =
+      st.armed?.cardKey === card.key &&
+      st.armed.requestId === pending.id &&
+      st.armed.revision === pending.revision &&
+      st.armed.optionId === option.id &&
+      at - st.armed.at <= CONFIRM_MS;
+    if (option.confirm && !second) {
+      const armed: Armed = {
+        cardKey: card.key,
+        requestId: pending.id,
+        revision: pending.revision,
+        optionId: option.id,
+        at,
+      };
+      return { state: { ...st, armed }, effect: NONE };
+    }
     return {
-      state: st,
+      state: rest,
       effect: {
         kind: "pick",
         cardKey: card.key,
@@ -127,13 +183,13 @@ export function onKey(
     };
   }
   if (key === "t" && card.free_text_answerable) {
-    return { state: st, effect: { kind: "focusAnswer", cardKey: card.key } };
+    return { state: rest, effect: { kind: "focusAnswer", cardKey: card.key } };
   }
   if (key === "r" && card.can_reply) {
-    return { state: st, effect: { kind: "openReply", cardKey: card.key } };
+    return { state: rest, effect: { kind: "openReply", cardKey: card.key } };
   }
   if (key === "e" && card.can_mark_seen) {
-    return { state: st, effect: { kind: "markSeen", cardKey: card.key } };
+    return { state: rest, effect: { kind: "markSeen", cardKey: card.key } };
   }
-  return none;
+  return { state: rest, effect: NONE };
 }

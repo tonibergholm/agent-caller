@@ -60,7 +60,7 @@ impl Adapter for FakeAdapter {
 pub fn test_machine() -> Machine {
     Machine {
         id: "test-machine".into(), name: "Test".into(), acd_version: "0.0.0".into(),
-        sources: Sources { hooks: SourceStatus::unconfigured(), herdr: SourceStatus::unconfigured(), t3: SourceStatus::unconfigured() },
+        sources: Sources { hooks: SourceStatus::unconfigured(), herdr: SourceStatus::unconfigured(), t3: SourceStatus::unconfigured(), external: false },
     }
 }
 
@@ -76,8 +76,8 @@ pub fn permission_obs(agent_id: &str, key: &str) -> RequestObs {
         agent_id: agent_id.into(), key: CorrelationKey(key.into()), upgrade_from: None,
         kind: RequestKind::Permission, answer_path: AnswerPath::Hook, title: "Bash".into(), detail: "ls".into(),
         options: vec![
-            RequestOption { id: "allow".into(), label: "Yes".into(), description: None, effect: Effect::Allow },
-            RequestOption { id: "deny".into(), label: "No".into(), description: None, effect: Effect::Deny },
+            RequestOption { id: "allow".into(), label: "Yes".into(), description: None, effect: Effect::Allow, confirm: false },
+            RequestOption { id: "deny".into(), label: "No".into(), description: None, effect: Effect::Deny, confirm: false },
         ],
         questions: None, free_text: false, raw_screen: None, ready: true, reusable_key: true,
     }

@@ -113,14 +113,23 @@
       "type": "string"
     },
     "AnswerPath": {
-      "enum": [
-        "hook",
-        "keys",
-        "t3",
-        "none",
-        "unknown"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "hook",
+            "keys",
+            "t3",
+            "none",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "external",
+          "description": "The answer is queued for the producer that published the request.",
+          "type": "string"
+        }
+      ]
     },
     "CommandResult": {
       "properties": {
@@ -354,6 +363,10 @@
     },
     "RequestOption": {
       "properties": {
+        "confirm": {
+          "description": "Clients ask for a second tap before sending this option.",
+          "type": "boolean"
+        },
         "description": {
           "type": [
             "string",
@@ -399,6 +412,11 @@
           "const": "stray_keystroke",
           "description": "A key may have landed in the agent's input box (spec §6.2).",
           "type": "string"
+        },
+        {
+          "const": "rejected",
+          "description": "The producer refused the answer before acting on it.",
+          "type": "string"
         }
       ]
     },
@@ -415,13 +433,22 @@
       "type": "string"
     },
     "Source": {
-      "enum": [
-        "herdr",
-        "t3",
-        "hooks",
-        "unknown"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "herdr",
+            "t3",
+            "hooks",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "external",
+          "description": "A local producer that publishes its own questions over `hook.sock`.",
+          "type": "string"
+        }
+      ]
     },
     "SourceState": {
       "enum": [
@@ -452,6 +479,11 @@
     },
     "Sources": {
       "properties": {
+        "external": {
+          "default": false,
+          "description": "Whether this daemon serves the producer API on `hook.sock`. Absent\nfrom older daemons, which read as `false`.",
+          "type": "boolean"
+        },
         "herdr": {
           "$ref": "#/$defs/SourceStatus"
         },
@@ -622,6 +654,13 @@
         },
         "epoch": {
           "type": "string"
+        },
+        "message": {
+          "description": "What the producer reported, at most 500 bytes.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "option_id": {
           "type": [

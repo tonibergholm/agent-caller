@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import * as M from "../model.mjs";
 
 const pending = (opts = {}) => ({
@@ -443,4 +444,175 @@ test("openCard reveals a card the machine filter or collapsed Done hides", () =>
   assert.deepEqual(M.revealCard("m2/d", cards, "m2", false), { machineFilter: "m2", doneOpen: true });
   assert.deepEqual(M.revealCard("m1/a", cards, "m1", false), { machineFilter: "m1", doneOpen: false });
   assert.deepEqual(M.revealCard("zz", cards, "m2", false), { machineFilter: "m2", doneOpen: false });
+});
+
+const externalCard = (key = "m1/e", extra = {}) => ({
+  ...card(key),
+  free_text_answerable: true,
+  selectable_options: ["go", "abandon"],
+  agent: {
+    id: "e", source: "external", kind: "other", title: "native autopilot", project: "engine", cwd: "/w/engine",
+    state: "needs_you",
+    pending: pending({
+      kind: "question", answer_path: "external", title: "ENG-12 parked", detail: "Repair exhausted", free_text: true,
+      options: [
+        { id: "go", label: "Go", description: null, effect: "choose" },
+        { id: "abandon", label: "Abandon", description: null, effect: "choose", confirm: true },
+      ],
+    }),
+  },
+  ...extra,
+});
+
+test("an external card is labelled with its producer and headed by what it asks", () => {
+  const meta = M.cardMeta(externalCard());
+  assert.equal(meta.badge, "native autopilot");
+  assert.equal(meta.title, "ENG-12 parked");
+  assert.equal(meta.tag, "QUESTION");
+  const none = externalCard();
+  none.agent.pending = null;
+  assert.equal(M.cardMeta(none).title, "native autopilot", "without a request the producer's title is the heading");
+});
+
+test("a typed answer is offered on an external question", () => {
+  const cards = [externalCard()];
+  assert.deepEqual(M.onKey(cards, { selected: "m1/e", replyFor: null }, key("t")).effect, { kind: "focusAnswer", cardKey: "m1/e" });
+});
+
+test("an option that needs confirmation arms on the first press and is sent by the second", () => {
+  const cards = [externalCard()];
+  const first = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 }));
+  assert.equal(first.effect.kind, "none");
+  assert.deepEqual(first.state.armed, { cardKey: "m1/e", requestId: "r1", revision: 1, optionId: "abandon", at: 1000 });
+  const rows = M.optionRows(cards[0], first.state.armed, 1500);
+  assert.deepEqual(rows.map((r) => [r.id, r.confirm, r.armed]), [["go", false, false], ["abandon", true, true]]);
+  const second = M.onKey(cards, first.state, key("Enter", { at: 2000 }));
+  assert.deepEqual(second.effect, { kind: "pick", cardKey: "m1/e", requestId: "r1", optionId: "abandon", revision: 1 });
+  assert.equal(second.state.armed, null);
+  assert.equal(M.onKey(cards, { selected: "m1/e", replyFor: null }, key("1")).effect.kind, "pick", "an option without confirm sends at once");
+});
+
+test("a second press outside the window, on another option, or after any other key does not send", () => {
+  const cards = [externalCard()];
+  const armed = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 })).state;
+  const late = M.onKey(cards, armed, key("Enter", { at: 1000 + M.CONFIRM_MS + 1 }));
+  assert.equal(late.effect.kind, "none", "Enter after the window sends nothing");
+  assert.equal(late.state.armed, null);
+  assert.equal(M.optionRows(cards[0], armed.armed, 1000 + M.CONFIRM_MS + 1).find((r) => r.id === "abandon").armed, false);
+  assert.equal(M.onKey(cards, armed, key("1", { at: 1100 })).effect.optionId, "go");
+  assert.equal(M.onKey(cards, armed, key("1", { at: 1100 })).state.armed, null);
+  for (const other of ["j", "Escape", "r", "t"]) {
+    const after = M.onKey(cards, armed, key(other, { at: 1100 })).state;
+    assert.equal(after.armed, null, other);
+    assert.equal(M.onKey(cards, after, key("2", { at: 1200 })).effect.kind, "none", "the press after " + other + " arms again");
+  }
+});
+
+test("a click goes through the same two steps and an armed option never outlives its request", () => {
+  const c = externalCard();
+  const st = { selected: "m1/e", replyFor: null };
+  const first = M.pickOption(st, c, "abandon", 1000);
+  assert.equal(first.effect.kind, "none");
+  const second = M.pickOption(first.state, c, "abandon", 1500);
+  assert.equal(second.effect.kind, "pick");
+  const moved = externalCard();
+  moved.agent.pending.revision = 2;
+  assert.equal(M.pruneKeyState(first.state, [moved]).armed, null, "a changed request disarms");
+  assert.equal(M.pruneKeyState(first.state, []).armed, null, "a gone card disarms");
+  assert.equal(M.pruneKeyState(first.state, [c]).armed.optionId, "abandon");
+  assert.equal(M.pickOption(first.state, moved, "abandon", 1500).effect.kind, "none", "the old arm cannot send the new revision");
+  assert.equal(M.pickOption(st, c, "nope", 1000).effect.kind, "none");
+});
+
+test("the panel sends picks through the model so a click cannot skip the confirmation", () => {
+  const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
+  assert.match(panel, /cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/);
+  assert.doesNotMatch(panel, /run\(\{ kind: "pick"/);
+});
+
+test("typing in a text field disarms an armed option", () => {
+  const cards = [externalCard()];
+  const armed = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 })).state;
+  const typed = M.onKey(cards, armed, key("x", { field: { kind: "reply", cardKey: "m1/e" }, at: 1100 }));
+  assert.equal(typed.state.armed, null);
+  assert.equal(M.onKey(cards, typed.state, key("Enter", { at: 1200 })).effect.kind, "none");
+});
+
+test("a held key neither arms nor confirms an option", () => {
+  const cards = [externalCard()];
+  const fresh = { selected: "m1/e", replyFor: null };
+  const held = M.onKey(cards, fresh, key("2", { at: 1000, repeat: true }));
+  assert.equal(held.effect.kind, "none");
+  assert.equal(held.state.armed ?? null, null);
+  const armed = M.onKey(cards, fresh, key("2", { at: 1000 })).state;
+  const repeat = M.onKey(cards, armed, key("2", { at: 1100, repeat: true }));
+  assert.equal(repeat.effect.kind, "none");
+  assert.deepEqual(repeat.state.armed, armed.armed);
+  assert.equal(M.onKey(cards, armed, key("Enter", { at: 1100 })).effect.kind, "pick");
+  assert.equal(M.fromQt(0x32, "2", 0, false, null, true).repeat, true);
+  assert.equal(M.fromQt(0x32, "2", 0, false, null).repeat, false);
+});
+
+test("a digit only arms a confirm option: the same digit again is a no-op and Enter completes it", () => {
+  const cards = [externalCard()];
+  const fresh = { selected: "m1/e", replyFor: null };
+  const armed = M.onKey(cards, fresh, key("2", { at: 1000 })).state;
+  for (const at of [1001, 1500, 2000]) {
+    const again = M.onKey(cards, armed, key("2", { at }));
+    assert.equal(again.effect.kind, "none", "digit at " + at);
+    assert.deepEqual(again.state.armed, armed.armed, "still armed, unmoved");
+  }
+  assert.deepEqual(M.onKey(cards, armed, key("Enter", { at: 1600 })).effect, { kind: "pick", cardKey: "m1/e", requestId: "r1", optionId: "abandon", revision: 1 });
+  assert.equal(M.onKey(cards, fresh, key("Enter", { at: 1600 })).effect.kind, "none", "Enter alone sends nothing");
+  const other = M.onKey(cards, armed, key("1", { at: 1100 }));
+  assert.equal(other.effect.optionId, "go");
+  assert.equal(M.fromQt(0, "\r", 0, false, null).key, "Enter", "a catcher text key of Return is Enter");
+});
+
+test("the same digit re-arms a confirm option once the window has passed", () => {
+  const cards = [externalCard()];
+  const armed = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 })).state;
+  const later = 1000 + M.CONFIRM_MS + 1;
+  const rearmed = M.onKey(cards, armed, key("2", { at: later })).state;
+  assert.equal(rearmed.armed.at, later);
+  assert.equal(M.onKey(cards, rearmed, key("Enter", { at: later + 100 })).effect.kind, "pick");
+});
+
+test("the armed row tells the user to press Enter", () => {
+  const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
+  assert.match(panel, /Press Enter to confirm: /);
+});
+
+test("an unrelated click drops the arm, and every Panel.qml click but the option row goes through disarm", () => {
+  const cards = [externalCard()];
+  const armed = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 })).state;
+  const after = M.disarm(armed);
+  assert.equal(after.armed, null);
+  assert.equal(after.selected, "m1/e");
+  assert.equal(M.disarm(after), after, "nothing to drop");
+  assert.equal(M.pickOption(after, cards[0], "abandon", 1100).effect.kind, "none", "the next tap arms again");
+  const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
+  const clicks = panel.split("\n").filter((l) => l.includes("onClicked:"));
+  assert.ok(clicks.length >= 10);
+  for (const l of clicks) {
+    if (l.includes("pickOption")) continue;
+    assert.match(l, /disarm\(\)|onClicked: \{\s*$/, l.trim());
+  }
+  assert.match(panel, /onClicked: \{\n\s*panel\.disarm\(\);/);
+});
+
+test("a question card shows its header and text beyond the detail", () => {
+  const c = externalCard();
+  c.agent.pending.questions = [{ id: "q1", header: "Parked", text: "What now?", multi_select: false, options: [] }];
+  assert.deepEqual(M.questionLines(c), { header: "Parked", text: "What now?" });
+  c.agent.pending.detail = "What now?";
+  assert.deepEqual(M.questionLines(c), { header: "Parked", text: null }, "the text the detail already holds is not repeated");
+  c.agent.pending.questions = [{ id: "q1", header: "Question", text: "What now?", multi_select: false, options: [] }];
+  assert.equal(M.questionLines(c), null);
+  assert.equal(M.questionLines(card("m1/a")), null, "a permission has no question");
+  const none = externalCard();
+  none.agent.pending = null;
+  assert.equal(M.questionLines(none), null);
+  const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
+  assert.match(panel, /Model\.questionLines\(cardItem\.card\)/);
 });

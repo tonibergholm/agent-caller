@@ -25,7 +25,9 @@
   } = $props();
 
   const sourceLabel = $derived(
-    { herdr: "herdr", t3: "T3", hooks: "hooks", unknown: "unknown" }[card.agent.source],
+    card.agent.source === "external"
+      ? card.agent.title
+      : { herdr: "herdr", t3: "T3", hooks: "hooks", unknown: "unknown" }[card.agent.source],
   );
   const state = $derived(card.agent.state);
   const changed = $derived(age(card.agent.state_since, now));

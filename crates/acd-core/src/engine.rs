@@ -24,6 +24,48 @@ struct Inner {
     idem: IdemCache,
 }
 
+/// The registry inside `Core::transact`.
+pub struct Txn<'a> {
+    registry: &'a mut Registry,
+    changes: Vec<Change>,
+}
+
+impl Txn<'_> {
+    pub fn apply(&mut self, obs: Observation) {
+        let changes = apply_bounded(self.registry, obs);
+        self.changes.extend(changes);
+    }
+    pub fn agent(&self, agent_id: &str) -> Option<&Agent> {
+        self.registry.agent(agent_id)
+    }
+    pub fn request(&self, request_id: &str) -> Option<&Request> {
+        self.registry.request(request_id)
+    }
+    pub fn request_id_for(&self, agent_id: &str, key: &CorrelationKey) -> Option<String> {
+        self.registry.request_id_for(agent_id, key)
+    }
+}
+
+/// A client cannot address an agent whose id is over the command limit
+/// (`check_limits`), so publishing one is a source bug. Drop it loudly
+/// rather than truncate, which could merge two agents.
+fn apply_bounded(registry: &mut Registry, obs: Observation) -> Vec<Change> {
+    let published = match &obs {
+        Observation::AgentUpsert(a) => Some(&a.id),
+        Observation::RequestSeen(r) => Some(&r.agent_id),
+        Observation::AgentMigrated { to, .. } => Some(to),
+        _ => None,
+    };
+    if let Some(id) = published.filter(|id| id.len() > MAX_ID_BYTES) {
+        tracing::error!(
+            len = id.len(),
+            "adapter published an agent id over 128 bytes; dropped"
+        );
+        return Vec::new();
+    }
+    registry.apply(obs)
+}
+
 pub struct Core {
     inner: Mutex<Inner>,
     events: broadcast::Sender<ServerMessage>,
@@ -74,25 +116,24 @@ impl Core {
     }
 
     pub fn observe(&self, obs: Observation) {
-        // A client cannot address an agent whose id is over the command limit
-        // (`check_limits`), so publishing one is a source bug. Drop it loudly
-        // rather than truncate, which could merge two agents.
-        let published = match &obs {
-            Observation::AgentUpsert(a) => Some(&a.id),
-            Observation::RequestSeen(r) => Some(&r.agent_id),
-            Observation::AgentMigrated { to, .. } => Some(to),
-            _ => None,
-        };
-        if let Some(id) = published.filter(|id| id.len() > MAX_ID_BYTES) {
-            tracing::error!(
-                len = id.len(),
-                "adapter published an agent id over 128 bytes; dropped"
-            );
-            return;
-        }
         let mut st = self.inner.lock().unwrap();
-        let changes = st.registry.apply(obs);
+        let changes = apply_bounded(&mut st.registry, obs);
         self.publish(&mut st, changes);
+    }
+
+    /// Runs `f` against the registry under one lock and publishes every
+    /// change it made, in order, after it returns. Nothing else reads or
+    /// claims in between. `f` must not call back into the core.
+    pub fn transact<R>(&self, f: impl FnOnce(&mut Txn<'_>) -> R) -> R {
+        let mut st = self.inner.lock().unwrap();
+        let mut txn = Txn {
+            registry: &mut st.registry,
+            changes: Vec::new(),
+        };
+        let out = f(&mut txn);
+        let changes = txn.changes;
+        self.publish(&mut st, changes);
+        out
     }
 
     pub fn set_source_status(&self, source: Source, status: SourceStatus) {
@@ -101,7 +142,7 @@ impl Core {
             Source::Hooks => &mut st.machine.sources.hooks,
             Source::Herdr => &mut st.machine.sources.herdr,
             Source::T3 => &mut st.machine.sources.t3,
-            Source::Unknown => return,
+            Source::External | Source::Unknown => return,
         };
         if *slot == status {
             return;
