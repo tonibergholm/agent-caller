@@ -35,6 +35,11 @@ fn the_producer_api_is_served_on_hook_sock_and_never_on_tcp() {
         "the TCP call must not have created an agent"
     );
 
+    assert!(
+        status(&dir).contains("external=true"),
+        "status reports the producer API: {}",
+        status(&dir)
+    );
     assert_eq!(
         call_hook_unix(&sock, "PUT", STATE, "wrong", &body("k1")).0,
         401

@@ -17,11 +17,13 @@ use tokio::sync::broadcast;
 const TOKEN: &str = "tok-external-0123456789";
 const LEASE: u64 = 60_000;
 const START_MS: i64 = 1_760_000_000_000;
+const WALL_START_MS: i64 = 1_790_000_000_000;
 
 struct Rig {
     core: Arc<Core>,
     adapter: Arc<ExternalAdapter>,
     clock: Arc<AtomicI64>,
+    wall: Arc<AtomicI64>,
     rx: broadcast::Receiver<ServerMessage>,
     sock: std::path::PathBuf,
     next_command: u32,
@@ -40,8 +42,11 @@ struct Resolved {
 async fn rig() -> Rig {
     let clock = Arc::new(AtomicI64::new(START_MS));
     let c = clock.clone();
+    let wall = Arc::new(AtomicI64::new(WALL_START_MS));
+    let w = wall.clone();
     let adapter = ExternalAdapter::new(ExternalConfig {
         clock: Arc::new(move || c.load(Ordering::SeqCst)),
+        wall: Arc::new(move || w.load(Ordering::SeqCst)),
         tick: Duration::from_secs(3600),
     });
     let core = Core::new(test_machine(), vec![adapter.clone()]);
@@ -61,6 +66,7 @@ async fn rig() -> Rig {
         core,
         adapter,
         clock,
+        wall,
         rx,
         sock,
         next_command: 0,
@@ -100,10 +106,16 @@ async fn http(
 impl Rig {
     fn advance(&self, ms: i64) {
         self.clock.fetch_add(ms, Ordering::SeqCst);
+        self.wall.fetch_add(ms, Ordering::SeqCst);
     }
 
-    fn now(&self) -> i64 {
-        self.clock.load(Ordering::SeqCst)
+    fn wall_now(&self) -> i64 {
+        self.wall.load(Ordering::SeqCst)
+    }
+
+    /// The system slept: the wall clock moved, the monotonic one did not.
+    fn sleep_through(&self, ms: i64) {
+        self.wall.fetch_add(ms, Ordering::SeqCst);
     }
 
     async fn put(&self, pid: &str, body: Value) -> (u16, Value) {
@@ -361,7 +373,7 @@ async fn a_client_answer_is_queued_for_the_producer_until_acked() {
         .await;
     let request = rig.request("autopilot");
     rig.advance(5_000);
-    let answered_at = rig.now();
+    let answered_at = rig.wall_now();
     let result = rig.answer(&request, "abandon").await;
     assert_eq!(result.outcome, Some(Outcome::Delivered), "{result:?}");
     assert_eq!(rig.request("autopilot").status, RequestStatus::Answering);
@@ -400,7 +412,7 @@ async fn the_answer_timeout_sets_the_expiry() {
     body["answer_timeout_ms"] = json!(45_000);
     rig.ok("sup", body.clone()).await;
     let request = rig.request("autopilot");
-    let at = rig.now();
+    let at = rig.wall_now();
     rig.answer(&request, "approve").await;
     let answer = only_answer(&rig.ok("sup", body).await);
     assert_eq!(answer["expires_at_ms"], at + 45_000);
@@ -616,6 +628,16 @@ async fn omission_resolves_open_by_agent_and_answering_uncertain() {
     assert_eq!(by(&alpha.id), ResolvedBy::Agent);
     assert_eq!(by(&beta.id), ResolvedBy::Uncertain);
     assert_eq!(resolved.len(), 2);
+    assert_eq!(
+        rig.agents()
+            .into_iter()
+            .map(|a| a.title)
+            .collect::<Vec<_>>(),
+        ["beta"],
+        "only the agent whose answer is now uncertain lingers for its notice"
+    );
+    rig.advance(15_000);
+    rig.adapter.sweep();
     assert!(rig.agents().is_empty(), "an agent with no item is removed");
     assert_eq!(
         rig.get_answers("sup", 0).await.1["answers"],
@@ -1331,4 +1353,123 @@ async fn titles_details_answers_and_ack_messages_never_reach_the_logs() {
     assert!(logs.contains("sup"), "the producer id is logged: {logs}");
     assert!(logs.contains("log-key"), "the key is logged: {logs}");
     assert!(!logs.contains("SECRET"), "{logs}");
+}
+
+#[tokio::test]
+async fn the_wire_deadline_follows_the_wall_clock_across_a_sleep() {
+    let mut rig = rig().await;
+    rig.ok("sup", state(vec![item("k1", "a1", "alpha")])).await;
+    let request = rig.request("alpha");
+    rig.answer(&request, "approve").await;
+    let queued_wall = rig.wall_now();
+    rig.advance(10_000);
+    let first = only_answer(&rig.get_answers("sup", 0).await.1);
+    assert_eq!(first["expires_at_ms"], queued_wall + 180_000);
+    // The laptop sleeps for an hour: wall time moves, the monotonic clock does not.
+    rig.sleep_through(3_600_000);
+    let after = only_answer(&rig.get_answers("sup", 0).await.1);
+    assert_eq!(
+        after["expires_at_ms"],
+        queued_wall + 180_000 + 3_600_000,
+        "170 s of the answer window are left, counted from the wall clock now"
+    );
+    assert_eq!(
+        after["expires_at_ms"].as_i64().unwrap() - rig.wall_now(),
+        170_000
+    );
+    assert!(
+        rig.resolved().is_empty(),
+        "the monotonic deadline did not pass"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_ack_dropped_in_the_same_call_keeps_its_card_for_the_notice() {
+    let mut rig = rig().await;
+    rig.ok("sup", state(vec![item("k1", "a1", "alpha")])).await;
+    let request = rig.request("alpha");
+    rig.answer(&request, "abandon").await;
+    let id = only_answer(&rig.get_answers("sup", 0).await.1)["answer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Ack and drop the item in one PUT.
+    rig.ok(
+        "sup",
+        with_acks(vec![], vec![ack(&id, "failed", Some("crashed mid-action"))]),
+    )
+    .await;
+    let agent = rig.agent("alpha").expect("the card stays for the notice");
+    assert!(agent.pending.is_none());
+    assert_eq!(rig.resolved().len(), 1);
+
+    rig.advance(14_999);
+    rig.adapter.sweep();
+    assert!(
+        rig.agent("alpha").is_some(),
+        "still within the linger window"
+    );
+    rig.advance(1);
+    rig.adapter.sweep();
+    assert!(rig.agent("alpha").is_none(), "then it goes");
+}
+
+#[tokio::test]
+async fn an_applied_ack_leaves_no_lingering_card() {
+    let mut rig = rig().await;
+    rig.ok("sup", state(vec![item("k1", "a1", "alpha")])).await;
+    let request = rig.request("alpha");
+    rig.answer(&request, "approve").await;
+    let id = only_answer(&rig.get_answers("sup", 0).await.1)["answer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    rig.ok("sup", with_acks(vec![], vec![ack(&id, "applied", None)]))
+        .await;
+    assert!(rig.agent("alpha").is_none());
+}
+
+#[tokio::test]
+async fn a_lingering_card_gives_way_to_a_new_item_and_to_the_lease_ending() {
+    let mut rig = rig().await;
+    rig.ok("sup", state(vec![item("k1", "a1", "alpha")])).await;
+    let request = rig.request("alpha");
+    rig.answer(&request, "abandon").await;
+    let id = only_answer(&rig.get_answers("sup", 0).await.1)["answer_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    rig.ok(
+        "sup",
+        with_acks(vec![], vec![ack(&id, "rejected", Some("stale"))]),
+    )
+    .await;
+    assert!(rig.agent("alpha").is_some());
+    rig.ok("sup", state(vec![item("k2", "a1", "alpha")])).await;
+    assert_eq!(rig.request("alpha").status, RequestStatus::Open);
+    rig.advance(20_000);
+    rig.adapter.sweep();
+    assert!(
+        rig.agent("alpha").is_some(),
+        "a relisted agent no longer lingers out"
+    );
+    rig.stop("sup").await;
+    assert!(rig.agents().is_empty());
+}
+
+#[tokio::test]
+async fn bidi_and_separator_characters_in_producer_text_are_refused() {
+    let rig = rig().await;
+    for bad in ["a\u{202E}b", "a\u{2066}b", "a\u{2028}b"] {
+        let mut it = item("k1", "a1", "alpha");
+        it["title"] = json!(bad);
+        assert_eq!(rig.put("sup", state(vec![it])).await.0, 422, "{bad:?}");
+    }
+    let mut joiner = item("k1", "a1", "alpha");
+    joiner["title"] = json!("a\u{200D}b");
+    assert_eq!(
+        rig.put("sup", state(vec![joiner])).await.0,
+        200,
+        "emoji joiners stay allowed"
+    );
 }

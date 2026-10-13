@@ -37,6 +37,7 @@ name = "acd-adapters"
 version = "0.8.0"
 dependencies = [
  "acd-adapters",
+ "acd-client",
  "acd-core",
  "acd-protocol",
  "acd-securefs",

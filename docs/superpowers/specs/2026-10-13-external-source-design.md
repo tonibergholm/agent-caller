@@ -23,7 +23,9 @@ typed corrective answers. Nothing in acd is specific to it.
   `/external` request over TCP gets the same response as any unknown
   route.
 - Every call carries `X-Acd-Token` with the hook token, as hook calls
-  do.
+  do. The producer id is not authenticated: any hook-token holder can act
+  as any producer (same-user trust boundary), so a producer must not treat
+  an acd ack as authority for an irreversible action.
 - A producer verifies the socket before connecting, using the same
   checks as the hook shim (`crates/acd/src/hook_shim.rs`): canonical
   directory, safe ancestors, socket not a symlink, owned by the user.
@@ -41,7 +43,7 @@ typed corrective answers. Nothing in acd is specific to it.
   key from its own durable occurrence id plus a hash of the card's
   meaning, so it opens a new occurrence by minting a new key.
 - Tombstones live in memory, bounded to the most recent 4096 per
-  producer, and do not survive a daemon restart. The producer's durable
+  producer (and 16 producers without a lease), and do not survive a daemon restart. The producer's durable
   occurrence record is the authority. A producer never lists a key it
   has recorded as resolved.
 
@@ -67,12 +69,14 @@ Request:
 - Limits: at most 8 live producers, 32 items, 8 options per item, 32
   acks. Title 200 bytes, detail 4000, option label 80, option
   description 200, question text 1000, ack message 500, body 256 KiB.
-  Text must pass `has_forbidden_control`.
+  Text must pass `has_forbidden_control` and the typed-answer rule (no bidi
+  overrides or line/paragraph separators).
 
 **Atomicity.** acd validates the whole body before touching the
 registry. Any violation, including a duplicate `key` or `agent_key` in
 `items`, returns 422 and changes nothing: no lease renewal, no acks and
-no diff. A malformed or truncated body can therefore never resolve an
+no diff. The time-driven sweep (lease and answer expiry) that starts
+every call still runs. A malformed or truncated body can therefore never resolve an
 existing card.
 
 After validation the steps run in this order, under one registry lock:
@@ -137,7 +141,9 @@ Clean stop. Same effect as lease expiry (§5).
 
 - When a client answers, the request moves to answering and the answer
   is queued for the producer with an `answer_id`, the request revision
-  and `expires_at_ms = answered_at + answer_timeout_ms`.
+  and `expires_at_ms = answered_at + answer_timeout_ms`, counted on a monotonic
+  clock and stamped on the wire as wall clock now plus time left, so a
+  system sleep does not shift it.
 - Answers are re-offered on every call until acked or expired. The
   producer dedupes by `answer_id`, records the answer durably before
   acting, and **must not act after `expires_at_ms`**. It acks an
@@ -161,6 +167,12 @@ Clean stop. Same effect as lease expiry (§5).
 An ack for an unknown or already resolved answer goes into
 `ack_refused` with reason `resolved` or `unknown`. The producer logs it
 and does nothing else.
+
+**Resolution notices.** An agent whose request resolved `uncertain` or
+with a `rejected`/`failed` ack stays 15 s without a request after the
+producer stops listing it, so clients can show the message on its card.
+
+Long-polls share the hook socket's 128-connection cap.
 
 ## 5. Lease
 

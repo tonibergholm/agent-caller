@@ -104,10 +104,11 @@ where
                     machine.name, machine.id, epoch
                 );
                 println!(
-                    "sources: hooks={:?} herdr={:?} t3={:?}",
+                    "sources: hooks={:?} herdr={:?} t3={:?} external={}",
                     machine.sources.hooks.state,
                     machine.sources.herdr.state,
-                    machine.sources.t3.state
+                    machine.sources.t3.state,
+                    machine.sources.external
                 );
                 for (name, source) in [
                     ("hooks", &machine.sources.hooks),

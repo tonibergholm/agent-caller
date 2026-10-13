@@ -19,7 +19,7 @@ config and the `acd/1` protocol may change without a major version bump.
   `message` on `request.resolved`, and `confirm` on request options. A
   client shows the message on the resolved card. The Mac app, iOS and the
   Omarchy plugin ask for a second tap before sending a `confirm` option, name
-  an external producer by its agent title and take typed answers for it.
+  an external producer by its agent title and take typed answers for it. Voice never sends a `confirm` option on a countdown alone. `acd status` shows `external=true`.
 
 ### Changed
 

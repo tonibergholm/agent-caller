@@ -29,6 +29,7 @@ subtle.workspace = true
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
+acd-client.workspace = true
 acd-adapters = { path = ".", features = ["testing"] }
 acd-core = { workspace = true, features = ["testing"] }
 tempfile.workspace = true

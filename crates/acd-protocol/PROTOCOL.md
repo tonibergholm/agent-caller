@@ -482,6 +482,12 @@ directory, every ancestor owned by root or the user and not writable by
 others (unless sticky), the directory owned by the user with mode 0700, and
 the socket not a symlink, owned by the user, mode 0600.
 
+**Trust.** The producer id is not authenticated: any holder of the hook
+token can act as any producer (the same-user trust boundary of
+`hook.sock`). A producer must not treat an acd ack, an answer or the
+absence of a refusal as authority for an irreversible action; it decides
+from its own durable record.
+
 **Identity.**
 
 | Name | Grammar |
@@ -496,7 +502,7 @@ card's meaning, so a new occurrence is a new key. Tombstones live in
 memory, the most recent 4096 per producer, and are lost on a daemon
 restart; the producer's own record of resolved occurrences is the authority
 and it never lists a key it has recorded as resolved. A producer that lost
-its lease keeps its tombstones; at most 64 such producers are remembered.
+its lease keeps its tombstones; at most 16 such producers are remembered.
 
 **`PUT /external/v1/producers/{pid}/state`** is the heartbeat, upsert, ack
 and fetch in one call.
@@ -518,20 +524,26 @@ Answer   {answer_id, key, revision, option_id|null, text|null, expires_at_ms}
   Byte limits: title 200, detail 4000, option label 80, option description
   200, question text 1000, question header 200, `agent.title` 200,
   `agent.project` 200, `agent.cwd` 1024, ack message 500, body 256 KiB.
-  Text holds no control characters other than newline and tab.
+  Text holds no control characters other than newline and tab and no bidi
+  override or line/paragraph separator (the typed-answer rule).
 - **All or nothing.** The whole body is validated first. A violation
   (including a duplicate `key`, `agent_key` or option id in one body, an
   item `key` already open under another `agent_key`, a body that is not
   valid JSON or is truncated, or a ninth live producer) answers 422 with
   `{"error": "<field and rule>"}` and changes nothing: no lease renewal, no
-  acks, no diff. The error never repeats the input text.
+  acks, no diff. The error never repeats the input text. A 422 still runs the time-driven
+  sweep (lease and answer expiry) that every call starts with; it never
+  renews a lease, applies an ack or runs the diff.
 - **Order**, under one registry lock: renew the lease; apply `acks`; upsert
   `items` (an item whose key is tombstoned goes to `refused` and is
   skipped, the others still apply); then the diff. A request of this
   producer that is not in `items` and was not refused is gone from the
   producer's side: open resolves `by: "agent"`, answering with no ack in
   this call resolves `by: "uncertain"`. An agent with no remaining item is
-  removed.
+  removed, except one whose request just resolved `uncertain` or with a
+  `rejected`/`failed` ack: it stays for 15 s with no request, so a client
+  can show the resolution message on its card, and is then removed. A new
+  item for the same `agent_key` ends the wait.
 - Each item becomes a `kind: "question"` request with one single-select
   question, `effect: "choose"` options and `answer_path: "external"`. With
   no options and `free_text: false` the path is `none` and the request is
@@ -542,14 +554,18 @@ Answer   {answer_id, key, revision, option_id|null, text|null, expires_at_ms}
 
 **`GET /external/v1/producers/{pid}/answers?wait_ms=N`** long-polls for
 answers, `N <= 25000`, and returns `{answers}` without renewing the lease.
-A producer may use `PUT` alone.
+A producer may use `PUT` alone. A long-poll holds one connection; the
+hook socket shares its 128-connection cap with the hook routes.
 
 **`DELETE /external/v1/producers/{pid}`** ends the lease at once (204).
 
 **Answers.** When a client answers, the request moves to `answering` and
 the answer is queued with an `answer_id`, the request revision and
-`expires_at_ms = answered_at + answer_timeout_ms`. It is offered on every
-call until acked or expired. The producer dedupes by `answer_id`, records
+`expires_at_ms`, the wall-clock deadline in epoch milliseconds. acd counts
+the window on a monotonic clock and stamps each offer with the wall clock
+now plus the time left, so a system sleep does not shift the deadline a
+producer sees. The window is `answer_timeout_ms` from the moment of the
+answer. It is offered on every call until acked or expired. The producer dedupes by `answer_id`, records
 the answer durably before acting and must not act after `expires_at_ms`;
 it acks an expired answer `failed`. An answer to a producer without a live
 lease fails with `source_unavailable` and the request stays open.

@@ -25,7 +25,10 @@ pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ExternalConfig {
+    /// Monotonic: leases and answer deadlines run on it.
     pub clock: Clock,
+    /// Wall clock: only the `expires_at_ms` a producer sees is stamped from it.
+    pub wall: Clock,
     /// How often leases and answer deadlines are checked between calls.
     pub tick: Duration,
 }
@@ -33,14 +36,19 @@ pub struct ExternalConfig {
 impl Default for ExternalConfig {
     fn default() -> Self {
         let start = Instant::now();
-        let base = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as i64);
+        let base = wall_ms();
         Self {
             clock: Arc::new(move || base + start.elapsed().as_millis() as i64),
+            wall: Arc::new(wall_ms),
             tick: Duration::from_secs(1),
         }
     }
+}
+
+fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 pub struct ExternalAdapter {
@@ -90,28 +98,28 @@ impl ExternalAdapter {
     }
 
     /// Runs `f` on the producer state inside one registry transaction.
-    fn run<R>(&self, f: impl FnOnce(&mut State, &mut Txn<'_>, i64) -> R) -> Option<R> {
+    fn run<R>(&self, f: impl FnOnce(&mut State, &mut Txn<'_>, i64, i64) -> R) -> Option<R> {
         let core = self.core()?;
-        let now = self.now_ms();
+        let (now, wall) = (self.now_ms(), (self.cfg.wall)());
         let mut state = self.state.lock().expect("external state");
-        Some(core.transact(|txn| f(&mut state, txn, now)))
+        Some(core.transact(|txn| f(&mut state, txn, now, wall)))
     }
 
     /// Ends expired leases and answers now, rather than at the next call.
     pub fn sweep(&self) {
-        self.run(|state, txn, now| state.sweep(now, txn));
+        self.run(|state, txn, now, _| state.sweep(now, txn));
     }
 
     pub(crate) fn put(&self, pid: &str, body: PutBody) -> Result<PutResponse, PutError> {
         let outcome = self
-            .run(|state, txn, now| state.put(pid, body, now, txn))
+            .run(|state, txn, now, wall| state.put(pid, body, now, wall, txn))
             .ok_or(PutError::Stopped)?;
         self.arrived.notify_waiters();
         outcome.map_err(PutError::Invalid)
     }
 
     pub(crate) fn delete(&self, pid: &str) -> bool {
-        self.run(|state, txn, now| state.delete(pid, now, txn))
+        self.run(|state, txn, now, _| state.delete(pid, now, txn))
             .is_some()
     }
 
@@ -121,7 +129,7 @@ impl ExternalAdapter {
             let notified = self.arrived.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let answers = self.run(|state, txn, now| state.answers(pid, now, txn))?;
+            let answers = self.run(|state, txn, now, wall| state.answers(pid, now, wall, txn))?;
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
             if !answers.is_empty() || left.is_zero() {
                 return Some(answers);

@@ -5,7 +5,7 @@
 //! label, answer or ack message must never reach a log (§8).
 use std::collections::HashSet;
 
-use acd_core::has_forbidden_control;
+use acd_protocol::text::has_forbidden_chars;
 use serde::{Deserialize, Serialize};
 
 pub const LEASE_MIN_MS: u64 = 30_000;
@@ -163,8 +163,10 @@ fn text(field: &str, value: &str, max: usize) -> Result<(), Invalid> {
     if value.len() > max {
         return invalid(format!("{field}: longer than {max} bytes"));
     }
-    if has_forbidden_control(value) {
-        return invalid(format!("{field}: holds a control character"));
+    if has_forbidden_chars(value) {
+        return invalid(format!(
+            "{field}: holds a control, bidi or separator character"
+        ));
     }
     Ok(())
 }

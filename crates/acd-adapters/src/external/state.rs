@@ -18,9 +18,17 @@ use crate::ids;
 
 const MAX_LIVE_PRODUCERS: usize = 8;
 const TOMBSTONE_CAP: usize = 4096;
+/// How long an agent whose request ended `uncertain`, or with a producer
+/// message, stays on screen after the producer stopped listing it. The
+/// client shows the resolution notice on that card for 10 s
+/// (`acd_client::Timing::notice_ttl`); without this the card would vanish
+/// in the same batch as the notice. The agent stays `needs_you` with no
+/// request, so it is read-only.
+const LINGER_MS: i64 = 15_000;
+
 /// Producers that lost their lease and still hold tombstones. Past this the
 /// longest idle one is forgotten.
-const MAX_DORMANT: usize = 64;
+const MAX_DORMANT: usize = 16;
 
 pub fn agent_id(pid: &str, agent_key: &str) -> String {
     ids::bounded("external:", &format!("{pid}:{agent_key}"))
@@ -75,14 +83,14 @@ struct Queued {
 }
 
 impl Queued {
-    fn out(&self) -> AnswerOut {
+    fn out(&self, expires_at_ms: i64) -> AnswerOut {
         AnswerOut {
             answer_id: self.answer_id.clone(),
             key: self.key.clone(),
             revision: self.revision,
             option_id: self.option_id.clone(),
             text: self.text.clone(),
-            expires_at_ms: self.expires_at_ms,
+            expires_at_ms,
         }
     }
 }
@@ -93,6 +101,8 @@ struct Producer {
     answer_timeout_ms: u64,
     last_active_ms: i64,
     agents: HashSet<String>,
+    /// Agents kept past their last item, with the time they go.
+    lingering: HashMap<String, i64>,
     tracked: HashMap<String, Tracked>,
     tombstones: Bounded,
     queued: Vec<Queued>,
@@ -107,6 +117,7 @@ impl Producer {
             answer_timeout_ms: 0,
             last_active_ms: 0,
             agents: HashSet::new(),
+            lingering: HashMap::new(),
             tracked: HashMap::new(),
             tombstones: Bounded::new(TOMBSTONE_CAP),
             queued: Vec::new(),
@@ -153,6 +164,9 @@ impl Producer {
             .map(|q| (q.key.clone(), q.request_id.clone()))
             .collect();
         for (key, request_id) in expired {
+            if let Some(agent_key) = self.tracked.get(&key).map(|t| t.agent_key.clone()) {
+                self.linger(&agent_key, now);
+            }
             if txn.request(&request_id).is_some() {
                 txn.apply(Observation::RequestEndedById {
                     request_id,
@@ -177,15 +191,24 @@ impl Producer {
         for q in self.queued.drain(..) {
             self.finished.insert(&q.answer_id);
         }
+        self.lingering.clear();
         self.live = false;
         tracing::info!(producer = pid, "external producer lease ended");
     }
 
-    fn pending_answers(&self, now: i64) -> Vec<AnswerOut> {
+    fn linger(&mut self, agent_key: &str, now: i64) {
+        self.lingering
+            .insert(agent_key.to_owned(), now.saturating_add(LINGER_MS));
+    }
+
+    /// The wire deadline is the wall clock plus the time left on the
+    /// monotonic clock, so a sleep between queueing and offering cannot
+    /// move it.
+    fn pending_answers(&self, now: i64, wall: i64) -> Vec<AnswerOut> {
         self.queued
             .iter()
             .filter(|q| q.expires_at_ms > now)
-            .map(Queued::out)
+            .map(|q| Queued::out(q, wall.saturating_add(q.expires_at_ms - now)))
             .collect()
     }
 }
@@ -266,6 +289,20 @@ impl State {
             if p.live && p.lease_expires_at_ms <= now {
                 p.expire_lease(pid, txn);
             }
+            let over: Vec<String> = p
+                .lingering
+                .iter()
+                .filter(|(_, until)| **until <= now)
+                .map(|(a, _)| a.clone())
+                .collect();
+            for agent_key in over {
+                p.lingering.remove(&agent_key);
+                if p.agents.remove(&agent_key) {
+                    txn.apply(Observation::AgentGone {
+                        agent_id: agent_id(pid, &agent_key),
+                    });
+                }
+            }
         }
         let dormant = self.producers.values().filter(|p| !p.live).count();
         for _ in MAX_DORMANT..dormant {
@@ -290,12 +327,12 @@ impl State {
         }
     }
 
-    pub fn answers(&mut self, pid: &str, now: i64, txn: &mut Txn<'_>) -> Vec<AnswerOut> {
+    pub fn answers(&mut self, pid: &str, now: i64, wall: i64, txn: &mut Txn<'_>) -> Vec<AnswerOut> {
         self.sweep(now, txn);
         self.producers
             .get(pid)
             .filter(|p| p.live)
-            .map(|p| p.pending_answers(now))
+            .map(|p| p.pending_answers(now, wall))
             .unwrap_or_default()
     }
 
@@ -331,6 +368,7 @@ impl State {
         pid: &str,
         body: PutBody,
         now: i64,
+        wall: i64,
         txn: &mut Txn<'_>,
     ) -> Result<PutResponse, Invalid> {
         self.sweep(now, txn);
@@ -347,9 +385,9 @@ impl State {
         p.answer_timeout_ms = body.answer_timeout_ms();
         p.last_active_ms = now;
 
-        let ack_refused = apply_acks(pid, p, body.acks, txn);
-        let refused = upsert_items(pid, p, &body.items, txn);
-        let answers = p.pending_answers(now);
+        let ack_refused = apply_acks(pid, p, body.acks, now, txn);
+        let refused = upsert_items(pid, p, &body.items, now, txn);
+        let answers = p.pending_answers(now, wall);
         Ok(PutResponse {
             answers,
             refused,
@@ -403,7 +441,13 @@ pub enum QueueError {
     Unavailable,
 }
 
-fn apply_acks(pid: &str, p: &mut Producer, acks: Vec<Ack>, txn: &mut Txn<'_>) -> Vec<AckRefused> {
+fn apply_acks(
+    pid: &str,
+    p: &mut Producer,
+    acks: Vec<Ack>,
+    now: i64,
+    txn: &mut Txn<'_>,
+) -> Vec<AckRefused> {
     let mut refused = Vec::new();
     for ack in acks {
         let Some(pos) = p.queued.iter().position(|q| q.answer_id == ack.answer_id) else {
@@ -448,13 +492,24 @@ fn apply_acks(pid: &str, p: &mut Producer, acks: Vec<Ack>, txn: &mut Txn<'_>) ->
             },
         };
         txn.apply(observation);
+        if ack.outcome != Outcome::Applied
+            && let Some(agent_key) = p.tracked.get(&q.key).map(|t| t.agent_key.clone())
+        {
+            p.linger(&agent_key, now);
+        }
         p.finish(&q.key);
         tracing::info!(producer = pid, key = %q.key, "external ack applied");
     }
     refused
 }
 
-fn upsert_items(pid: &str, p: &mut Producer, items: &[Item], txn: &mut Txn<'_>) -> Vec<Refused> {
+fn upsert_items(
+    pid: &str,
+    p: &mut Producer,
+    items: &[Item],
+    now: i64,
+    txn: &mut Txn<'_>,
+) -> Vec<Refused> {
     let mut refused = Vec::new();
     let mut present: HashSet<&str> = HashSet::new();
     let mut accepted: HashSet<&str> = HashSet::new();
@@ -483,6 +538,7 @@ fn upsert_items(pid: &str, p: &mut Producer, items: &[Item], txn: &mut Txn<'_>) 
             p.finish(&old_key);
         }
         p.agents.insert(item.agent_key.clone());
+        p.lingering.remove(&item.agent_key);
         txn.apply(Observation::AgentUpsert(agent_obs(pid, item, &id)));
         txn.apply(Observation::RequestSeen(request_obs(item, &id)));
         match txn.request_id_for(&id, &CorrelationKey(item.key.clone())) {
@@ -523,13 +579,16 @@ fn upsert_items(pid: &str, p: &mut Producer, items: &[Item], txn: &mut Txn<'_>) 
                 request_id,
                 by: ResolvedBy::Uncertain,
             });
+            if let Some(agent_key) = p.tracked.get(&key).map(|t| t.agent_key.clone()) {
+                p.linger(&agent_key, now);
+            }
         }
         p.finish(&key);
     }
     let stale: Vec<String> = p
         .agents
         .iter()
-        .filter(|a| !accepted.contains(a.as_str()))
+        .filter(|a| !accepted.contains(a.as_str()) && !p.lingering.contains_key(a.as_str()))
         .cloned()
         .collect();
     for agent_key in stale {
