@@ -18,6 +18,8 @@ final class SystemEvents {
             // with it), not free to open a new session.
             Bridge.shared.emitSystem(code)
             Sessions.shared.cancelAll()
+            // Spec §6.3: model work is discarded on lock and sleep too.
+            ModelRequests.shared.cancelAll()
         }
         let workspace = NSWorkspace.shared.notificationCenter
         tokens.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
