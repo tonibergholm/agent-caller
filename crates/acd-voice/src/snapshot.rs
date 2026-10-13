@@ -150,6 +150,15 @@ impl fmt::Debug for CardSnap {
     }
 }
 
+/// A machine the inbox knows, with or without cards. Alerts baseline a
+/// machine the first time it is seen online (plan V14).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineSnap {
+    pub key: String,
+    /// Connected and its snapshot applied (`MachineStatus::Online`).
+    pub online: bool,
+}
+
 /// Everything voice reads, frozen when recording starts (spec §4.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
@@ -159,6 +168,9 @@ pub struct Snapshot {
     pub panel_open: bool,
     pub show_subagents: bool,
     pub cards: Vec<CardSnap>,
+    /// Every machine, whether or not it has cards. Empty in fixtures that do
+    /// not care: alerts then treat every machine as already known.
+    pub machines: Vec<MachineSnap>,
 }
 
 /// Why a card can never be a target (spec §5.2).
@@ -336,6 +348,7 @@ pub mod fixtures {
             panel_open: true,
             show_subagents: false,
             cards,
+            machines: Vec::new(),
         }
     }
 

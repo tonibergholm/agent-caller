@@ -1,7 +1,8 @@
 //! acd-client's stamped view, frozen into an acd-voice snapshot (spec §4.3).
 use acd_client::view::{CardGroup, CardView};
 use acd_client::voice::{ConnStamp as ClientStamp, StampedView};
-use acd_voice::snapshot::{CardSnap, ConnStamp, Group, OptionSnap, Presentation, RequestSnap, Snapshot};
+use acd_client::conn::MachineStatus;
+use acd_voice::snapshot::{CardSnap, ConnStamp, Group, MachineSnap, OptionSnap, Presentation, RequestSnap, Snapshot};
 
 /// The cards and their stamps come from one rebuild (D5).
 pub fn freeze(stamped: &StampedView, presentation: Presentation, panel_open: bool) -> Snapshot {
@@ -13,7 +14,13 @@ pub fn freeze(stamped: &StampedView, presentation: Presentation, panel_open: boo
         .map(|c| card(c, stamp(&c.machine_key), false))
         .collect();
     cards.extend(stamped.hidden_idle_cards.iter().map(|c| card(c, stamp(&c.machine_key), true)));
-    Snapshot { presentation, panel_open, show_subagents: stamped.view.show_subagents, cards }
+    let machines = stamped
+        .view
+        .machines
+        .iter()
+        .map(|m| MachineSnap { key: m.key.clone(), online: matches!(m.status, MachineStatus::Online) })
+        .collect();
+    Snapshot { presentation, panel_open, show_subagents: stamped.view.show_subagents, cards, machines }
 }
 
 pub(crate) fn convert(s: ClientStamp) -> ConnStamp {
@@ -147,6 +154,31 @@ mod tests {
         assert!(r.answerable && r.free_text);
         assert!(r.options[0].selectable);
         assert_eq!((r.options[1].effect, r.options[1].selectable), (Effect::Unknown, false));
+    }
+
+    /// Alerts baseline a machine the first time it is online (plan V14), so
+    /// every machine reaches the snapshot, with or without cards.
+    #[test]
+    fn every_machine_is_frozen_with_its_online_state() {
+        use acd_client::conn::MachineStatus;
+        use acd_client::view::MachineView;
+        let machine = |key: &str, status: MachineStatus| MachineView {
+            key: key.into(),
+            name: key.into(),
+            machine_id: None,
+            status,
+            is_local: false,
+            duplicate_of: None,
+        };
+        let mut s = stamped(vec![question_card()], vec![], HashMap::new());
+        s.view.machines = vec![
+            machine("m1", MachineStatus::Online),
+            machine("quiet", MachineStatus::Online),
+            machine("away", MachineStatus::Offline { since_ms: 1.0, error: "x".into() }),
+        ];
+        let frozen = freeze(&s, Presentation::default(), false);
+        let seen: Vec<(&str, bool)> = frozen.machines.iter().map(|m| (m.key.as_str(), m.online)).collect();
+        assert_eq!(seen, [("m1", true), ("quiet", true), ("away", false)]);
     }
 
     #[test]

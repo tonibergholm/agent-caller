@@ -107,6 +107,11 @@ pub enum Due {
 pub struct Alerts {
     /// `None` until the baseline is taken.
     seen: Option<HashSet<(String, String)>>,
+    /// Machines already seen online. A machine seen online for the first time
+    /// (it connects after the baseline) has its waiting requests taken as its
+    /// baseline; a reconnect does not, so what arrived while it was away is
+    /// still news.
+    known: HashSet<String>,
     queue: Vec<(String, String)>,
     last: Option<Instant>,
 }
@@ -122,8 +127,18 @@ impl Alerts {
         let now = waiting(s);
         let Some(seen) = &mut self.seen else {
             self.seen = Some(now.into_iter().collect());
+            self.known = s.machines.iter().filter(|m| m.online).map(|m| m.key.clone()).collect();
             return;
         };
+        for m in s.machines.iter().filter(|m| m.online) {
+            if self.known.insert(m.key.clone()) {
+                for c in s.cards.iter().filter(|c| c.machine_key == m.key) {
+                    if let Some(r) = &c.pending {
+                        seen.insert((c.key.clone(), r.id.clone()));
+                    }
+                }
+            }
+        }
         let eligible = keys(s);
         for key in &now {
             // Remembered either way; queued only if an alert may name it now.
@@ -214,6 +229,7 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::MachineSnap;
     use crate::snapshot::fixtures::*;
     use acd_protocol::AgentRole;
 
@@ -356,6 +372,56 @@ mod tests {
         assert_eq!(alerted(&s), ["k1/a"]);
         s.presentation.machine_filter = Some("Minos".into());
         assert!(alerted(&s).is_empty());
+    }
+
+    fn with_machines(mut s: Snapshot, machines: &[(&str, bool)]) -> Snapshot {
+        s.machines = machines.iter().map(|(k, online)| MachineSnap { key: (*k).into(), online: *online }).collect();
+        s
+    }
+
+    /// Review: at app start a remote machine connects after alerts were
+    /// turned on. What it was already waiting on is its baseline, not news.
+    #[test]
+    fn a_machine_connecting_after_the_baseline_announces_nothing_old() {
+        let t0 = Instant::now();
+        let mut a = Alerts::default();
+        a.observe(&with_machines(snapshot(vec![]), &[("local", true), ("remote", false)]));
+        let connected = with_machines(
+            snapshot(vec![pending("remote", "a"), pending("remote", "b")]),
+            &[("local", true), ("remote", true)],
+        );
+        a.observe(&connected);
+        assert_eq!(a.due(&connected, t0, false), Due::Nothing, "its first snapshot is its baseline");
+        let news = with_machines(
+            snapshot(vec![pending("remote", "a"), pending("remote", "b"), pending("remote", "c")]),
+            &[("local", true), ("remote", true)],
+        );
+        a.observe(&news);
+        assert!(matches!(a.due(&news, t0 + ALERT_GAP, false), Due::Speak(_)), "a request after that is news");
+    }
+
+    /// A quiet machine that was already connected: its first request is news.
+    #[test]
+    fn the_first_request_on_a_connected_quiet_machine_is_announced() {
+        let t0 = Instant::now();
+        let mut a = Alerts::default();
+        a.observe(&with_machines(snapshot(vec![]), &[("quiet", true)]));
+        let s = with_machines(snapshot(vec![pending("quiet", "a")]), &[("quiet", true)]);
+        a.observe(&s);
+        assert!(matches!(a.due(&s, t0, false), Due::Speak(_)));
+    }
+
+    /// A reconnect does not re-baseline: a request that arrived while the
+    /// machine was away is announced when it is back.
+    #[test]
+    fn a_request_that_arrived_during_a_disconnect_is_announced_on_reconnect() {
+        let t0 = Instant::now();
+        let mut a = Alerts::default();
+        a.observe(&with_machines(snapshot(vec![pending("m", "a")]), &[("m", true)]));
+        a.observe(&with_machines(snapshot(vec![]), &[("m", false)]));
+        let back = with_machines(snapshot(vec![pending("m", "a"), pending("m", "new")]), &[("m", true)]);
+        a.observe(&back);
+        assert_eq!(a.due(&back, t0, false), Due::Speak(VoiceText::new("m Claude needs you: bash approval")));
     }
 
     fn alerted(s: &Snapshot) -> Vec<&str> {
