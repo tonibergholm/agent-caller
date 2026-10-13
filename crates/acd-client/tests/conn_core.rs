@@ -130,10 +130,11 @@ async fn offline_then_online_when_the_daemon_appears() {
         matches!(s.status, MachineStatus::Offline { .. })
     })
     .await;
-    let MachineStatus::Offline { since_ms, .. } = s.status else {
+    let MachineStatus::Offline { since_ms, error } = s.status else {
         unreachable!()
     };
     assert!(since_ms > 0.0);
+    assert!(error.contains("Is acd running"), "{error}");
     let l = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap();

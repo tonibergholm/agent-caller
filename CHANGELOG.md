@@ -12,7 +12,8 @@ config and the `acd/1` protocol may change without a major version bump.
 - A machine that refuses the connection, times out, or cannot be reached now
   says so in plain words ("connection refused. Is acd running on that
   machine?", "cannot reach that machine. Is Tailscale on?") instead of the
-  raw system error.
+  raw system error. A stopped local daemon reads "acd is not running on this
+  machine".
 - Adding a machine from the clipboard clears the clipboard once the machine
   is saved, on the Mac app and on iOS. The pairing line carries the client
   token.

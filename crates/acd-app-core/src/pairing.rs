@@ -25,6 +25,20 @@ pub fn import_text(
         .ok_or_else(|| "Could not list saved machines".to_owned())
 }
 
+/// Like [`import_text`], and clears the clipboard through `clear` once the
+/// machine is saved. The pairing line carries the client token, so nothing
+/// else needs it afterwards. A failed import leaves the line for another try.
+pub fn import_and_clear(
+    inbox: &Arc<Inbox>,
+    runtime: &Handle,
+    clip: Option<String>,
+    clear: impl FnOnce(),
+) -> Result<MachineEntryView, String> {
+    let imported = import_text(inbox, runtime, clip)?;
+    clear();
+    Ok(imported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +106,27 @@ mod tests {
         .unwrap_err();
         assert!(refused.contains("Tailscale"), "{refused}");
         assert!(inbox.machines().is_empty());
+    }
+
+    #[test]
+    fn the_clipboard_is_cleared_after_a_saved_machine_and_kept_after_a_failure() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let inbox = inbox(&runtime);
+        let pin = acd_protocol::pairing::spki_pin(b"test certificate");
+        let mut cleared = 0;
+        import_and_clear(
+            &inbox,
+            runtime.handle(),
+            Some(format!("acd://example.test:47800?pin={pin}#{TOKEN}")),
+            || cleared += 1,
+        )
+        .expect("valid pairing imports");
+        assert_eq!(cleared, 1);
+        let failed = import_and_clear(&inbox, runtime.handle(), Some("hello #tok".into()), || {
+            cleared += 1
+        });
+        assert!(failed.is_err());
+        assert_eq!(cleared, 1, "a failed import must leave the clipboard");
     }
 
     #[test]

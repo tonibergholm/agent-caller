@@ -129,6 +129,10 @@ Historical flakes and environment caveats (not reproduced in this audit):
 ## Mac app
 
 - Optional `tailscale whois` node validation hardening.
+- Clearing the clipboard after pairing (0.8.1) is not yet checked on a
+  device. With Universal Clipboard the line may remain on the Mac it was
+  copied from. A Keychain prompt during import leaves a window in which a
+  newer clipboard value would be cleared as well.
 - Ad-hoc signed rebuilds can prompt for Keychain access. `just app-install`
   supports `APPLE_SIGNING_IDENTITY` for a stable identity; signing and
   distribution are not automated releases.

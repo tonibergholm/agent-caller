@@ -482,9 +482,9 @@ test("a denied Input Monitoring says how to clear a grant from another build", a
 });
 
 test("a granted Input Monitoring shows no reset hint", async () => {
-  const api = fakeApi({ voice: on, status: { ...STATUS_OK, hold_key_active: true } });
+  const api = fakeApi({ voice: on, status: { ...STATUS_OK, input_monitoring: "not_determined", hold_key_active: false } });
   render(Settings, { api });
-  await screen.findByRole("combobox", { name: "Hold key" });
+  expect(await screen.findByText("The hold key needs Input Monitoring.")).toBeTruthy();
   expect(screen.queryByText(/grant then belongs to another build/)).toBeNull();
 });
 

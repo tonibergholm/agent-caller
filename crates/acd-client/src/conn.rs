@@ -158,7 +158,7 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
             Endpoint::Local { config_dir } => {
                 let stream = tokio::net::UnixStream::connect(local::socket_path(config_dir))
                     .await
-                    .map_err(|e| End::Offline(e.to_string()))?;
+                    .map_err(|e| End::Offline(local_reason(&e)))?;
                 let (ws, _) = tokio_tungstenite::client_async(
                     "ws://localhost/",
                     Box::new(stream) as Box<dyn Io>,
@@ -242,6 +242,15 @@ fn connect_reason(e: &std::io::Error) -> String {
         HostUnreachable | NetworkUnreachable => {
             "cannot reach that machine. Is Tailscale on?".into()
         }
+        _ => e.to_string(),
+    }
+}
+
+/// The local socket is missing or dead when the daemon is not running.
+fn local_reason(e: &std::io::Error) -> String {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        NotFound | ConnectionRefused => "acd is not running on this machine".into(),
         _ => e.to_string(),
     }
 }
@@ -750,7 +759,7 @@ pub fn spawn_machine(cfg: MachineConfig) -> MachineHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::connect_reason;
+    use super::{connect_reason, local_reason};
     use std::io::{Error, ErrorKind};
 
     #[test]
@@ -767,5 +776,18 @@ mod tests {
             connect_reason(&Error::other("boom")),
             "boom"
         );
+    }
+
+    #[test]
+    fn a_missing_local_socket_says_acd_is_not_running() {
+        assert_eq!(
+            local_reason(&Error::from(ErrorKind::NotFound)),
+            "acd is not running on this machine"
+        );
+        assert_eq!(
+            local_reason(&Error::from(ErrorKind::ConnectionRefused)),
+            "acd is not running on this machine"
+        );
+        assert_eq!(local_reason(&Error::other("boom")), "boom");
     }
 }
