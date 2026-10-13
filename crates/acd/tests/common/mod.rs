@@ -165,8 +165,18 @@ pub fn ready(dir: &Path) -> bool {
 }
 
 fn hook_request(path: &str, token: &str, headers: &[(&str, &str)], body: &str) -> String {
+    method_request("POST", path, token, headers, body)
+}
+
+fn method_request(
+    method: &str,
+    path: &str,
+    token: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> String {
     let mut req = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nX-Acd-Token: {token}\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nX-Acd-Token: {token}\r\n",
         body.len()
     );
     for (k, v) in headers {
@@ -232,6 +242,26 @@ pub fn post_hook_unix(
     let s = std::os::unix::net::UnixStream::connect(sock).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     hook_exchange(s, &hook_request(path, token, headers, body))
+}
+
+/// Any method to the daemon's loopback hook endpoint.
+pub fn call_hook(port: u16, method: &str, path: &str, token: &str, body: &str) -> (u16, String) {
+    let s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    hook_exchange(s, &method_request(method, path, token, &[], body))
+}
+
+/// Any method to the daemon's `hook.sock`.
+pub fn call_hook_unix(
+    sock: &Path,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: &str,
+) -> (u16, String) {
+    let s = std::os::unix::net::UnixStream::connect(sock).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    hook_exchange(s, &method_request(method, path, token, &[], body))
 }
 
 /// The current hook token from the store (Task 21 layout).
