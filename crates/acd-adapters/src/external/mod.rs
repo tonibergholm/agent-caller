@@ -56,6 +56,8 @@ pub struct ExternalAdapter {
     state: Mutex<State>,
     core: Mutex<Weak<Core>>,
     arrived: Notify,
+    /// Producers with a long-poll in flight: a second poll does not wait.
+    polling: Mutex<std::collections::HashSet<String>>,
 }
 
 impl ExternalAdapter {
@@ -65,6 +67,7 @@ impl ExternalAdapter {
             state: Mutex::new(State::default()),
             core: Mutex::new(Weak::new()),
             arrived: Notify::new(),
+            polling: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -124,6 +127,14 @@ impl ExternalAdapter {
     }
 
     pub(crate) async fn answers(&self, pid: &str, wait: Duration) -> Option<Vec<AnswerOut>> {
+        // One in-flight long-poll per producer; the guard frees the slot on
+        // every exit, including the future being dropped.
+        let _slot = PollSlot::take(&self.polling, pid);
+        let wait = if _slot.is_some() {
+            wait
+        } else {
+            Duration::ZERO
+        };
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             let notified = self.arrived.notified();
@@ -139,6 +150,29 @@ impl ExternalAdapter {
                 () = tokio::time::sleep(left.min(self.cfg.tick)) => {}
             }
         }
+    }
+}
+
+struct PollSlot<'a> {
+    set: &'a Mutex<std::collections::HashSet<String>>,
+    pid: String,
+}
+
+impl<'a> PollSlot<'a> {
+    fn take(set: &'a Mutex<std::collections::HashSet<String>>, pid: &str) -> Option<Self> {
+        set.lock()
+            .expect("polling")
+            .insert(pid.to_owned())
+            .then(|| PollSlot {
+                set,
+                pid: pid.to_owned(),
+            })
+    }
+}
+
+impl Drop for PollSlot<'_> {
+    fn drop(&mut self) {
+        self.set.lock().expect("polling").remove(&self.pid);
     }
 }
 

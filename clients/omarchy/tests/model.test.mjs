@@ -537,3 +537,18 @@ test("typing in a text field disarms an armed option", () => {
   assert.equal(typed.state.armed, null);
   assert.equal(M.onKey(cards, typed.state, key("2", { at: 1200 })).effect.kind, "none");
 });
+
+test("a held key neither arms nor confirms an option", () => {
+  const cards = [externalCard()];
+  const fresh = { selected: "m1/e", replyFor: null };
+  const held = M.onKey(cards, fresh, key("2", { at: 1000, repeat: true }));
+  assert.equal(held.effect.kind, "none");
+  assert.equal(held.state.armed ?? null, null);
+  const armed = M.onKey(cards, fresh, key("2", { at: 1000 })).state;
+  const repeat = M.onKey(cards, armed, key("2", { at: 1100, repeat: true }));
+  assert.equal(repeat.effect.kind, "none");
+  assert.deepEqual(repeat.state.armed, armed.armed);
+  assert.equal(M.onKey(cards, armed, key("2", { at: 1100 })).effect.kind, "pick");
+  assert.equal(M.fromQt(0x32, "2", 0, false, null, true).repeat, true);
+  assert.equal(M.fromQt(0x32, "2", 0, false, null).repeat, false);
+});

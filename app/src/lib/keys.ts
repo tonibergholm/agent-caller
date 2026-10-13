@@ -21,6 +21,8 @@ export type KeyInput = {
   keyCode: number;
   /** Event time in ms; absent means 0. */
   at?: number;
+  /** The key is held down and auto-repeating. */
+  repeat?: boolean;
   inField: boolean;
   /** Which text field has focus: the reply box, a card's typed-answer input, or the voice command field. */
   field?: { kind: "reply" | "answer" | "voice"; cardKey: string | null };
@@ -61,6 +63,7 @@ export function fromEvent(e: KeyboardEvent): KeyInput {
     composing: e.isComposing,
     keyCode: e.keyCode,
     at: Date.now(),
+    repeat: e.repeat,
     inField: target?.tagName === "TEXTAREA",
     field:
       kind === "reply" || kind === "answer" || kind === "voice"
@@ -146,6 +149,8 @@ export function onKey(
     if (!card.answerable || !pending) return idle;
     const option = pending.options[Number(key) - 1];
     if (!option || !card.selectable_options.includes(option.id)) return idle;
+    // A held key must neither arm nor confirm: only a fresh press counts.
+    if (option.confirm && ev.repeat) return { state: st, effect: NONE };
     const at = ev.at ?? 0;
     const second =
       st.armed?.cardKey === card.key &&

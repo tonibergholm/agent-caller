@@ -757,7 +757,10 @@ async fn a_request_the_registry_resolved_on_its_own_is_tombstoned_too() {
         1,
         "only the original resolution: no new request opened"
     );
-    assert!(rig.agent("alpha").is_none());
+    assert!(
+        rig.agent("alpha").is_some_and(|a| a.pending.is_none()),
+        "the card lingers for its notice, without a request"
+    );
 }
 
 #[tokio::test]
@@ -1505,4 +1508,93 @@ async fn a_lingering_card_outlives_delete_until_its_linger_ends() {
     rig.advance(1);
     rig.adapter.sweep();
     assert!(rig.agents().is_empty());
+}
+
+#[tokio::test]
+async fn a_request_resolved_elsewhere_keeps_its_card_through_the_stale_pass() {
+    let mut rig = rig().await;
+    rig.ok("sup", state(vec![item("k1", "a1", "alpha")])).await;
+    let request = rig.request("alpha");
+    rig.answer(&request, "abandon").await;
+    rig.core.observe(acd_core::Observation::RequestEndedById {
+        request_id: request.id,
+        by: ResolvedBy::Uncertain,
+    });
+    rig.ok("sup", state(vec![])).await;
+    assert!(
+        rig.agent("alpha").is_some(),
+        "the same call that noticed it must not drop the card"
+    );
+    assert_eq!(rig.resolved().len(), 1);
+    rig.advance(15_000);
+    rig.adapter.sweep();
+    assert!(rig.agents().is_empty());
+}
+
+#[tokio::test]
+async fn a_second_long_poll_for_the_same_producer_returns_at_once() {
+    let rig = rig().await;
+    rig.ok("sup", state(vec![item("k1", "a1", "alpha")])).await;
+    let sock = rig.sock.clone();
+    let first = tokio::spawn(async move {
+        http(
+            &sock,
+            "GET",
+            "/external/v1/producers/sup/answers?wait_ms=20000",
+            Some(TOKEN),
+            "",
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let started = std::time::Instant::now();
+    let (status, body) = rig.get_answers("sup", 20_000).await;
+    assert_eq!((status, &body["answers"]), (200, &json!([])));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!first.is_finished(), "the first poll keeps waiting");
+    let other = rig.get_answers("other", 200).await;
+    assert!(other.0 == 200, "another producer is unaffected");
+
+    first.abort();
+    let _ = first.await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let started = std::time::Instant::now();
+    rig.get_answers("sup", 300).await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "a cancelled poll freed the slot, so the next one waits again"
+    );
+}
+
+#[tokio::test]
+async fn a_finished_long_poll_frees_its_slot() {
+    let mut rig = rig().await;
+    rig.ok("sup", state(vec![item("k1", "a1", "alpha")])).await;
+    let request = rig.request("alpha");
+    let sock = rig.sock.clone();
+    let first = tokio::spawn(async move {
+        http(
+            &sock,
+            "GET",
+            "/external/v1/producers/sup/answers?wait_ms=20000",
+            Some(TOKEN),
+            "",
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    rig.answer(&request, "approve").await;
+    let (_, body) = first.await.unwrap();
+    let id = only_answer(&body)["answer_id"].as_str().unwrap().to_owned();
+    rig.ok("sup", with_acks(vec![], vec![ack(&id, "applied", None)])).await;
+    let started = std::time::Instant::now();
+    rig.get_answers("sup", 300).await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "the slot was freed"
+    );
 }

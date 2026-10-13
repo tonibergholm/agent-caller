@@ -347,7 +347,7 @@ export const QT = {
 };
 
 /** `field`: null, or {kind: "reply"|"answer"|"pairing", cardKey}. `composing`: the focused field's inputMethodComposing. */
-export function fromQt(key, text, modifiers, composing, field) {
+export function fromQt(key, text, modifiers, composing, field, repeat = false) {
   const name =
     key === QT.Key_Escape ? "Escape"
     : key === QT.Key_Return || key === QT.Key_Enter ? "Enter"
@@ -361,6 +361,7 @@ export function fromQt(key, text, modifiers, composing, field) {
     alt: (modifiers & QT.AltModifier) !== 0,
     meta: (modifiers & QT.MetaModifier) !== 0,
     at: Date.now(),
+    repeat: !!repeat,
     composing: !!composing,
     field: field ?? null,
   };
@@ -394,6 +395,8 @@ export function onKey(visible, st, ev) {
   if (/^[1-9]$/.test(k)) {
     const row = optionRows(card).find((r) => r.number === Number(k));
     if (!row) return { state: rest, effect: NONE };
+    // A held key must neither arm nor confirm: only a fresh press counts.
+    if (row.confirm && ev.repeat) return { state: st, effect: NONE };
     return pickOption(st, card, row.id, ev.at ?? 0);
   }
   if (k === "t" && card.free_text_answerable) return { state: rest, effect: { kind: "focusAnswer", cardKey: card.key } };

@@ -195,7 +195,7 @@ Item {
     // focus, and `composing` is that field's IME state (spec section 7).
     function keyEvent(event, field, composing, input) {
         message = "";
-        const r = Model.onKey(visibleCards, keyState, Model.fromQt(event.key, event.text, event.modifiers, composing, field));
+        const r = Model.onKey(visibleCards, keyState, Model.fromQt(event.key, event.text, event.modifiers, composing, field, event.isAutoRepeat === true));
         keyState = r.state;
         if (r.effect.kind !== "none") {
             run(r.effect, input);

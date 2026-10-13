@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import Panel from "./Panel.svelte";
 import { card, view, fakeApi } from "../lib/fixtures";
 import type { MachineView } from "../lib/bindings/MachineView";
@@ -765,4 +765,23 @@ test("an armed option disarms when the request changes", async () => {
   expect(screen.queryByRole("button", { name: /tap again/i })).toBeNull();
   await userEvent.keyboard("2");
   expect(api.calls).toEqual([]);
+});
+
+test("a second click after the window re-arms instead of sending", async () => {
+  vi.spyOn(globalThis, "setInterval").mockImplementation((() => 0) as unknown as typeof setInterval);
+  const clock = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+  try {
+    const api = fakeApi();
+    const c = destructive();
+    render(Panel, { view: view({ cards: [c] }), api });
+    await userEvent.click(screen.getByRole("button", { name: /abandon/i }));
+    clock.mockReturnValue(1_000_000 + 5_001);
+    await userEvent.click(screen.getByRole("button", { name: /tap again to abandon/i }));
+    expect(api.calls).toEqual([]);
+    clock.mockReturnValue(1_000_000 + 5_001 + 1_000);
+    await userEvent.click(screen.getByRole("button", { name: /tap again to abandon/i }));
+    expect(api.calls).toEqual([["pick", "m/e", c.agent.pending!.id, "abandon", 1]]);
+  } finally {
+    vi.restoreAllMocks();
+  }
 });

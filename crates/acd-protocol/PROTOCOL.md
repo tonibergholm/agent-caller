@@ -556,8 +556,10 @@ Answer   {answer_id, key, revision, option_id|null, text|null, expires_at_ms}
 
 **`GET /external/v1/producers/{pid}/answers?wait_ms=N`** long-polls for
 answers, `N <= 25000`, and returns `{answers}` without renewing the lease.
-A producer may use `PUT` alone. A long-poll holds one connection; the
-hook socket shares its 128-connection cap with the hook routes.
+A producer may use `PUT` alone. At most one long-poll is in flight per producer: a second
+`GET` for the same producer returns the current answers at once without
+waiting. A poll holds one connection of the hook socket's 128-connection
+cap, shared with the hook routes.
 
 **`DELETE /external/v1/producers/{pid}`** ends the lease at once (204).
 

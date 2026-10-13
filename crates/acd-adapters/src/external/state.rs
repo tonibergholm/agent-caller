@@ -144,7 +144,7 @@ impl Producer {
     /// Requests the registry resolved on its own (an abandoned delivery
     /// resolves `uncertain`) are tombstoned here, so a producer that still
     /// lists the key cannot open a second occurrence.
-    fn reconcile(&mut self, txn: &Txn<'_>) {
+    fn reconcile(&mut self, now: i64, txn: &Txn<'_>) {
         let resolved: Vec<String> = self
             .tracked
             .iter()
@@ -152,6 +152,10 @@ impl Producer {
             .map(|(k, _)| k.clone())
             .collect();
         for key in resolved {
+            // Its card carries the notice, so it must outlive the stale-agent pass.
+            if let Some(agent_key) = self.tracked.get(&key).map(|t| t.agent_key.clone()) {
+                self.linger(&agent_key, now);
+            }
             self.finish(&key);
         }
     }
@@ -291,7 +295,7 @@ impl State {
     /// resolved without us.
     pub fn sweep(&mut self, now: i64, txn: &mut Txn<'_>) {
         for (pid, p) in self.producers.iter_mut() {
-            p.reconcile(txn);
+            p.reconcile(now, txn);
             p.expire_answers(pid, now, txn);
             if p.live && p.lease_expires_at_ms <= now {
                 p.expire_lease(pid, txn);

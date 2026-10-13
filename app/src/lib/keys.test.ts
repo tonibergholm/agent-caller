@@ -148,6 +148,17 @@ describe("options that need a second tap", () => {
     expect(after.effect).toEqual({ kind: "none" });
   });
 
+  test("a held key neither arms nor confirms", () => {
+    const fresh = { selected: "m/e", replyFor: null };
+    const held = onKey(v, fresh, k("2", { at: 1000, repeat: true }));
+    expect(held.effect).toEqual({ kind: "none" });
+    expect(held.state.armed ?? null).toBeNull();
+    const second = onKey(v, armedState, k("2", { at: 1100, repeat: true }));
+    expect(second.effect).toEqual({ kind: "none" });
+    expect(second.state.armed).toEqual(armedState.armed);
+    expect(onKey(v, armedState, k("2", { at: 1100 })).effect.kind).toBe("pick");
+  });
+
   test("typing in a text field disarms", () => {
     const r = onKey(v, { ...armedState, replyFor: "m/e" }, k("x", { inField: true, at: 1100 }));
     expect(r.state.armed ?? null).toBeNull();

@@ -172,7 +172,8 @@ and does nothing else.
 with a `rejected`/`failed` ack stays 15 s without a request after the
 producer stops listing it, so clients can show the message on its card.
 
-Long-polls share the hook socket's 128-connection cap.
+One long-poll per producer waits at a time; a concurrent second returns at
+once. A poll holds one connection of the hook socket's 128-connection cap.
 
 ## 5. Lease
 

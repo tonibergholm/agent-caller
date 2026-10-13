@@ -257,6 +257,25 @@
           st = { ...st, selected: c.key, armed: { cardKey: c.key, requestId, revision, optionId, at: Date.now() } };
         }}
         onpick={(optionId, requestId, revision) => {
+          // A confirm option is sent only by a second click inside the window,
+          // judged by the clock now: the timer does not run in a suspended WebView.
+          const option = c.agent.pending?.options.find((o) => o.id === optionId);
+          const a = st.armed;
+          const at = Date.now();
+          if (
+            option?.confirm &&
+            !(
+              a &&
+              a.cardKey === c.key &&
+              a.requestId === requestId &&
+              a.revision === revision &&
+              a.optionId === optionId &&
+              at - a.at <= CONFIRM_MS
+            )
+          ) {
+            st = { ...st, selected: c.key, armed: { cardKey: c.key, requestId, revision, optionId, at } };
+            return;
+          }
           // Id and revision come from the request the card rendered at click time.
           if (st.armed) st = { ...st, armed: null };
           act(run({ kind: "pick", cardKey: c.key, requestId, optionId, revision }));
