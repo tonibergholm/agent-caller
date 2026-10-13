@@ -7,6 +7,8 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-13
+
 ### Added
 
 - External source: a local program can put questions in the inbox over

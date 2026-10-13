@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acd-app-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "acd-client",
  "security-framework",
@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "acd-client"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "acd-protocol",
  "acd-securefs",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "acd-protocol"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "acd-securefs"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "libc",
 ]
@@ -63,7 +63,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-caller-ios"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "acd-app-core",
  "acd-client",
