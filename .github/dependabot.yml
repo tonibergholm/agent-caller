@@ -6,3 +6,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # actions/upload-artifact and actions/download-artifact must stay on
+    # compatible majors, so their bumps arrive together as one PR.
+    groups:
+      actions:
+        patterns:
+          - "*"
