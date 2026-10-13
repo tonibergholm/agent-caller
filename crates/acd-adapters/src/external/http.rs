@@ -113,8 +113,14 @@ async fn state(
     .await
     {
         Ok(Ok(body)) => body,
-        Ok(Err(_)) => return rejected("body: longer than 256 KiB"),
-        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
+        Ok(Err(_)) => {
+            ctx.adapter.sweep();
+            return rejected("body: longer than 256 KiB");
+        }
+        Err(_) => {
+            ctx.adapter.sweep();
+            return StatusCode::REQUEST_TIMEOUT.into_response();
+        }
     };
     let body = match PutBody::parse(&body) {
         Ok(body) => body,

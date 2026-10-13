@@ -159,6 +159,15 @@ describe("options that need a second tap", () => {
     expect(onKey(v, armedState, k("2", { at: 1100 })).effect.kind).toBe("pick");
   });
 
+  test("a modified key or IME composition disarms before it is ignored", () => {
+    for (const extra of [{ ctrl: true }, { meta: true }, { alt: true }, { composing: true }, { keyCode: 229 }]) {
+      const r = onKey(v, armedState, k("2", { at: 1100, ...extra }));
+      expect(r.effect, JSON.stringify(extra)).toEqual({ kind: "none" });
+      expect(r.state.armed ?? null, JSON.stringify(extra)).toBeNull();
+      expect(onKey(v, r.state, k("2", { at: 1200 })).effect).toEqual({ kind: "none" });
+    }
+  });
+
   test("typing in a text field disarms", () => {
     const r = onKey(v, { ...armedState, replyFor: "m/e" }, k("x", { inField: true, at: 1100 }));
     expect(r.state.armed ?? null).toBeNull();

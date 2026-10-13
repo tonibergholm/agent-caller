@@ -1354,3 +1354,28 @@ async fn a_body_rejected_at_parse_time_still_runs_the_expiry_sweep() {
     );
     assert!(rig.agents().is_empty());
 }
+
+#[tokio::test]
+async fn a_body_that_cannot_be_read_still_runs_the_expiry_sweep() {
+    let mut rig = rig().await;
+    rig.ok("sup", state(vec![item("k1", "a1", "alpha")])).await;
+    rig.advance(LEASE as i64);
+    let oversize = format!(
+        "{{\"lease_ms\":60000,\"pad\":\"{}\"}}",
+        "p".repeat(256 * 1024)
+    );
+    let (status, _) = http(
+        &rig.sock,
+        "PUT",
+        "/external/v1/producers/sup/state",
+        Some(TOKEN),
+        &oversize,
+    )
+    .await;
+    assert_eq!(status, 422);
+    assert_eq!(
+        rig.resolved().len(),
+        1,
+        "the lease ended without waiting for the timer"
+    );
+}

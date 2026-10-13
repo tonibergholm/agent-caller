@@ -581,7 +581,7 @@ lease fails with `source_unavailable` and the request stays open.
 |---|---|---|
 | `applied` | the producer carried it out | `by: "inbox"` |
 | `rejected` | refused before acting (stale, invalid input) | `by: "agent"`, reason `rejected`, `message` |
-| `failed` | outcome unknown or partial (crash mid-action, timeout, expired) | `by: "uncertain"`, `message` (acd supplies "<agent title> reported the outcome as failed; check it there." when the ack has none) |
+| `failed` | outcome unknown or partial (crash mid-action, timeout, expired) | `by: "uncertain"`, `message` (acd supplies "<agent title> reported the outcome as failed; check it there." when the ack has no message or only blank text) |
 
 An ack for an unknown or already resolved answer goes to `ack_refused`;
 the producer logs it and does nothing else. An answer that is not acked by

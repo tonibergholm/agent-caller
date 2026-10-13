@@ -104,7 +104,10 @@ export function onKey(
 ): { state: KeyState; effect: Effect } {
   const none = { state: st, effect: NONE };
   // Guards first: IME composition and modifiers are never shortcuts.
-  if (ev.composing || ev.keyCode === 229 || ev.meta || ev.ctrl || ev.alt) return none;
+  if (ev.composing || ev.keyCode === 229 || ev.meta || ev.ctrl || ev.alt) {
+    // Ignored as a shortcut, but still not the second tap of an armed option.
+    return st.armed ? { state: { ...st, armed: null }, effect: NONE } : none;
+  }
 
   // Any key but the second tap of an armed option disarms it.
   const rest: KeyState = st.armed ? { ...st, armed: null } : st;
