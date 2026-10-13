@@ -7,6 +7,8 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-13
+
 ### Added
 
 - Voice, free-form commands on macOS: anything that is not a fixed phrase goes

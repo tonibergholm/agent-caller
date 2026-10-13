@@ -16,6 +16,9 @@ final class SystemEvents {
             // Latch for Rust first: while sessions are cancelled, a queued
             // press must already be behind the system event (it is dropped
             // with it), not free to open a new session.
+            // Spec §6.2: locking the screen or sleep stops speech, first: it is
+            // the quickest thing to silence.
+            Speaker.shared.stop()
             Bridge.shared.emitSystem(code)
             Sessions.shared.cancelAll()
             // Spec §6.3: model work is discarded on lock and sleep too.

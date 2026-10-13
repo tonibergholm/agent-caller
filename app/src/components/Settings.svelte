@@ -14,6 +14,7 @@
     type PermissionKind,
     type PermissionState,
     type VoiceSettings,
+    type SpeechRate,
     type VoiceStatus,
   } from "../lib/voice";
 
@@ -61,6 +62,7 @@
     relaunch_for_hold_key: false,
     toggle_error: null,
     model: { state: "checking" },
+    voices: [],
   });
   let toggleDraft = $state("");
   /** The stored voice settings arrived; until then the keys below would show defaults. */
@@ -222,7 +224,36 @@
   const endpointText = (m: MachineEntryView) =>
     m.endpoint.kind === "local" ? "This Mac (acd.sock)" : `${m.endpoint.host}:${m.endpoint.port}`;
 
-  const setVoice = (box: HTMLInputElement, field: "enabled" | "debug_input") =>
+  const RATES: [SpeechRate, string][] = [
+    ["slow", "Slower"],
+    ["normal", "Normal"],
+    ["fast", "Faster"],
+  ];
+
+  const setVoiceChoice = (select: HTMLSelectElement) =>
+    act(async () => {
+      try {
+        voice = await api.setVoiceSettings({ ...voice, speech_voice: select.value || null });
+      } catch (e) {
+        select.value = voice.speech_voice ?? "";
+        throw e;
+      }
+    }, "Could not change the voice");
+
+  const setRate = (select: HTMLSelectElement) =>
+    act(async () => {
+      try {
+        voice = await api.setVoiceSettings({ ...voice, speech_rate: select.value as SpeechRate });
+      } catch (e) {
+        select.value = voice.speech_rate;
+        throw e;
+      }
+    }, "Could not change the speaking rate");
+
+  /** A saved voice that is no longer installed shows as the system voice. */
+  const chosenVoice = $derived(status.voices.some((v) => v.id === voice.speech_voice) ? (voice.speech_voice ?? "") : "");
+
+  const setVoice = (box: HTMLInputElement, field: "enabled" | "debug_input" | "alerts") =>
     act(async () => {
       try {
         voice = await api.setVoiceSettings({ ...voice, [field]: box.checked });
@@ -493,11 +524,34 @@
       {#if status.toggle_error}
         <p class="note" role="status">{withStop(status.toggle_error)} The previous shortcut stays active.</p>
       {/if}
+      <label>
+        <input type="checkbox" checked={voice.alerts} disabled={!voice.enabled} onchange={(e) => setVoice(e.currentTarget, "alerts")} />
+        Speak an alert when an agent needs you
+      </label>
+      <p class="note">At most one alert every 5 seconds, never while you are talking. Agents hidden in the inbox, or on machines the filter hides, are not announced.</p>
+      <label>
+        Voice
+        <select aria-label="Voice" value={chosenVoice} disabled={!voice.enabled} onchange={(e) => setVoiceChoice(e.currentTarget)}>
+          <option value="">System English voice</option>
+          {#each status.voices as v (v.id)}
+            <option value={v.id}>{v.name} ({v.language})</option>
+          {/each}
+        </select>
+      </label>
+      <label>
+        Speaking rate
+        <select aria-label="Speaking rate" value={voice.speech_rate} disabled={!voice.enabled} onchange={(e) => setRate(e.currentTarget)}>
+          {#each RATES as [rate, label] (rate)}
+            <option value={rate}>{label}</option>
+          {/each}
+        </select>
+      </label>
     {/if}
 
     <p class="note">
       Hold the key to talk, or press the shortcut once to start and again to stop. Recording stops after 60 seconds.
-      Audio and text stay on this Mac and are never saved. English only; the system microphone is used.
+      Audio and text stay on this Mac and are never saved. Answers you ask for (read, summaries) are spoken; agent text
+      is never spoken except through these templates. English only; the system microphone is used.
     </p>
     <label>
       <input

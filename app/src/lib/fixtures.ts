@@ -16,6 +16,7 @@ export const STATUS_OK: VoiceStatus = {
   relaunch_for_hold_key: false,
   toggle_error: null,
   model: { state: "available" },
+  voices: [{ id: "com.apple.voice.Ava", name: "Ava", language: "en-US" }],
 };
 
 export function card(overrides: Partial<CardView> = {}): CardView {
@@ -191,6 +192,7 @@ export function fakeApi(
     voiceConfirm: rec("voiceConfirm", undefined),
     voiceChoose: rec("voiceChoose", undefined),
     voiceCancel: rec("voiceCancel", undefined),
+    voiceStopSpeech: rec("voiceStopSpeech", undefined),
     // Kept out of `calls`: sizing is not an action.
     voiceHudFit: async (seq: number) => {
       api.fits.push(seq);

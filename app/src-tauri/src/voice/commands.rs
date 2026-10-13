@@ -16,6 +16,9 @@ pub fn voice_set_settings(
     voice: State<'_, VoiceState>,
     settings: VoiceSettings,
 ) -> Result<VoiceSettings, String> {
+    if !settings.speech_voice_is_valid() {
+        return Err("Unknown voice".into());
+    }
     // Turning voice off must work even when the saved shortcut conflicts.
     if settings.enabled
         && let Some(toggle) = &settings.toggle_shortcut
@@ -28,6 +31,7 @@ pub fn voice_set_settings(
     let prev = std::mem::replace(&mut *voice.settings.lock().unwrap(), settings.clone());
     let was_on = prev.enabled;
     voice.controller.set_enabled(settings.enabled);
+    voice.controller.set_speech(settings.speech());
     #[cfg(target_os = "macos")]
     {
         use super::permissions;
@@ -49,6 +53,7 @@ pub fn voice_set_settings(
                 let _ = restored.save(path);
             }
             *voice.settings.lock().unwrap() = restored.clone();
+            voice.controller.set_speech(restored.speech());
             *voice.trigger_error.lock().unwrap() = super::trigger::apply(&app, &restored, &settings);
             super::emit_status(&app);
             if let Err(error) = app.emit("voice://settings", &restored) {
@@ -112,10 +117,21 @@ pub fn voice_choose(window: WebviewWindow, voice: State<'_, VoiceState>, choice_
     voice.controller.choose(choice_id, index);
 }
 
+/// Esc or Stop on the HUD's spoken text (plan V12). `seq` is the state it shows.
+#[tauri::command]
+pub fn voice_stop_speech(window: WebviewWindow, voice: State<'_, VoiceState>, seq: u64) {
+    if !hud::is_hud(window.label()) {
+        tracing::debug!(label = window.label(), "ignored a HUD command from another window");
+        return;
+    }
+    voice.controller.stop_speaking(Some(seq));
+}
+
 /// Esc or Cancel in the HUD. `id` is the `id` of the `voice://hud` event the
-/// frontend is showing. A HUD state without an id (Sending, Done, Error,
-/// Speaking) has nothing to cancel, so the frontend sends nothing; a missing
-/// id is ignored here too and is never turned into a cancel-whatever-is-current.
+/// frontend is showing. A HUD state without an id (Sending, Done, Error) has
+/// nothing to cancel, so the frontend sends nothing; spoken text stops through
+/// `voice_stop_speech`. A missing id is ignored here too and is never turned
+/// into a cancel-whatever-is-current.
 #[tauri::command]
 pub fn voice_cancel(window: WebviewWindow, voice: State<'_, VoiceState>, id: Option<u64>) {
     if !hud::is_hud(window.label()) {
@@ -189,6 +205,7 @@ pub fn voice_status(app: AppHandle) -> super::status::VoiceStatus {
         super::trigger::refresh(&app);
         // Swift reports only changes (plan V16), so this cannot loop.
         tauri::Manager::state::<super::VoiceState>(&app).model.query();
+        super::speaker::query_voices(false);
     }
     super::status::current(&app)
 }

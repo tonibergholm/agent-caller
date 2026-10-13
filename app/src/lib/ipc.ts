@@ -52,6 +52,7 @@ export interface Api {
   voiceChoose(choiceId: number, index: number): Promise<void>;
   /** `id` is the `id` of the shown state; states without one send no cancel. */
   voiceCancel(id: number): Promise<void>;
+  voiceStopSpeech(seq: number): Promise<void>;
   /** The content height in CSS px of HUD state `seq`; the panel fits it. */
   voiceHudFit(seq: number, height: number): Promise<void>;
   /** Spike probe step (plan Task 1A); the report arrives through `onVoiceProbe`. */
@@ -104,6 +105,7 @@ export const tauriApi: Api = {
   voiceConfirm: (proposalId) => invoke("voice_confirm", { proposalId }),
   voiceChoose: (choiceId, index) => invoke("voice_choose", { choiceId, index }),
   voiceCancel: (id) => invoke("voice_cancel", { id }),
+  voiceStopSpeech: (seq) => invoke("voice_stop_speech", { seq }),
   voiceHudFit: (seq, height) => invoke("voice_hud_fit", { seq, height }),
   voiceProbe: (step) => invoke("voice_probe", { step }),
   openVoicePrivacy: (kind) => invoke("voice_open_privacy", { kind }),
