@@ -82,9 +82,9 @@ the test fails. This is a finding, not a flake: the three runs below agree.
 
 Warm p95 is 1.3 s. The slowest cold call was 3.95 s, so the plan's rule
 (the larger of warm p95 plus 1 s and the slowest cold call plus 1 s, capped
-at 8 s) gives 4.95 s: **keep `MODEL_TIMEOUT` at 5 s.** No cold call exceeded 8 s.
+at 8 s) gives 4.95 s: **keep `MODEL_TIMEOUT` at 5 s** at this point. (Task 5b raised it to 6 s once the model also writes a restatement.) No cold call exceeded 8 s.
 
-## Follow-up
+## Follow-up (done: see [the quality note](2026-10-13-voice-model-quality.md))
 
 Do not tune `INSTRUCTIONS` inside this task (plan Task 5). The result is a
 contract problem for every model, so it gets its own task: a guided type

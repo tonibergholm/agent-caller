@@ -1,0 +1,11 @@
+[
+"{\"option\":\"2\",\"request\":\"r1\",\"step\":\"answer\"}",
+"{\"request\":\"r1\",\"step\":\"answer_text\",\"text\":\"use the blue one\"}",
+"{\"agent\":\"a2\",\"step\":\"send\",\"text\":\"run the tests\"}",
+"{\"request\":\"r1\",\"step\":\"read\"}",
+"{\"machine\":\"minos\",\"step\":\"summarize\"}",
+"{\"step\":\"summarize\"}",
+"{\"agent\":\"a2\",\"step\":\"select\"}",
+"{\"step\":\"cancel\"}",
+"{\"step\":\"none\"}"
+]
