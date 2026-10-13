@@ -262,8 +262,6 @@ impl Controller {
             if !core.enabled {
                 return Err(InputError::Off);
             }
-            // V12: a new utterance stops what the app is saying.
-            self.stop_speech(&mut core);
             // S23: a transcript from before a press, lock, overflow or
             // voice off and on never enters the executor.
             if let Some(t) = token
@@ -272,6 +270,10 @@ impl Controller {
                 tracing::info!(target: "acd_voice", source = source.tag(), "stale transcript dropped");
                 return Ok(());
             }
+            // V12: a new utterance stops what the app is saying. After the
+            // stale check: a dropped transcript changes nothing, so it must not
+            // cut a reply that is playing.
+            self.stop_speech(&mut core);
             // A typed command never runs beside a live recording; checked here,
             // under the lock, because one may have started since the first look.
             if token.is_none() && core.recorder.active().is_some() {
@@ -820,6 +822,10 @@ impl Controller {
                 s.seq = Some(seq);
             }
             let delivered = self.sink.hud(seq, &reaction.hud);
+            if voiced && !delivered {
+                // V13: a reply plays only while its state is on the HUD.
+                self.stop_speech(core);
+            }
             let Some(id) = reaction.hud.awaiting_display() else {
                 return;
             };

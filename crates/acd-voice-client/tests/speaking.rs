@@ -149,3 +149,42 @@ async fn the_voice_and_rate_reach_the_speaker() {
     read_it(&r).await;
     assert!(matches!(speaker.calls().last(), Some(Said::Say { voice: Some(v), rate: Rate::Fast, .. }) if v == "v1"));
 }
+
+/// Review: an end for an older generation must not fade the newer reply.
+#[tokio::test]
+async fn a_stale_end_does_not_fade_the_new_reply() {
+    let (r, speaker) = speaking_rig(vec![pending_agent()]).await;
+    read_it(&r).await;
+    let (first, _) = speaker.last_say().unwrap();
+    let seq2 = read_it(&r).await;
+    let (second, _) = speaker.last_say().unwrap();
+    assert_ne!(first, second);
+    r.voice.spoken(first);
+    assert!(r.sink.ended.lock().unwrap().is_empty(), "the old generation's end is ignored");
+    r.voice.spoken(second);
+    assert_eq!(*r.sink.ended.lock().unwrap(), [seq2]);
+}
+
+/// Review: an old reply's cap timer must not cut the reply that replaced it.
+#[tokio::test]
+async fn an_old_cap_does_not_cut_the_new_reply() {
+    let (r, speaker) = speaking_rig(vec![pending_agent()]).await;
+    r.voice.set_speech_cap_for_test(Duration::from_millis(100));
+    read_it(&r).await;
+    r.voice.set_speech_cap_for_test(Duration::from_secs(30));
+    read_it(&r).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(matches!(speaker.calls().last(), Some(Said::Say { .. })), "the first reply's cap left the second playing");
+    assert!(matches!(r.sink.last(), Some(Hud::Speaking { audio: true, .. })));
+}
+
+/// Review, plan V13: a reply the HUD could not show is not spoken on.
+#[tokio::test]
+async fn a_reply_the_hud_cannot_show_is_not_spoken_on() {
+    let (r, speaker) = speaking_rig(vec![pending_agent()]).await;
+    r.sink.refuse_speaking.store(true, std::sync::atomic::Ordering::SeqCst);
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.text_input("read it".into(), true).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(speaker.calls().last(), Some(&Said::Stop), "stopped as soon as the HUD refused it");
+}

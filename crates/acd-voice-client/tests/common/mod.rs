@@ -166,6 +166,8 @@ pub struct Sink {
     acks: Mutex<Option<mpsc::UnboundedSender<u64>>>,
     /// Refuse every state that awaits display, as a failed emit would.
     pub refuse_display: AtomicBool,
+    /// Refuse a spoken-reply state, as a HUD that cannot show it would.
+    pub refuse_speaking: AtomicBool,
     /// Runs for every state published, before it is acknowledged.
     pub on_hud: Mutex<Option<HudHook>>,
     pub mics: Mutex<Vec<bool>>,
@@ -185,6 +187,9 @@ impl HudSink for Sink {
 
     fn hud(&self, seq: u64, hud: &Hud) -> bool {
         if hud.awaiting_display().is_some() && self.refuse_display.load(Ordering::SeqCst) {
+            return false;
+        }
+        if matches!(hud, Hud::Speaking { .. }) && self.refuse_speaking.load(Ordering::SeqCst) {
             return false;
         }
         self.huds.lock().unwrap().push((seq, hud.clone()));
