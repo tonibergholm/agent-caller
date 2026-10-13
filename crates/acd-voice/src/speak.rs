@@ -39,7 +39,9 @@ pub struct SpeechSettings {
 }
 
 /// Text to speech (spec §4.1). Both methods return at once, and neither
-/// calls back into the controller: it calls them under its core lock.
+/// calls back into the controller, not even synchronously to report a
+/// failure: it calls them under its core lock, so a callback would deadlock.
+/// The end of speech is reported later, from the platform's own queue.
 pub trait Speaker: Send + Sync {
     /// Speaks `text` as `generation`, replacing any speech. When it ends,
     /// the platform calls `Controller::spoken(generation)`.

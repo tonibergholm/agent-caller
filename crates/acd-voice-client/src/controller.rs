@@ -19,6 +19,8 @@ use tokio::sync::{broadcast, watch};
 use crate::freeze::freeze;
 use crate::port::{AcdPort, voice_outcome};
 
+mod speaking;
+
 /// How long the HUD has to acknowledge a step before it fails closed (D22).
 pub const DISPLAY_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -31,6 +33,9 @@ pub trait HudSink: Send + Sync {
     /// The microphone went on or off, as Swift reported it (spec §6.2,
     /// plan S18): the menu bar indicator.
     fn listening(&self, _on: bool) {}
+    /// The spoken reply shown as state `seq` ended (plan V11): the HUD may
+    /// fade. Runs under the core lock: only dispatch.
+    fn speech_ended(&self, _seq: u64) {}
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -98,6 +103,13 @@ struct Core {
     mic: Option<u64>,
     /// The highest generation Swift reported stopped (S18).
     mic_off: u64,
+    /// What is speaking now (plan V10). `seq` is the HUD state showing it;
+    /// `None` for an alert.
+    speaking: Option<speaking::Speaking>,
+    speech: acd_voice::speak::SpeechSettings,
+    next_speech: u64,
+    /// Test hook: a shorter cap than `speak::speech_cap`.
+    speech_cap: Option<Duration>,
 }
 
 pub struct Controller {
@@ -122,6 +134,8 @@ pub struct Controller {
     admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// The platform's capture and transcription; `None` until attached.
     speech: Mutex<Option<Arc<dyn SpeechInput>>>,
+    /// The platform's text to speech; `None` until attached.
+    speaker: Mutex<Option<Arc<dyn acd_voice::speak::Speaker>>>,
 }
 
 impl Controller {
@@ -154,6 +168,10 @@ impl Controller {
                 unadmitted: None,
                 mic: None,
                 mic_off: 0,
+                speaking: None,
+                speech: Default::default(),
+                next_speech: 0,
+                speech_cap: None,
             }),
             presentation: Mutex::new(None),
             model,
@@ -164,6 +182,7 @@ impl Controller {
             seq: AtomicU64::new(0),
             admission_hook: Mutex::new(None),
             speech: Mutex::new(None),
+            speaker: Mutex::new(None),
         });
         this.runtime.spawn(forward_outcomes(Arc::downgrade(&this), outcomes));
         this
@@ -251,6 +270,10 @@ impl Controller {
                 tracing::info!(target: "acd_voice", source = source.tag(), "stale transcript dropped");
                 return Ok(());
             }
+            // V12: a new utterance stops what the app is saying. After the
+            // stale check: a dropped transcript changes nothing, so it must not
+            // cut a reply that is playing.
+            self.stop_speech(&mut core);
             // A typed command never runs beside a live recording; checked here,
             // under the lock, because one may have started since the first look.
             if token.is_none() && core.recorder.active().is_some() {
@@ -261,7 +284,7 @@ impl Controller {
                 // A result that landed while the HUD showed Listening must
                 // not vanish behind the new step.
                 if let Some(late) = core.deferred.take() {
-                    self.emit(&mut core.exec, late);
+                    self.emit(&mut core, late);
                 }
             }
             let session = core.session;
@@ -270,18 +293,18 @@ impl Controller {
             // A HUD that waits for input takes the utterance as its answer (D21).
             if let Some(r) = core.exec.reply(&self.port, &transcript, self.opts.locale) {
                 self.sync_routing(&core.exec);
-                self.emit(&mut core.exec, r);
+                self.emit(&mut core, r);
                 Err("reply")
             } else {
                 match core.exec.begin(&self.port, snapshot.clone(), transcript.clone(), self.opts.locale) {
                     Ok((n, thinking)) => {
                         self.sync_routing(&core.exec);
-                        self.emit(&mut core.exec, thinking);
+                        self.emit(&mut core, thinking);
                         Ok((session, n, changes, routing))
                     }
                     Err(refused) => {
                         self.sync_routing(&core.exec);
-                        self.emit(&mut core.exec, *refused);
+                        self.emit(&mut core, *refused);
                         Err("refused")
                     }
                 }
@@ -317,7 +340,7 @@ impl Controller {
             "utterance routed"
         );
         if let Some(r) = core.exec.routed(n, routed) {
-            self.emit(&mut core.exec, r);
+            self.emit(&mut core, r);
         }
         Ok(())
     }
@@ -446,7 +469,7 @@ impl Controller {
         let mut core = self.core.lock().unwrap();
         if core.recorder.active().is_none() && core.exec.is_idle() {
             let hud = Hud::Error { refusal, transcript: None };
-            self.emit(&mut core.exec, Reaction { hud, select: None });
+            self.emit(&mut core, Reaction { hud, select: None });
         }
     }
 
@@ -467,7 +490,7 @@ impl Controller {
             None => {}
             Some(Progress::Partial(text)) => {
                 let hud = Hud::Listening { id, partial: Some(text), over: core.over.clone().map(Box::new) };
-                self.emit(&mut core.exec, Reaction { hud, select: None });
+                self.emit(&mut core, Reaction { hud, select: None });
             }
             Some(Progress::Done(heard)) => {
                 // Too long or failed: make sure Swift lets go too.
@@ -502,13 +525,14 @@ impl Controller {
         core.epoch += 1;
         core.session += 1;
         self.session_tx.send_replace(core.session);
+        self.stop_speech(core);
         core.exec.reset(&self.port);
         self.sync_routing(&core.exec);
         // Spec §6.3: model sessions are discarded with the rest.
         if let Some(model) = &self.model {
             model.discard();
         }
-        self.emit(&mut core.exec, Reaction { hud: Hud::Hidden, select: None });
+        self.emit(core, Reaction { hud: Hud::Hidden, select: None });
     }
 
     fn trigger(&self, core: &mut Core, ev: TriggerEvent, snapshot: Option<Snapshot>) {
@@ -524,6 +548,8 @@ impl Controller {
     }
 
     fn start_listening(&self, core: &mut Core, snapshot: Snapshot) {
+        // V12, Review Focus 3: the app's voice stops before any microphone opens.
+        self.silence(core);
         if !core.enabled || core.recorder.listening().is_some() {
             return;
         }
@@ -542,7 +568,7 @@ impl Controller {
             let refusal = unavailable.unwrap_or(Refusal::SpeechUnavailable);
             tracing::info!(target: "acd_voice", refusal = ?refusal, "voice cannot listen");
             let r = core.exec.listen_failed(refusal);
-            self.emit(&mut core.exec, r);
+            self.emit(core, r);
             return;
         };
         if let Start::Replaced(old) = core.recorder.start(id, Instant::now()) {
@@ -552,7 +578,7 @@ impl Controller {
             core.recorder.cancel();
             tracing::info!(target: "acd_voice", error = ?e, "recording refused");
             let r = core.exec.listen_failed(Refusal::from(e));
-            self.emit(&mut core.exec, r);
+            self.emit(core, r);
             return;
         }
         // The press is the cue to load the model (spec §6.3 keeps sessions short).
@@ -563,7 +589,7 @@ impl Controller {
         core.over = over.clone();
         tracing::info!(target: "acd_voice", "listening");
         let hud = Hud::Listening { id, partial: None, over: over.map(Box::new) };
-        self.emit(&mut core.exec, Reaction { hud, select: None });
+        self.emit(core, Reaction { hud, select: None });
         self.schedule_tick(core.recorder.limits().max);
     }
 
@@ -599,7 +625,7 @@ impl Controller {
         let r = core.exec.resume();
         self.sync_routing(&core.exec);
         let r = core.deferred.take().unwrap_or(r);
-        self.emit(&mut core.exec, r);
+        self.emit(core, r);
     }
 
     /// Esc or Cancel after the final left the recorder and before admission:
@@ -618,7 +644,7 @@ impl Controller {
         let r = core.exec.resume();
         self.sync_routing(&core.exec);
         let r = core.deferred.take().unwrap_or(r);
-        self.emit(&mut core.exec, r);
+        self.emit(core, r);
         true
     }
 
@@ -631,7 +657,7 @@ impl Controller {
         let refusal = match heard {
             Heard::Transcript(text) => {
                 if let Some(late) = deferred {
-                    self.emit(&mut core.exec, late);
+                    self.emit(core, late);
                 }
                 let token = Admission { session: core.session, epoch: core.epoch };
                 let (Some(snapshot), Some(me)) = (snapshot, self.me.upgrade()) else {
@@ -647,7 +673,7 @@ impl Controller {
                 tracing::info!(target: "acd_voice", ignored = ?why, "recording ignored");
                 let r = core.exec.resume();
                 self.sync_routing(&core.exec);
-                self.emit(&mut core.exec, deferred.unwrap_or(r));
+                self.emit(core, deferred.unwrap_or(r));
                 return;
             }
             Heard::Failed(e) => Refusal::from(e),
@@ -656,10 +682,10 @@ impl Controller {
         };
         tracing::info!(target: "acd_voice", refusal = ?refusal, "recording failed");
         if let Some(late) = deferred {
-            self.emit(&mut core.exec, late);
+            self.emit(core, late);
         }
         let r = core.exec.listen_failed(refusal);
-        self.emit(&mut core.exec, r);
+        self.emit(core, r);
     }
 
     fn schedule_tick(&self, after: Duration) {
@@ -716,7 +742,7 @@ impl Controller {
         let reaction = core.exec.cancel(&self.port, id);
         self.sync_routing(&core.exec);
         if let Some(reaction) = reaction {
-            self.emit(&mut core.exec, reaction);
+            self.emit(&mut core, reaction);
         }
     }
 
@@ -728,7 +754,7 @@ impl Controller {
         self.sync_routing(&core.exec);
         match cancelled {
             Some(reaction) => {
-                self.emit(&mut core.exec, reaction);
+                self.emit(&mut core, reaction);
                 true
             }
             None => false,
@@ -743,7 +769,7 @@ impl Controller {
         let reaction = f(&mut core.exec, &self.port);
         self.sync_routing(&core.exec);
         if let Some(reaction) = reaction {
-            self.emit(&mut core.exec, reaction);
+            self.emit(&mut core, reaction);
         }
     }
 
@@ -760,7 +786,7 @@ impl Controller {
         if core.recorder.active().is_some() || core.unadmitted.is_some() {
             core.deferred = Some(reaction);
         } else {
-            self.emit(&mut core.exec, reaction);
+            self.emit(&mut core, reaction);
         }
     }
 
@@ -772,14 +798,34 @@ impl Controller {
         self.routing_tx.send_replace(exec.routing());
     }
 
-    fn emit(&self, exec: &mut Executor, mut reaction: Reaction) {
-        self.sync_routing(exec);
+    fn emit(&self, core: &mut Core, mut reaction: Reaction) {
         loop {
+            let voiced = match &mut reaction.hud {
+                Hud::Speaking { text, audio } => {
+                    *audio = self.say_reply(core, text);
+                    *audio
+                }
+                // V13: a spoken reply plays only while its state is on the HUD.
+                _ => {
+                    if core.speaking.is_some_and(|s| s.seq.is_some()) {
+                        self.stop_speech(core);
+                    }
+                    false
+                }
+            };
+            self.sync_routing(&core.exec);
             if let Some(card) = &reaction.select {
                 self.sink.select(card);
             }
             let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+            if voiced && let Some(s) = core.speaking.as_mut() {
+                s.seq = Some(seq);
+            }
             let delivered = self.sink.hud(seq, &reaction.hud);
+            if voiced && !delivered {
+                // V13: a reply plays only while its state is on the HUD.
+                self.stop_speech(core);
+            }
             let Some(id) = reaction.hud.awaiting_display() else {
                 return;
             };
@@ -788,9 +834,7 @@ impl Controller {
                 return;
             }
             // The HUD cannot show it: fail closed (D22).
-            let failed = exec.display_failed(id);
-            self.sync_routing(exec);
-            match failed {
+            match core.exec.display_failed(id) {
                 Some(r) => reaction = r,
                 None => return,
             }

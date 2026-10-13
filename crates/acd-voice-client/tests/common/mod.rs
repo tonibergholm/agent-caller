@@ -166,19 +166,30 @@ pub struct Sink {
     acks: Mutex<Option<mpsc::UnboundedSender<u64>>>,
     /// Refuse every state that awaits display, as a failed emit would.
     pub refuse_display: AtomicBool,
+    /// Refuse a spoken-reply state, as a HUD that cannot show it would.
+    pub refuse_speaking: AtomicBool,
     /// Runs for every state published, before it is acknowledged.
     pub on_hud: Mutex<Option<HudHook>>,
     pub mics: Mutex<Vec<bool>>,
     pub acked: Mutex<Vec<u64>>,
+    /// States whose spoken reply ended (plan V11).
+    pub ended: Mutex<Vec<u64>>,
 }
 
 impl HudSink for Sink {
+    fn speech_ended(&self, seq: u64) {
+        self.ended.lock().unwrap().push(seq);
+    }
+
     fn listening(&self, on: bool) {
         self.mics.lock().unwrap().push(on);
     }
 
     fn hud(&self, seq: u64, hud: &Hud) -> bool {
         if hud.awaiting_display().is_some() && self.refuse_display.load(Ordering::SeqCst) {
+            return false;
+        }
+        if matches!(hud, Hud::Speaking { .. }) && self.refuse_speaking.load(Ordering::SeqCst) {
             return false;
         }
         self.huds.lock().unwrap().push((seq, hud.clone()));
@@ -302,4 +313,19 @@ pub fn final_(generation: u64, text: &str) -> ListenEvent {
         audio: Duration::from_millis(900),
         voiced: Duration::from_millis(600),
     }
+}
+
+use acd_voice::speak::fake::FakeSpeaker;
+
+/// `rig` with a recording speaker attached.
+pub async fn speaking_rig(agents: Vec<Value>) -> (Rig, Arc<FakeSpeaker>) {
+    let r = rig(agents, None, Display::Acks).await;
+    let speaker = Arc::new(FakeSpeaker::default());
+    r.voice.attach_speaker(speaker.clone());
+    (r, speaker)
+}
+
+/// The seq of the newest published state.
+pub fn last_seq(sink: &Sink) -> u64 {
+    sink.huds.lock().unwrap().last().map(|(s, _)| *s).unwrap_or(0)
 }

@@ -91,3 +91,28 @@ async fn spoken_text_never_reaches_the_logs() {
     assert!(logs.contains("listening"), "{logs}");
     assert!(!logs.contains("SECRET"), "{logs}");
 }
+
+/// Spec §3.7 for speech: spoken text never reaches the logs.
+#[tokio::test(flavor = "current_thread")]
+async fn spoken_replies_never_reach_the_logs() {
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let mut agent = pending_agent();
+    agent["pending"]["detail"] = "SECRET-DETAIL-3b".into();
+    let (r, speaker) = speaking_rig(vec![agent]).await;
+    r.voice.publish(shown(Some("m1/a1"), &["m1/a1"]));
+    r.voice.text_input("read it".into(), true).await.unwrap();
+    hud_until(&r.sink, "speaking", |h| matches!(h, Hud::Speaking { .. })).await;
+    let (generation, text) = speaker.last_say().unwrap();
+    assert!(text.contains("SECRET-DETAIL-3b"), "the test speaks the secret");
+    r.voice.spoken(generation);
+    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("speaking"), "{logs}");
+    assert!(!logs.contains("SECRET"), "{logs}");
+}
