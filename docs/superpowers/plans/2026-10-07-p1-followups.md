@@ -124,6 +124,14 @@ Historical flakes and environment caveats (not reproduced in this audit):
   `hooks::claude_sessions::tests::the_system_check_recognises_this_process`
   fail only inside the Codex sandbox (special bits and `ps` are not honoured
   there). They pass outside it.
+- `crates/acd-adapters/tests/t3_sync.rs`
+  `hidden_thread_shows_while_it_has_a_request_and_resolves_terminal` failed
+  once on macOS CI (2026-10-13, PR #51, run 38388201910) at line 1752:
+  `no stream for the hidden thread`. The agent was already gone when the
+  assertion read `live_thread_streams()`, so the stream teardown is probably
+  still running at that point. The same commit passed in the other run. Wait
+  for the stream to end with `until(...)` before asserting, as the line above
+  does for the agent.
 - Review automated edits for unrelated formatting; keep changes scoped.
 
 ## Mac app
@@ -236,3 +244,47 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 
 - omarchy: `loginctl enable-linger toni` keeps acd running while logged out (optional).
 - minos: agents started over SSH cannot use the login keychain; acceptance there relies on locally started sessions.
+
+## 1.0 triage
+
+Sorted 2026-10-13 from the lists above. Each item is in one bucket.
+Items not named here stay in their section as accepted residuals.
+
+**Fix before 1.0** (daily use, or wrong output a user would see):
+
+- `acd status | head` panics on a broken pipe.
+- Shutdown: the clean-SIGTERM `TLS listener task ended` error log, and the
+  run error printed only after `rt.shutdown_timeout`.
+- Omarchy: Show idle is not saved across restarts (decide for both clients),
+  J/K does not scroll the card list to the selection, and a flapping machine
+  notifies the same request again on reconnect (Mac app and Omarchy; keep a
+  bounded history).
+- Voice: Download-speech-model gives no progress and does not report a
+  failed install; stale voice shortcut after a failed unregister.
+- Pairing a literal non-Tailscale address says "That is not an acd pairing
+  line" on Omarchy. Needs a protocol decision on a new error code.
+- The clipboard clear after pairing (0.8.1), the iOS Keychain class
+  replacement, a release build on a device and the Online state right after a
+  relaunch: live checks on a device, in the signed-release step.
+
+**Verify on the 1.0 acceptance run** (implemented, not yet seen live):
+
+- Notification delivery on a bundled build, the Codex title fallback,
+  `project.removed` payloads, rotating `Tip:` lines, Codex free text for
+  providers other than Claude.
+- Hotkey failed-registration path and panel frame after an unplugged display.
+
+**After 1.0** (design work, upstream, or rare):
+
+- A command-hook shim for Claude to remove the loopback port-squatting
+  exposure of the `http` hooks (ruling R7).
+- Free text, multi-select and multi-question answers on the keys path.
+- Codex in a shared managed daemon, wrapped multi-row commands, narrow Codex
+  panes, `AskUserQuestion` variants, T3 cursor retention and keepalive
+  details, stale T3 requests on subagent threads.
+- Esc before Claude draws the dialog, and a restart with a dialog on screen
+  (read-only after the restart).
+- Keyring edge cases on Omarchy (individually locked item, locked after a
+  failed mutation, deadline), installer stderr tail, uninstall provenance.
+- Voice: pump stalls, nested Confirm under Listening, dropped-chunk wording.
+- Harness races in `just e2e`.
