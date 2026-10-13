@@ -1749,10 +1749,10 @@ async fn hidden_thread_shows_while_it_has_a_request_and_resolves_terminal() {
     );
     assert_eq!(until_resolved(&mut rx, &req.id).await, ResolvedBy::Terminal);
     until("hidden again", || agent(&r, "sub").is_none().then_some(())).await;
-    assert!(
-        r.fake.live_thread_streams().is_empty(),
-        "no stream for the hidden thread"
-    );
+    // The stream ends after the agent is gone, on the adapter's own task:
+    // wait for it, as for the agent above. (This read once raced the teardown
+    // and failed on macOS CI: docs/superpowers/plans/2026-10-07-p1-followups.md.)
+    until("the hidden thread's stream to end", || r.fake.live_thread_streams().is_empty().then_some(())).await;
 }
 
 #[tokio::test]

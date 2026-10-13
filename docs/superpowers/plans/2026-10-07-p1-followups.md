@@ -134,12 +134,11 @@ Historical flakes and environment caveats (not reproduced in this audit):
   there). They pass outside it.
 - `crates/acd-adapters/tests/t3_sync.rs`
   `hidden_thread_shows_while_it_has_a_request_and_resolves_terminal` failed
-  once on macOS CI (2026-10-13, PR #51, run 38388201910) at line 1752:
-  `no stream for the hidden thread`. The agent was already gone when the
-  assertion read `live_thread_streams()`, so the stream teardown is probably
-  still running at that point. The same commit passed in the other run. Wait
-  for the stream to end with `until(...)` before asserting, as the line above
-  does for the agent.
+  on macOS CI twice (2026-10-13: PR #51, run 38388201910, and PR #64, run
+  38413203985) at `no stream for the hidden thread`: the assertion read
+  `live_thread_streams()` right after the agent disappeared, before the
+  stream's own teardown ran. Fixed the same day: the test waits for the
+  stream to end, as it does for the agent.
 - Review automated edits for unrelated formatting; keep changes scoped.
 
 ## Mac app
