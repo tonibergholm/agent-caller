@@ -404,6 +404,25 @@ fn status_when_ready(dir: &std::path::Path, rust_log: Option<&str>) -> std::proc
     }
 }
 
+/// `acd status | head` where the reader has gone: a normal end, no panic.
+#[test]
+fn status_into_a_closed_pipe_exits_quietly() {
+    let (_tmp, dir) = init_named();
+    let _daemon = start(&dir, "pipe-box", &[]);
+    status_when_ready(&dir, None);
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = acd(&dir)
+        .arg("status")
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{:?} {err}", out.status);
+    assert!(!err.contains("panicked") && !err.contains("Broken pipe"), "{err}");
+}
+
 #[test]
 fn run_serves_loopback_and_status_reports_machine() {
     use std::os::unix::fs::FileTypeExt;
