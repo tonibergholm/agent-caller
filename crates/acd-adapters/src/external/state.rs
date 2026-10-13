@@ -511,12 +511,24 @@ fn apply_acks(
                 reason: Some(ResolveReason::Rejected),
                 message: ack.message,
             },
-            Outcome::Failed => Observation::RequestEndedWithReason {
-                request_id,
-                by: ResolvedBy::Uncertain,
-                reason: None,
-                message: ack.message,
-            },
+            Outcome::Failed => {
+                let message = ack.message.filter(|m| !m.trim().is_empty()).or_else(|| {
+                    let title = p
+                        .tracked
+                        .get(&q.key)
+                        .and_then(|t| txn.agent(&agent_id(pid, &t.agent_key)))
+                        .map_or_else(|| pid.to_owned(), |a| a.title.clone());
+                    Some(format!(
+                        "{title} reported the outcome as failed; check it there."
+                    ))
+                });
+                Observation::RequestEndedWithReason {
+                    request_id,
+                    by: ResolvedBy::Uncertain,
+                    reason: None,
+                    message,
+                }
+            }
         };
         txn.apply(observation);
         if ack.outcome != Outcome::Applied

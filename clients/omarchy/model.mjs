@@ -220,6 +220,19 @@ export function armedHolds(armed, card) {
 }
 
 /**
+ * The first question's header and text, for a question card. The text is
+ * left out when the request detail already is it (hook questions copy it).
+ */
+export function questionLines(card) {
+  const p = card.agent.pending;
+  const q = p && p.kind === "question" && Array.isArray(p.questions) ? p.questions[0] : null;
+  if (!q) return null;
+  const header = q.header && q.header !== "Question" && q.header.trim() ? q.header : null;
+  const text = q.text && q.text.trim() && q.text.trim() !== (p.detail ?? "").trim() ? q.text : null;
+  return header === null && text === null ? null : { header, text };
+}
+
+/**
  * Options as the panel lists them (plan D30). `armed` and `now` mark the
  * option of this card that waits for its second tap.
  */

@@ -118,7 +118,11 @@ async fn state(
     };
     let body = match PutBody::parse(&body) {
         Ok(body) => body,
-        Err(wire::Invalid(why)) => return rejected(&why),
+        Err(wire::Invalid(why)) => {
+            // A rejected body still lets time-driven expiry run.
+            ctx.adapter.sweep();
+            return rejected(&why);
+        }
     };
     match ctx.adapter.put(&pid, body) {
         Ok(response) => json(StatusCode::OK, &response),

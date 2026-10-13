@@ -338,6 +338,15 @@ Item {
                 text: cardItem.card.agent.pending ? cardItem.meta.tag + "  " + cardItem.card.agent.pending.detail : ""
             }
 
+            Label {
+                readonly property var lines: Model.questionLines(cardItem.card)
+                visible: lines !== null
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                maximumLineCount: 6
+                text: lines ? [lines.header, lines.text].filter(x => x).join("\n") : ""
+            }
+
             Repeater {
                 model: cardItem.rows
 

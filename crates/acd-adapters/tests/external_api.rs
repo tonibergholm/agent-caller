@@ -1307,3 +1307,50 @@ async fn the_dormant_cap_holds_even_when_every_idle_producer_still_lingers() {
         "an evicted producer starts afresh, tombstones included"
     );
 }
+
+#[tokio::test]
+async fn a_failed_ack_without_a_message_gets_one_naming_the_agent() {
+    for blank in [None, Some(""), Some("   ")] {
+        let mut rig = rig().await;
+        rig.ok("sup", state(vec![item("k1", "a1", "autopilot")]))
+            .await;
+        let request = rig.request("autopilot");
+        rig.answer(&request, "abandon").await;
+        let id = only_answer(&rig.get_answers("sup", 0).await.1)["answer_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        rig.ok("sup", with_acks(vec![], vec![ack(&id, "failed", blank)]))
+            .await;
+        let resolved = rig.resolved();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].by, ResolvedBy::Uncertain);
+        assert_eq!(
+            resolved[0].message.as_deref(),
+            Some("autopilot reported the outcome as failed; check it there."),
+            "{blank:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_body_rejected_at_parse_time_still_runs_the_expiry_sweep() {
+    let mut rig = rig().await;
+    rig.ok("sup", state(vec![item("k1", "a1", "alpha")])).await;
+    rig.advance(LEASE as i64);
+    let (status, _) = http(
+        &rig.sock,
+        "PUT",
+        "/external/v1/producers/sup/state",
+        Some(TOKEN),
+        "not json",
+    )
+    .await;
+    assert_eq!(status, 422);
+    assert_eq!(
+        rig.resolved().len(),
+        1,
+        "the lease ended without waiting for the timer"
+    );
+    assert!(rig.agents().is_empty());
+}

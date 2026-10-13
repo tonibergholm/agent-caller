@@ -600,3 +600,19 @@ test("an unrelated click drops the arm, and every Panel.qml click but the option
   }
   assert.match(panel, /onClicked: \{\n\s*panel\.disarm\(\);/);
 });
+
+test("a question card shows its header and text beyond the detail", () => {
+  const c = externalCard();
+  c.agent.pending.questions = [{ id: "q1", header: "Parked", text: "What now?", multi_select: false, options: [] }];
+  assert.deepEqual(M.questionLines(c), { header: "Parked", text: "What now?" });
+  c.agent.pending.detail = "What now?";
+  assert.deepEqual(M.questionLines(c), { header: "Parked", text: null }, "the text the detail already holds is not repeated");
+  c.agent.pending.questions = [{ id: "q1", header: "Question", text: "What now?", multi_select: false, options: [] }];
+  assert.equal(M.questionLines(c), null);
+  assert.equal(M.questionLines(card("m1/a")), null, "a permission has no question");
+  const none = externalCard();
+  none.agent.pending = null;
+  assert.equal(M.questionLines(none), null);
+  const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
+  assert.match(panel, /Model\.questionLines\(cardItem\.card\)/);
+});
