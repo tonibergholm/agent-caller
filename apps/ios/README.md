@@ -144,5 +144,21 @@ an update keeps an old item's class. Release gate: confirm on a device that a
 secret stored before this change is replaced with the new class on the next
 pairing, and that the machine stays Online after a relaunch.
 
-Not verified: device install, Keychain behaviour on a device, the Tailscale
-route (100.64.0.0/10) and whether iOS shows a Local Network prompt for it.
+Checked on a real device (iPhone 16 Pro, iOS 27, 2026-10-13, debug build, a
+scratch daemon reached over Tailscale):
+
+- Install and launch, with a free personal team.
+- Pairing from the clipboard (Universal Clipboard from the Mac), over the
+  Tailscale address.
+- A held Claude permission request showed up and was answered Allow; a second
+  one, sent after a force-quit and relaunch, was answered Deny. Both answers
+  reached the hook. So the stored secret survived the relaunch.
+- iOS showed no Local Network prompt for the Tailscale route (100.64.0.0/10).
+- With the daemon stopped, the app showed the connection error and kept the
+  last requests, dimmed and marked offline.
+
+Not verified: that the machine shows Online right after a relaunch, before any
+new request (it was not looked at; the answer after the relaunch shows the
+connection came back). The old-class Keychain item replacement described
+above (needs a secret stored by a build from before that change). A release
+build, and a physical device with `ios:dev`.
