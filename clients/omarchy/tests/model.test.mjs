@@ -569,6 +569,15 @@ test("a digit only arms a confirm option: the same digit again is a no-op and En
   assert.equal(M.fromQt(0, "\r", 0, false, null).key, "Enter", "a catcher text key of Return is Enter");
 });
 
+test("the same digit re-arms a confirm option once the window has passed", () => {
+  const cards = [externalCard()];
+  const armed = M.onKey(cards, { selected: "m1/e", replyFor: null }, key("2", { at: 1000 })).state;
+  const later = 1000 + M.CONFIRM_MS + 1;
+  const rearmed = M.onKey(cards, armed, key("2", { at: later })).state;
+  assert.equal(rearmed.armed.at, later);
+  assert.equal(M.onKey(cards, rearmed, key("Enter", { at: later + 100 })).effect.kind, "pick");
+});
+
 test("the armed row tells the user to press Enter", () => {
   const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
   assert.match(panel, /Press Enter to confirm: /);

@@ -406,7 +406,7 @@ export function onKey(visible, st, ev) {
     const row = optionRows(card).find((r) => r.number === Number(k));
     if (!row) return { state: rest, effect: NONE };
     if (row.confirm) {
-      if (st.armed && armedHolds(st.armed, card) && st.armed.optionId === row.id) return { state: st, effect: NONE };
+      if (st.armed && armedHolds(st.armed, card) && st.armed.optionId === row.id && (ev.at ?? 0) - st.armed.at <= CONFIRM_MS) return { state: st, effect: NONE };
       if (ev.repeat) return { state: st, effect: NONE };
       return pickOption(Object.assign({}, st, { armed: null }), card, row.id, ev.at ?? 0);
     }

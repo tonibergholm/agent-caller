@@ -265,7 +265,7 @@ Item {
     Timer {
         interval: 100
         repeat: true
-        running: panel.shown && panel.view !== null && panel.view.actions.length > 0
+        running: panel.shown && panel.view !== null && (panel.view.actions.length > 0 || !!panel.keyState.armed)
         onTriggered: panel.now = Date.now()
     }
 
