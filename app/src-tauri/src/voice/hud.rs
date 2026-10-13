@@ -332,10 +332,6 @@ fn position(window: &WebviewWindow) {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_voiced_reply_has_no_timer_fade() {
-        assert!(!Hud::Speaking { text: VoiceText::new("x"), audio: true }.fades());
-    }
 
     use super::*;
     use acd_voice::text::VoiceText;

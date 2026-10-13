@@ -43,5 +43,8 @@ mod tests {
         assert_eq!(rate_code(Rate::Slow), VB_RATE_SLOW);
         assert_eq!(rate_code(Rate::Normal), VB_RATE_NORMAL);
         assert_eq!(rate_code(Rate::Fast), VB_RATE_FAST);
+        // The numbers themselves are the header's (voice_bridge.h), not ours.
+        assert_eq!((VB_RATE_SLOW, VB_RATE_NORMAL, VB_RATE_FAST), (0, 1, 2));
+        assert_eq!((super::super::bridge::VB_EV_SPOKEN, super::super::bridge::VB_EV_VOICES), (16, 17));
     }
 }

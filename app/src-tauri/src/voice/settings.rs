@@ -143,6 +143,9 @@ mod tests {
         let path = dir.join("voice.json");
         std::fs::write(&path, r#"{"enabled":true}"#).unwrap();
         let s = VoiceSettings::load(&path);
+        // An old file parses (rather than falling back to the defaults, which
+        // would also give these speech values): its own field survives.
+        assert!(s.enabled, "the old file was read, not replaced by the defaults");
         assert_eq!(s.speech(), SpeechSettings { alerts: false, voice: None, rate: Rate::Normal });
         let on = VoiceSettings { alerts: true, speech_voice: Some("com.apple.voice.Ava".into()), speech_rate: Rate::Fast, ..s };
         on.save(&path).unwrap();

@@ -150,7 +150,9 @@ pub fn emit_status(app: &AppHandle) {
 /// The app is quitting (spec §6.3): stop speech and drop model work.
 #[cfg(target_os = "macos")]
 pub fn shutdown(app: &AppHandle) {
-    let voice = app.state::<VoiceState>();
+    let Some(voice) = app.try_state::<VoiceState>() else {
+        return;
+    };
     acd_voice::router::model::IntentModel::discard(voice.model.as_ref());
     acd_voice::speak::Speaker::stop(&speaker::MacSpeaker);
 }

@@ -403,6 +403,12 @@ test("Esc or Stop on spoken text stops speech for that state", async () => {
   expect(api.calls).toEqual([["voiceStopSpeech", seq], ["voiceStopSpeech", seq]]);
 });
 
+test("text shown without audio ignores keys", async () => {
+  const api = await show({ state: "speaking", text: "2 need you.", audio: false });
+  await userEvent.keyboard("{Escape}{Enter}1");
+  expect(api.calls).toEqual([]);
+});
+
 test("text shown without audio has no Stop button", async () => {
   await show({ state: "speaking", text: "2 need you.", audio: false });
   expect(screen.queryByRole("button", { name: /^Stop/ })).toBeNull();

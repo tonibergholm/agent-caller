@@ -107,8 +107,6 @@ fn main() {
             let speech = Arc::new(voice::bridge::MacSpeech::new());
             #[cfg(target_os = "macos")]
             controller.attach_speech(speech.clone());
-            #[cfg(target_os = "macos")]
-            controller.attach_speaker(Arc::new(voice::speaker::MacSpeaker));
             controller.set_speech(voice_settings.speech());
             app.manage(voice::VoiceState {
                 controller,
@@ -127,6 +125,9 @@ fn main() {
             voice::hud::create(app.handle())?;
             #[cfg(target_os = "macos")]
             if let Some((link, events)) = voice::bridge::start() {
+                // Speech needs the bridge: without it nothing would report the
+                // end of speech, and a reply would wait for its cap.
+                app.state::<voice::VoiceState>().controller.attach_speaker(Arc::new(voice::speaker::MacSpeaker));
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(voice::bridge::pump(link, events, move |ev| voice::dispatch(&handle, ev)));
             }
