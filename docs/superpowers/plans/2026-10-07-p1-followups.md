@@ -306,11 +306,16 @@ needs a decision or a small follow-up.
   prove who holds the port first, for example the listener's owner uid from
   `/proc/net/tcp` on Linux, or a narrower and shorter-lived T3 token; needs an
   owner decision), F4 (herdr socket discovery checks no owner), F5 (service
-  files from unescaped paths). Core 1, 2 and 6 and local F1 and F3 are fixed.
-  F3 residual: the hook listeners time out only the request head (10 s, from
-  accept); an idle keep-alive connection after a completed request, and a
-  slow body after the token check (5 s `body_timeout`), are not bounded by
-  the new timeout, and there is no per-peer connection cap.
+  files from unescaped paths). Core 1, 2 and 6 and local F1 are fixed; local F3 is fixed apart from the residual below.
+  F3 fix: the hook listeners drop a connection that has not sent a
+  complete request head 10 s after accept, and every response carries
+  `Connection: close`, so a connection never idles between requests (a 401
+  to an unauthenticated `GET /` no longer leaves a keep-alive socket holding
+  a slot). A held permission request is unaffected: it sends no response
+  until it is decided. F3 residual: a slow body after the token check is
+  bounded only by the 5 s `body_timeout`, and there is no per-peer
+  connection cap, so a peer can still fill the 128 slots for up to 10 s at a
+  time by sending nothing. Local F2 stays **open**, as above.
 - **Owner decisions still open:** same-user denial of service on the local
   socket and the four-source pre-auth residual (see Pre-auth residuals); the
   relay spec's lock-screen content rule and handle revocation (see its review

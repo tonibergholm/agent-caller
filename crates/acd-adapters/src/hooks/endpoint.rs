@@ -360,6 +360,17 @@ pub fn router_with_release(
         .route("/hook/{agent}/{event}", any(handle))
         .fallback(|| async { StatusCode::UNAUTHORIZED })
         .with_state(ctx)
+        .layer(axum::middleware::map_response(close_after_response))
+}
+
+/// Every response ends its connection (F3). Hook clients send one request per
+/// connection, and a kept-alive connection holds a slot while idle, with no
+/// token needed to open one. A held request answers only when it is decided,
+/// so this never cuts a hold.
+async fn close_after_response(mut res: Response) -> Response {
+    res.headers_mut()
+        .insert(axum::http::header::CONNECTION, axum::http::HeaderValue::from_static("close"));
+    res
 }
 
 fn empty() -> Response {
