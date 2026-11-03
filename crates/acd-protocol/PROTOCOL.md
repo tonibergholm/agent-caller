@@ -35,14 +35,23 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
 |---|---|
 | A. TCP accept → TLS finished | At most 16 handshakes at once per listener. 5 s each, then the socket is dropped. |
 | B. TLS finished → HTTP upgrade request complete | Covered by the 10 s pre-authentication deadline; silent or trickling HTTP clients are cut when it passes. |
-| C. Upgrade → `hello` authenticated | At most 8 at once; `hello` within 5 s. |
-| A + B + C | At most 32 unauthenticated TCP connections shared by the daemon across all TCP listeners. Each must authenticate within 10 s of TCP accept. |
+| C. Upgrade → `hello` authenticated | At most 8 at once on the network pool; `hello` within 5 s. The Unix socket has its own pool of 8. |
+| A + B + C | At most 32 unauthenticated TCP connections shared by the daemon across all TCP listeners, and at most 2 of them from one source IP (IPv4-mapped IPv6 counts as the IPv4 address). Each must authenticate within 10 s of TCP accept. |
 
 **Limits.**
 - `hello` must arrive within 5 s.
 - Frames are limited to 1 MiB.
-- At most 8 unauthenticated connections at once. Past that, the upgrade
-  request gets HTTP 503.
+- **Unauthenticated connections.** Counted from TCP accept until `hello`
+  authenticates, the connection is cut, or it closes.
+  - Per source IP: at most 2. A third connection from the same address is
+    closed right after TCP accept, before TLS starts. The client sees a
+    connection reset or EOF, not an HTTP status.
+  - Network pool: at most 8 past the upgrade, shared by all TCP listeners.
+    When it is full, the upgrade request gets HTTP 503.
+  - Unix socket: a separate pool of 8. Network peers cannot take these
+    slots; when they are full, the upgrade request gets HTTP 503.
+  Authenticated connections do not count. Fewer than 4 source IPs cannot
+  fill the network pool.
 - A request carrying an `Origin` header is rejected with HTTP 403 unless
   the origin is in `allowed_origins`, which is empty by default. This
   blocks connections opened from web pages.
