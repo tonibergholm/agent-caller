@@ -33,6 +33,10 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Fixed
 
+- acd: one device that opens connections and never sends `hello` can no longer
+  keep other clients out. Each source address may hold two unauthenticated
+  connections at a time (a third is dropped), and the local socket has its own
+  pre-auth slots.
 - Omarchy: a request that left the view when its machine disconnected no longer
   notifies again on reconnect; the last 256 announced requests are remembered.
 - Omarchy: J/K now scrolls the card list so the selected card stays in view.

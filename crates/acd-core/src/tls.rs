@@ -12,7 +12,7 @@ use std::{
     fmt,
     future::Future,
     io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -185,18 +185,70 @@ pub fn server_config(files: &KeyFiles) -> Result<Arc<ServerConfig>, TlsError> {
     Ok(Arc::new(config))
 }
 
+/// Unauthenticated connections one source address may hold at once. Tailnet
+/// peers cannot spoof their address, so one anonymous device cannot take more
+/// than this many of the daemon-wide slots.
+pub const MAX_UNAUTHENTICATED_PER_SOURCE: usize = 2;
+
+type SourceCounts = Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, usize>>>;
+
 #[derive(Clone)]
 pub struct Admission {
     semaphore: Arc<Semaphore>,
+    per_source: usize,
+    sources: SourceCounts,
 }
 impl Admission {
     pub fn new(max_unauthenticated: usize) -> Admission {
+        Self::with_per_source(max_unauthenticated, MAX_UNAUTHENTICATED_PER_SOURCE)
+    }
+    pub fn with_per_source(max_unauthenticated: usize, per_source: usize) -> Admission {
         Admission {
             semaphore: Arc::new(Semaphore::new(max_unauthenticated)),
+            per_source,
+            sources: Arc::default(),
         }
     }
-    fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
-        self.semaphore.clone().try_acquire_owned().ok()
+    /// A slot for `source`, or `None` when the daemon-wide pool is full or
+    /// `source` already holds its share. The source check comes first so a
+    /// refused source takes nothing from the pool.
+    fn try_acquire(&self, source: IpAddr) -> Option<Held> {
+        let source = source.to_canonical();
+        let mut counts = self.sources.lock().unwrap();
+        let held = counts.entry(source).or_insert(0);
+        if *held >= self.per_source {
+            return None;
+        }
+        let Ok(permit) = self.semaphore.clone().try_acquire_owned() else {
+            if *held == 0 {
+                counts.remove(&source);
+            }
+            return None;
+        };
+        *held += 1;
+        Some(Held {
+            _permit: permit,
+            source,
+            sources: self.sources.clone(),
+        })
+    }
+}
+
+/// A pool slot and the source's share of it, both returned on drop.
+struct Held {
+    _permit: OwnedSemaphorePermit,
+    source: IpAddr,
+    sources: SourceCounts,
+}
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut counts = self.sources.lock().unwrap();
+        if let Some(n) = counts.get_mut(&self.source) {
+            *n -= 1;
+            if *n == 0 {
+                counts.remove(&self.source);
+            }
+        }
     }
 }
 
@@ -217,7 +269,7 @@ impl Default for Limits {
 pub const MAX_UNAUTHENTICATED_TCP: usize = 32;
 
 struct AdmitInner {
-    permit: std::sync::Mutex<Option<OwnedSemaphorePermit>>,
+    permit: std::sync::Mutex<Option<Held>>,
     authenticated: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
@@ -225,7 +277,7 @@ pub struct Admit {
     inner: Arc<AdmitInner>,
 }
 impl Admit {
-    fn new(permit: OwnedSemaphorePermit) -> Self {
+    fn new(permit: Held) -> Self {
         Self {
             inner: Arc::new(AdmitInner {
                 permit: std::sync::Mutex::new(Some(permit)),
@@ -400,7 +452,7 @@ impl TlsListener {
                     result = tcp.accept() => {
                         let Ok((stream, addr)) = result else { continue };
                         let accepted_at = Instant::now();
-                        let Some(permit) = admission.try_acquire() else { drop(stream); continue };
+                        let Some(permit) = admission.try_acquire(addr.ip()) else { drop(stream); continue };
                         if handshakes.len() >= limits.max_handshakes { drop(stream); drop(permit); continue; }
                         let admit = Admit::new(permit);
                         let deadline = accepted_at + limits.preauth_deadline;
@@ -480,6 +532,45 @@ mod io_tests {
         pki_types::{CertificateDer, ServerName, UnixTime},
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn a_source_is_capped_and_gives_its_slots_back() {
+        let a = Admission::with_per_source(8, 2);
+        let (x, y) = ("100.64.0.1".parse().unwrap(), "100.64.0.2".parse().unwrap());
+        let held: Vec<_> = (0..2).map(|_| a.try_acquire(x).unwrap()).collect();
+        assert!(a.try_acquire(x).is_none(), "third from one source");
+        let other = a.try_acquire(y).expect("another source is unaffected");
+        drop(held);
+        assert!(a.try_acquire(x).is_some(), "slots return on drop");
+        drop(other);
+        assert!(a.sources.lock().unwrap().len() <= 1, "no stale entries");
+    }
+
+    #[test]
+    fn a_refused_source_takes_nothing_from_the_pool() {
+        let a = Admission::with_per_source(3, 2);
+        let x = "100.64.0.1".parse().unwrap();
+        let _held = (a.try_acquire(x).unwrap(), a.try_acquire(x).unwrap());
+        for _ in 0..10 {
+            assert!(a.try_acquire(x).is_none());
+        }
+        assert!(a.try_acquire("100.64.0.2".parse().unwrap()).is_some());
+    }
+
+    #[test]
+    fn a_full_pool_leaves_no_entry_for_the_refused_source() {
+        let a = Admission::with_per_source(1, 2);
+        let _held = a.try_acquire("100.64.0.1".parse().unwrap()).unwrap();
+        assert!(a.try_acquire("100.64.0.2".parse().unwrap()).is_none());
+        assert_eq!(a.sources.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn mapped_and_plain_addresses_are_one_source() {
+        let a = Admission::with_per_source(8, 1);
+        let _held = a.try_acquire("100.64.0.1".parse().unwrap()).unwrap();
+        assert!(a.try_acquire("::ffff:100.64.0.1".parse().unwrap()).is_none());
+    }
 
     /// The accept task ends when it is aborted, as it does when the runtime
     /// shuts down while a server still polls the listener. Accept must wait
@@ -576,7 +667,7 @@ mod io_tests {
         client.flush().await.unwrap();
 
         let admission = Admission::new(1);
-        let admit = Admit::new(admission.semaphore.clone().try_acquire_owned().unwrap());
+        let admit = Admit::new(admission.try_acquire("127.0.0.1".parse().unwrap()).unwrap());
         admit.authenticated();
         let (kill_tx, kill_rx) = watch::channel(false);
         let kill = KillSwitch { tx: kill_tx };

@@ -696,8 +696,9 @@ pub async fn run(dir: &Path) -> Result<()> {
         });
     }
     let tls_watch = tokio::spawn(crate::tls::watch(dir.to_path_buf(), installed_pin, tls_tx));
-    // The same router (and so the same limits) on the Unix socket. Hello and
-    // token auth still apply; the Origin check passes trivially because no
+    // The same router (and so the same daemon-wide in-flight limit) on the
+    // Unix socket. Its pre-auth slots are a separate pool, so no network peer
+    // can fill them. Hello and token auth still apply; the Origin check passes trivially because no
     // browser can reach a Unix socket, and there is no address to allowlist.
     let sock = socket_path(dir);
     let (local, local_owned) = local_socket::bind(&lock, &sock)?;
