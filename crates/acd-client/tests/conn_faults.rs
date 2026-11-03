@@ -216,6 +216,54 @@ async fn seq_gap_forces_resync_without_resume() {
 }
 
 #[tokio::test]
+async fn frame_over_one_mib_drops_the_connection_and_holds_nothing() {
+    let (f, h) = start().await;
+    let c = online(&f, &h).await;
+    let mut big = upd("e1", 2, "a", "working");
+    big["agent"]["title"] = serde_json::Value::String("x".repeat(2 << 20));
+    c.send(big).await;
+    wait_for_connections(&f, 2).await;
+    assert!(!h.state().borrow().session.agents.contains_key("a"));
+}
+
+#[tokio::test]
+async fn snapshot_over_the_agent_cap_forces_resync_without_state() {
+    let (f, h) = start().await;
+    let c = f.next_connection().await;
+    let ids: Vec<String> = (0..=MAX_AGENTS_PER_MACHINE).map(|i| format!("a{i}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    c.send(snapshot("e1", 1, &ids)).await;
+    let _c2 = f.next_connection().await;
+    assert!(f.hellos()[1].get("resume").is_none());
+    assert!(h.state().borrow().session.agents.is_empty());
+}
+
+#[tokio::test]
+async fn new_agent_past_the_cap_forces_resync() {
+    let (f, _h) = start().await;
+    let c = f.next_connection().await;
+    let ids: Vec<String> = (0..MAX_AGENTS_PER_MACHINE).map(|i| format!("a{i}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    c.send(snapshot("e1", 1, &ids)).await;
+    c.send(upd("e1", 2, "a0", "done")).await;
+    c.send(upd("e1", 3, "one-too-many", "working")).await;
+    let _c2 = f.next_connection().await;
+    assert!(f.hellos()[1].get("resume").is_none());
+}
+
+#[tokio::test]
+async fn oversized_agent_forces_resync() {
+    let (f, _h) = start().await;
+    let c = f.next_connection().await;
+    c.send(snapshot("e1", 1, &[])).await;
+    let mut big = upd("e1", 2, "a", "working");
+    big["agent"]["title"] = serde_json::Value::String("x".repeat(MAX_AGENT_BYTES + 1));
+    c.send(big).await;
+    let _c2 = f.next_connection().await;
+    assert!(f.hellos()[1].get("resume").is_none());
+}
+
+#[tokio::test]
 async fn resume_carries_the_cursor_after_a_drop() {
     let (f, h) = start().await;
     let c = f.next_connection().await;

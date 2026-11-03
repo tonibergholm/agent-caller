@@ -147,6 +147,13 @@ enum End {
     Stopped,
 }
 
+/// The server's 1 MiB limit (PROTOCOL.md §1), applied to what a peer sends us.
+fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(acd_protocol::MAX_FRAME_BYTES))
+        .max_frame_size(Some(acd_protocol::MAX_FRAME_BYTES))
+}
+
 async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), End> {
     timeout_at(deadline, async {
         // Refused before any token is read. See `refuse_local`.
@@ -165,9 +172,10 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
                 let stream = tokio::net::UnixStream::connect(local::socket_path(config_dir))
                     .await
                     .map_err(|e| End::Offline(local_reason(&e)))?;
-                let (ws, _) = tokio_tungstenite::client_async(
+                let (ws, _) = tokio_tungstenite::client_async_with_config(
                     "ws://localhost/",
                     Box::new(stream) as Box<dyn Io>,
+                    Some(ws_config()),
                 )
                 .await
                 .map_err(|e| End::Offline(e.to_string()))?;
@@ -223,8 +231,12 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
                         Err(_) => host.trim_matches(['[', ']']).to_string(),
                     };
                     let url = format!("wss://{authority_host}:{port}/");
-                    match tokio_tungstenite::client_async(url, Box::new(stream) as Box<dyn Io>)
-                        .await
+                    match tokio_tungstenite::client_async_with_config(
+                        url,
+                        Box::new(stream) as Box<dyn Io>,
+                        Some(ws_config()),
+                    )
+                    .await
                     {
                         Ok((ws, _)) => return Ok((ws, token)),
                         Err(e) => {
