@@ -12,7 +12,7 @@ use super::detail::PendingView;
 use super::wire::{Project, ShellThread, TurnItem};
 use crate::text::{LAST_MESSAGE_CHARS, TITLE_CHARS, cap_chars, clean_display, clean_screen};
 
-pub const DETAIL_CHARS: usize = 4000;
+pub use crate::hooks::mapping::DETAIL_CHARS;
 pub const DECISIONS: [&str; 5] = [
     "accept",
     "acceptForSession",
@@ -139,6 +139,11 @@ fn detail(s: &str) -> String {
     cap_chars(clean_screen(s).trim(), DETAIL_CHARS)
 }
 
+/// Whether `detail(s)` hides part of `s`.
+fn detail_is_cut(s: &str) -> bool {
+    clean_screen(s).trim().chars().count() > DETAIL_CHARS
+}
+
 /// Whether a typed answer is offered for `q`. T3's own UI treats an absent
 /// `allowCustomAnswer` as allowed, but only Claude is verified to take a typed
 /// string (live check, 2026-10-11). Any other provider needs an explicit
@@ -197,18 +202,22 @@ pub fn request_obs(
                         c.to_owned()
                     };
                     obs.detail = detail(&text);
-                    obs.answer_path = AnswerPath::T3;
-                    obs.options = FALLBACK
-                        .iter()
-                        .map(|(id, label, effect)| RequestOption {
-                            id: (*id).into(),
-                            label: (*label).into(),
-                            description: None,
-                            effect: *effect,
-                            confirm: false,
-                        })
-                        .collect();
-                    answer = TargetAnswer::Decision;
+                    // A cut command hides part of what would run: read-only,
+                    // answered in T3 (same rule as the hooks mapping).
+                    if !detail_is_cut(&text) {
+                        obs.answer_path = AnswerPath::T3;
+                        obs.options = FALLBACK
+                            .iter()
+                            .map(|(id, label, effect)| RequestOption {
+                                id: (*id).into(),
+                                label: (*label).into(),
+                                description: None,
+                                effect: *effect,
+                                confirm: false,
+                            })
+                            .collect();
+                        answer = TargetAnswer::Decision;
+                    }
                 }
                 None => {
                     let mut text = String::from("Command not available yet \u{2014} answer in T3.");
@@ -426,5 +435,40 @@ mod tests {
         // Options stay answerable either way.
         let (obs, _) = obs_for(Some("codex"), &question_view(false, None));
         assert_eq!(obs.answer_path, AnswerPath::T3);
+    }
+
+    fn command_view(command: &str) -> PendingView {
+        let projection = crate::t3::fake::approval_projection("thread", "request", None);
+        let (detail, _) = ThreadDetail::from_projection(&projection);
+        let mut view = detail.pending_view("request").unwrap();
+        let Some(TurnItem::ApprovalRequest {
+            request_kind,
+            prompt,
+            ..
+        }) = &mut view.item
+        else {
+            panic!("an approval");
+        };
+        assert_eq!(request_kind.as_deref(), Some("command"));
+        *prompt = None;
+        view.command = Some(command.into());
+        view
+    }
+
+    #[test]
+    fn a_command_at_the_cap_is_answerable() {
+        let (obs, target) = obs_for(Some("claude"), &command_view(&"a".repeat(DETAIL_CHARS)));
+        assert_eq!(obs.answer_path, AnswerPath::T3);
+        assert_eq!(obs.options.len(), 3);
+        assert_eq!(target.answer, TargetAnswer::Decision);
+    }
+
+    #[test]
+    fn a_command_over_the_cap_is_read_only() {
+        let (obs, target) = obs_for(Some("claude"), &command_view(&"a".repeat(DETAIL_CHARS + 1)));
+        assert_eq!(obs.answer_path, AnswerPath::None);
+        assert!(obs.options.is_empty());
+        assert_eq!(target.answer, TargetAnswer::ReadOnly);
+        assert!(obs.detail.chars().count() <= DETAIL_CHARS);
     }
 }
