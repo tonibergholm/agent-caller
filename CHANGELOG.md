@@ -33,6 +33,10 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Fixed
 
+- acd: one device that opens connections and never sends `hello` can no longer
+  keep other clients out. Each source address may hold two unauthenticated
+  connections at a time (a third is dropped), and the local socket has its own
+  pre-auth slots.
 - A daemon that closes every connection with 4408 (client too slow) is no longer
   redialled at once, about 150 times a second. The client now waits as it does
   after any other close: 1 s, doubling to 30 s, reset when a session is ready.

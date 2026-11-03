@@ -84,7 +84,12 @@ struct AppState {
     core: Arc<Core>,
     auth: Arc<Auth>,
     opts: ServerOptions,
+    /// Pre-auth slots for network peers. Each source address is also capped in
+    /// `tls::Admission`, so one peer cannot hold more than a few of them.
     preauth: Arc<Semaphore>,
+    /// Pre-auth slots for the Unix socket, apart from the network pool so
+    /// that no remote peer can starve the local client.
+    local_preauth: Arc<Semaphore>,
     /// Daemon-wide in-flight commands; shared by every clone of the router.
     inflight_total: Arc<Semaphore>,
 }
@@ -93,12 +98,14 @@ struct AppState {
 /// so the limits apply daemon-wide.
 pub fn router(core: Arc<Core>, auth: Arc<Auth>, opts: ServerOptions) -> Router {
     let preauth = Arc::new(Semaphore::new(opts.max_preauth));
+    let local_preauth = Arc::new(Semaphore::new(opts.max_preauth));
     let inflight_total = Arc::new(Semaphore::new(opts.max_inflight_total));
     Router::new().route("/", get(upgrade)).with_state(AppState {
         core,
         auth,
         opts,
         preauth,
+        local_preauth,
         inflight_total,
     })
 }
@@ -118,7 +125,14 @@ async fn upgrade(
             return StatusCode::FORBIDDEN.into_response();
         }
     }
-    let Ok(permit) = st.preauth.clone().try_acquire_owned() else {
+    // A connection without admission info did not come through the TLS
+    // listener: it is on the Unix socket.
+    let pool = if admit.is_some() {
+        &st.preauth
+    } else {
+        &st.local_preauth
+    };
+    let Ok(permit) = pool.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let max = st.opts.max_frame;

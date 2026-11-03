@@ -249,10 +249,26 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - omarchy: `loginctl enable-linger toni` keeps acd running while logged out (optional).
 - minos: agents started over SSH cannot use the login keychain; acceptance there relies on locally started sessions.
 
+## Pre-auth residuals (PR #82)
+
+- **OWNER-undecided.** Same-UID local denial of service: a process of the same user can hold all
+  8 local pre-auth slots (open `acd.sock`, never send `hello`) until the
+  5 s hello timeout, and reconnect. Another UID cannot reach the socket
+  (mode 0600, `crates/acd/src/local_socket.rs`). Argument for accepting: a
+  process running as the user can already read the token and answer
+  requests. The owner has not decided; this is not an accepted residual.
+  Decide whether a per-peer-credential cap is wanted.
+- **OWNER-undecided.** Four or more distinct source IPs (four addresses at 2
+  slots each) can still fill all 8 network pre-auth slots. No status yet.
+- A hostile process sharing a source IP with a paired client can take that
+  client's 2 slots.
+
 ## 1.0 triage
 
 Sorted 2026-10-13 from the lists above. Each item is in one bucket.
-Items not named here stay in their section as accepted residuals.
+Items not named here stay in their section as accepted residuals, except
+items marked **OWNER-undecided**: those are not accepted and need an owner
+decision before 1.0.
 
 **Fix before 1.0** (daily use, or wrong output a user would see):
 
