@@ -297,9 +297,20 @@ needs a decision or a small follow-up.
   and `-local.md`): core 3 (16 MiB frames, unbounded agent state), 4 (no
   connection or auth log), 5 (unbounded notifications), 7 and 8 (pairing host
   and `agent.send` character rules); local F2 (T3 token goes to whoever holds
-  the loopback port), F3 (hook listeners have no read timeout), F4 (herdr
-  socket discovery checks no owner), F5 (service files from unescaped paths).
-  Core 1, 2 and 6 and local F1 are fixed.
+  the loopback port; **not fixed by the review's ticket fix**: the ticket
+  request `POST /api/auth/websocket-ticket` itself needs `Authorization:
+  Bearer <t3.token>` over plain HTTP to the same port, so a squatter receives
+  the long-lived token there instead of on the upgrade. The endpoint is
+  confirmed (`docs/research/2026-10-08-t3-gate3.md` §1,
+  `tests/fixtures/t3/http_websocket_ticket_200.json`). A real fix has to
+  prove who holds the port first, for example the listener's owner uid from
+  `/proc/net/tcp` on Linux, or a narrower and shorter-lived T3 token; needs an
+  owner decision), F4 (herdr socket discovery checks no owner), F5 (service
+  files from unescaped paths). Core 1, 2 and 6 and local F1 and F3 are fixed.
+  F3 residual: the hook listeners time out only the request head (10 s, from
+  accept); an idle keep-alive connection after a completed request, and a
+  slow body after the token check (5 s `body_timeout`), are not bounded by
+  the new timeout, and there is no per-peer connection cap.
 - **Owner decisions still open:** same-user denial of service on the local
   socket and the four-source pre-auth residual (see Pre-auth residuals); the
   relay spec's lock-screen content rule and handle revocation (see its review

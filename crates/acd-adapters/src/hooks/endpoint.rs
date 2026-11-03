@@ -1,5 +1,6 @@
 //! Authenticated, bounded hook endpoint shared by loopback TCP and Unix sockets.
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -537,6 +538,20 @@ async fn hold(
 pub struct Capped<L> {
     inner: L,
     slots: Arc<Semaphore>,
+    head_timeout: Duration,
+}
+
+/// How long a connection may take to send a complete request head before it
+/// is dropped and its slot freed (F3). Only the head is bounded: a held
+/// request is silent after its head and body, by design.
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl<L> Capped<L> {
+    /// Overrides [`HEAD_TIMEOUT`]; tests use a short one.
+    pub fn with_head_timeout(mut self, head_timeout: Duration) -> Self {
+        self.head_timeout = head_timeout;
+        self
+    }
 }
 
 /// The loopback TCP hook listener.
@@ -548,6 +563,7 @@ fn capped_with<L>(inner: L, max: usize) -> Capped<L> {
     Capped {
         inner,
         slots: Arc::new(Semaphore::new(max)),
+        head_timeout: HEAD_TIMEOUT,
     }
 }
 
@@ -562,6 +578,29 @@ pub fn capped_unix(listener: UnixListener, max: usize) -> CappedUnixListener {
 pub struct CappedIo<S> {
     io: S,
     _slot: OwnedSemaphorePermit,
+    head: Option<HeadWatch>,
+}
+
+/// Runs from accept until the first blank line (end of the request head).
+struct HeadWatch {
+    deadline: Pin<Box<tokio::time::Sleep>>,
+    /// The last bytes read, so a terminator split across reads is seen.
+    tail: [u8; 3],
+}
+
+impl HeadWatch {
+    /// True once `\r\n\r\n` has been seen across `tail` and `new`.
+    fn saw_end(&mut self, new: &[u8]) -> bool {
+        let mut window = self.tail.to_vec();
+        window.extend_from_slice(new);
+        if window.windows(4).any(|w| w == b"\r\n\r\n") {
+            return true;
+        }
+        let keep = window.len().min(3);
+        self.tail = [0; 3];
+        self.tail[3 - keep..].copy_from_slice(&window[window.len() - keep..]);
+        false
+    }
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for CappedIo<S> {
@@ -570,7 +609,20 @@ impl<S: AsyncRead + Unpin> AsyncRead for CappedIo<S> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.io).poll_read(cx, buf)
+        let this = &mut *self;
+        if let Some(head) = this.head.as_mut()
+            && head.deadline.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(Err(io::ErrorKind::TimedOut.into()));
+        }
+        let before = buf.filled().len();
+        let polled = Pin::new(&mut this.io).poll_read(cx, buf);
+        if let (Poll::Ready(Ok(())), Some(head)) = (&polled, this.head.as_mut())
+            && head.saw_end(&buf.filled()[before..])
+        {
+            this.head = None;
+        }
+        polled
     }
 }
 
@@ -602,7 +654,11 @@ impl<L: Listener> Listener for Capped<L> {
             .await
             .expect("semaphore is never closed");
         let (io, addr) = self.inner.accept().await;
-        (CappedIo { io, _slot: slot }, addr)
+        let head = Some(HeadWatch {
+            deadline: Box::pin(tokio::time::sleep(self.head_timeout)),
+            tail: [0; 3],
+        });
+        (CappedIo { io, _slot: slot, head }, addr)
     }
 
     fn local_addr(&self) -> io::Result<Self::Addr> {

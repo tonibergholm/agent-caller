@@ -782,3 +782,67 @@ async fn unix_listener_serves_the_same_authenticated_endpoint_and_bounds() {
         Inbound::Event { .. }
     ));
 }
+
+/// Like `serve`, with a short head timeout (F3).
+async fn serve_with_head_timeout(head: Duration) -> (u16, Mailbox) {
+    let opts = EndpointOptions::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, mailbox) = mailbox(&opts);
+    let app = router(Arc::new(HookAuth::new(cred(TOKEN, 1))), tx, opts.clone());
+    tokio::spawn(async move {
+        axum::serve(
+            capped(listener, opts.max_connections).with_head_timeout(head),
+            app,
+        )
+        .await
+        .unwrap()
+    });
+    (port, mailbox)
+}
+
+#[tokio::test]
+async fn silent_connections_do_not_starve_a_later_hook_call() {
+    use tokio::io::AsyncReadExt;
+    let opts = EndpointOptions::default();
+    let (port, mut mailbox) = serve_with_head_timeout(Duration::from_millis(200)).await;
+    let mut idle = Vec::new();
+    for _ in 0..opts.max_connections {
+        idle.push(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap());
+    }
+    // Ordering, not a clock bound: every silent connection is closed by the
+    // server (EOF or reset), which frees its slot; only then the call runs.
+    for stream in &mut idle {
+        let mut byte = [0u8; 1];
+        let closed = timeout(Duration::from_secs(30), stream.read(&mut byte))
+            .await
+            .expect("the server closed the silent connection");
+        assert!(matches!(closed, Ok(0) | Err(_)), "closed, no data sent");
+    }
+    let body = fx("claude/payload-UserPromptSubmit.json");
+    let reply = timeout(
+        Duration::from_secs(30),
+        post(port, "/hook/claude/UserPromptSubmit", TOKEN, &[], &body),
+    )
+    .await
+    .expect("a slot was free for the later call");
+    assert_eq!(reply.0, 200);
+    assert!(matches!(
+        next_event(&mut mailbox).await,
+        Inbound::Event { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_held_request_is_not_cut_by_the_head_timeout() {
+    let (port, mut mailbox) = serve_with_head_timeout(Duration::from_millis(100)).await;
+    let body = fx("claude/payload-PermissionRequest-Bash.json");
+    let stream = send(port, PR, TOKEN, &[], &body).await;
+    let Inbound::Held { .. } = next_control(&mut mailbox).await else {
+        panic!("not held")
+    };
+    // Several head timeouts later the silent hold is still open.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(mailbox.control.is_empty(), "no HoldClosed: still held");
+    drop(stream);
+}
