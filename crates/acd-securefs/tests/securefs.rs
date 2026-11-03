@@ -1,3 +1,7 @@
+//! Unix only: these pin mode bits, uids and symlinks. Non-unix targets refuse
+//! every check; that is tested in the crate itself.
+#![cfg(unix)]
+
 use acd_securefs::*;
 use std::{
     fs,
