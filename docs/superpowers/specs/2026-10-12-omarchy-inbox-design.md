@@ -151,6 +151,9 @@ out Done cards, then Working cards (never a card with a countdown), and
 reports them as `"omitted":{"done":n,"working":m}` so the panel shows
 "N not shown"; Needs-you cards are never left out, and if they alone do
 not fit, their text is truncated further down to a minimum per field.
+A card whose request text (detail, option labels, questions; not `raw_screen`)
+was truncated is sent read-only: `answerable`, `free_text_answerable` false,
+`selectable_options` empty, `pending.answer_path` `none`. No new field.
 If even that does not fit, the service sends
 `{"type":"view_overflow","needs_you":n}` instead of a view and the panel
 shows an error state with the count until a view fits again.
