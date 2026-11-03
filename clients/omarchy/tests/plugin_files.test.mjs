@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import * as Model from "../model.mjs";
+import { parseQml, idOf, findAll, ancestorsToFlick, extractFn, compileFns } from "./qml_helpers.mjs";
 
 const read = (name) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
 const QML = ["BarWidget.qml", "Panel.qml", "Service.qml"];
@@ -210,20 +212,56 @@ test("Panel.run handles the select effect by scrolling the card list", () => {
   assert.match(panel, /function revealCard\(key\) \{[\s\S]*cardsFlick\.contentY = Model\.scrollToCard\(/);
 });
 
-// A card must show the whole command or be read-only (mapping.rs), so the
-// panel may not cut the detail or the question text to a few rows.
-test("the permission detail and the question text are not capped to a line count", () => {
-  const panel = read("Panel.qml");
+// A card must show the whole command or be read-only (mapping.rs), so nothing
+// between the detail / question text and the card list may cut it: not the
+// Label, not the card, not any Item on the way up to the Flickable (the one
+// legitimate clip). The QML is parsed into its object tree, not grepped.
+const CUTS = /(?:^|[\n;{])\s*(?:maximumLineCount|elide|clip|height|maximumHeight|maximumWidth|implicitHeight|Layout\.maximumHeight|Layout\.preferredHeight|Layout\.maximumWidth)\s*:/;
+const CARD_IMPLICIT_HEIGHT = "body.implicitHeight + Commons.Style.spacing.lg * 2";
+function detailViolations(panel) {
+  const bad = [];
+  const tree = parseQml(panel);
   for (const marker of ["agent.pending.detail", "Model.questionLines("]) {
-    const at = panel.indexOf(marker);
-    assert.ok(at > 0, `anchor not found in Panel.qml: ${marker}`);
-    const start = panel.lastIndexOf("Label {", at);
-    const end = panel.indexOf("\n            }\n", at);
-    assert.ok(start >= 0 && end > at, `Label block around ${marker} not found`);
-    const label = panel.slice(start, end);
-    assert.match(label, /wrapMode:\s*Text\.Wrap\b/, `${marker}: must wrap`);
-    assert.doesNotMatch(label, /maximumLineCount|elide:|clip:|\bheight:|\bmaximumHeight|NoWrap|\bmaximumWidth|\bimplicitHeight:|\bLayout\.(maximum|preferred)Height/, `${marker}: hides text`);
+    const labels = findAll(tree, (n) => n.type === "Label" && n.props.includes(marker));
+    if (labels.length !== 1) {
+      bad.push(`${marker}: expected one Label, found ${labels.length}`);
+      continue;
+    }
+    const label = labels[0];
+    if (!/wrapMode:\s*Text\.Wrap\b/.test(label.props)) bad.push(`${marker}: must wrap`);
+    if (!/Layout\.fillWidth:\s*true/.test(label.props)) bad.push(`${marker}: must fill the width`);
+    if (CUTS.test(label.props) || /NoWrap|Elide|Truncate/.test(label.props)) bad.push(`${marker}: the label hides text`);
+    const { chain, reached } = ancestorsToFlick(tree, label, "cardsFlick");
+    if (!reached) bad.push(`${marker}: some path does not end in cardsFlick`);
+    for (const item of chain) {
+      const what = `${marker}: ${item.type}${idOf(item) ? "#" + idOf(item) : item.name ? " (" + item.name + ")" : ""}`;
+      const own = item.props.replace(new RegExp(`(?:^|[\\n;{])\\s*implicitHeight\\s*:\\s*${CARD_IMPLICIT_HEIGHT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*(?=\\n|;|$)`), "\n");
+      if (CUTS.test(own)) bad.push(`${what} clips or sizes the card`);
+    }
   }
+  return bad;
+}
+
+// The oversized-card note names a card that does not fit, options or not.
+function noteViolations(panel) {
+  const bad = [];
+  const tree = parseQml(panel);
+  const notes = findAll(tree, (n) => n.type === "Label" && n.props.includes("tooLongNote("));
+  if (notes.length !== 1) return [`expected one note Label, found ${notes.length}`];
+  if (!/visible:\s*note !== ""/.test(notes[0].props)) bad.push("note not shown whenever it is non-empty");
+  if (/rows|options|pickable/.test(notes[0].props)) bad.push("note depends on the option rows");
+  if (!/text:\s*note\b/.test(notes[0].props)) bad.push("note text is not the model's");
+  const fn = extractFn(panel, "tooLongNote") ?? "";
+  if (!/return Model\.tooLongNote\(item\.card, cardsFlick\.height, item\.height\);/.test(fn)) bad.push("tooLongNote is not the model's");
+  return bad;
+}
+
+test("the permission detail and the question text are shown whole, to the card list", () => {
+  assert.deepEqual(detailViolations(read("Panel.qml")), []);
+});
+
+test("the oversized-card note does not wait for option rows", () => {
+  assert.deepEqual(noteViolations(read("Panel.qml")), []);
 });
 
 // UNVERIFIED in a real Quickshell: only the wiring is pinned here.
@@ -236,34 +274,31 @@ test("Panel reveals the card on a notification click", () => {
 // A card is answered from the panel only while it is wholly in the viewport.
 // Every path that can send an answer is listed here and must go through the
 // gate (Model.pickOption / Model.planAnswer with the live Panel.cardFits).
-// Returns the violations found in a copy of Panel.qml / BarWidget.qml.
+// Structural checks of a copy of Panel.qml / BarWidget.qml.
 function gateViolations(panel, bar) {
   const bad = [];
-  const fn = (src, name) => {
-    const at = src.indexOf(`function ${name}(`);
-    if (at < 0) return "";
-    const end = src.indexOf("\n    }\n", at);
-    return src.slice(at, end < 0 ? src.length : end);
-  };
-  // the live geometry check
-  const fits = fn(panel, "cardFits");
-  if (!/Model\.cardFullyVisible\(cardsFlick\.contentY, cardsFlick\.height, item\.y, item\.height\)/.test(fits)) bad.push("cardFits does not read live geometry");
-  if (/\bproperty\b/.test(fits)) bad.push("cardFits caches");
+  const fn = (name) => extractFn(panel, name) ?? "";
+  // the live geometry check: one statement to look the card up, one return, nothing before it
+  const fits = fn("cardFits");
+  const body = fits.slice(fits.indexOf("{") + 1, fits.lastIndexOf("}")).trim().split(/\s*;\s*/).filter(Boolean).map((x) => x.replace(/\s+/g, " "));
+  if (body.length !== 2 || body[0] !== "const item = cardItemFor(key)" || !/^return Model\.cardFitsView\(item !== null && cardsFlick\.visible, cardsFlick\.contentY, cardsFlick\.height, item \? item\.y : NaN, item \? item\.height : NaN\)$/.test(body[1])) bad.push("cardFits is not exactly the lookup and the model's gate");
+  if ((fits.match(/\breturn\b/g) ?? []).length !== 1) bad.push("cardFits has an early return");
   // keys: digits and Enter ask the live geometry through the event
-  if (!/ev\.fits = cardFits;/.test(fn(panel, "keyEvent"))) bad.push("keyEvent does not pass cardFits");
+  if (!/ev\.fits = cardFits;/.test(fn("keyEvent"))) bad.push("keyEvent does not pass cardFits");
   // mouse and typed answers
-  const pick = fn(panel, "pickOption");
+  const pick = fn("pickOption");
   if (!/const fits = cardFits\(card\.key\);\s*const r = Model\.pickOption\(keyState, card, optionId, Date\.now\(\), fits\);/.test(pick)) bad.push("pickOption wrapper not gated");
-  if (!/Model\.planAnswer\(answerEditor, cards, text, answerEditor !== null && cardFits\(answerEditor\.cardKey\)\)/.test(fn(panel, "submitAnswer"))) bad.push("submitAnswer not gated");
+  if (!/const plan = Model\.planAnswer\(answerEditor, cards, text, answerEditor !== null && cardFits\(answerEditor\.cardKey\)\);/.test(fn("submitAnswer"))) bad.push("submitAnswer not gated");
   // Model.pickOption / planAnswer are called once each, only in those wrappers
   if ((panel.match(/Model\.pickOption\(/g) ?? []).length !== 1) bad.push("Model.pickOption called outside the wrapper");
   if ((panel.match(/Model\.planAnswer\(/g) ?? []).length !== 1) bad.push("Model.planAnswer called outside submitAnswer");
   // the raw sends exist once and only in run() / submitAnswer
-  if (!/case "pick":\s*service\.send\("pick"/.test(fn(panel, "run"))) bad.push("pick send not in run()");
+  if (!/case "pick":\s*service\.send\("pick"/.test(fn("run"))) bad.push("pick send not in run()");
   if ((panel.match(/send\("pick"/g) ?? []).length !== 1) bad.push("another pick send");
-  if ((panel.match(/send\("answer_text"/g) ?? []).length !== 1 || !/send\("answer_text"/.test(fn(panel, "submitAnswer"))) bad.push("answer_text send outside submitAnswer");
-  if (/run\(\{\s*kind:\s*"(pick|submitAnswer)"/.test(panel)) bad.push("run() called with a hand-made pick");
-  // every handler line that can send an option goes through the Panel wrapper
+  if ((panel.match(/send\("answer_text"/g) ?? []).length !== 1 || !/send\("answer_text"/.test(fn("submitAnswer"))) bad.push("answer_text send outside submitAnswer");
+  // run() is defined once and called only by pickOption and keyEvent (plus its own cases)
+  if ((panel.match(/\brun\(/g) ?? []).length !== 3) bad.push("run() called from somewhere else");
+  // every handler that can send an option goes through the Panel wrapper
   for (const src of [panel, bar]) {
     for (const l of src.split("\n")) {
       if (!/onClicked|onTapped|onPressed|onAccepted|onActivated|Keys\./.test(l)) continue;
@@ -275,26 +310,126 @@ function gateViolations(panel, bar) {
   return bad;
 }
 
+// Runs Panel.qml's own gate functions (cardItemFor, cardFits, run, pickOption,
+// submitAnswer, keyEvent, tooLongNote) against stubs and real model.mjs, and
+// counts what would reach the service.
+const sampleCard = (extra = {}) => ({
+  key: "m1/a", answerable: true, free_text_answerable: true, selectable_options: ["allow", "deny"], busy: false, action: null,
+  can_reply: false, can_mark_seen: false,
+  agent: { pending: { id: "r1", revision: 1, kind: "permission", detail: "x", questions: null, options: [
+    { id: "allow", label: "Yes", description: null, effect: "allow" },
+    { id: "deny", label: "No", description: null, effect: "deny", confirm: true },
+  ] } },
+  ...extra,
+});
+const OK = { contentY: 0, flickHeight: 100, y: 10, height: 50 };
+function trial(panel, geo, act) {
+  const g = { visible: true, hasItem: true, ...OK, ...geo };
+  const card = sampleCard();
+  const sent = [];
+  const ctx = {
+    Model, keyState: { selected: card.key, replyFor: null }, answerEditor: null, cards: [card], visibleCards: [card], message: "", now: 0,
+    cardsFlick: { contentY: g.contentY, height: g.flickHeight, visible: g.visible },
+    sectionsColumn: { children: g.hasItem ? [{ card, y: g.y, height: g.height }] : [] },
+    service: { send: (type, fields) => sent.push(type) },
+    started: () => () => {}, releaseFocus() {}, revealCard() {}, close() {}, submitReply() {}, submitPairing() {}, report() {}, cardFor: () => card,
+  };
+  compileFns(panel, ["cardItemFor", "cardFits", "run", "pickOption", "submitAnswer", "keyEvent", "tooLongNote", "cardTooTall"], ctx);
+  const press = (text, key = 0) => ctx.keyEvent({ key, text, modifiers: 0, accepted: false }, null, false, null);
+  act({ ctx, card, press, scroll: (y) => { ctx.cardsFlick.contentY = y; }, resize: (h) => { ctx.cardsFlick.height = h; }, grow: (h) => { ctx.sectionsColumn.children[0].height = h; } });
+  return { sent: sent.filter((t) => t === "pick" || t === "answer_text").length, ctx, card };
+}
+const ACTS = {
+  click: ({ ctx, card }) => ctx.pickOption(card, "allow"),
+  digit: ({ press }) => press("1"),
+  armedEnter: ({ press }) => { press("2"); press("", Model.QT.Key_Return); },
+  armedThenScrolledEnter: ({ press, scroll }) => { press("2"); scroll(40); press("", Model.QT.Key_Return); },
+  armedThenResizedEnter: ({ press, resize }) => { press("2"); resize(40); press("", Model.QT.Key_Return); },
+  armedThenGrewEnter: ({ press, grow }) => { press("2"); grow(150); press("", Model.QT.Key_Return); },
+  armedThenClick: ({ ctx, card, scroll }) => { ctx.pickOption(card, "deny"); scroll(40); ctx.pickOption(card, "deny"); },
+  answer: ({ ctx, card }) => { ctx.answerEditor = Model.answerEditor(card); ctx.submitAnswer("hello"); },
+};
+function gateBehaviour(panel) {
+  const bad = [];
+  try {
+    for (const [name, act] of Object.entries(ACTS)) {
+      const sentWhenOk = trial(panel, {}, act).sent;
+      const mustSend = !/Scrolled|Resized|Grew|Click$/.test(name) || name === "click";
+      if (sentWhenOk !== (mustSend ? 1 : 0)) bad.push(`${name}: sent ${sentWhenOk} while the card fits`);
+    }
+    const refused = {
+      "half off the bottom": { y: 70 }, "half off the top": { contentY: 40 }, "far above the view": { contentY: 2000 },
+      "taller than the panel": { height: 150, y: 0 }, "101 px in a 100 px panel": { height: 101, y: 0 },
+      "list hidden": { visible: false }, "card gone": { hasItem: false }, "no viewport": { flickHeight: 0 },
+    };
+    for (const [why, geo] of Object.entries(refused)) {
+      for (const name of ["click", "digit", "armedEnter", "answer"]) {
+        const n = trial(panel, geo, ACTS[name]).sent;
+        if (n !== 0) bad.push(`${name} sent ${n} while ${why}`);
+      }
+    }
+    // the note: free-text-only cards too
+    const note = (card, h) => trial(panel, { height: h }, ({ ctx }) => { ctx.note = ctx.tooLongNote({ card, height: h }); }).ctx.note;
+    const textOnly = sampleCard({ answerable: false });
+    textOnly.agent.pending.options = [];
+    if (note(textOnly, 300) !== Model.TOO_LONG_NOTE) bad.push("no note on a free-text-only card taller than the panel");
+    if (note(sampleCard(), 300) !== Model.TOO_LONG_NOTE) bad.push("no note on a tall card with options");
+    if (note(textOnly, 50) !== "") bad.push("note on a card that fits");
+  } catch (e) {
+    bad.push("could not run Panel.qml's functions: " + e.message);
+  }
+  return bad;
+}
+
+const families = (panel, bar) => ({ gate: gateViolations(panel, bar), behaviour: gateBehaviour(panel), detail: detailViolations(panel), note: noteViolations(panel) });
+
 test("every Panel path that can send an answer goes through the whole-card-visible gate", () => {
   const panel = read("Panel.qml");
   const bar = read("BarWidget.qml");
-  assert.deepEqual(gateViolations(panel, bar), []);
-  // The tall-card note and disabled buttons
-  assert.match(panel, /Too long to show here\. Answer it in the terminal\./);
+  assert.deepEqual(families(panel, bar), { gate: [], behaviour: [], detail: [], note: [] });
   assert.match(panel, /enabled: optionRow\.modelData\.pickable && !cardItem\.inbox\.cardTooTall\(cardItem\)/);
-  const mutations = {
-    "click calls the model directly": [/onClicked: cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/, "onClicked: cardItem.inbox.keyState = Model.pickOption(cardItem.inbox.keyState, cardItem.card, optionRow.modelData.id, Date.now(), true).state"],
-    "click sends the pick itself": [/onClicked: cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/, 'onClicked: cardItem.inbox.service.send("pick", {})'],
-    "wrapper passes a constant": [/Date\.now\(\), fits\)/, "Date.now(), true)"],
-    "keys lose the geometry": [/ev\.fits = cardFits;/, ""],
-    "geometry is not live": [/Model\.cardFullyVisible\(cardsFlick\.contentY,/, "Model.cardFullyVisible(0,"],
-    "typed answer ungated": [/, answerEditor !== null && cardFits\(answerEditor\.cardKey\)\)/, ", true)"],
-    "second pick send": [/function markSeen|case "markSeen":/, 'case "markSeen": service.send("pick", {}); '],
-  };
-  for (const [name, [from, to]] of Object.entries(mutations)) {
+});
+
+// Each mutation is applied in memory and must be caught by the named guard.
+const insertAfter = (anchor, text) => [anchor, anchor + text];
+const MUTATIONS = {
+  "click calls the model directly": [/onClicked: cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/, "onClicked: cardItem.inbox.keyState = Model.pickOption(cardItem.inbox.keyState, cardItem.card, optionRow.modelData.id, Date.now(), true).state", ["gate"]],
+  "multi-line click calls the model directly": [/onClicked: cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/, "onClicked: {\n                            cardItem.inbox.keyState = Model.pickOption(cardItem.inbox.keyState, cardItem.card, optionRow.modelData.id, Date.now(), true).state;\n                        }", ["gate"]],
+  "click sends the pick itself": [/onClicked: cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/, 'onClicked: cardItem.inbox.service.send("pick", {})', ["gate"]],
+  "click runs a hand-made pick": [/onClicked: cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/, 'onClicked: { cardItem.inbox.run({ kind: "pick", cardKey: cardItem.card.key }, null) }', ["gate"]],
+  "wrapper passes a constant": [/Date\.now\(\), fits\)/, "Date.now(), true)", ["gate", "behaviour"]],
+  "keys lose the geometry": [/ev\.fits = cardFits;/, "", ["gate", "behaviour"]],
+  "keys pass a constant gate": [/ev\.fits = cardFits;/, "ev.fits = () => true;", ["behaviour"]],
+  "geometry is not live": [/cardsFlick\.contentY, cardsFlick\.height, item \?/, "0, cardsFlick.height, item ?", ["gate", "behaviour"]],
+  "typed answer ungated": [/, answerEditor !== null && cardFits\(answerEditor\.cardKey\)\)/, ", true)", ["gate", "behaviour"]],
+  "second pick send": [/function markSeen|case "markSeen":/, 'case "markSeen": service.send("pick", {}); ', ["gate"]],
+  "cardFits starts with return true": [/function cardFits\(key\) \{/, "function cardFits(key) {\n        return true;", ["gate", "behaviour"]],
+  "cardFits returns early on a condition": [/function cardFits\(key\) \{/, "function cardFits(key) {\n        if (key !== '') return true;", ["gate", "behaviour"]],
+  "cardFits ignores the list being hidden": [/item !== null && cardsFlick\.visible,/, "item !== null,", ["gate", "behaviour"]],
+  "clip + height on the parent card": [/radius: Commons\.Style\.cornerRadius\n/, "radius: Commons.Style.cornerRadius\n        clip: true\n        height: 160\n", ["detail"]],
+  "clip on the card body": [/id: body\n/, "id: body\n            clip: true\n", ["detail"]],
+  "maximumHeight on the card": [/radius: Commons\.Style\.cornerRadius\n/, "radius: Commons.Style.cornerRadius\n        Layout.maximumHeight: 120\n", ["detail"]],
+  "height on the card list column": [/id: sectionsColumn\n/, "id: sectionsColumn\n                    height: 300\n", ["detail"]],
+  "height on one card instance": [/inbox: panel; card: modelData/, "inbox: panel; height: 120; card: modelData", ["detail"]],
+  "another implicitHeight on the card": [/implicitHeight: body\.implicitHeight \+ Commons\.Style\.spacing\.lg \* 2/, "implicitHeight: 90", ["detail"]],
+  "maximumLineCount on the detail": [/text: cardItem\.card\.agent\.pending \? cardItem\.meta\.tag/, "maximumLineCount: 6\n                text: cardItem.card.agent.pending ? cardItem.meta.tag", ["detail"]],
+  "elide on the detail": [/text: cardItem\.card\.agent\.pending \? cardItem\.meta\.tag/, "elide: Text.ElideRight\n                text: cardItem.card.agent.pending ? cardItem.meta.tag", ["detail"]],
+  "NoWrap on the question": [/wrapMode: Text\.Wrap\n(\s+)text: lines \?/, "wrapMode: Text.NoWrap\n$1text: lines ?", ["detail"]],
+  "NoWrap on the detail": [/wrapMode: Text\.Wrap\n(\s+)text: cardItem\.card\.agent\.pending \?/, "wrapMode: Text.NoWrap\n$1text: cardItem.card.agent.pending ?", ["detail"]],
+  "note waits for option rows": [/visible: note !== ""/, "visible: cardItem.rows.length > 0 && note !== \"\"", ["note"]],
+  "note ignores the model": [/return Model\.tooLongNote\(item\.card, cardsFlick\.height, item\.height\);/, 'return item.card.answerable ? "" : "x";', ["note", "behaviour"]],
+};
+
+test("each guard fails on its mutated copy of the panel", () => {
+  const panel = read("Panel.qml");
+  const bar = read("BarWidget.qml");
+  for (const [name, [from, to, expect]] of Object.entries(MUTATIONS)) {
     const mutated = panel.replace(from, to);
     assert.notEqual(mutated, panel, `mutation did not apply: ${name}`);
-    assert.notDeepEqual(gateViolations(mutated, bar), [], `guard misses: ${name}`);
+    const found = families(mutated, bar);
+    for (const family of expect) assert.notDeepEqual(found[family], [], `${family} guard misses: ${name}`);
+    if (process.env.SHOW_MUTATIONS) console.log(`MUT ${name}: ` + expect.map((f) => `${f}=${found[f].length} [${found[f][0]}]`).join("; "));
   }
-  assert.notDeepEqual(gateViolations(panel, bar + '\nonClicked: svc.send("pick", {})'), [], "BarWidget sending a pick");
+  const withBar = families(panel, bar + '\nonClicked: svc.send("pick", {})');
+  assert.notDeepEqual(withBar.gate, [], "BarWidget sending a pick");
 });

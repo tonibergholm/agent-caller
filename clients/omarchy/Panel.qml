@@ -166,12 +166,16 @@ Item {
     // resize, revision and selection changes cannot leave a stale "yes".
     function cardFits(key) {
         const item = cardItemFor(key);
-        return item !== null && cardsFlick.visible && Model.cardFullyVisible(cardsFlick.contentY, cardsFlick.height, item.y, item.height);
+        return Model.cardFitsView(item !== null && cardsFlick.visible, cardsFlick.contentY, cardsFlick.height, item ? item.y : NaN, item ? item.height : NaN);
     }
 
     // A card taller than the panel is never answerable here (it shows a note).
     function cardTooTall(item) {
-        return cardsFlick.height > 0 && Model.cardTooTall(cardsFlick.height, item.height);
+        return Model.cardTooTall(cardsFlick.height, item.height);
+    }
+
+    function tooLongNote(item) {
+        return Model.tooLongNote(item.card, cardsFlick.height, item.height);
     }
 
     // The draft and the box stay until the service accepts the reply, so a
@@ -391,11 +395,12 @@ Item {
             }
 
             Label {
-                visible: cardItem.rows.length > 0 && cardItem.inbox.cardTooTall(cardItem)
+                readonly property string note: cardItem.inbox.tooLongNote(cardItem)
+                visible: note !== ""
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 color: cardItem.inbox.muted
-                text: "Too long to show here. Answer it in the terminal."
+                text: note
             }
 
             Repeater {

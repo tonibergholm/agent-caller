@@ -42,7 +42,8 @@ config and the `acd/1` protocol may change without a major version bump.
   inside the visible list; a card taller than the panel disables its options
   and says "Too long to show here. Answer it in the terminal." A card opened
   from a notification is scrolled into view. The QML rendering and wiring are
-  UNVERIFIED: Quickshell could not run in the development sandbox.
+  UNVERIFIED: Quickshell could not run in the development sandbox. The manual
+  Omarchy check is in the pull request description (PR #80).
 
 ## [0.9.0] - 2026-10-13
 

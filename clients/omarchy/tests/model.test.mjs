@@ -640,16 +640,57 @@ test("cardFullyVisible: only a card wholly inside the viewport is answerable", (
   assert.equal(f(200, 100, 150, 50), false, "above the view");
   assert.equal(f(200, 100, 170, 50), false, "partially above");
   assert.equal(f(200, 100, 270, 50), false, "partially below");
-  assert.equal(f(200, 100, 199.5, 100), true, "float edge: within 1 px");
-  assert.equal(f(200, 100, 200, 100.5), true, "float edge: 0.5 px taller");
-  assert.equal(f(200, 100, 198, 100), false, "2 px above is not float error");
-  assert.equal(f(200, 100, 200, 102), false, "2 px taller is not float error");
+  assert.equal(f(200, 100, 199.5, 100), true, "float edge: 0.5 px on the position");
+  assert.equal(f(200, 100, 200.5, 99.5), true, "0.5 px below the bottom edge");
+  assert.equal(f(200, 100, 199, 100), false, "1 px above is not float noise");
+  assert.equal(f(200, 100, 200, 100.5), false, "no tolerance on height");
+  assert.equal(f(0, 100, 0, 101), false, "101 px card in a 100 px viewport (the review's case)");
+  assert.equal(f(0, 100, 0, 100.0001), false, "any card taller than the viewport");
+  assert.equal(f(0, 100, 0, 100), true, "equal height fits");
+  assert.equal(f(0, Infinity, 0, 50), false, "infinite viewport");
+  assert.equal(f(0, 100, 0, Infinity), false, "infinite card");
+  assert.equal(f(Infinity, 100, 0, 50), false);
+  assert.equal(f(0, 100, -Infinity, 50), false);
+  assert.equal(f(0, "100", 0, 50), false, "numeric strings are not numbers");
+  assert.equal(f(0, 100, null, 50), false);
   assert.equal(f(0, 0, 0, 0), false, "no viewport");
   assert.equal(f(0, 100, 0, 0), false, "no card");
   assert.equal(f(NaN, 100, 0, 50), false, "not a number");
   assert.equal(f(0, 100, undefined, 50), false, "missing geometry");
   assert.equal(M.cardTooTall(100, 150), true);
-  assert.equal(M.cardTooTall(100, 100.5), false);
+  assert.equal(M.cardTooTall(100, 101), true);
+  assert.equal(M.cardTooTall(100, 100), false);
+  assert.equal(M.cardTooTall(0, 150), false, "not laid out yet");
+  assert.equal(M.cardTooTall(NaN, 150), false);
+  assert.equal(M.cardTooTall(100, Infinity), false, "unknown size is not a claim");
+});
+
+test("cardFitsView is the panel's gate: shown and wholly in view", () => {
+  assert.equal(M.cardFitsView(true, 200, 100, 220, 50), true);
+  assert.equal(M.cardFitsView(false, 200, 100, 220, 50), false, "list hidden or card missing");
+  assert.equal(M.cardFitsView(undefined, 200, 100, 220, 50), false);
+  assert.equal(M.cardFitsView(1, 200, 100, 220, 50), false, "only true counts");
+  assert.equal(M.cardFitsView(true, 200, 100, 170, 50), false, "half off screen");
+  assert.equal(M.cardFitsView(true, 200, 100, NaN, NaN), false, "no card item");
+});
+
+test("an oversized card that could be answered here carries the note, options or not", () => {
+  const withOptions = card("m1/a");
+  const textOnly = card("m1/q", "request", { answerable: false, free_text_answerable: true });
+  textOnly.agent.pending = pending({ kind: "question", options: [], free_text: true });
+  const readOnly = card("m1/r", "request", { answerable: false });
+  const working = card("m1/w", "working");
+  assert.equal(M.tooLongNote(withOptions, 100, 300), M.TOO_LONG_NOTE);
+  assert.equal(M.tooLongNote(textOnly, 100, 300), M.TOO_LONG_NOTE, "free-text-only card");
+  assert.equal(M.tooLongNote(withOptions, 100, 100), "", "fits");
+  assert.equal(M.tooLongNote(textOnly, 100, 101), M.TOO_LONG_NOTE, "one pixel too tall");
+  assert.equal(M.tooLongNote(textOnly, 0, 300), "", "not laid out");
+  assert.equal(M.tooLongNote(readOnly, 100, 300), "", "read-only cards say so elsewhere");
+  assert.equal(M.tooLongNote(working, 100, 300), "");
+  assert.match(M.TOO_LONG_NOTE, /Too long to show here\. Answer it in the terminal\./);
+  // and the typed answer is refused for it
+  const editor = M.answerEditor(textOnly);
+  assert.equal(M.planAnswer(editor, [textOnly], "hello", M.cardFitsView(true, 0, 100, 0, 300)).kind, "hidden");
 });
 
 test("a pick is refused unless the card is wholly in view (digit, Enter, click)", () => {

@@ -610,24 +610,45 @@ export function scrollToCard(contentY, viewHeight, contentHeight, top, height) {
 /** Shown when an answer is refused because the card is not wholly in view. */
 export const HIDDEN_NOTICE = "Scroll the whole card into view to answer it, or answer in the terminal.";
 
-const VISIBLE_TOLERANCE = 1;
+// Float noise on the edges only. Never applied to a height.
+const EDGE_TOLERANCE = 0.5;
 
-/** A card taller than the viewport can never be shown whole (1 px for float error). */
+const finite = (n) => typeof n === "number" && Number.isFinite(n);
+
+/** A card taller than a (laid-out) viewport can never be shown whole. Unknown sizes are not "too tall". */
 export function cardTooTall(viewHeight, cardHeight) {
-  return !(cardHeight - viewHeight <= VISIBLE_TOLERANCE);
+  return finite(viewHeight) && finite(cardHeight) && viewHeight > 0 && cardHeight > viewHeight;
+}
+
+export const TOO_LONG_NOTE = "Too long to show here. Answer it in the terminal.";
+
+/**
+ * The note on a card that could be answered here but does not fit the panel,
+ * whether it has options or only takes a typed answer. "" otherwise.
+ */
+export function tooLongNote(card, viewHeight, cardHeight) {
+  return (card.answerable === true || card.free_text_answerable === true) && cardTooTall(viewHeight, cardHeight) ? TOO_LONG_NOTE : "";
 }
 
 /**
- * True only while the WHOLE card is inside the viewport (edges inclusive, 1 px
- * for float error). A card is answered from the panel only then: the user has
- * seen every row of the command (mapping.rs: whole or read-only). Anything
- * that is not a plain number, a card taller than the view and a card above or
- * below the view are all false.
+ * True only while the WHOLE card is inside the viewport: all four numbers
+ * finite, the card no taller than the viewport (strictly: no tolerance on
+ * height) and both edges inside it (0.5 px for float noise). A card is
+ * answered from the panel only then: the user has seen every row of the
+ * command (mapping.rs: whole or read-only).
  */
 export function cardFullyVisible(contentY, viewHeight, cardY, cardHeight) {
-  if (!(viewHeight > 0) || !(cardHeight > 0) || !Number.isFinite(contentY) || !Number.isFinite(cardY)) return false;
-  if (cardTooTall(viewHeight, cardHeight)) return false;
-  return cardY >= contentY - VISIBLE_TOLERANCE && cardY + cardHeight <= contentY + viewHeight + VISIBLE_TOLERANCE;
+  if (![contentY, viewHeight, cardY, cardHeight].every(finite)) return false;
+  if (!(viewHeight > 0) || !(cardHeight > 0) || cardHeight > viewHeight) return false;
+  return cardY >= contentY - EDGE_TOLERANCE && cardY + cardHeight <= contentY + viewHeight + EDGE_TOLERANCE;
+}
+
+/**
+ * The panel's one answer gate: `shown` is whether the card list is on screen
+ * and the card exists. Read live at each call, never cached.
+ */
+export function cardFitsView(shown, contentY, viewHeight, cardY, cardHeight) {
+  return shown === true && cardFullyVisible(contentY, viewHeight, cardY, cardHeight);
 }
 
 /** `openCard`: select that card and close any reply box. */
