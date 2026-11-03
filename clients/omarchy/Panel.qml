@@ -121,6 +121,9 @@ Item {
         case "submitPairing":
             submitPairing();
             break;
+        case "select":
+            revealCard(effect.key);
+            break;
         case "openReply":
             keyState = Object.assign({}, keyState, { replyFor: effect.cardKey });
             break;
@@ -133,6 +136,17 @@ Item {
                 if (Model.escapeCloses(reply)) close();
             });
             break;
+        }
+    }
+
+    // Scrolls the card list just enough to show the selected card. The cards
+    // are the Column's children (the Repeaters parent their delegates to it).
+    function revealCard(key) {
+        for (let i = 0; i < sectionsColumn.children.length; i++) {
+            const item = sectionsColumn.children[i];
+            if (!item.card || item.card.key !== key) continue;
+            cardsFlick.contentY = Model.scrollToCard(cardsFlick.contentY, cardsFlick.height, cardsFlick.contentHeight, item.y, item.height);
+            return;
         }
     }
 
@@ -537,6 +551,7 @@ Item {
             }
 
             Flickable {
+                id: cardsFlick
                 visible: !panel.settingsOpen
                 Layout.fillWidth: true
                 Layout.fillHeight: true
