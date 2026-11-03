@@ -348,7 +348,6 @@ Item {
                 visible: cardItem.card.agent.pending !== null
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                maximumLineCount: 6
                 text: cardItem.card.agent.pending ? cardItem.meta.tag + "  " + cardItem.card.agent.pending.detail : ""
             }
 
@@ -357,7 +356,6 @@ Item {
                 visible: lines !== null
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                maximumLineCount: 6
                 text: lines ? [lines.header, lines.text].filter(x => x).join("\n") : ""
             }
 

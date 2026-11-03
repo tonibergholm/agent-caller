@@ -209,3 +209,15 @@ test("Panel.run handles the select effect by scrolling the card list", () => {
   assert.match(panel, /id: cardsFlick/);
   assert.match(panel, /function revealCard\(key\) \{[\s\S]*cardsFlick\.contentY = Model\.scrollToCard\(/);
 });
+
+// A card must show the whole command or be read-only (mapping.rs), so the
+// panel may not cut the detail or the question text to a few rows.
+test("the permission detail and the question text are not capped to a line count", () => {
+  const panel = read("Panel.qml");
+  for (const marker of ["agent.pending.detail", "Model.questionLines("]) {
+    const at = panel.indexOf(marker);
+    assert.ok(at > 0, marker);
+    const label = panel.slice(panel.lastIndexOf("Label {", at), panel.indexOf("\n            }\n", at));
+    assert.doesNotMatch(label, /maximumLineCount|elide:|clip:/, marker);
+  }
+});
