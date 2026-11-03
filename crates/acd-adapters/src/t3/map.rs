@@ -506,6 +506,41 @@ mod tests {
     }
 
     #[test]
+    fn a_command_is_shown_with_exact_escapes_for_every_character_class() {
+        let cases: &[(&str, &str)] = &[
+            ("a\rb", "a\\rb"),
+            ("a\0b", "a\\u{0}b"),
+            ("\u{1b}[31mred\u{1b}[0m", "\\u{1b}[31mred\\u{1b}[0m"),
+            ("a\u{2066}b\u{2067}c\u{2068}d\u{2069}e", "a\\u{2066}b\\u{2067}c\\u{2068}d\\u{2069}e"),
+            ("a\u{200b}b\u{200c}c\u{200d}d\u{2060}e\u{feff}f", "a\\u{200b}b\\u{200c}c\\u{200d}d\\u{2060}e\\u{feff}f"),
+            ("a\\b\\\\c", "a\\\\b\\\\\\\\c"),
+            ("  ls  ", "\\u{20}\\u{20}ls\\u{20}\\u{20}"),
+            ("\n ls\t", "\\n\\u{20}ls\\t"),
+            ("a b\nc", "a b\nc"),
+            (
+                "  a\r\0\u{1b}[31m\u{2066}x\u{2069}\u{200b}\\ b  ",
+                "\\u{20}\\u{20}a\\r\\u{0}\\u{1b}[31m\\u{2066}x\\u{2069}\\u{200b}\\\\ b\\u{20}\\u{20}",
+            ),
+        ];
+        for (raw, want) in cases {
+            let (shown, cut) = command_detail(raw);
+            assert_eq!((shown.as_str(), cut), (*want, false), "{raw:?}");
+        }
+        // The same text on a whole observation stays answerable, unchanged.
+        let (obs, _) = obs_for(Some("claude"), &command_view("a\rb\u{2066}c\\d"));
+        assert_eq!(obs.detail, "a\\rb\\u{2066}c\\\\d");
+        assert_eq!(obs.answer_path, AnswerPath::T3);
+    }
+
+    /// Accepted residual (follow-ups, 2026-11-03): U+034F and similar pass
+    /// the escaper unchanged. Pinned so a change shows.
+    #[test]
+    fn a_combining_grapheme_joiner_in_a_command_passes_unchanged() {
+        let (shown, cut) = command_detail("ls\u{34f}x");
+        assert_eq!((shown.as_str(), cut), ("ls\u{34f}x", false));
+    }
+
+    #[test]
     fn the_cap_counts_characters_not_bytes() {
         let ok = "é".repeat(DETAIL_CHARS);
         assert!(ok.len() > DETAIL_CHARS);

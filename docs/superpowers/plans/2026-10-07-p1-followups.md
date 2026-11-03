@@ -268,28 +268,25 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 Found by independent review and left on purpose. None blocks a merge; each
 needs a decision or a small follow-up.
 
-- **Flaky test, macOS CI.** `status_change_before_resubscribe_is_caught`
-  (`crates/acd-adapters/tests/herdr_sync.rs` around line 427) failed once on a
-  docs-only commit (main `b76b93e`). It asserts the new pane gets its own
-  `agent.get` after the last `events.subscribe`, but its own comment says a
-  full list after resubscribe also catches the change, so on a slow runner
-  the order can flip. Fix: accept either path, or synchronise on the
-  resubscribe. Seen once; rerun when it fails.
-- **Omarchy approval card guards (#80).** The QML checks in
-  `clients/omarchy/tests/plugin_files.test.mjs` match text and cannot prove
-  wiring. Mutations that still pass: `maximumLineCount` added to the shared
-  `Label` component (inherited), and a multiline `onClicked` or
-  `Keys.onPressed` handler that calls `Model.pickOption` and `service.send`
-  directly. The code itself was traced by review and found gated. Real proof
-  is the manual Omarchy check in the PR body, not yet done.
-- **Pre-auth recovery test (#82).** `preauth_sources.rs` around lines 359-365
-  needs two sequential TLS upgrades and a rejected third attempt inside three
-  seconds; a very slow runner can fail correct code. Synchronise the setup
-  before advancing the expiry clock.
-- **T3 and hooks escaping tests (#83).** Exact-output tests are missing for
-  CR, NUL, ESC sequences, bidi isolates, zero-width characters, backslashes
-  and edge whitespace. Characters such as U+034F pass the escaper unchanged,
-  so "whole command" is not a universal visible-character encoding.
+- **Test hardening, fixed (branch `claude/test-hardening-1103-faqnrl`).**
+  `status_change_before_resubscribe_is_caught` now accepts the new pane's own
+  `agent.get` or the full list after the last subscribe. The pre-auth recovery
+  test (#82) redoes its setup on a fresh server when a slow runner overruns the
+  hello timeout, and checks only a setup that fit. The Omarchy plugin test (#80)
+  checks the shared `Label` component's own properties and every handler body
+  (block handlers too), so an inherited `maximumLineCount` and an aliased or
+  bracket-called pick in a multi-line handler now fail it. T3 and hooks have
+  exact-output escape tests (CR, NUL, ESC, bidi isolates, zero-width,
+  backslashes, edge whitespace).
+- **Omarchy approval card guards (#80), still open.** The QML checks match
+  text and cannot prove wiring. Real proof is the manual Omarchy check in the
+  PR body, not yet done.
+- **T3 and hooks escaping (#83), accepted residual.** Characters such as
+  U+034F, U+115F, U+3164 and U+FE0F pass the escaper unchanged, so "whole
+  command" is not a universal visible-character encoding. Pinned by
+  `characters_outside_the_escaped_classes_pass_unchanged` (hooks) and
+  `a_combining_grapheme_joiner_in_a_command_passes_unchanged` (T3); a change
+  to the escaper must update them on purpose.
 - **Restart notifications (#81).** A request first seen in a reconnect
   snapshot stays silent, as before. The client's notified set is unbounded
   (security review finding 5).

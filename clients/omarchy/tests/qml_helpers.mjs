@@ -90,6 +90,32 @@ function parseBody(s, i, node, top) {
   return i;
 }
 
+/**
+ * Every signal-handler binding (`onClicked:`, `Keys.onPressed:`, ...) as
+ * {name, body}. A block handler (`{ ... }`, or `event => { ... }`) is taken
+ * whole, however many lines it spans; any other handler runs to the end of
+ * its line. Comments are stripped first.
+ */
+export function handlers(src) {
+  const s = stripComments(src);
+  const out = [];
+  const re = /(?:^|[\n;{\s])((?:Keys\.)?on[A-Z]\w*)\s*:\s*/g;
+  let m;
+  while ((m = re.exec(s))) {
+    const at = m.index + m[0].length;
+    const block = /^(?:[\w$]+\s*=>\s*|\([^)]*\)\s*=>\s*)?\{/.exec(s.slice(at, at + 80));
+    let end;
+    if (block) end = skipBlock(s, at + block[0].length - 1);
+    else {
+      end = s.indexOf("\n", at);
+      if (end < 0) end = s.length;
+    }
+    out.push({ name: m[1], body: s.slice(at, end) });
+    re.lastIndex = at;
+  }
+  return out;
+}
+
 /** The QML object tree: {type, name (inline component), props (own text, children cut out), children, parent}. */
 export function parseQml(src) {
   const root = { type: "file", name: null, props: "", children: [], parent: null };

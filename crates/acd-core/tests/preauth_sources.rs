@@ -355,15 +355,31 @@ async fn idle_raw_tcp_from_one_source_does_not_block_another_tls_handshake() {
 /// waits for the server to close the held connections, then checks at once.
 #[tokio::test]
 async fn the_saturating_source_is_released_after_the_hello_timeout() {
-    let s = serve_with(HELLO_SHORT, HOLD, HOLD).await;
-    let started = tokio::time::Instant::now();
-    let mut held = idle_tls(s.tcp, "127.0.0.1", 2).await;
+    // The setup (two upgrades and a refused third) must finish before the
+    // hello timeout fires, or the slots are freed mid-setup and correct code
+    // looks broken. The clock is the server's, so it cannot be paused: when
+    // a slow runner overruns the budget, discard that server and redo the
+    // setup on a fresh one. The checks below run only on a setup that fit.
+    let (s, started, mut held, capped) = {
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let s = serve_with(HELLO_SHORT, HOLD, HOLD).await;
+            let started = tokio::time::Instant::now();
+            let held = idle_tls(s.tcp, "127.0.0.1", 2).await;
+            let capped = open_tls_result(s.tcp, "127.0.0.1").await;
+            // Measured after the third attempt, so it bounds the server's
+            // own clock from above: under budget means nothing had expired.
+            if started.elapsed() < HELLO_SHORT {
+                break (s, started, held, capped);
+            }
+            assert!(
+                tries < 10,
+                "runner too slow: setup never fit inside the hello timeout"
+            );
+        }
+    };
     assert_eq!(held.len(), 2, "slots were held before the deadline");
-    let capped = open_tls_result(s.tcp, "127.0.0.1").await;
-    assert!(
-        started.elapsed() < HELLO_SHORT,
-        "runner too slow: the hello timeout expired before the saturation check"
-    );
     assert!(
         matches!(capped, Err(Refused::Connection(_))),
         "still capped while the slots are held"
