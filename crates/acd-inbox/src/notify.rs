@@ -29,6 +29,9 @@ pub struct NoteKey {
     pub card: String,
     pub request: String,
     pub revision: u64,
+    /// Request ids restart at `r1` whenever `acd` restarts, so the id alone can
+    /// repeat for a new request. `opened_at` is set once and never changes.
+    pub opened_at: acd_protocol::Timestamp,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,7 +58,7 @@ impl Reconciler {
             .filter_map(|c| {
                 let p = c.agent.pending.as_ref()?;
                 (p.status == RequestStatus::Open)
-                    .then(|| (NoteKey { card: c.key.clone(), request: p.id.clone(), revision: p.revision }, c))
+                    .then(|| (NoteKey { card: c.key.clone(), request: p.id.clone(), revision: p.revision, opened_at: p.opened_at }, c))
             })
             .collect();
         let mut out = Vec::new();

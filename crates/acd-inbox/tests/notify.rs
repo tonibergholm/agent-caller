@@ -47,7 +47,7 @@ fn view(cards: Vec<CardView>) -> InboxView {
 }
 
 fn key(id: &str, revision: u64) -> NoteKey {
-    NoteKey { card: format!("m1/{id}"), request: format!("r-{id}"), revision }
+    NoteKey { card: format!("m1/{id}"), request: format!("r-{id}"), revision, opened_at: "2026-10-08T00:00:00Z".parse().unwrap() }
 }
 
 fn shown(cmds: &[NoteCmd]) -> Vec<NoteKey> {
@@ -78,6 +78,18 @@ fn a_flap_does_not_announce_again_but_a_new_revision_or_request_does() {
 }
 
 #[test]
+fn a_request_id_reused_after_an_acd_restart_still_announces() {
+    // acd numbers requests from r1 on every start, and the agent id survives
+    // (a herdr pane id does), so only `opened_at` tells the two apart.
+    let mut r = Reconciler::default();
+    assert_eq!(shown(&r.reconcile(&view(vec![card("a1", 1, false)]), true, false)).len(), 1);
+    r.reconcile(&view(vec![]), true, false);
+    let mut again = card("a1", 1, false);
+    again.agent.pending.as_mut().unwrap().opened_at = "2026-10-09T00:00:00Z".parse().unwrap();
+    assert_eq!(shown(&r.reconcile(&view(vec![again]), true, false)).len(), 1, "same id and revision, opened later");
+}
+
+#[test]
 fn the_announced_history_is_bounded_and_evicts_the_oldest_first() {
     let mut r = Reconciler::default();
     let n = SEEN_HISTORY_MAX + 1;
@@ -89,6 +101,9 @@ fn the_announced_history_is_bounded_and_evicts_the_oldest_first() {
     // The newest is still remembered; the oldest was evicted and announces again.
     let newest = format!("c{}", n - 1);
     assert!(r.reconcile(&view(vec![card(&newest, 1, false)]), true, false).is_empty());
+    r.reconcile(&view(vec![]), true, false);
+    // Only the oldest went: the next one is still remembered (a cap one too low would drop it).
+    assert!(r.reconcile(&view(vec![card("c1", 1, false)]), true, false).is_empty());
     r.reconcile(&view(vec![]), true, false);
     assert_eq!(shown(&r.reconcile(&view(vec![card("c0", 1, false)]), true, false)), [key("c0", 1)]);
 }
