@@ -20,7 +20,8 @@ const TITLE_MAX: usize = 60;
 /// How many announced (card, request, revision) keys are remembered after they
 /// leave the view. Without it a machine that flaps (disconnect, reconnect)
 /// would announce the same request and revision again. Oldest are evicted
-/// first so the history cannot grow without bound.
+/// first so the history cannot grow without bound. Requests still in the view
+/// are never evicted, so the history can exceed this while more are open.
 pub const SEEN_HISTORY_MAX: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -68,11 +69,6 @@ impl Reconciler {
         for (key, card) in fresh {
             if self.seen.insert(key.clone()) {
                 self.order.push_back(key.clone());
-                if self.order.len() > SEEN_HISTORY_MAX
-                    && let Some(old) = self.order.pop_front()
-                {
-                    self.seen.remove(&old);
-                }
             }
             if !enabled || panel_open || card.action.is_some() {
                 continue;
@@ -80,6 +76,14 @@ impl Reconciler {
             if let Some((summary, body)) = text(card) {
                 self.shown.insert(key.clone());
                 out.push(NoteCmd::Show { key: key.clone(), summary, body });
+            }
+        }
+        // Evict the oldest keys that have left the view. A key still in the
+        // view stays, or its unchanged request would be announced again.
+        while self.order.len() > SEEN_HISTORY_MAX {
+            let Some(at) = self.order.iter().position(|k| !current.contains_key(k)) else { break };
+            if let Some(old) = self.order.remove(at) {
+                self.seen.remove(&old);
             }
         }
         out

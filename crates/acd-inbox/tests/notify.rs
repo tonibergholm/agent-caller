@@ -94,6 +94,16 @@ fn the_announced_history_is_bounded_and_evicts_the_oldest_first() {
 }
 
 #[test]
+fn requests_still_in_view_are_never_evicted_from_the_history() {
+    let mut r = Reconciler::default();
+    let n = SEEN_HISTORY_MAX + 5;
+    let ids: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+    let cards = || view(ids.iter().map(|id| card(id, 1, false)).collect());
+    assert_eq!(shown(&r.reconcile(&cards(), true, false)).len(), n);
+    assert!(r.reconcile(&cards(), true, false).is_empty(), "open requests are not announced again");
+}
+
+#[test]
 fn none_while_a_panel_is_open_off_or_counting_and_not_later_either() {
     let mut r = Reconciler::default();
     assert!(r.reconcile(&view(vec![card("a1", 1, false)]), true, true).is_empty());
