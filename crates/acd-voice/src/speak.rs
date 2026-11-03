@@ -75,11 +75,15 @@ pub fn alert_cards(s: &Snapshot) -> Vec<&CardSnap> {
         .collect()
 }
 
+/// A request: card key, request id and `opened_at`. Ids restart at `r1` with
+/// each `acd` start, so the id alone can repeat for a new request.
+type Key = (String, String, acd_protocol::Timestamp);
+
 /// The requests an alert may announce now.
-fn keys(s: &Snapshot) -> Vec<(String, String)> {
+fn keys(s: &Snapshot) -> Vec<Key> {
     alert_cards(s)
         .into_iter()
-        .filter_map(|c| c.pending.as_ref().map(|r| (c.key.clone(), r.id.clone())))
+        .filter_map(|c| c.pending.as_ref().map(|r| (c.key.clone(), r.id.clone(), r.opened_at)))
         .collect()
 }
 
@@ -87,10 +91,10 @@ fn keys(s: &Snapshot) -> Vec<(String, String)> {
 /// The baseline and the seen set use this one, so a request that was already
 /// waiting is never announced later because something made it eligible: an
 /// offline machine reconnecting, the machine filter clearing, subagents shown.
-fn waiting(s: &Snapshot) -> Vec<(String, String)> {
+fn waiting(s: &Snapshot) -> Vec<Key> {
     s.cards
         .iter()
-        .filter_map(|c| c.pending.as_ref().map(|r| (c.key.clone(), r.id.clone())))
+        .filter_map(|c| c.pending.as_ref().map(|r| (c.key.clone(), r.id.clone(), r.opened_at)))
         .collect()
 }
 
@@ -106,13 +110,13 @@ pub enum Due {
 #[derive(Debug, Default)]
 pub struct Alerts {
     /// `None` until the baseline is taken.
-    seen: Option<HashSet<(String, String)>>,
+    seen: Option<HashSet<Key>>,
     /// Machines already seen online. A machine seen online for the first time
     /// (it connects after the baseline) has its waiting requests taken as its
     /// baseline; a reconnect does not, so what arrived while it was away is
     /// still news.
     known: HashSet<String>,
-    queue: Vec<(String, String)>,
+    queue: Vec<Key>,
     last: Option<Instant>,
 }
 
@@ -134,7 +138,7 @@ impl Alerts {
             if self.known.insert(m.key.clone()) {
                 for c in s.cards.iter().filter(|c| c.machine_key == m.key) {
                     if let Some(r) = &c.pending {
-                        seen.insert((c.key.clone(), r.id.clone()));
+                        seen.insert((c.key.clone(), r.id.clone(), r.opened_at));
                     }
                 }
             }
@@ -170,7 +174,7 @@ impl Alerts {
             return Due::Wait(last + ALERT_GAP - now);
         }
         let queued = std::mem::take(&mut self.queue);
-        let cards: Vec<&CardSnap> = queued.iter().filter_map(|(card, _)| s.card(card)).collect();
+        let cards: Vec<&CardSnap> = queued.iter().filter_map(|(card, ..)| s.card(card)).collect();
         self.last = Some(now);
         speech::alerts(&cards).map_or(Due::Nothing, Due::Speak)
     }
@@ -284,6 +288,25 @@ mod tests {
             a.due(&three, t0 + ALERT_GAP, false),
             Due::Speak(VoiceText::new("minos Claude needs you: bash approval. 1 more needs you."))
         );
+    }
+
+    /// acd numbers requests from r1 on every start, and an agent id can
+    /// survive a restart: the same card and request id is a new request when
+    /// `opened_at` differs.
+    #[test]
+    fn a_request_id_reused_after_a_restart_is_announced_again() {
+        let t0 = Instant::now();
+        let mut a = Alerts::default();
+        a.observe(&snapshot(vec![]));
+        let s = snapshot(vec![pending("minos", "a")]);
+        a.observe(&s);
+        assert!(matches!(a.due(&s, t0, false), Due::Speak(_)));
+        a.observe(&snapshot(vec![]));
+        let mut again = pending("minos", "a");
+        again.pending.as_mut().unwrap().opened_at = acd_protocol::Timestamp::UNIX_EPOCH;
+        let s = snapshot(vec![again]);
+        a.observe(&s);
+        assert!(matches!(a.due(&s, t0 + ALERT_GAP, false), Due::Speak(_)));
     }
 
     #[test]
