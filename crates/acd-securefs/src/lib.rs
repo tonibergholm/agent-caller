@@ -1,4 +1,4 @@
-#[cfg(unix)]
+#[cfg(owner_checks)]
 use std::{
     fs::File,
     io::{Read, Take},
@@ -8,6 +8,13 @@ use std::{
     fmt,
     path::{Path, PathBuf},
 };
+
+mod platform;
+pub use platform::platform_supports_owner_checks;
+
+/// True when this build has the real owner-only checks (`cfg(owner_checks)`):
+/// unix except Android. Everywhere else every check refuses.
+pub const OWNER_CHECKS: bool = cfg!(owner_checks);
 
 #[derive(Debug)]
 pub enum SecureFsError {
@@ -41,9 +48,9 @@ impl fmt::Display for SecureFsError {
 }
 impl std::error::Error for SecureFsError {}
 
-/// Unix only. There is no non-unix `euid`: a made-up user id would let a caller
+/// Supported unix only (not Android). There is no `euid` elsewhere: a made-up user id would let a caller
 /// believe an owner check had happened.
-#[cfg(unix)]
+#[cfg(owner_checks)]
 pub fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
@@ -51,7 +58,7 @@ pub fn owner_ok(file_uid: u32, expected_uid: u32) -> bool {
     file_uid == expected_uid
 }
 
-#[cfg(unix)]
+#[cfg(owner_checks)]
 /// Decide, from lstat facts, whether a permission-denied open is really a
 /// symlink or wrong-owner problem. Diagnostic only: never grants access.
 fn classify_denied(
@@ -69,7 +76,7 @@ fn classify_denied(
     }
 }
 
-#[cfg(unix)]
+#[cfg(owner_checks)]
 fn diagnose_denied(path: &Path, open_err: std::io::Error) -> SecureFsError {
     use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(path) {
@@ -79,7 +86,7 @@ fn diagnose_denied(path: &Path, open_err: std::io::Error) -> SecureFsError {
     }
 }
 
-#[cfg(unix)]
+#[cfg(owner_checks)]
 fn open_path(path: &Path, directory: bool) -> Result<File, SecureFsError> {
     use std::os::unix::ffi::OsStrExt;
     let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
@@ -108,7 +115,7 @@ fn open_path(path: &Path, directory: bool) -> Result<File, SecureFsError> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-#[cfg(unix)]
+#[cfg(owner_checks)]
 fn verify(file: &File, path: &Path, directory: bool, max_mode: u32) -> Result<(), SecureFsError> {
     let m = file
         .metadata()
@@ -131,14 +138,14 @@ fn verify(file: &File, path: &Path, directory: bool, max_mode: u32) -> Result<()
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(owner_checks)]
 pub fn check_private_dir(dir: &Path, max_mode: u32) -> Result<(), SecureFsError> {
     let file = open_path(dir, true)?;
     verify(&file, dir, true, max_mode)
 }
 
 /// No-follow open, regular file, owned by the euid, mode within `max_mode`.
-#[cfg(unix)]
+#[cfg(owner_checks)]
 pub fn check_private_file(path: &Path, max_mode: u32) -> Result<(), SecureFsError> {
     let file = open_path(path, false)?;
     verify(&file, path, false, max_mode)
@@ -147,14 +154,14 @@ pub fn check_private_file(path: &Path, max_mode: u32) -> Result<(), SecureFsErro
 /// No-follow, non-blocking open of a regular file owned by the euid, with no
 /// mode requirement. The returned descriptor is what callers should inspect
 /// and `fchmod`, so nothing can be swapped in between check and use.
-#[cfg(unix)]
+#[cfg(owner_checks)]
 pub fn open_owned_file(path: &Path) -> Result<File, SecureFsError> {
     let file = open_path(path, false)?;
     verify(&file, path, false, 0o7777)?;
     Ok(file)
 }
 
-#[cfg(unix)]
+#[cfg(owner_checks)]
 pub fn read_private(path: &Path, max_mode: u32, max_len: u64) -> Result<Vec<u8>, SecureFsError> {
     let mut file = open_path(path, false)?;
     verify(&file, path, false, max_mode)?;
@@ -174,8 +181,8 @@ pub fn read_private(path: &Path, max_mode: u32, max_len: u64) -> Result<Vec<u8>,
 /// implementation. It is an `Io` error of kind `Unsupported`, so callers that
 /// already treat `Io` as a failure keep failing closed.
 // Built on every target so the Linux tests can pin its text; only the
-// non-unix functions below call it.
-#[cfg_attr(unix, allow(dead_code))]
+// refusing functions below call it.
+#[cfg_attr(owner_checks, allow(dead_code))]
 fn unsupported(path: &Path) -> SecureFsError {
     SecureFsError::Io(
         path.into(),
@@ -186,28 +193,28 @@ fn unsupported(path: &Path) -> SecureFsError {
     )
 }
 
-// shortcut: every owner-only check refuses on non-unix targets (Windows),
+// shortcut: every owner-only check refuses where `cfg(owner_checks)` is unset (Windows, Android),
 // upgrade when a Windows client needs to read acd's local files or the acd
 // daemon itself is ported: open with FILE_FLAG_OPEN_REPARSE_POINT, check the
 // owner SID and that the DACL grants nobody else (see the feasibility note,
 // section B4). Until then a caller gets an error, never "ok".
-#[cfg(not(unix))]
+#[cfg(not(owner_checks))]
 pub fn check_private_dir(dir: &Path, _max_mode: u32) -> Result<(), SecureFsError> {
     Err(unsupported(dir))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(owner_checks))]
 pub fn check_private_file(path: &Path, _max_mode: u32) -> Result<(), SecureFsError> {
     Err(unsupported(path))
 }
 
-/// Non-unix: always refuses. Returns `std::fs::File` on unix.
-#[cfg(not(unix))]
+/// Refusing targets: always refuses. Returns `std::fs::File` on unix.
+#[cfg(not(owner_checks))]
 pub fn open_owned_file(path: &Path) -> Result<std::fs::File, SecureFsError> {
     Err(unsupported(path))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(owner_checks))]
 pub fn read_private(path: &Path, _max_mode: u32, _max_len: u64) -> Result<Vec<u8>, SecureFsError> {
     Err(unsupported(path))
 }
@@ -226,8 +233,32 @@ mod tests {
         assert!(err.to_string().contains("unsupported on this platform"));
     }
 
-    /// Runs only on Windows, where this is the whole implementation.
-    #[cfg(not(unix))]
+    /// The decision itself, for every target, on any host.
+    #[test]
+    fn android_and_windows_refuse_and_the_other_unixes_do_not() {
+        for (os, unix, want) in [
+            ("linux", true, true),
+            ("macos", true, true),
+            ("ios", true, true),
+            ("freebsd", true, true),
+            ("android", true, false),
+            ("windows", false, false),
+        ] {
+            assert_eq!(platform_supports_owner_checks(os, unix), want, "{os}");
+        }
+    }
+
+    /// The compiled cfg agrees with the rule for the target being built.
+    #[test]
+    fn the_compiled_cfg_follows_the_rule() {
+        assert_eq!(
+            OWNER_CHECKS,
+            platform_supports_owner_checks(std::env::consts::OS, cfg!(unix))
+        );
+    }
+
+    /// Runs on Windows and Android, where this is the whole implementation.
+    #[cfg(not(owner_checks))]
     #[test]
     fn every_check_refuses_even_for_a_good_file() {
         let dir = std::env::temp_dir();
@@ -240,7 +271,20 @@ mod tests {
         let _ = std::fs::remove_file(&f);
     }
 
-    #[cfg(unix)]
+    /// Android has `cfg(unix)` but must still refuse. Not run in the Linux
+    /// sandbox; type-checked with `--target aarch64-linux-android --tests`.
+    #[cfg(target_os = "android")]
+    #[test]
+    fn android_takes_the_refusing_path() {
+        assert!(cfg!(unix) && !OWNER_CHECKS);
+        let f = std::env::temp_dir().join("acd-securefs-android-probe");
+        std::fs::write(&f, b"x").unwrap();
+        let err = read_private(&f, 0o600, 16).unwrap_err();
+        assert!(matches!(&err, SecureFsError::Io(_, e) if e.kind() == std::io::ErrorKind::Unsupported));
+        let _ = std::fs::remove_file(&f);
+    }
+
+    #[cfg(owner_checks)]
     #[test]
     fn classify_denied_decisions() {
         let p = Path::new("/x");
@@ -259,7 +303,7 @@ mod tests {
         assert!(classify_denied(p, 501, 501, false).is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(owner_checks)]
     #[test]
     fn denied_open_of_own_file_stays_io() {
         use std::os::unix::fs::PermissionsExt;
@@ -277,7 +321,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(owner_checks)]
     #[test]
     fn denied_traverse_of_own_dir_stays_io() {
         use std::os::unix::fs::PermissionsExt;

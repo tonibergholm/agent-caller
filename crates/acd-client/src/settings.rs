@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-#[cfg(unix)]
+#[cfg(owner_checks)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Mutex;
@@ -284,7 +284,7 @@ impl Settings {
         }
     }
 
-    /// Atomic write. On unix: mode 0600, parent directory 0700.
+    /// Atomic write. With `owner_checks` (unix except Android): mode 0600, parent directory 0700.
     ///
     /// shortcut: on Windows the file and its directory are created with the
     /// default ACL inherited from the per-user config dir (the caller passes
@@ -297,14 +297,14 @@ impl Settings {
         let io = |e| SettingsError::Io(path.display().to_string(), e);
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(io)?;
-            #[cfg(unix)]
+            #[cfg(owner_checks)]
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(io)?;
         }
         let tmp = path.with_extension("json.tmp");
         let _ = fs::remove_file(&tmp);
         let mut opts = fs::OpenOptions::new();
         opts.write(true).create_new(true);
-        #[cfg(unix)]
+        #[cfg(owner_checks)]
         opts.mode(0o600);
         let mut f = opts.open(&tmp).map_err(io)?;
         f.write_all(
@@ -521,7 +521,7 @@ mod tests {
             again.client_id, s.client_id,
             "client.id is created once per installation"
         );
-        #[cfg(unix)]
+        #[cfg(owner_checks)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(

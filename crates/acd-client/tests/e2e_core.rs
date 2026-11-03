@@ -1,5 +1,5 @@
 // Unix only: these drive the fake server over a unix socket (no local endpoint on Windows).
-#![cfg(unix)]
+#![cfg(owner_checks)]
 
 mod common;
 

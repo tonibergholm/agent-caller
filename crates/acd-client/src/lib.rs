@@ -9,7 +9,7 @@ pub mod conn;
 pub mod endpoint;
 // The fake server listens on a unix socket, so it is unix only. Windows has no
 // local endpoint (see conn::open).
-#[cfg(all(unix, any(test, feature = "testing")))]
+#[cfg(all(owner_checks, any(test, feature = "testing")))]
 pub mod fake;
 pub mod inbox;
 pub mod local;
