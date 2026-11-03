@@ -60,6 +60,8 @@ Item {
         machineFilter = shown.machineFilter;
         doneOpen = shown.doneOpen;
         keyState = Model.selectCard(key);
+        // The view may rebuild first (filter, Done section): scroll once laid out.
+        Qt.callLater(() => revealCard(key));
     }
 
     function openCard(key) {
@@ -124,6 +126,9 @@ Item {
         case "select":
             revealCard(effect.key);
             break;
+        case "revealBottom":
+            revealCardBottom(effect.key);
+            break;
         case "openReply":
             keyState = Object.assign({}, keyState, { replyFor: effect.cardKey });
             break;
@@ -148,6 +153,26 @@ Item {
             cardsFlick.contentY = Model.scrollToCard(cardsFlick.contentY, cardsFlick.height, cardsFlick.contentHeight, item.y, item.height);
             return;
         }
+    }
+
+    // The card item for `key`, or null.
+    function cardItemFor(key) {
+        for (let i = 0; i < sectionsColumn.children.length; i++) {
+            const item = sectionsColumn.children[i];
+            if (item.card && item.card.key === key) return item;
+        }
+        return null;
+    }
+
+    // A tall card's options sit below the fold: the first digit scrolls here.
+    function revealCardBottom(key) {
+        const item = cardItemFor(key);
+        if (item) cardsFlick.contentY = Model.scrollToCardBottom(cardsFlick.height, cardsFlick.contentHeight, item.y, item.height);
+    }
+
+    function bottomHidden(key) {
+        const item = cardItemFor(key);
+        return item !== null && Model.cardBottomHidden(cardsFlick.contentY, cardsFlick.height, item.y, item.height);
     }
 
     // The draft and the box stay until the service accepts the reply, so a
@@ -215,7 +240,9 @@ Item {
     // focus, and `composing` is that field's IME state (spec section 7).
     function keyEvent(event, field, composing, input) {
         message = "";
-        const r = Model.onKey(visibleCards, keyState, Model.fromQt(event.key, event.text, event.modifiers, composing, field, event.isAutoRepeat === true));
+        const ev = Model.fromQt(event.key, event.text, event.modifiers, composing, field, event.isAutoRepeat === true);
+        ev.bottomHidden = bottomHidden(keyState.armed ? keyState.armed.cardKey : keyState.selected);
+        const r = Model.onKey(visibleCards, keyState, ev);
         keyState = r.state;
         if (r.effect.kind !== "none") {
             run(r.effect, input);

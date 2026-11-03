@@ -216,8 +216,21 @@ test("the permission detail and the question text are not capped to a line count
   const panel = read("Panel.qml");
   for (const marker of ["agent.pending.detail", "Model.questionLines("]) {
     const at = panel.indexOf(marker);
-    assert.ok(at > 0, marker);
-    const label = panel.slice(panel.lastIndexOf("Label {", at), panel.indexOf("\n            }\n", at));
-    assert.doesNotMatch(label, /maximumLineCount|elide:|clip:/, marker);
+    assert.ok(at > 0, `anchor not found in Panel.qml: ${marker}`);
+    const start = panel.lastIndexOf("Label {", at);
+    const end = panel.indexOf("\n            }\n", at);
+    assert.ok(start >= 0 && end > at, `Label block around ${marker} not found`);
+    const label = panel.slice(start, end);
+    assert.match(label, /wrapMode:\s*Text\.Wrap\b/, `${marker}: must wrap`);
+    assert.doesNotMatch(label, /maximumLineCount|elide:|clip:|\bheight:|\bmaximumHeight|NoWrap|\bmaximumWidth|\bimplicitHeight:|\bLayout\.(maximum|preferred)Height/, `${marker}: hides text`);
   }
+});
+
+// UNVERIFIED in a real Quickshell: only the wiring is pinned here.
+test("Panel reveals the card on a notification click and gates key picks on the card bottom", () => {
+  const panel = read("Panel.qml");
+  assert.match(panel, /function selectAndReveal\(key\) \{[\s\S]*?Qt\.callLater\(\(\) => revealCard\(key\)\);[\s\S]*?\n    \}/);
+  assert.match(panel, /case "revealBottom":\s*revealCardBottom\(effect\.key\);/);
+  assert.match(panel, /ev\.bottomHidden = bottomHidden\(/);
+  assert.match(panel, /Model\.scrollToCardBottom\(/);
 });

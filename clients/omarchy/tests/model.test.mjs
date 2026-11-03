@@ -626,3 +626,30 @@ test("scrollToCard moves the list only when the card is outside the view", () =>
   assert.equal(M.scrollToCard(0, 100, 500, 480, 50), 400, "clamped to the end");
   assert.equal(M.scrollToCard(0, 100, 60, 10, 50), 0, "content shorter than the view");
 });
+
+test("scrollToCardBottom and cardBottomHidden: a tall card's options must be scrolled into view", () => {
+  // viewport 100 high, content 5000 high, a card 1300 tall at 200
+  assert.equal(M.cardBottomHidden(0, 100, 200, 1300), true, "top of a tall card: options below the fold");
+  assert.equal(M.cardBottomHidden(1400, 100, 200, 1300), false, "bottom in view");
+  assert.equal(M.cardBottomHidden(0, 100, 10, 50), false, "a small visible card");
+  assert.equal(M.scrollToCardBottom(100, 5000, 200, 1300), 1400, "bottom edge meets the view bottom");
+  assert.equal(M.scrollToCardBottom(100, 1500, 200, 1300), 1400);
+  assert.equal(M.scrollToCardBottom(100, 60, 10, 50), 0, "content shorter than the view");
+});
+
+test("a digit or Enter on a card whose options are below the fold only scrolls there", () => {
+  const cards = [externalCard()];
+  const fresh = { selected: "m1/e", replyFor: null };
+  for (const k of ["1", "2"]) {
+    const r = M.onKey(cards, fresh, key(k, { at: 1000, bottomHidden: true }));
+    assert.deepEqual(r.effect, { kind: "revealBottom", key: "m1/e" }, "digit " + k);
+    assert.equal(r.state.armed ?? null, null, "nothing armed");
+  }
+  assert.equal(M.onKey(cards, fresh, key("1", { at: 1000, bottomHidden: false })).effect.kind, "pick", "bottom seen: picks");
+  const armed = M.onKey(cards, fresh, key("2", { at: 1000 })).state;
+  const hidden = M.onKey(cards, armed, key("Enter", { at: 1500, bottomHidden: true }));
+  assert.equal(hidden.effect.kind, "revealBottom", "Enter does not send while the options are hidden");
+  assert.equal(hidden.state.armed, null);
+  assert.equal(M.onKey(cards, armed, key("Enter", { at: 1500, bottomHidden: false })).effect.kind, "pick");
+  assert.equal(M.onKey(cards, fresh, key("9", { bottomHidden: true })).effect.kind, "none", "no such option: no scroll");
+});

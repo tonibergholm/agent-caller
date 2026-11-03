@@ -398,6 +398,7 @@ export function onKey(visible, st, ev) {
   // The host's key catcher reports no auto-repeat, so a digit only arms a
   // confirm option; Enter completes it. A digit pressed again is a no-op.
   if (k === "Enter" && st.armed) {
+    if (ev.bottomHidden) return { state: rest, effect: { kind: "revealBottom", key: st.armed.cardKey } };
     const armedCard = visible.find((c) => c.key === st.armed.cardKey);
     const row = armedCard ? optionRows(armedCard).find((r) => r.id === st.armed.optionId) : undefined;
     if (armedCard && row && row.pickable && row.confirm && armedHolds(st.armed, armedCard) && (ev.at ?? 0) - st.armed.at <= CONFIRM_MS) {
@@ -418,6 +419,8 @@ export function onKey(visible, st, ev) {
   if (/^[1-9]$/.test(k)) {
     const row = optionRows(card).find((r) => r.number === Number(k));
     if (!row) return { state: rest, effect: NONE };
+    // First press on a card whose options are below the fold only scrolls there.
+    if (ev.bottomHidden) return { state: rest, effect: { kind: "revealBottom", key: card.key } };
     if (row.confirm) {
       if (st.armed && armedHolds(st.armed, card) && st.armed.optionId === row.id && (ev.at ?? 0) - st.armed.at <= CONFIRM_MS) return { state: st, effect: NONE };
       if (ev.repeat) return { state: st, effect: NONE };
@@ -596,6 +599,21 @@ export function scrollToCard(contentY, viewHeight, contentHeight, top, height) {
   if (top + height > y + viewHeight) y = top + height - viewHeight;
   if (top < y) y = top;
   return Math.min(maxY, Math.max(0, y));
+}
+
+/**
+ * True while the bottom of a card (its option rows) is below the fold of the
+ * viewport. A digit or Enter must not answer such a card: the user has not
+ * seen all of the command yet (mapping.rs: whole or read-only).
+ */
+export function cardBottomHidden(contentY, viewHeight, top, height) {
+  return top + height > contentY + viewHeight + 1;
+}
+
+/** The `contentY` that puts the bottom of a card at the bottom of the viewport. */
+export function scrollToCardBottom(viewHeight, contentHeight, top, height) {
+  const maxY = Math.max(0, contentHeight - viewHeight);
+  return Math.min(maxY, Math.max(0, top + height - viewHeight));
 }
 
 /** `openCard`: select that card and close any reply box. */

@@ -37,7 +37,10 @@ config and the `acd/1` protocol may change without a major version bump.
   notifies again on reconnect; the last 256 announced requests are remembered.
 - Omarchy: J/K now scrolls the card list so the selected card stays in view.
 - Omarchy: an approval card shows every row of the command and of a question,
-  not only the first six.
+  not only the first six (security finding F1). A card taller than the panel
+  cannot be answered by a digit or Enter until its option rows have been
+  scrolled into view (the first press scrolls there), and a card opened from a
+  notification is scrolled into view.
 
 ## [0.9.0] - 2026-10-13
 
