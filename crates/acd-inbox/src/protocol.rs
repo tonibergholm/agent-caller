@@ -356,13 +356,42 @@ fn agent_texts(v: &mut Value) -> Vec<&mut String> {
     out
 }
 
+/// Cuts every agent string to `cap` chars. A card whose request text was cut
+/// (anything under `pending` except `raw_screen`, a display fallback) shows
+/// only part of what would be approved, so it is made read-only: the client
+/// is told `answerable: false` and the request's `answer_path` becomes `none`.
 fn cap_text(v: &mut Value, cap: usize) {
-    for s in agent_texts(v) {
-        if s.chars().count() > cap {
-            let mut cut: String = s.chars().take(cap).collect();
-            cut.push_str(TRUNCATED);
-            *s = cut;
+    let Some(cards) = v["view"]["cards"].as_array_mut() else {
+        return;
+    };
+    for card in cards {
+        let Some(agent) = card.get_mut("agent") else {
+            continue;
+        };
+        let shown = |agent: &Value| {
+            let mut p = agent.get("pending").cloned().unwrap_or(Value::Null);
+            if let Some(m) = p.as_object_mut() {
+                m.remove("raw_screen");
+            }
+            p
+        };
+        let before = shown(agent);
+        let mut texts = Vec::new();
+        texts_mut(agent, &mut texts);
+        for s in texts {
+            if s.chars().count() > cap {
+                let mut cut: String = s.chars().take(cap).collect();
+                cut.push_str(TRUNCATED);
+                *s = cut;
+            }
         }
+        if before.is_null() || shown(agent) == before {
+            continue;
+        }
+        agent["pending"]["answer_path"] = json!("none");
+        card["answerable"] = json!(false);
+        card["free_text_answerable"] = json!(false);
+        card["selectable_options"] = json!([]);
     }
 }
 
@@ -520,6 +549,52 @@ mod tests {
         assert_eq!(pending["id"], "r-a1");
         assert_eq!(out["view"]["cards"][0]["agent"]["title"], "fix tests", "short text is not cut");
         assert_eq!(out["omitted"], json!({"done":0,"working":0}));
+    }
+
+    fn first_card(out: &Value) -> &Value {
+        &out["view"]["cards"][0]
+    }
+
+    fn assert_read_only(card: &Value) {
+        assert_eq!(card["answerable"], false);
+        assert_eq!(card["free_text_answerable"], false);
+        assert_eq!(card["selectable_options"], json!([]));
+        assert_eq!(card["agent"]["pending"]["answer_path"], "none");
+    }
+
+    #[test]
+    fn a_card_whose_detail_was_cut_is_not_answerable() {
+        let mut a = agent("a1", "fix tests", None);
+        a.pending.as_mut().unwrap().detail = "é".repeat(5 * 1024 * 1024 / 2 + 7);
+        let v = view(vec![card(a), card(agent("a2", "small", None))]);
+        let out = line(&v, MAX_LINE);
+        let c = first_card(&out);
+        assert!(c["agent"]["pending"]["detail"].as_str().unwrap().ends_with(TRUNCATED));
+        assert_read_only(c);
+        let other = &out["view"]["cards"][1];
+        assert_eq!(other["answerable"], true, "an uncut card stays answerable");
+        assert_eq!(other["selectable_options"], json!(["allow"]));
+        assert_eq!(other["agent"]["pending"]["answer_path"], "hook");
+    }
+
+    #[test]
+    fn a_card_whose_option_label_was_cut_is_not_answerable() {
+        let mut a = agent("a1", "fix tests", None);
+        a.pending.as_mut().unwrap().options[0].label = "é".repeat(5 * 1024 * 1024 / 2);
+        let out = line(&view(vec![card(a)]), MAX_LINE);
+        assert!(first_card(&out)["agent"]["pending"]["options"][0]["label"].as_str().unwrap().ends_with(TRUNCATED));
+        assert_read_only(first_card(&out));
+    }
+
+    #[test]
+    fn a_cut_title_or_screen_alone_keeps_the_card_answerable() {
+        let mut a = agent("a1", &"t".repeat(5 * 1024 * 1024 / 2), Some(&"é".repeat(5 * 1024 * 1024 / 2)));
+        a.pending.as_mut().unwrap().detail = "npm test".into();
+        let out = line(&view(vec![card(a)]), MAX_LINE);
+        let c = first_card(&out);
+        assert!(c["agent"]["pending"]["raw_screen"].as_str().unwrap().ends_with(TRUNCATED));
+        assert_eq!(c["answerable"], true);
+        assert_eq!(c["agent"]["pending"]["answer_path"], "hook");
     }
 
     #[test]
