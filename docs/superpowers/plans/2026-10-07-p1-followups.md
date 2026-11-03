@@ -294,12 +294,20 @@ needs a decision or a small follow-up.
   snapshot stays silent, as before. The client's notified set is unbounded
   (security review finding 5).
 - **Security review findings still open** (`docs/research/2026-11-03-security-review-core.md`
-  and `-local.md`): core 3 (16 MiB frames, unbounded agent state), 4 (no
-  connection or auth log), 5 (unbounded notifications), 7 and 8 (pairing host
-  and `agent.send` character rules); local F2 (T3 token goes to whoever holds
-  the loopback port), F3 (hook listeners have no read timeout), F4 (herdr
-  socket discovery checks no owner), F5 (service files from unescaped paths).
-  Core 1, 2 and 6 and local F1 are fixed.
+  and `-local.md`): core 3 (16 MiB frames, unbounded agent state), 7 and 8
+  (pairing host and `agent.send` character rules); local F2 (T3 token goes
+  to whoever holds the loopback port), F3 (hook listeners have no read
+  timeout), F4 (herdr socket discovery checks no owner), F5 (service files
+  from unescaped paths). Core 1, 2, 4, 5 and 6 and local F1 are fixed.
+  Core 4 logs each accepted and rejected `hello` (peer address, client id,
+  name, version, reason; never a token) at 10 lines per 10 s per kind. Lines
+  over the limit are counted into `suppressed` on the next line. TLS
+  handshake failures and pre-auth slot refusals are not logged. Core 5 bounds the client's notified set
+  (256) and limits notifications to 5 per 10 s per machine. Left open: it
+  still notifies for a request whose agent is not in the snapshot, because
+  the daemon sends `request.opened` before the agent update (tested in
+  `hook_only_agents_show_with_a_request_and_notify_as_before`); the rate
+  limit is the bound on that lure.
 - **Owner decisions still open:** same-user denial of service on the local
   socket and the four-source pre-auth residual (see Pre-auth residuals); the
   relay spec's lock-screen content rule and handle revocation (see its review

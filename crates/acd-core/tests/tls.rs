@@ -379,3 +379,94 @@ async fn authenticate_ok(
     .expect("server welcomes authenticated client");
     ws
 }
+
+/// Everything the daemon logs while this test binary runs.
+fn captured_log() -> &'static std::sync::Mutex<Vec<u8>> {
+    use std::sync::{Mutex, OnceLock};
+    static BUF: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+    BUF.get_or_init(|| {
+        #[derive(Clone)]
+        struct W;
+        impl std::io::Write for W {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                captured_log().lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_writer(|| W)
+                .with_ansi(false)
+                .finish(),
+        )
+        .unwrap();
+        Mutex::new(Vec::new())
+    })
+}
+
+async fn hello_with(port: u16, token: &str, client_id: &str) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let tls = tls_connect(port).await;
+    let (mut ws, _) = tokio_tungstenite::client_async("wss://localhost/", tls)
+        .await
+        .unwrap();
+    let hello = acd_protocol::ClientMessage::Hello {
+        protocol: acd_protocol::PROTOCOL.into(),
+        token: token.into(),
+        client: acd_protocol::ClientInfo {
+            id: client_id.into(),
+            name: "log-test".into(),
+            version: "9.9".into(),
+        },
+        resume: None,
+    };
+    ws.send(Message::Text(serde_json::to_string(&hello).unwrap().into()))
+        .await
+        .unwrap();
+    // Wait for the verdict: a welcome, or the connection ending.
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(Ok(m)) = ws.next().await {
+            if matches!(m, Message::Close(_)) {
+                break;
+            }
+            if let Message::Text(t) = m
+                && matches!(
+                    acd_protocol::decode_server(t.as_str()),
+                    Ok(Some(acd_protocol::ServerMessage::Welcome { .. }))
+                )
+            {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn accepted_and_rejected_hellos_are_logged_without_the_token() {
+    captured_log();
+    let s = serve(short(), tls::Admission::new(tls::MAX_UNAUTHENTICATED_TCP)).await;
+    hello_with(s.port, "wrong-token-7f3a", "bad-client").await;
+    hello_with(s.port, "secret", "good-client-1").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let log = String::from_utf8(captured_log().lock().unwrap().clone()).unwrap();
+    let rejected = log
+        .lines()
+        .find(|l| l.contains("hello rejected"))
+        .expect("a rejected hello is logged");
+    assert!(rejected.contains("invalid token"), "{rejected}");
+    assert!(rejected.contains("127.0.0.1:"), "{rejected}");
+    let accepted = log
+        .lines()
+        .find(|l| l.contains("hello accepted"))
+        .expect("an accepted hello is logged");
+    assert!(accepted.contains("127.0.0.1:"), "{accepted}");
+    assert!(accepted.contains("good-client-1"), "{accepted}");
+    assert!(accepted.contains("log-test"), "{accepted}");
+    assert!(!log.contains("wrong-token-7f3a"), "presented token leaked");
+    assert!(!log.contains("secret"), "stored token leaked");
+}

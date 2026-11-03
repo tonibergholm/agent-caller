@@ -269,6 +269,7 @@ impl Default for Limits {
 pub const MAX_UNAUTHENTICATED_TCP: usize = 32;
 
 struct AdmitInner {
+    peer: Option<SocketAddr>,
     permit: std::sync::Mutex<Option<Held>>,
     authenticated: std::sync::atomic::AtomicBool,
 }
@@ -277,13 +278,18 @@ pub struct Admit {
     inner: Arc<AdmitInner>,
 }
 impl Admit {
-    fn new(permit: Held) -> Self {
+    fn new(permit: Held, peer: Option<SocketAddr>) -> Self {
         Self {
             inner: Arc::new(AdmitInner {
+                peer,
                 permit: std::sync::Mutex::new(Some(permit)),
                 authenticated: std::sync::atomic::AtomicBool::new(false),
             }),
         }
+    }
+    /// The remote address of the TCP connection, for the auth log.
+    pub fn peer(&self) -> Option<SocketAddr> {
+        self.inner.peer
     }
     pub fn authenticated(&self) {
         if !self
@@ -454,7 +460,7 @@ impl TlsListener {
                         let accepted_at = Instant::now();
                         let Some(permit) = admission.try_acquire(addr.ip()) else { drop(stream); continue };
                         if handshakes.len() >= limits.max_handshakes { drop(stream); drop(permit); continue; }
-                        let admit = Admit::new(permit);
+                        let admit = Admit::new(permit, Some(addr));
                         let deadline = accepted_at + limits.preauth_deadline;
                         let acceptor = TlsAcceptor::from(config.borrow_and_update().clone());
                         let tx = tx.clone();
@@ -667,7 +673,7 @@ mod io_tests {
         client.flush().await.unwrap();
 
         let admission = Admission::new(1);
-        let admit = Admit::new(admission.try_acquire("127.0.0.1".parse().unwrap()).unwrap());
+        let admit = Admit::new(admission.try_acquire("127.0.0.1".parse().unwrap()).unwrap(), None);
         admit.authenticated();
         let (kill_tx, kill_rx) = watch::channel(false);
         let kill = KillSwitch { tx: kill_tx };

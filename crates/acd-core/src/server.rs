@@ -1,5 +1,5 @@
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use acd_protocol::*;
 use axum::Router;
@@ -54,6 +54,55 @@ impl Auth {
     }
 }
 
+/// Lets at most `MAX` auth log lines through per `WINDOW`, so a flood of
+/// connections can fill neither the log nor the disk. Lines held back are
+/// counted and reported on the next line that passes.
+struct LogLimiter {
+    state: Mutex<LimiterState>,
+}
+struct LimiterState {
+    window_start: Instant,
+    in_window: u32,
+    suppressed: u64,
+    total: u64,
+}
+impl LogLimiter {
+    const MAX: u32 = 10;
+    const WINDOW: Duration = Duration::from_secs(10);
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(LimiterState {
+                window_start: Instant::now(),
+                in_window: 0,
+                suppressed: 0,
+                total: 0,
+            }),
+        }
+    }
+    /// `Some((suppressed_since_last_line, total_events))` when the line may
+    /// be written, `None` when it is held back.
+    fn pass(&self) -> Option<(u64, u64)> {
+        let mut s = self.state.lock().unwrap();
+        s.total += 1;
+        if s.window_start.elapsed() >= Self::WINDOW {
+            s.window_start = Instant::now();
+            s.in_window = 0;
+        }
+        if s.in_window >= Self::MAX {
+            s.suppressed += 1;
+            return None;
+        }
+        s.in_window += 1;
+        Some((std::mem::take(&mut s.suppressed), s.total))
+    }
+}
+
+/// Peer-chosen text for a log line: cut to `max` characters, and the caller
+/// prints it with `{:?}` so control characters are escaped.
+fn clip(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
 #[derive(Clone)]
 pub struct ServerOptions {
     pub allowed_origins: Vec<String>,
@@ -92,6 +141,9 @@ struct AppState {
     local_preauth: Arc<Semaphore>,
     /// Daemon-wide in-flight commands; shared by every clone of the router.
     inflight_total: Arc<Semaphore>,
+    /// Bounded logs for rejected and accepted hellos. Never log a token.
+    reject_log: Arc<LogLimiter>,
+    accept_log: Arc<LogLimiter>,
 }
 
 /// The acd/1 WebSocket server. Serve clones of one router on every listener
@@ -107,6 +159,8 @@ pub fn router(core: Arc<Core>, auth: Arc<Auth>, opts: ServerOptions) -> Router {
         preauth,
         local_preauth,
         inflight_total,
+        reject_log: Arc::new(LogLimiter::new()),
+        accept_log: Arc::new(LogLimiter::new()),
     })
 }
 
@@ -187,6 +241,15 @@ async fn session(
     permit: OwnedSemaphorePermit,
     admit: Option<crate::tls::Admit>,
 ) {
+    let peer = match &admit {
+        Some(a) => a.peer().map_or_else(|| "tcp".to_string(), |p| p.to_string()),
+        None => "local".to_string(),
+    };
+    let reject = |why: &str| {
+        if let Some((suppressed, total)) = st.reject_log.pass() {
+            tracing::warn!(target: "acd::auth", %peer, why, rejected_total = total, suppressed, "hello rejected");
+        }
+    };
     let hello = match tokio::time::timeout(st.opts.hello_timeout, socket.recv()).await {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<ClientMessage>(t.as_str()).ok(),
         _ => None,
@@ -198,10 +261,12 @@ async fn session(
         resume,
     }) = hello
     else {
+        reject("hello required");
         preauth_send(&mut socket, close_msg(CLOSE_UNAUTHORIZED, "hello required")).await;
         return;
     };
     if protocol != PROTOCOL {
+        reject("unsupported protocol");
         let msg = ServerMessage::Error {
             code: ErrorCode::UnsupportedProtocol,
             message: format!("unsupported protocol {protocol}"),
@@ -217,6 +282,7 @@ async fn session(
     }
     let mut gen_rx = st.auth.subscribe();
     let Some(generation) = st.auth.check(&token) else {
+        reject("invalid token");
         preauth_send(
             &mut socket,
             text(&error(ErrorCode::Unauthorized, "invalid token")),
@@ -226,6 +292,7 @@ async fn session(
         return;
     };
     if client.id.len() > MAX_ID_BYTES {
+        reject("client.id too long");
         preauth_send(
             &mut socket,
             text(&error(
@@ -240,6 +307,11 @@ async fn session(
     drop(permit);
     if let Some(admit) = admit {
         admit.authenticated();
+    }
+    if let Some((suppressed, total)) = st.accept_log.pass() {
+        tracing::info!(target: "acd::auth", %peer, client_id = ?clip(&client.id, 64),
+            client_name = ?clip(&client.name, 64), client_version = ?clip(&client.version, 32),
+            accepted_total = total, suppressed, "hello accepted");
     }
 
     let (mut sink, mut stream) = socket.split();
@@ -554,5 +626,20 @@ mod revocation_tests {
                 "resolved uncertain by the abandon guard"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod log_limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_flood_passes_a_bounded_number_of_lines_and_counts_the_rest() {
+        let l = LogLimiter::new();
+        let passed = (0..1000).filter(|_| l.pass().is_some()).count();
+        assert_eq!(passed, LogLimiter::MAX as usize);
+        // A new window lets lines through again and reports what was held back.
+        l.state.lock().unwrap().window_start = Instant::now() - LogLimiter::WINDOW;
+        assert_eq!(l.pass(), Some((990, 1001)));
     }
 }
