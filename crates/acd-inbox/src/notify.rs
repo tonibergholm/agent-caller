@@ -1,6 +1,6 @@
 //! Notifications (omarchy spec §8, plan D15 to D17). Views are reconciled into
 //! show and close commands; the D-Bus side sits behind `NotifyBackend`.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,6 +17,11 @@ pub const OPEN_ACTION: &str = "open";
 pub const PLUGIN_ID: &str = "tonibergholm.agentcaller";
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const TITLE_MAX: usize = 60;
+/// How many announced (card, request, revision) keys are remembered after they
+/// leave the view. Without it a machine that flaps (disconnect, reconnect)
+/// would announce the same request and revision again. Oldest are evicted
+/// first so the history cannot grow without bound.
+pub const SEEN_HISTORY_MAX: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NoteKey {
@@ -35,6 +40,8 @@ pub enum NoteCmd {
 #[derive(Default)]
 pub struct Reconciler {
     seen: HashSet<NoteKey>,
+    /// `seen` in insertion order, for eviction.
+    order: VecDeque<NoteKey>,
     shown: HashSet<NoteKey>,
 }
 
@@ -56,11 +63,17 @@ impl Reconciler {
             self.shown.remove(&key);
             out.push(NoteCmd::Close { key });
         }
-        self.seen.retain(|k| current.contains_key(k));
         let mut fresh: Vec<(&NoteKey, &&CardView)> = current.iter().filter(|(k, _)| !self.seen.contains(*k)).collect();
         fresh.sort_by(|a, b| a.0.card.cmp(&b.0.card));
         for (key, card) in fresh {
-            self.seen.insert(key.clone());
+            if self.seen.insert(key.clone()) {
+                self.order.push_back(key.clone());
+                if self.order.len() > SEEN_HISTORY_MAX
+                    && let Some(old) = self.order.pop_front()
+                {
+                    self.seen.remove(&old);
+                }
+            }
             if !enabled || panel_open || card.action.is_some() {
                 continue;
             }

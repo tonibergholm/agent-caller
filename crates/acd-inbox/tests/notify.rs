@@ -66,6 +66,34 @@ fn one_notification_per_request_revision_and_none_for_repeats() {
 }
 
 #[test]
+fn a_flap_does_not_announce_again_but_a_new_revision_or_request_does() {
+    let mut r = Reconciler::default();
+    assert_eq!(shown(&r.reconcile(&view(vec![card("a1", 1, false)]), true, false)), [key("a1", 1)]);
+    // The machine disconnects: the card leaves the view, then comes back.
+    assert_eq!(r.reconcile(&view(vec![]), true, false), [NoteCmd::Close { key: key("a1", 1) }]);
+    assert!(r.reconcile(&view(vec![card("a1", 1, false)]), true, false).is_empty(), "same request and revision");
+    r.reconcile(&view(vec![]), true, false);
+    assert_eq!(shown(&r.reconcile(&view(vec![card("a1", 2, false)]), true, false)), [key("a1", 2)], "new revision");
+    assert_eq!(shown(&r.reconcile(&view(vec![card("a1", 2, false), card("b1", 1, false)]), true, false)), [key("b1", 1)], "new request");
+}
+
+#[test]
+fn the_announced_history_is_bounded_and_evicts_the_oldest_first() {
+    let mut r = Reconciler::default();
+    let n = SEEN_HISTORY_MAX + 1;
+    for i in 0..n {
+        let id = format!("c{i}");
+        assert_eq!(shown(&r.reconcile(&view(vec![card(&id, 1, false)]), true, false)), [key(&id, 1)]);
+    }
+    r.reconcile(&view(vec![]), true, false);
+    // The newest is still remembered; the oldest was evicted and announces again.
+    let newest = format!("c{}", n - 1);
+    assert!(r.reconcile(&view(vec![card(&newest, 1, false)]), true, false).is_empty());
+    r.reconcile(&view(vec![]), true, false);
+    assert_eq!(shown(&r.reconcile(&view(vec![card("c0", 1, false)]), true, false)), [key("c0", 1)]);
+}
+
+#[test]
 fn none_while_a_panel_is_open_off_or_counting_and_not_later_either() {
     let mut r = Reconciler::default();
     assert!(r.reconcile(&view(vec![card("a1", 1, false)]), true, true).is_empty());
