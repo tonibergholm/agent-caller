@@ -55,6 +55,7 @@ fn card(c: &CardView, conn: Option<ConnStamp>, idle_hidden: bool) -> CardSnap {
         pending: c.agent.pending.as_ref().map(|r| RequestSnap {
             id: r.id.clone(),
             revision: r.revision,
+            opened_at: r.opened_at,
             kind: r.kind,
             title: r.title.clone(),
             detail: r.detail.clone(),
