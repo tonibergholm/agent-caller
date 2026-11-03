@@ -135,7 +135,8 @@ struct Inner {
     busy: HashSet<String>,
     notices: HashMap<String, (Notice, Instant)>,
     #[allow(dead_code)] // Reserved for the notification state added by Task 11.
-    notified: HashSet<(String, String)>,
+    // `opened_at` tells a request from an earlier acd run: ids restart at r1.
+    notified: HashSet<(String, String, acd_protocol::Timestamp)>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum InboxEvent {
@@ -929,7 +930,7 @@ impl Inbox {
                     .map(|a| a.title.clone())
                     .unwrap_or_else(|| req.agent_id.clone());
                 drop(state);
-                if !hidden_subagent && inner.notified.insert((machine_id, req.id.clone())) {
+                if !hidden_subagent && inner.notified.insert((machine_id, req.id.clone(), req.opened_at)) {
                     let _ = self.events_tx.send(InboxEvent::RequestOpened {
                         machine_key: key.to_owned(),
                         machine_name,

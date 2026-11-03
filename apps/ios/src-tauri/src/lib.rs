@@ -8,7 +8,7 @@ mod commands;
 #[cfg(all(debug_assertions, target_os = "ios", target_abi = "sim"))]
 use std::sync::Arc;
 
-use acd_app_core::{commands::AppState, keychain, setup};
+use acd_app_core::{commands::AppState, platform_secrets, setup};
 #[cfg(all(debug_assertions, target_os = "ios", target_abi = "sim"))]
 use acd_client::inbox::Inbox;
 use tauri::{Emitter, Manager};
@@ -49,7 +49,7 @@ pub fn run() {
             let path = app.path().app_config_dir()?.join("settings.json");
             let inbox = setup::open_inbox(
                 &path,
-                keychain::cached_secrets(),
+                platform_secrets(),
                 tauri::async_runtime::handle().inner(),
                 setup::OpenOptions {
                     client_name: "agent-caller-ios",

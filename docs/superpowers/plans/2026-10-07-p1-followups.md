@@ -315,3 +315,12 @@ Items not named here stay in their section as accepted residuals.
   keyboard; noted, not changed.
 - Run-to-run: the 19/20 and 19/20 phrase result is two runs on one Mac, small
   sets, typed text.
+
+### Whole-or-read-only (PR #83), accepted residuals
+
+- Question text and option labels that the adapters cut earlier (T3 in
+  `t3/map.rs`, hooks in `hooks/mapping.rs`) stay answerable. Only permission
+  commands follow the whole-or-read-only rule at the adapter.
+- Read-only for an oversized inbox view is a presentation guarantee.
+  `Inbox::pick` in `acd-client` checks the original request, so a direct
+  socket caller can still answer a card the view showed cut.

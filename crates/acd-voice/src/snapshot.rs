@@ -64,6 +64,9 @@ pub struct OptionSnap {
 pub struct RequestSnap {
     pub id: String,
     pub revision: u64,
+    /// Set once when the request opens. Ids restart at `r1` with each `acd`
+    /// start, so the id alone can repeat for a new request.
+    pub opened_at: acd_protocol::Timestamp,
     pub kind: RequestKind,
     pub title: String,
     pub detail: String,
@@ -286,6 +289,7 @@ pub mod fixtures {
         RequestSnap {
             id: id.into(),
             revision: 1,
+            opened_at: acd_protocol::Timestamp::MIN_UTC,
             kind: RequestKind::Permission,
             title: "Bash".into(),
             detail: "npm test".into(),

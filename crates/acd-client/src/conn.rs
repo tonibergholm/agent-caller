@@ -149,6 +149,10 @@ enum End {
 
 async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), End> {
     timeout_at(deadline, async {
+        // Refused before any token is read. See `refuse_local`.
+        if let Some(end) = refuse_local(&cfg.endpoint, acd_securefs::OWNER_CHECKS) {
+            return Err(end);
+        }
         let token = match &cfg.credential {
             Credential::Token(t) => t.clone(),
             Credential::LocalFile(dir) => {
@@ -156,6 +160,7 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
             }
         };
         match &cfg.endpoint {
+            #[cfg(owner_checks)]
             Endpoint::Local { config_dir } => {
                 let stream = tokio::net::UnixStream::connect(local::socket_path(config_dir))
                     .await
@@ -168,6 +173,8 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
                 .map_err(|e| End::Offline(e.to_string()))?;
                 Ok((ws, token))
             }
+            #[cfg(not(owner_checks))]
+            Endpoint::Local { .. } => unreachable!("refused above"),
             Endpoint::Tcp { host, port, pin } => {
                 let addrs = endpoint::vet(host, *port)
                     .await
@@ -247,7 +254,25 @@ fn connect_reason(e: &std::io::Error) -> String {
     }
 }
 
+/// The `local` endpoint is a unix socket whose peer is proved by file mode and
+/// owner. Where the owner-only checks are unsupported (Windows, and Android,
+/// which has cfg(unix) but is refused on purpose) it is refused outright,
+/// before any token is read, and never replaced by anything weaker. Remote
+/// TCP + TLS is unaffected. `owner_checks` is a parameter so the Linux tests
+/// can exercise the refusing side.
+// shortcut: no local machine on Windows or Android, upgrade with a named-pipe
+// transport that checks the server's SID (feasibility note B1).
+fn refuse_local(endpoint: &Endpoint, owner_checks: bool) -> Option<End> {
+    (!owner_checks && matches!(endpoint, Endpoint::Local { .. }))
+        .then(|| End::Local(LOCAL_UNSUPPORTED.into()))
+}
+
+/// Shown for a `local` machine on a platform without the owner-only checks.
+const LOCAL_UNSUPPORTED: &str =
+    "the local acd.sock endpoint is unavailable on this platform; pair a remote machine instead";
+
 /// The local socket is missing or dead when the daemon is not running.
+#[cfg(owner_checks)]
 fn local_reason(e: &std::io::Error) -> String {
     use std::io::ErrorKind::*;
     match e.kind() {
@@ -617,7 +642,9 @@ async fn run(
                     &session,
                     generation,
                 );
-                Duration::ZERO
+                // Not zero: a daemon that closes every connection with 4408 would
+                // otherwise be redialled in a tight loop. Ready resets the backoff.
+                backoff.next_delay()
             }
             End::Unauthorized => {
                 commands.revoke_all();
@@ -760,7 +787,9 @@ pub fn spawn_machine(cfg: MachineConfig) -> MachineHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{connect_reason, local_reason};
+    use super::connect_reason;
+    #[cfg(owner_checks)]
+    use super::local_reason;
     use std::io::{Error, ErrorKind};
 
     #[test]
@@ -779,6 +808,7 @@ mod tests {
         );
     }
 
+    #[cfg(owner_checks)]
     #[test]
     fn a_missing_local_socket_says_acd_is_not_running() {
         assert_eq!(
@@ -790,5 +820,49 @@ mod tests {
             "acd is not running on this machine"
         );
         assert_eq!(local_reason(&Error::other("boom")), "boom");
+    }
+
+    /// The refusal policy, on any host: without owner checks (Windows, Android)
+    /// a `local` endpoint is refused whatever else is true; a remote one never is.
+    #[test]
+    fn local_is_refused_exactly_when_owner_checks_are_unsupported() {
+        use super::{refuse_local, End, LOCAL_UNSUPPORTED};
+        use crate::endpoint::Endpoint;
+        let local = Endpoint::Local { config_dir: "/nonexistent".into() };
+        let tcp = Endpoint::Tcp { host: "h.example".into(), port: 1, pin: String::new() };
+        assert!(matches!(refuse_local(&local, false), Some(End::Local(m)) if m == LOCAL_UNSUPPORTED));
+        assert!(refuse_local(&local, true).is_none());
+        assert!(refuse_local(&tcp, false).is_none());
+        assert!(refuse_local(&tcp, true).is_none());
+    }
+
+    /// Windows and Android only; not run in the Linux sandbox. A `local` machine is refused
+    /// before any token is read, whatever the credential.
+    #[cfg(not(owner_checks))]
+    #[tokio::test]
+    async fn local_endpoint_is_refused_without_owner_checks() {
+        use super::{open, Credential, End, MachineConfig, LOCAL_UNSUPPORTED};
+        use crate::endpoint::Endpoint;
+        use std::time::Duration;
+        use tokio::time::Instant;
+        for credential in [
+            Credential::Token("x".into()),
+            Credential::LocalFile(std::env::temp_dir()),
+        ] {
+            let cfg = MachineConfig {
+                key: "local".into(),
+                instance: 1,
+                endpoint: Endpoint::Local { config_dir: std::env::temp_dir() },
+                credential,
+                client: acd_protocol::ClientInfo {
+                    id: "t".into(),
+                    name: "t".into(),
+                    version: "0".into(),
+                },
+                timing: crate::Timing::default(),
+            };
+            let r = open(&cfg, Instant::now() + Duration::from_secs(5)).await;
+            assert!(matches!(r, Err(End::Local(m)) if m == LOCAL_UNSUPPORTED));
+        }
     }
 }

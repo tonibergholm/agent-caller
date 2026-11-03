@@ -9,10 +9,11 @@ use acd_protocol::{
 use serde_json::{Value, json};
 
 use super::detail::PendingView;
+use crate::hooks::mapping::escape_text;
 use super::wire::{Project, ShellThread, TurnItem};
 use crate::text::{LAST_MESSAGE_CHARS, TITLE_CHARS, cap_chars, clean_display, clean_screen};
 
-pub const DETAIL_CHARS: usize = 4000;
+pub use crate::hooks::mapping::DETAIL_CHARS;
 pub const DECISIONS: [&str; 5] = [
     "accept",
     "acceptForSession",
@@ -139,6 +140,17 @@ fn detail(s: &str) -> String {
     cap_chars(clean_screen(s).trim(), DETAIL_CHARS)
 }
 
+/// A command as it would run, for display: control, bidi and format
+/// characters are shown as escapes instead of being dropped (same as the
+/// hooks mapping). Returns the text and whether it is cut at `DETAIL_CHARS`
+/// characters (not bytes). The escaped text is never shorter than the raw
+/// one, so a raw command over the limit is always cut.
+fn command_detail(s: &str) -> (String, bool) {
+    let escaped = escape_text(s, true);
+    let cut = escaped.chars().count() > DETAIL_CHARS;
+    (cap_chars(&escaped, DETAIL_CHARS), cut)
+}
+
 /// Whether a typed answer is offered for `q`. T3's own UI treats an absent
 /// `allowCustomAnswer` as allowed, but only Claude is verified to take a typed
 /// string (live check, 2026-10-11). Any other provider needs an explicit
@@ -187,8 +199,7 @@ pub fn request_obs(
             match view
                 .command
                 .as_deref()
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
+                .filter(|c| !c.trim().is_empty())
             {
                 Some(c) => {
                     let text = if !prompt.is_empty() && c != prompt {
@@ -196,19 +207,24 @@ pub fn request_obs(
                     } else {
                         c.to_owned()
                     };
-                    obs.detail = detail(&text);
-                    obs.answer_path = AnswerPath::T3;
-                    obs.options = FALLBACK
-                        .iter()
-                        .map(|(id, label, effect)| RequestOption {
-                            id: (*id).into(),
-                            label: (*label).into(),
-                            description: None,
-                            effect: *effect,
-                            confirm: false,
-                        })
-                        .collect();
-                    answer = TargetAnswer::Decision;
+                    let (shown, cut) = command_detail(&text);
+                    obs.detail = shown;
+                    // A cut command hides part of what would run: read-only,
+                    // answered in T3 (same rule as the hooks mapping).
+                    if !cut {
+                        obs.answer_path = AnswerPath::T3;
+                        obs.options = FALLBACK
+                            .iter()
+                            .map(|(id, label, effect)| RequestOption {
+                                id: (*id).into(),
+                                label: (*label).into(),
+                                description: None,
+                                effect: *effect,
+                                confirm: false,
+                            })
+                            .collect();
+                        answer = TargetAnswer::Decision;
+                    }
                 }
                 None => {
                     let mut text = String::from("Command not available yet \u{2014} answer in T3.");
@@ -426,5 +442,78 @@ mod tests {
         // Options stay answerable either way.
         let (obs, _) = obs_for(Some("codex"), &question_view(false, None));
         assert_eq!(obs.answer_path, AnswerPath::T3);
+    }
+
+    fn command_view(command: &str) -> PendingView {
+        let projection = crate::t3::fake::approval_projection("thread", "request", None);
+        let (detail, _) = ThreadDetail::from_projection(&projection);
+        let mut view = detail.pending_view("request").unwrap();
+        let Some(TurnItem::ApprovalRequest {
+            request_kind,
+            prompt,
+            ..
+        }) = &mut view.item
+        else {
+            panic!("an approval");
+        };
+        assert_eq!(request_kind.as_deref(), Some("command"));
+        *prompt = None;
+        view.command = Some(command.into());
+        view
+    }
+
+    #[test]
+    fn a_command_at_the_cap_is_answerable() {
+        let (obs, target) = obs_for(Some("claude"), &command_view(&"a".repeat(DETAIL_CHARS)));
+        assert_eq!(obs.answer_path, AnswerPath::T3);
+        assert_eq!(obs.options.len(), 3);
+        assert_eq!(target.answer, TargetAnswer::Decision);
+    }
+
+    #[test]
+    fn a_command_over_the_cap_is_read_only() {
+        let (obs, target) = obs_for(Some("claude"), &command_view(&"a".repeat(DETAIL_CHARS + 1)));
+        assert_eq!(obs.answer_path, AnswerPath::None);
+        assert!(obs.options.is_empty());
+        assert_eq!(target.answer, TargetAnswer::ReadOnly);
+        assert!(obs.detail.chars().count() <= DETAIL_CHARS);
+    }
+
+    #[test]
+    fn a_tab_in_a_command_is_shown_escaped_and_stays_answerable() {
+        let (obs, _) = obs_for(Some("claude"), &command_view("printf 'a\tb'"));
+        assert_eq!(obs.detail, "printf 'a\\tb'");
+        assert_eq!(obs.answer_path, AnswerPath::T3);
+    }
+
+    #[test]
+    fn a_command_of_mostly_tabs_over_the_cap_is_read_only() {
+        let cmd = format!("a{}", "\t".repeat(DETAIL_CHARS));
+        assert_eq!(cmd.chars().count(), DETAIL_CHARS + 1);
+        let (obs, target) = obs_for(Some("claude"), &command_view(&cmd));
+        assert_eq!(obs.answer_path, AnswerPath::None);
+        assert_eq!(target.answer, TargetAnswer::ReadOnly);
+        // Fewer raw characters, but the escaped text is over the cap.
+        let (obs, _) = obs_for(Some("claude"), &command_view(&format!("a{}a", "\t".repeat(2500))));
+        assert_eq!(obs.answer_path, AnswerPath::None);
+    }
+
+    #[test]
+    fn a_bidi_override_in_a_command_is_not_dropped_silently() {
+        let (obs, _) = obs_for(Some("claude"), &command_view("echo \u{202e}ok"));
+        assert!(!obs.detail.contains('\u{202e}'));
+        assert!(obs.detail.contains("\\u{202e}"));
+    }
+
+    #[test]
+    fn the_cap_counts_characters_not_bytes() {
+        let ok = "é".repeat(DETAIL_CHARS);
+        assert!(ok.len() > DETAIL_CHARS);
+        let (obs, _) = obs_for(Some("claude"), &command_view(&ok));
+        assert_eq!(obs.answer_path, AnswerPath::T3);
+        assert_eq!(obs.detail, ok);
+        let (obs, target) = obs_for(Some("claude"), &command_view(&"é".repeat(DETAIL_CHARS + 1)));
+        assert_eq!(obs.answer_path, AnswerPath::None);
+        assert_eq!(target.answer, TargetAnswer::ReadOnly);
     }
 }

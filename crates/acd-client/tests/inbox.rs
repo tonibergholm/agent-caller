@@ -1,3 +1,6 @@
+// Unix only: these drive the fake server over a unix socket (no local endpoint on Windows).
+#![cfg(owner_checks)]
+
 mod common;
 use acd_client::actions::ActionOwner;
 use acd_client::{fake::*, inbox::*, settings::*, view::*, voice::*};
@@ -417,6 +420,32 @@ async fn notifications_only_for_opened_events_and_deduped() {
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
     assert_eq!(f.connections(), 2);
+}
+
+/// acd numbers requests from r1 on every start, so after a restart a new
+/// request can carry an id the app already announced. `opened_at` tells them apart.
+#[tokio::test]
+async fn a_request_id_reused_after_a_restart_notifies_again() {
+    let (f, c, ib) = setup().await;
+    let mut events = ib.events();
+    let first = pending_agent();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[first]})).await;
+    c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":2,"request":first["pending"]})).await;
+    let event = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
+    assert!(matches!(event, InboxEvent::RequestOpened { ref request_id, .. } if request_id == ANSWER_REQ));
+    // The daemon restarts: same machine, same agent id, same request id, a new request.
+    f.set_epoch("e2");
+    c.close(1001).await;
+    let c2 = f.next_connection().await;
+    let mut second = pending_agent();
+    second["pending"]["opened_at"] = "2026-10-08T01:00:00.000Z".into();
+    c2.send(serde_json::json!({"type":"snapshot","epoch":"e2","seq":1,"agents":[second]})).await;
+    c2.send(serde_json::json!({"type":"request.opened","epoch":"e2","seq":2,"request":second["pending"]})).await;
+    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("the reused id is a new request and must notify")
+        .unwrap();
+    assert!(matches!(event, InboxEvent::RequestOpened { ref request_id, .. } if request_id == ANSWER_REQ));
 }
 
 #[tokio::test]

@@ -44,7 +44,7 @@ fn is_invisible(c: char) -> bool {
 /// (so the text `\u{7}` differs from a real BEL) and inner newlines stay
 /// real line breaks (the display contract keeps them); without it the
 /// text is already JSON-escaped and every newline is escaped.
-fn escape_text(raw: &str, raw_text: bool) -> String {
+pub(crate) fn escape_text(raw: &str, raw_text: bool) -> String {
     let cs: Vec<char> = raw.chars().collect();
     let first = cs.iter().position(|c| !c.is_whitespace());
     let last = cs.iter().rposition(|c| !c.is_whitespace());
