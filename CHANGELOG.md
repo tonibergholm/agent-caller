@@ -46,6 +46,14 @@ config and the `acd/1` protocol may change without a major version bump.
 - Omarchy: a request that left the view when its machine disconnected no longer
   notifies again on reconnect; the last 256 announced requests are remembered.
 - Omarchy: J/K now scrolls the card list so the selected card stays in view.
+- Omarchy: an approval card shows every row of the command and of a question,
+  not only the first six (security finding F1). A card is answered from the
+  panel (digit, Enter, click or typed answer) only while the whole card is
+  inside the visible list; a card taller than the panel disables its options
+  and says "Too long to show here. Answer it in the terminal." A card opened
+  from a notification is scrolled into view. The QML rendering and wiring are
+  UNVERIFIED: Quickshell could not run in the development sandbox. The manual
+  Omarchy check is in the pull request description (PR #80).
 
 ## [0.9.0] - 2026-10-13
 

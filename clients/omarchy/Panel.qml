@@ -60,6 +60,8 @@ Item {
         machineFilter = shown.machineFilter;
         doneOpen = shown.doneOpen;
         keyState = Model.selectCard(key);
+        // The view may rebuild first (filter, Done section): scroll once laid out.
+        Qt.callLater(() => revealCard(key));
     }
 
     function openCard(key) {
@@ -150,6 +152,32 @@ Item {
         }
     }
 
+    // The card item for `key`, or null.
+    function cardItemFor(key) {
+        for (let i = 0; i < sectionsColumn.children.length; i++) {
+            const item = sectionsColumn.children[i];
+            if (item.card && item.card.key === key) return item;
+        }
+        return null;
+    }
+
+    // The one question every answer asks: is the WHOLE card inside the
+    // viewport right now? Read live at each call, never cached, so scroll,
+    // resize, revision and selection changes cannot leave a stale "yes".
+    function cardFits(key) {
+        const item = cardItemFor(key);
+        return Model.cardFitsView(item !== null && cardsFlick.visible, cardsFlick.contentY, cardsFlick.height, item ? item.y : NaN, item ? item.height : NaN);
+    }
+
+    // A card taller than the panel is never answerable here (it shows a note).
+    function cardTooTall(item) {
+        return Model.cardTooTall(cardsFlick.height, item.height);
+    }
+
+    function tooLongNote(item) {
+        return Model.tooLongNote(item.card, cardsFlick.height, item.height);
+    }
+
     // The draft and the box stay until the service accepts the reply, so a
     // rejected one (another view started a countdown first) loses no text.
     function submitReply(cardKey, text, field) {
@@ -180,7 +208,7 @@ Item {
     // current one; the plan is made again now, from the view on screen.
     // The text stays until the request resolves, so an undo gets it back.
     function submitAnswer(text) {
-        const plan = Model.planAnswer(answerEditor, cards, text);
+        const plan = Model.planAnswer(answerEditor, cards, text, answerEditor !== null && cardFits(answerEditor.cardKey));
         switch (plan.kind) {
         case "closed":
             message = Model.editorClosedNotice(answerEditor);
@@ -189,6 +217,9 @@ Item {
             break;
         case "invalid":
             message = Model.reasonText(plan.reason);
+            break;
+        case "hidden":
+            message = Model.HIDDEN_NOTICE;
             break;
         case "send":
             const editor = answerEditor;
@@ -206,8 +237,10 @@ Item {
 
     // A click on an option: one that needs confirmation arms first (model.mjs).
     function pickOption(card, optionId) {
-        const r = Model.pickOption(keyState, card, optionId, Date.now());
+        const fits = cardFits(card.key);
+        const r = Model.pickOption(keyState, card, optionId, Date.now(), fits);
         keyState = r.state;
+        if (!fits) message = Model.HIDDEN_NOTICE;
         if (r.effect.kind !== "none") run(r.effect, null);
     }
 
@@ -215,7 +248,9 @@ Item {
     // focus, and `composing` is that field's IME state (spec section 7).
     function keyEvent(event, field, composing, input) {
         message = "";
-        const r = Model.onKey(visibleCards, keyState, Model.fromQt(event.key, event.text, event.modifiers, composing, field, event.isAutoRepeat === true));
+        const ev = Model.fromQt(event.key, event.text, event.modifiers, composing, field, event.isAutoRepeat === true);
+        ev.fits = cardFits;
+        const r = Model.onKey(visibleCards, keyState, ev);
         keyState = r.state;
         if (r.effect.kind !== "none") {
             run(r.effect, input);
@@ -348,7 +383,6 @@ Item {
                 visible: cardItem.card.agent.pending !== null
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                maximumLineCount: 6
                 text: cardItem.card.agent.pending ? cardItem.meta.tag + "  " + cardItem.card.agent.pending.detail : ""
             }
 
@@ -357,8 +391,16 @@ Item {
                 visible: lines !== null
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                maximumLineCount: 6
                 text: lines ? [lines.header, lines.text].filter(x => x).join("\n") : ""
+            }
+
+            Label {
+                readonly property string note: cardItem.inbox.tooLongNote(cardItem)
+                visible: note !== ""
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                color: cardItem.inbox.muted
+                text: note
             }
 
             Repeater {
@@ -369,12 +411,12 @@ Item {
                     required property var modelData
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
-                    color: modelData.pickable ? cardItem.inbox.fg : cardItem.inbox.muted
+                    color: modelData.pickable && !cardItem.inbox.cardTooTall(cardItem) ? cardItem.inbox.fg : cardItem.inbox.muted
                     text: modelData.number + ". " + (modelData.armed ? "Press Enter to confirm: " : "") + modelData.label + (modelData.rule ? "  (" + modelData.rule + ")" : "")
 
                     MouseArea {
                         anchors.fill: parent
-                        enabled: optionRow.modelData.pickable
+                        enabled: optionRow.modelData.pickable && !cardItem.inbox.cardTooTall(cardItem)
                         onClicked: cardItem.inbox.pickOption(cardItem.card, optionRow.modelData.id)
                     }
                 }

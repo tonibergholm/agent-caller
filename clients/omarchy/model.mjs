@@ -253,12 +253,15 @@ export function optionRows(card, armed = null, now = 0) {
  * Picking an option: one that needs confirmation arms on the first tap and
  * is sent by the second, on the same request and revision, within
  * `CONFIRM_MS`. Anything else the user does in between disarms it.
+ * Every pick (digit, Enter, click) comes through here. `fits` is the live
+ * `cardFullyVisible` of the card at this moment; anything but `true` refuses
+ * the pick and disarms, so a card that is not wholly on screen is never answered.
  */
-export function pickOption(st, card, optionId, at) {
+export function pickOption(st, card, optionId, at, fits) {
   const rest = st.armed ? Object.assign({}, st, { armed: null }) : st;
   const p = card.agent.pending;
   const row = optionRows(card).find((r) => r.id === optionId);
-  if (!p || !row || !row.pickable) return { state: rest, effect: NONE };
+  if (fits !== true || !p || !row || !row.pickable) return { state: rest, effect: NONE };
   const second = armedHolds(st.armed, card) && st.armed.optionId === optionId && at - st.armed.at <= CONFIRM_MS;
   if (row.confirm && !second) {
     const armed = { cardKey: card.key, requestId: p.id, revision: p.revision, optionId, at };
@@ -380,6 +383,11 @@ export function fromQt(key, text, modifiers, composing, field, repeat = false) {
   };
 }
 
+/** `ev.fits(cardKey)` reads the live geometry; missing or not `true` means not visible. */
+function cardFits(ev, cardKey) {
+  return typeof ev.fits === "function" && ev.fits(cardKey) === true;
+}
+
 /** Keys (omarchy spec §7), as app/src/lib/keys.ts, over the cards in display order. */
 export function onKey(visible, st, ev) {
   const none = { state: st, effect: NONE };
@@ -401,7 +409,7 @@ export function onKey(visible, st, ev) {
     const armedCard = visible.find((c) => c.key === st.armed.cardKey);
     const row = armedCard ? optionRows(armedCard).find((r) => r.id === st.armed.optionId) : undefined;
     if (armedCard && row && row.pickable && row.confirm && armedHolds(st.armed, armedCard) && (ev.at ?? 0) - st.armed.at <= CONFIRM_MS) {
-      return pickOption(st, armedCard, row.id, st.armed.at);
+      return pickOption(st, armedCard, row.id, st.armed.at, cardFits(ev, armedCard.key));
     }
     return { state: rest, effect: NONE };
   }
@@ -421,9 +429,9 @@ export function onKey(visible, st, ev) {
     if (row.confirm) {
       if (st.armed && armedHolds(st.armed, card) && st.armed.optionId === row.id && (ev.at ?? 0) - st.armed.at <= CONFIRM_MS) return { state: st, effect: NONE };
       if (ev.repeat) return { state: st, effect: NONE };
-      return pickOption(Object.assign({}, st, { armed: null }), card, row.id, ev.at ?? 0);
+      return pickOption(Object.assign({}, st, { armed: null }), card, row.id, ev.at ?? 0, cardFits(ev, card.key));
     }
-    return pickOption(st, card, row.id, ev.at ?? 0);
+    return pickOption(st, card, row.id, ev.at ?? 0, cardFits(ev, card.key));
   }
   if (k === "t" && card.free_text_answerable) return { state: rest, effect: { kind: "focusAnswer", cardKey: card.key } };
   if (k === "r" && card.can_reply) return { state: rest, effect: { kind: "openReply", cardKey: card.key } };
@@ -561,10 +569,11 @@ export class Tracker {
  * card is busy). `closed`: the request changed, so the editor closes and the
  * text is dropped. `invalid`: the text cannot be sent.
  */
-export function planAnswer(editor, cards, text) {
+export function planAnswer(editor, cards, text, fits) {
   if (!answerEditorValid(editor, cards)) return { kind: "closed" };
   const card = cards.find((c) => c.key === editor.cardKey);
   if (card.action !== null || card.busy) return { kind: "none" };
+  if (fits !== true) return { kind: "hidden" };
   const r = validateAnswer(text);
   if (!r.ok) return { kind: "invalid", reason: r.reason };
   return { kind: "send", fields: { card: editor.cardKey, request: editor.requestId, revision: editor.revision, text: r.text } };
@@ -596,6 +605,50 @@ export function scrollToCard(contentY, viewHeight, contentHeight, top, height) {
   if (top + height > y + viewHeight) y = top + height - viewHeight;
   if (top < y) y = top;
   return Math.min(maxY, Math.max(0, y));
+}
+
+/** Shown when an answer is refused because the card is not wholly in view. */
+export const HIDDEN_NOTICE = "Scroll the whole card into view to answer it, or answer in the terminal.";
+
+// Float noise on the edges only. Never applied to a height.
+const EDGE_TOLERANCE = 0.5;
+
+const finite = (n) => typeof n === "number" && Number.isFinite(n);
+
+/** A card taller than a (laid-out) viewport can never be shown whole. Unknown sizes are not "too tall". */
+export function cardTooTall(viewHeight, cardHeight) {
+  return finite(viewHeight) && finite(cardHeight) && viewHeight > 0 && cardHeight > viewHeight;
+}
+
+export const TOO_LONG_NOTE = "Too long to show here. Answer it in the terminal.";
+
+/**
+ * The note on a card that could be answered here but does not fit the panel,
+ * whether it has options or only takes a typed answer. "" otherwise.
+ */
+export function tooLongNote(card, viewHeight, cardHeight) {
+  return (card.answerable === true || card.free_text_answerable === true) && cardTooTall(viewHeight, cardHeight) ? TOO_LONG_NOTE : "";
+}
+
+/**
+ * True only while the WHOLE card is inside the viewport: all four numbers
+ * finite, the card no taller than the viewport (strictly: no tolerance on
+ * height) and both edges inside it (0.5 px for float noise). A card is
+ * answered from the panel only then: the user has seen every row of the
+ * command (mapping.rs: whole or read-only).
+ */
+export function cardFullyVisible(contentY, viewHeight, cardY, cardHeight) {
+  if (![contentY, viewHeight, cardY, cardHeight].every(finite)) return false;
+  if (!(viewHeight > 0) || !(cardHeight > 0) || cardHeight > viewHeight) return false;
+  return cardY >= contentY - EDGE_TOLERANCE && cardY + cardHeight <= contentY + viewHeight + EDGE_TOLERANCE;
+}
+
+/**
+ * The panel's one answer gate: `shown` is whether the card list is on screen
+ * and the card exists. Read live at each call, never cached.
+ */
+export function cardFitsView(shown, contentY, viewHeight, cardY, cardHeight) {
+  return shown === true && cardFullyVisible(contentY, viewHeight, cardY, cardHeight);
 }
 
 /** `openCard`: select that card and close any reply box. */
