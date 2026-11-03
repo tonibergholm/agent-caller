@@ -586,6 +586,63 @@ mod tests {
         assert_read_only(first_card(&out));
     }
 
+    /// An answerable free-text question card with two options.
+    fn question_card(text: &str, label: &str) -> CardView {
+        let mut a = agent("q1", "ask", None);
+        let p = a.pending.as_mut().unwrap();
+        p.kind = acd_protocol::RequestKind::Question;
+        p.free_text = true;
+        p.questions = serde_json::from_value(json!([{
+            "id": "q", "header": null, "text": text, "multi_select": false,
+            "options": [{"id":"o1","label":label,"description":null,"effect":"choose"}]
+        }]))
+        .unwrap();
+        CardView {
+            free_text_answerable: true,
+            selectable_options: vec!["o1".into()],
+            ..card(a)
+        }
+    }
+
+    #[test]
+    fn a_free_text_question_whose_text_was_cut_stops_taking_free_text() {
+        let c = question_card(&"é".repeat(5 * 1024 * 1024 / 2 + 7), "Yes");
+        assert!(c.free_text_answerable, "starts answerable");
+        let out = line(&view(vec![c]), MAX_LINE);
+        let q = &first_card(&out)["agent"]["pending"]["questions"][0];
+        assert!(q["text"].as_str().unwrap().ends_with(TRUNCATED));
+        assert_read_only(first_card(&out));
+    }
+
+    #[test]
+    fn a_question_option_label_that_was_cut_makes_the_card_read_only() {
+        let c = question_card("Pick one", &"é".repeat(5 * 1024 * 1024 / 2 + 7));
+        assert!(c.free_text_answerable && c.answerable);
+        let out = line(&view(vec![c]), MAX_LINE);
+        let l = &first_card(&out)["agent"]["pending"]["questions"][0]["options"][0]["label"];
+        assert!(l.as_str().unwrap().ends_with(TRUNCATED));
+        assert_read_only(first_card(&out));
+    }
+
+    #[test]
+    fn a_card_cut_by_the_32_character_fallback_is_read_only() {
+        let mut a = agent("a1", "fix tests", None);
+        a.pending.as_mut().unwrap().detail = "d".repeat(1000);
+        let v = view(vec![card(a)]);
+        let mut at_32 = v.clone();
+        let c = &mut at_32.cards[0];
+        c.answerable = false;
+        c.selectable_options = vec![];
+        let p = c.agent.pending.as_mut().unwrap();
+        p.answer_path = acd_protocol::AnswerPath::None;
+        p.detail = format!("{}{TRUNCATED}", "d".repeat(MIN_CAP));
+        let max = view_line(&at_32, usize::MAX).unwrap().len() + 1;
+        let out = line(&v, max);
+        let detail = first_card(&out)["agent"]["pending"]["detail"].as_str().unwrap();
+        assert_eq!(detail, format!("{}{TRUNCATED}", "d".repeat(MIN_CAP)));
+        assert_read_only(first_card(&out));
+    }
+
     #[test]
     fn a_cut_title_or_screen_alone_keeps_the_card_answerable() {
         let mut a = agent("a1", &"t".repeat(5 * 1024 * 1024 / 2), Some(&"é".repeat(5 * 1024 * 1024 / 2)));
