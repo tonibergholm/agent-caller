@@ -263,6 +263,48 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 - A hostile process sharing a source IP with a paired client can take that
   client's 2 slots.
 
+## Review residuals, 2026-11-03 (PRs #73 to #83)
+
+Found by independent review and left on purpose. None blocks a merge; each
+needs a decision or a small follow-up.
+
+- **Flaky test, macOS CI.** `status_change_before_resubscribe_is_caught`
+  (`crates/acd-adapters/tests/herdr_sync.rs` around line 427) failed once on a
+  docs-only commit (main `b76b93e`). It asserts the new pane gets its own
+  `agent.get` after the last `events.subscribe`, but its own comment says a
+  full list after resubscribe also catches the change, so on a slow runner
+  the order can flip. Fix: accept either path, or synchronise on the
+  resubscribe. Seen once; rerun when it fails.
+- **Omarchy approval card guards (#80).** The QML checks in
+  `clients/omarchy/tests/plugin_files.test.mjs` match text and cannot prove
+  wiring. Mutations that still pass: `maximumLineCount` added to the shared
+  `Label` component (inherited), and a multiline `onClicked` or
+  `Keys.onPressed` handler that calls `Model.pickOption` and `service.send`
+  directly. The code itself was traced by review and found gated. Real proof
+  is the manual Omarchy check in the PR body, not yet done.
+- **Pre-auth recovery test (#82).** `preauth_sources.rs` around lines 359-365
+  needs two sequential TLS upgrades and a rejected third attempt inside three
+  seconds; a very slow runner can fail correct code. Synchronise the setup
+  before advancing the expiry clock.
+- **T3 and hooks escaping tests (#83).** Exact-output tests are missing for
+  CR, NUL, ESC sequences, bidi isolates, zero-width characters, backslashes
+  and edge whitespace. Characters such as U+034F pass the escaper unchanged,
+  so "whole command" is not a universal visible-character encoding.
+- **Restart notifications (#81).** A request first seen in a reconnect
+  snapshot stays silent, as before. The client's notified set is unbounded
+  (security review finding 5).
+- **Security review findings still open** (`docs/research/2026-11-03-security-review-core.md`
+  and `-local.md`): core 3 (16 MiB frames, unbounded agent state), 4 (no
+  connection or auth log), 5 (unbounded notifications), 7 and 8 (pairing host
+  and `agent.send` character rules); local F2 (T3 token goes to whoever holds
+  the loopback port), F3 (hook listeners have no read timeout), F4 (herdr
+  socket discovery checks no owner), F5 (service files from unescaped paths).
+  Core 1, 2 and 6 and local F1 are fixed.
+- **Owner decisions still open:** same-user denial of service on the local
+  socket and the four-source pre-auth residual (see Pre-auth residuals); the
+  relay spec's lock-screen content rule and handle revocation (see its review
+  status).
+
 ## 1.0 triage
 
 Sorted 2026-10-13 from the lists above. Each item is in one bucket.
