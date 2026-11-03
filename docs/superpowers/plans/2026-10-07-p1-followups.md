@@ -299,7 +299,8 @@ needs a decision or a small follow-up.
   port), F3 (hook listeners have no read timeout), F4 (herdr socket discovery
   checks no owner), F5 (service files from unescaped paths).
   Core 1, 2, 3, 6, 7 and 8 and local F1 are fixed. Core 3 limits the client
-  (1 MiB frames, 1000 agents, 64 KiB per agent); the daemon registry is fed
+  (1 MiB frames, 1000 agents, 64 KiB per agent; each breach, an oversized
+  frame included, ends as a resync without the resume cursor); the daemon registry is fed
   by local adapters, not by peers, so it has no new cap. Core 7 accepts ASCII
   hostnames only; IDNA names must be paired as punycode.
 - **Owner decisions still open:** same-user denial of service on the local

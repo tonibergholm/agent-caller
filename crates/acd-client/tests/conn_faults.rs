@@ -223,6 +223,20 @@ async fn frame_over_one_mib_drops_the_connection() {
     c.send(serde_json::json!({"type":"future.thing","pad":"x".repeat(2 << 20)}))
         .await;
     wait_for_connections(&f, 2).await;
+    // A peer that breaks the limit is not trusted to resume: fresh snapshot.
+    assert!(f.hellos()[1].get("resume").is_none());
+}
+
+#[tokio::test]
+async fn snapshot_with_one_oversized_agent_forces_resync_without_state() {
+    let (f, h) = start().await;
+    let c = f.next_connection().await;
+    let mut snap = snapshot("e1", 1, &["a", "b"]);
+    snap["agents"][1]["title"] = serde_json::Value::String("x".repeat(MAX_AGENT_BYTES + 1));
+    c.send(snap).await;
+    let _c2 = f.next_connection().await;
+    assert!(f.hellos()[1].get("resume").is_none());
+    assert!(h.state().borrow().session.agents.is_empty());
 }
 
 #[tokio::test]

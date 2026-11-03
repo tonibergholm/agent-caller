@@ -60,12 +60,24 @@ async fn a_disconnect_cancels_that_views_countdowns_only() {
     assert_eq!(answers(&rig.f), 1);
 }
 
+/// A view line of about 600 KB, more than the socket buffers hold. Each agent
+/// stays under the client's 64 KiB agent limit (`acd_protocol::MAX_AGENT_BYTES`),
+/// so the whole snapshot reaches the view.
+fn big_agents() -> Vec<serde_json::Value> {
+    (1..=10)
+        .map(|n| {
+            let mut a = pending_agent(&format!("a{n}"), &format!("r{n}"));
+            a["pending"]["raw_screen"] = "x".repeat(60_000).into();
+            a
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_view_that_stops_reading_is_disconnected_and_its_countdowns_cancelled() {
-    let mut big = pending_agent("a1", "r1");
-    big["pending"]["raw_screen"] = "x".repeat(2 * 1024 * 1024).into();
+    let big = big_agents();
     let rig = rig_with(RigOptions {
-        agents: vec![big],
+        agents: big,
         timing: held(),
         server: ServerOptions { write_timeout: Duration::from_millis(300), ..Default::default() },
         ..Default::default()
@@ -175,9 +187,8 @@ async fn a_lagged_outcome_stream_tells_every_view() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_connection_receives_outcomes_while_its_greeting_is_still_being_written() {
-    let mut big = pending_agent("a1", "r1");
-    big["pending"]["raw_screen"] = "x".repeat(2 * 1024 * 1024).into();
-    let rig = rig_with(RigOptions { agents: vec![big], timing: held(), ..Default::default() }).await;
+    let big = big_agents();
+    let rig = rig_with(RigOptions { agents: big, timing: held(), ..Default::default() }).await;
     // Nothing is read yet: the view line is stuck in the socket buffer.
     let mut v = View::connect(&rig.socket).await;
     until("the connection to be subscribed", || rig.svc.connections() == 1).await;

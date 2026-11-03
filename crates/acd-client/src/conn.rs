@@ -442,7 +442,7 @@ async fn serve(
             }
             incoming = ws.next() => {
                 let Some(incoming) = incoming else { return End::Offline("closed".into()); };
-                let msg = match incoming { Ok(m) => m, Err(e) => return End::Offline(e.to_string()) };
+                let msg = match incoming { Ok(m) => m, Err(tokio_tungstenite::tungstenite::Error::Capacity(_)) => return End::Resync("frame over the size limit"), Err(e) => return End::Offline(e.to_string()) };
                 if let Some(code) = close_code(&msg) { return end_for_close(code); }
                 last_frame = tokio::time::Instant::now(); ping_deadline = None;
                 let text = match msg { Message::Text(t) => t.to_string(), Message::Ping(v) => { let send = tokio::select! { biased; _ = cancel.changed() => return End::Stopped, r = tokio::time::timeout(timing.write_timeout, ws.send(Message::Pong(v))) => r }; match send { Ok(Ok(())) => {}, Ok(Err(e)) => return End::Offline(e.to_string()), Err(_) => return End::Offline("write timed out".into()) } continue; }, Message::Pong(_) => continue, Message::Close(_) => return End::Offline("closed".into()), _ => continue };

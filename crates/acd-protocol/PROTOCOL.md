@@ -45,7 +45,8 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
 **Limits.**
 - `hello` must arrive within 5 s.
 - Frames are limited to 1 MiB, in both directions. A client drops a
-  connection whose peer sends a larger frame or message, as the daemon does.
+  connection whose peer sends a larger frame or message, as the daemon does,
+  and reconnects without `resume` (a resync), like the state limits below.
 - **Client state limits.** A client holds at most 1000 agents per machine,
   and no single agent may encode to more than 64 KiB of JSON. A snapshot or
   `agent.updated` past either limit ends the connection as a resync: the
