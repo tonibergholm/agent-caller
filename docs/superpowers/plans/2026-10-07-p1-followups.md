@@ -298,10 +298,13 @@ needs a decision or a small follow-up.
   connection or auth log), 5 (unbounded notifications), 7 and 8 (pairing host
   and `agent.send` character rules); local F2 (T3 token goes to whoever holds
   the loopback port), F3 (hook listeners have no read timeout).
-  Core 1, 2 and 6 and local F1, F4 and F5 are fixed. F4 checks the herdr
-  socket's owner only; the ancestor-directory walk the review suggests is
-  not done (the owner check is what stops a planted socket; a same-user
-  process is out of scope). F5 rejects control characters in the home,
+  Core 1, 2 and 6 and local F1, F4 and F5 are fixed. F4: discovery and
+  every herdr reconnect require the socket to be a socket owned by the
+  effective uid and every ancestor directory (checked root-first) to be
+  owned by root or us and not group/other-writable, unless sticky and the
+  next component is ours (`acd_securefs::check_socket_path`). Not covered:
+  a same-user process, and the instant between the check and the connect
+  (closing it would need a peer-credential check on the connection). F5 rejects control characters in the home,
   executable and config-dir paths; other characters were already escaped.
 - **Owner decisions still open:** same-user denial of service on the local
   socket and the four-source pre-auth residual (see Pre-auth residuals); the
