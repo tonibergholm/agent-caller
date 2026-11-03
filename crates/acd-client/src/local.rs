@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 
 use acd_securefs::{self as securefs, SecureFsError};
 
+/// The local machine's config dir. `None` without `owner_checks` (Windows, Android): there is no local
+/// endpoint there (see `conn::open`), so none is offered.
+#[cfg(not(owner_checks))]
+pub fn default_config_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(owner_checks)]
 pub fn default_config_dir() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("ACD_CONFIG_DIR") {
         return Some(PathBuf::from(d));
@@ -64,7 +72,7 @@ pub fn read_local_token(dir: &Path) -> Result<String, LocalError> {
     Ok(token.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, owner_checks))]
 mod tests {
     use super::*;
     use std::fs;
