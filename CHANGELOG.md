@@ -33,6 +33,9 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Fixed
 
+- A daemon that closes every connection with 4408 (client too slow) is no longer
+  redialled at once, about 150 times a second. The client now waits as it does
+  after any other close: 1 s, doubling to 30 s, reset when a session is ready.
 - After an `acd` restart, a new request that reuses an id the app already announced
   now notifies, and is spoken when alerts are on. `acd` numbers requests from `r1`
   on every start.

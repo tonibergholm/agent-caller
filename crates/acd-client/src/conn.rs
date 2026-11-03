@@ -617,7 +617,9 @@ async fn run(
                     &session,
                     generation,
                 );
-                Duration::ZERO
+                // Not zero: a daemon that closes every connection with 4408 would
+                // otherwise be redialled in a tight loop. Ready resets the backoff.
+                backoff.next_delay()
             }
             End::Unauthorized => {
                 commands.revoke_all();
