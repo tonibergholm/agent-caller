@@ -2,9 +2,9 @@
 //! runs one reconciler per socket, and reports the herdr source status.
 use std::collections::HashMap;
 use std::io;
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -78,15 +78,53 @@ fn session_sockets(dir: &Path) -> Vec<PathBuf> {
     socks
 }
 
-/// The path is a socket and accepts a connection within `LIVE_TIMEOUT`.
+/// Our effective uid, or `None` where there are no owner checks (Android):
+/// discovery then refuses every socket, because it cannot prove who owns it.
+#[cfg(owner_checks)]
+fn current_euid() -> Option<u32> {
+    Some(acd_securefs::euid())
+}
+#[cfg(not(owner_checks))]
+fn current_euid() -> Option<u32> {
+    None
+}
+
+/// The path is a socket owned by the current user and accepts a connection
+/// within `LIVE_TIMEOUT`. A socket owned by anyone else is refused (fail
+/// closed): acd would show its screens and send it keys and typed text.
 /// The connect is async, so a hung herdr leaves no blocked thread behind.
 pub async fn is_live(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok()
-        && std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket())
-        && matches!(
-            timeout(LIVE_TIMEOUT, UnixStream::connect(path)).await,
-            Ok(Ok(_))
-        )
+    is_live_as(path, current_euid()).await
+}
+
+async fn is_live_as(path: &Path, euid: Option<u32>) -> bool {
+    if std::fs::symlink_metadata(path).is_err() {
+        return false;
+    }
+    let Ok(m) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !m.file_type().is_socket() {
+        return false;
+    }
+    if !euid.is_some_and(|e| acd_securefs::owner_ok(m.uid(), e)) {
+        warn_refused(path);
+        return false;
+    }
+    matches!(
+        timeout(LIVE_TIMEOUT, UnixStream::connect(path)).await,
+        Ok(Ok(_))
+    )
+}
+
+/// One warning per path: discovery rescans on an interval.
+fn warn_refused(path: &Path) {
+    static SEEN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if !seen.iter().any(|p| p == path) {
+        seen.push(path.to_path_buf());
+        tracing::warn!(socket = %path.display(), "herdr socket is not owned by the current user; refusing it");
+    }
 }
 
 pub fn aggregate(healths: &[(PathBuf, Health)]) -> SourceStatus {
@@ -281,6 +319,20 @@ mod tests {
         std::fs::write(&file, "").unwrap();
         assert!(!is_live(&file).await);
         assert!(!is_live(&dir.path().join("missing")).await);
+    }
+
+    #[tokio::test]
+    async fn a_socket_owned_by_another_user_is_refused() {
+        let dir = tempfile::Builder::new()
+            .prefix("acd")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let sock = dir.path().join("herdr.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let owner = std::fs::metadata(&sock).unwrap().uid();
+        assert!(is_live_as(&sock, Some(owner)).await, "own socket");
+        assert!(!is_live_as(&sock, Some(owner + 1)).await, "foreign owner");
+        assert!(!is_live_as(&sock, None).await, "no owner checks");
     }
 
     #[test]
