@@ -456,13 +456,13 @@ async fn accepted_and_rejected_hellos_are_logged_without_the_token() {
     let log = String::from_utf8(captured_log().lock().unwrap().clone()).unwrap();
     let rejected = log
         .lines()
-        .find(|l| l.contains("hello rejected"))
+        .find(|l| l.contains("hello rejected") && l.contains("invalid token"))
         .expect("a rejected hello is logged");
     assert!(rejected.contains("invalid token"), "{rejected}");
     assert!(rejected.contains("127.0.0.1:"), "{rejected}");
     let accepted = log
         .lines()
-        .find(|l| l.contains("hello accepted"))
+        .find(|l| l.contains("hello accepted") && l.contains("good-client-1"))
         .expect("an accepted hello is logged");
     assert!(accepted.contains("127.0.0.1:"), "{accepted}");
     assert!(accepted.contains("good-client-1"), "{accepted}");
