@@ -126,9 +126,6 @@ Item {
         case "select":
             revealCard(effect.key);
             break;
-        case "revealBottom":
-            revealCardBottom(effect.key);
-            break;
         case "openReply":
             keyState = Object.assign({}, keyState, { replyFor: effect.cardKey });
             break;
@@ -164,15 +161,17 @@ Item {
         return null;
     }
 
-    // A tall card's options sit below the fold: the first digit scrolls here.
-    function revealCardBottom(key) {
+    // The one question every answer asks: is the WHOLE card inside the
+    // viewport right now? Read live at each call, never cached, so scroll,
+    // resize, revision and selection changes cannot leave a stale "yes".
+    function cardFits(key) {
         const item = cardItemFor(key);
-        if (item) cardsFlick.contentY = Model.scrollToCardBottom(cardsFlick.height, cardsFlick.contentHeight, item.y, item.height);
+        return item !== null && cardsFlick.visible && Model.cardFullyVisible(cardsFlick.contentY, cardsFlick.height, item.y, item.height);
     }
 
-    function bottomHidden(key) {
-        const item = cardItemFor(key);
-        return item !== null && Model.cardBottomHidden(cardsFlick.contentY, cardsFlick.height, item.y, item.height);
+    // A card taller than the panel is never answerable here (it shows a note).
+    function cardTooTall(item) {
+        return cardsFlick.height > 0 && Model.cardTooTall(cardsFlick.height, item.height);
     }
 
     // The draft and the box stay until the service accepts the reply, so a
@@ -205,7 +204,7 @@ Item {
     // current one; the plan is made again now, from the view on screen.
     // The text stays until the request resolves, so an undo gets it back.
     function submitAnswer(text) {
-        const plan = Model.planAnswer(answerEditor, cards, text);
+        const plan = Model.planAnswer(answerEditor, cards, text, answerEditor !== null && cardFits(answerEditor.cardKey));
         switch (plan.kind) {
         case "closed":
             message = Model.editorClosedNotice(answerEditor);
@@ -214,6 +213,9 @@ Item {
             break;
         case "invalid":
             message = Model.reasonText(plan.reason);
+            break;
+        case "hidden":
+            message = Model.HIDDEN_NOTICE;
             break;
         case "send":
             const editor = answerEditor;
@@ -231,8 +233,10 @@ Item {
 
     // A click on an option: one that needs confirmation arms first (model.mjs).
     function pickOption(card, optionId) {
-        const r = Model.pickOption(keyState, card, optionId, Date.now());
+        const fits = cardFits(card.key);
+        const r = Model.pickOption(keyState, card, optionId, Date.now(), fits);
         keyState = r.state;
+        if (!fits) message = Model.HIDDEN_NOTICE;
         if (r.effect.kind !== "none") run(r.effect, null);
     }
 
@@ -241,7 +245,7 @@ Item {
     function keyEvent(event, field, composing, input) {
         message = "";
         const ev = Model.fromQt(event.key, event.text, event.modifiers, composing, field, event.isAutoRepeat === true);
-        ev.bottomHidden = bottomHidden(keyState.armed ? keyState.armed.cardKey : keyState.selected);
+        ev.fits = cardFits;
         const r = Model.onKey(visibleCards, keyState, ev);
         keyState = r.state;
         if (r.effect.kind !== "none") {
@@ -386,6 +390,14 @@ Item {
                 text: lines ? [lines.header, lines.text].filter(x => x).join("\n") : ""
             }
 
+            Label {
+                visible: cardItem.rows.length > 0 && cardItem.inbox.cardTooTall(cardItem)
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                color: cardItem.inbox.muted
+                text: "Too long to show here. Answer it in the terminal."
+            }
+
             Repeater {
                 model: cardItem.rows
 
@@ -394,12 +406,12 @@ Item {
                     required property var modelData
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
-                    color: modelData.pickable ? cardItem.inbox.fg : cardItem.inbox.muted
+                    color: modelData.pickable && !cardItem.inbox.cardTooTall(cardItem) ? cardItem.inbox.fg : cardItem.inbox.muted
                     text: modelData.number + ". " + (modelData.armed ? "Press Enter to confirm: " : "") + modelData.label + (modelData.rule ? "  (" + modelData.rule + ")" : "")
 
                     MouseArea {
                         anchors.fill: parent
-                        enabled: optionRow.modelData.pickable
+                        enabled: optionRow.modelData.pickable && !cardItem.inbox.cardTooTall(cardItem)
                         onClicked: cardItem.inbox.pickOption(cardItem.card, optionRow.modelData.id)
                     }
                 }

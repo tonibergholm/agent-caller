@@ -29,7 +29,7 @@ const view = (cards, machines = [{ key: "m1", name: "Box", machine_id: "x", stat
   ({ machines, cards, hidden_idle: 0, show_idle: false, show_subagents: false, show_hook_only: false,
      tray: { color: "amber", needs_you: cards.filter((c) => c.group === "request").length }, actions: [] });
 
-const key = (k, extra = {}) => ({ key: k, shift: false, ctrl: false, alt: false, meta: false, composing: false, field: null, ...extra });
+const key = (k, extra = {}) => ({ key: k, shift: false, ctrl: false, alt: false, meta: false, composing: false, field: null, fits: () => true, ...extra });
 
 test("the line reader handles partial lines, several lines per chunk and split characters", () => {
   const r = new M.LineReader();
@@ -357,7 +357,7 @@ test("Backoff doubles to the cap and resets only when told", () => {
 test("a typed answer is sent to the request its editor was opened for", () => {
   const c = card("m1/a", "request", { free_text_answerable: true, agent: { pending: { id: "r1", revision: 3 } } });
   const editor = M.answerEditor(c);
-  const plan = M.planAnswer(editor, [c], "  yes\r\nplease ");
+  const plan = M.planAnswer(editor, [c], "  yes\r\nplease ", true);
   assert.deepEqual(plan, { kind: "send", fields: { card: "m1/a", request: "r1", revision: 3, text: "yes\nplease" } });
 });
 
@@ -365,17 +365,17 @@ test("a changed request closes the editor at submit time and nothing is sent", (
   const c = card("m1/a", "request", { free_text_answerable: true, agent: { pending: { id: "r1", revision: 3 } } });
   const editor = M.answerEditor(c);
   const bumped = { ...c, agent: { pending: { id: "r1", revision: 4 } } };
-  assert.equal(M.planAnswer(editor, [bumped], "x").kind, "closed");
-  assert.equal(M.planAnswer(editor, [], "x").kind, "closed");
-  assert.equal(M.planAnswer(null, [c], "x").kind, "closed");
+  assert.equal(M.planAnswer(editor, [bumped], "x", true).kind, "closed");
+  assert.equal(M.planAnswer(editor, [], "x", true).kind, "closed");
+  assert.equal(M.planAnswer(null, [c], "x", true).kind, "closed");
 });
 
 test("a card with a countdown or busy takes no second answer", () => {
   const base = card("m1/a", "request", { free_text_answerable: true, agent: { pending: { id: "r1", revision: 3 } } });
   const editor = M.answerEditor(base);
-  assert.equal(M.planAnswer(editor, [{ ...base, action: { id: "a1", fires_at_ms: 1 } }], "x").kind, "none");
-  assert.equal(M.planAnswer(editor, [{ ...base, busy: true }], "x").kind, "none");
-  assert.equal(M.planAnswer(editor, [base], "   ").kind, "invalid");
+  assert.equal(M.planAnswer(editor, [{ ...base, action: { id: "a1", fires_at_ms: 1 } }], "x", true).kind, "none");
+  assert.equal(M.planAnswer(editor, [{ ...base, busy: true }], "x", true).kind, "none");
+  assert.equal(M.planAnswer(editor, [base], "   ", true).kind, "invalid");
 });
 
 test("the reply box closes when its card leaves the view", () => {
@@ -511,17 +511,17 @@ test("a second press outside the window, on another option, or after any other k
 test("a click goes through the same two steps and an armed option never outlives its request", () => {
   const c = externalCard();
   const st = { selected: "m1/e", replyFor: null };
-  const first = M.pickOption(st, c, "abandon", 1000);
+  const first = M.pickOption(st, c, "abandon", 1000, true);
   assert.equal(first.effect.kind, "none");
-  const second = M.pickOption(first.state, c, "abandon", 1500);
+  const second = M.pickOption(first.state, c, "abandon", 1500, true);
   assert.equal(second.effect.kind, "pick");
   const moved = externalCard();
   moved.agent.pending.revision = 2;
   assert.equal(M.pruneKeyState(first.state, [moved]).armed, null, "a changed request disarms");
   assert.equal(M.pruneKeyState(first.state, []).armed, null, "a gone card disarms");
   assert.equal(M.pruneKeyState(first.state, [c]).armed.optionId, "abandon");
-  assert.equal(M.pickOption(first.state, moved, "abandon", 1500).effect.kind, "none", "the old arm cannot send the new revision");
-  assert.equal(M.pickOption(st, c, "nope", 1000).effect.kind, "none");
+  assert.equal(M.pickOption(first.state, moved, "abandon", 1500, true).effect.kind, "none", "the old arm cannot send the new revision");
+  assert.equal(M.pickOption(st, c, "nope", 1000, true).effect.kind, "none");
 });
 
 test("the panel sends picks through the model so a click cannot skip the confirmation", () => {
@@ -590,7 +590,7 @@ test("an unrelated click drops the arm, and every Panel.qml click but the option
   assert.equal(after.armed, null);
   assert.equal(after.selected, "m1/e");
   assert.equal(M.disarm(after), after, "nothing to drop");
-  assert.equal(M.pickOption(after, cards[0], "abandon", 1100).effect.kind, "none", "the next tap arms again");
+  assert.equal(M.pickOption(after, cards[0], "abandon", 1100, true).effect.kind, "none", "the next tap arms again");
   const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
   const clicks = panel.split("\n").filter((l) => l.includes("onClicked:"));
   assert.ok(clicks.length >= 10);
@@ -627,29 +627,72 @@ test("scrollToCard moves the list only when the card is outside the view", () =>
   assert.equal(M.scrollToCard(0, 100, 60, 10, 50), 0, "content shorter than the view");
 });
 
-test("scrollToCardBottom and cardBottomHidden: a tall card's options must be scrolled into view", () => {
-  // viewport 100 high, content 5000 high, a card 1300 tall at 200
-  assert.equal(M.cardBottomHidden(0, 100, 200, 1300), true, "top of a tall card: options below the fold");
-  assert.equal(M.cardBottomHidden(1400, 100, 200, 1300), false, "bottom in view");
-  assert.equal(M.cardBottomHidden(0, 100, 10, 50), false, "a small visible card");
-  assert.equal(M.scrollToCardBottom(100, 5000, 200, 1300), 1400, "bottom edge meets the view bottom");
-  assert.equal(M.scrollToCardBottom(100, 1500, 200, 1300), 1400);
-  assert.equal(M.scrollToCardBottom(100, 60, 10, 50), 0, "content shorter than the view");
+test("cardFullyVisible: only a card wholly inside the viewport is answerable", () => {
+  const f = M.cardFullyVisible;
+  // viewport 100 high showing content from y=200
+  assert.equal(f(200, 100, 220, 50), true, "fits");
+  assert.equal(f(200, 100, 200, 100), true, "exactly fits");
+  assert.equal(f(0, 100, 10, 150), false, "taller than the view");
+  assert.equal(f(0, 100, 0, 1300), false, "much taller than the view, top shown");
+  assert.equal(f(1400, 100, 200, 1300), false, "taller: bottom shown is still not whole");
+  assert.equal(f(2000, 100, 200, 1300), false, "far above the view (the review's case)");
+  assert.equal(f(0, 100, 500, 50), false, "below the view");
+  assert.equal(f(200, 100, 150, 50), false, "above the view");
+  assert.equal(f(200, 100, 170, 50), false, "partially above");
+  assert.equal(f(200, 100, 270, 50), false, "partially below");
+  assert.equal(f(200, 100, 199.5, 100), true, "float edge: within 1 px");
+  assert.equal(f(200, 100, 200, 100.5), true, "float edge: 0.5 px taller");
+  assert.equal(f(200, 100, 198, 100), false, "2 px above is not float error");
+  assert.equal(f(200, 100, 200, 102), false, "2 px taller is not float error");
+  assert.equal(f(0, 0, 0, 0), false, "no viewport");
+  assert.equal(f(0, 100, 0, 0), false, "no card");
+  assert.equal(f(NaN, 100, 0, 50), false, "not a number");
+  assert.equal(f(0, 100, undefined, 50), false, "missing geometry");
+  assert.equal(M.cardTooTall(100, 150), true);
+  assert.equal(M.cardTooTall(100, 100.5), false);
 });
 
-test("a digit or Enter on a card whose options are below the fold only scrolls there", () => {
+test("a pick is refused unless the card is wholly in view (digit, Enter, click)", () => {
   const cards = [externalCard()];
   const fresh = { selected: "m1/e", replyFor: null };
+  // digit: refused, nothing armed; accepted when it fits
   for (const k of ["1", "2"]) {
-    const r = M.onKey(cards, fresh, key(k, { at: 1000, bottomHidden: true }));
-    assert.deepEqual(r.effect, { kind: "revealBottom", key: "m1/e" }, "digit " + k);
+    const r = M.onKey(cards, fresh, key(k, { at: 1000, fits: () => false }));
+    assert.equal(r.effect.kind, "none", "digit " + k);
     assert.equal(r.state.armed ?? null, null, "nothing armed");
   }
-  assert.equal(M.onKey(cards, fresh, key("1", { at: 1000, bottomHidden: false })).effect.kind, "pick", "bottom seen: picks");
+  assert.equal(M.onKey(cards, fresh, key("1", { at: 1000, fits: () => false })).effect.kind, "none");
+  assert.equal(M.onKey(cards, fresh, key("1", { at: 1000 })).effect.kind, "pick", "fits: first digit picks, no scrolling");
+  assert.equal(M.onKey(cards, fresh, key("1", { at: 1000, fits: undefined })).effect.kind, "none", "no geometry: fail closed");
+  assert.equal(M.onKey(cards, fresh, key("1", { at: 1000, fits: () => "yes" })).effect.kind, "none", "only true counts");
+  // Enter completing an armed option, scrolled away in between
   const armed = M.onKey(cards, fresh, key("2", { at: 1000 })).state;
-  const hidden = M.onKey(cards, armed, key("Enter", { at: 1500, bottomHidden: true }));
-  assert.equal(hidden.effect.kind, "revealBottom", "Enter does not send while the options are hidden");
-  assert.equal(hidden.state.armed, null);
-  assert.equal(M.onKey(cards, armed, key("Enter", { at: 1500, bottomHidden: false })).effect.kind, "pick");
-  assert.equal(M.onKey(cards, fresh, key("9", { bottomHidden: true })).effect.kind, "none", "no such option: no scroll");
+  assert.equal(armed.armed.optionId, "abandon");
+  const hidden = M.onKey(cards, armed, key("Enter", { at: 1500, fits: () => false }));
+  assert.equal(hidden.effect.kind, "none", "Enter does not send while the card is partly off screen");
+  assert.equal(hidden.state.armed, null, "and disarms");
+  assert.equal(M.onKey(cards, armed, key("Enter", { at: 1500 })).effect.kind, "pick");
+  // The geometry is asked for the card the pick targets, at that moment.
+  const asked = [];
+  M.onKey(cards, armed, key("Enter", { at: 1500, fits: (k) => (asked.push(k), true) }));
+  assert.deepEqual(asked, ["m1/e"]);
+  // mouse: pickOption itself refuses
+  const c = cards[0];
+  assert.equal(M.pickOption(fresh, c, "go", 1000, false).effect.kind, "none");
+  assert.equal(M.pickOption(fresh, c, "go", 1000).effect.kind, "none", "missing flag: refused");
+  assert.equal(M.pickOption(fresh, c, "go", 1000, true).effect.kind, "pick");
+  const arm = M.pickOption(fresh, c, "abandon", 1000, true).state;
+  assert.equal(arm.armed.optionId, "abandon");
+  assert.equal(M.pickOption(arm, c, "abandon", 1200, false).effect.kind, "none", "second click refused when off screen");
+  assert.equal(M.pickOption(arm, c, "abandon", 1200, false).state.armed, null);
+  assert.equal(M.pickOption(fresh, c, "abandon", 1000, false).state.armed ?? null, null, "a refused first tap does not arm");
+  assert.equal(M.pickOption(arm, c, "abandon", 1200, true).effect.kind, "pick");
+});
+
+test("a typed answer is not planned unless the card is wholly in view", () => {
+  const c = externalCard("m1/e");
+  const editor = M.answerEditor(c);
+  assert.equal(M.planAnswer(editor, [c], "yes", false).kind, "hidden");
+  assert.equal(M.planAnswer(editor, [c], "yes").kind, "hidden", "missing flag: refused");
+  assert.equal(M.planAnswer(editor, [c], "yes", true).kind, "send");
 });

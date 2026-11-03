@@ -104,7 +104,7 @@ test("the key catcher fills the panel, is blocked by a focused field and closes 
 test("a typed answer goes to the request its editor was opened for", () => {
   const panel = read("Panel.qml");
   const body = panel.slice(panel.indexOf("function submitAnswer"), panel.indexOf("function keyEvent"));
-  assert.match(body, /Model\.planAnswer\(answerEditor, cards, text\)/);
+  assert.match(body, /Model\.planAnswer\(answerEditor, cards, text, /);
   assert.match(body, /service\.send\("answer_text", plan\.fields/);
   assert.doesNotMatch(body, /pending\.(id|revision)/);
   assert.match(panel, /onViewChanged:[\s\S]*editorShouldClose[\s\S]*pruneKeyState/);
@@ -227,10 +227,74 @@ test("the permission detail and the question text are not capped to a line count
 });
 
 // UNVERIFIED in a real Quickshell: only the wiring is pinned here.
-test("Panel reveals the card on a notification click and gates key picks on the card bottom", () => {
+test("Panel reveals the card on a notification click", () => {
   const panel = read("Panel.qml");
   assert.match(panel, /function selectAndReveal\(key\) \{[\s\S]*?Qt\.callLater\(\(\) => revealCard\(key\)\);[\s\S]*?\n    \}/);
-  assert.match(panel, /case "revealBottom":\s*revealCardBottom\(effect\.key\);/);
-  assert.match(panel, /ev\.bottomHidden = bottomHidden\(/);
-  assert.match(panel, /Model\.scrollToCardBottom\(/);
+  assert.doesNotMatch(panel, /bottomHidden|revealBottom|revealCardBottom|scrollToCardBottom|cardBottomHidden/, "the bottom-seen state is gone");
+});
+
+// A card is answered from the panel only while it is wholly in the viewport.
+// Every path that can send an answer is listed here and must go through the
+// gate (Model.pickOption / Model.planAnswer with the live Panel.cardFits).
+// Returns the violations found in a copy of Panel.qml / BarWidget.qml.
+function gateViolations(panel, bar) {
+  const bad = [];
+  const fn = (src, name) => {
+    const at = src.indexOf(`function ${name}(`);
+    if (at < 0) return "";
+    const end = src.indexOf("\n    }\n", at);
+    return src.slice(at, end < 0 ? src.length : end);
+  };
+  // the live geometry check
+  const fits = fn(panel, "cardFits");
+  if (!/Model\.cardFullyVisible\(cardsFlick\.contentY, cardsFlick\.height, item\.y, item\.height\)/.test(fits)) bad.push("cardFits does not read live geometry");
+  if (/\bproperty\b/.test(fits)) bad.push("cardFits caches");
+  // keys: digits and Enter ask the live geometry through the event
+  if (!/ev\.fits = cardFits;/.test(fn(panel, "keyEvent"))) bad.push("keyEvent does not pass cardFits");
+  // mouse and typed answers
+  const pick = fn(panel, "pickOption");
+  if (!/const fits = cardFits\(card\.key\);\s*const r = Model\.pickOption\(keyState, card, optionId, Date\.now\(\), fits\);/.test(pick)) bad.push("pickOption wrapper not gated");
+  if (!/Model\.planAnswer\(answerEditor, cards, text, answerEditor !== null && cardFits\(answerEditor\.cardKey\)\)/.test(fn(panel, "submitAnswer"))) bad.push("submitAnswer not gated");
+  // Model.pickOption / planAnswer are called once each, only in those wrappers
+  if ((panel.match(/Model\.pickOption\(/g) ?? []).length !== 1) bad.push("Model.pickOption called outside the wrapper");
+  if ((panel.match(/Model\.planAnswer\(/g) ?? []).length !== 1) bad.push("Model.planAnswer called outside submitAnswer");
+  // the raw sends exist once and only in run() / submitAnswer
+  if (!/case "pick":\s*service\.send\("pick"/.test(fn(panel, "run"))) bad.push("pick send not in run()");
+  if ((panel.match(/send\("pick"/g) ?? []).length !== 1) bad.push("another pick send");
+  if ((panel.match(/send\("answer_text"/g) ?? []).length !== 1 || !/send\("answer_text"/.test(fn(panel, "submitAnswer"))) bad.push("answer_text send outside submitAnswer");
+  if (/run\(\{\s*kind:\s*"(pick|submitAnswer)"/.test(panel)) bad.push("run() called with a hand-made pick");
+  // every handler line that can send an option goes through the Panel wrapper
+  for (const src of [panel, bar]) {
+    for (const l of src.split("\n")) {
+      if (!/onClicked|onTapped|onPressed|onAccepted|onActivated|Keys\./.test(l)) continue;
+      if (/Model\.pickOption|send\("(pick|answer_text)"|\brun\(|\.run\(/.test(l)) bad.push("ungated handler: " + l.trim());
+      if (/pickOption\(/.test(l) && !/cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/.test(l)) bad.push("pick handler not via the wrapper: " + l.trim());
+    }
+  }
+  if (/send\("(pick|answer_text|reply)"|pickOption|Model\.planAnswer/.test(bar)) bad.push("BarWidget sends an answer");
+  return bad;
+}
+
+test("every Panel path that can send an answer goes through the whole-card-visible gate", () => {
+  const panel = read("Panel.qml");
+  const bar = read("BarWidget.qml");
+  assert.deepEqual(gateViolations(panel, bar), []);
+  // The tall-card note and disabled buttons
+  assert.match(panel, /Too long to show here\. Answer it in the terminal\./);
+  assert.match(panel, /enabled: optionRow\.modelData\.pickable && !cardItem\.inbox\.cardTooTall\(cardItem\)/);
+  const mutations = {
+    "click calls the model directly": [/onClicked: cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/, "onClicked: cardItem.inbox.keyState = Model.pickOption(cardItem.inbox.keyState, cardItem.card, optionRow.modelData.id, Date.now(), true).state"],
+    "click sends the pick itself": [/onClicked: cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/, 'onClicked: cardItem.inbox.service.send("pick", {})'],
+    "wrapper passes a constant": [/Date\.now\(\), fits\)/, "Date.now(), true)"],
+    "keys lose the geometry": [/ev\.fits = cardFits;/, ""],
+    "geometry is not live": [/Model\.cardFullyVisible\(cardsFlick\.contentY,/, "Model.cardFullyVisible(0,"],
+    "typed answer ungated": [/, answerEditor !== null && cardFits\(answerEditor\.cardKey\)\)/, ", true)"],
+    "second pick send": [/function markSeen|case "markSeen":/, 'case "markSeen": service.send("pick", {}); '],
+  };
+  for (const [name, [from, to]] of Object.entries(mutations)) {
+    const mutated = panel.replace(from, to);
+    assert.notEqual(mutated, panel, `mutation did not apply: ${name}`);
+    assert.notDeepEqual(gateViolations(mutated, bar), [], `guard misses: ${name}`);
+  }
+  assert.notDeepEqual(gateViolations(panel, bar + '\nonClicked: svc.send("pick", {})'), [], "BarWidget sending a pick");
 });

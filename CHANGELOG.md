@@ -37,10 +37,12 @@ config and the `acd/1` protocol may change without a major version bump.
   notifies again on reconnect; the last 256 announced requests are remembered.
 - Omarchy: J/K now scrolls the card list so the selected card stays in view.
 - Omarchy: an approval card shows every row of the command and of a question,
-  not only the first six (security finding F1). A card taller than the panel
-  cannot be answered by a digit or Enter until its option rows have been
-  scrolled into view (the first press scrolls there), and a card opened from a
-  notification is scrolled into view.
+  not only the first six (security finding F1). A card is answered from the
+  panel (digit, Enter, click or typed answer) only while the whole card is
+  inside the visible list; a card taller than the panel disables its options
+  and says "Too long to show here. Answer it in the terminal." A card opened
+  from a notification is scrolled into view. The QML rendering and wiring are
+  UNVERIFIED: Quickshell could not run in the development sandbox.
 
 ## [0.9.0] - 2026-10-13
 
