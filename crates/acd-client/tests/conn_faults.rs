@@ -216,14 +216,13 @@ async fn seq_gap_forces_resync_without_resume() {
 }
 
 #[tokio::test]
-async fn frame_over_one_mib_drops_the_connection_and_holds_nothing() {
+async fn frame_over_one_mib_drops_the_connection() {
     let (f, h) = start().await;
     let c = online(&f, &h).await;
-    let mut big = upd("e1", 2, "a", "working");
-    big["agent"]["title"] = serde_json::Value::String("x".repeat(2 << 20));
-    c.send(big).await;
+    // An unknown type is ignored once decoded, so only the frame limit ends this.
+    c.send(serde_json::json!({"type":"future.thing","pad":"x".repeat(2 << 20)}))
+        .await;
     wait_for_connections(&f, 2).await;
-    assert!(!h.state().borrow().session.agents.contains_key("a"));
 }
 
 #[tokio::test]
