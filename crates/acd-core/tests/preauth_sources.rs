@@ -22,6 +22,10 @@ const STEP: Duration = Duration::from_secs(5);
 /// far longer than any CI runner needs to open a dozen connections.
 const HOLD: Duration = Duration::from_secs(60);
 
+/// A hello timeout short enough to wait for, long enough to open a few
+/// connections first.
+const HELLO_SHORT: Duration = Duration::from_secs(3);
+
 async fn within<T>(what: &str, f: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(STEP, f)
         .await
@@ -146,16 +150,44 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAny {
 
 type TlsWs = WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
 
+/// How an open attempt ended when it did not give a WebSocket.
+/// The payloads are read through `Debug` in assertion messages.
+#[allow(dead_code)]
+#[derive(Debug)]
+enum Refused {
+    /// TCP connect or TLS handshake failed: a connection-level failure
+    /// (reset or EOF), not an HTTP answer.
+    Connection(String),
+    /// The server answered the upgrade request with this HTTP status.
+    Http(u16),
+    /// The upgrade failed in some other way.
+    Other(String),
+}
+
+fn upgrade_failure(e: tokio_tungstenite::tungstenite::Error) -> Refused {
+    match e {
+        tokio_tungstenite::tungstenite::Error::Http(r) => Refused::Http(r.status().as_u16()),
+        e => Refused::Other(e.to_string()),
+    }
+}
+
 /// TCP connect from `source`, TLS, then the WebSocket upgrade. `None` when
 /// the server refuses at any step.
 async fn open_tls(server: SocketAddr, source: &str) -> Option<TlsWs> {
+    open_tls_result(server, source).await.ok()
+}
+
+async fn open_tls_result(server: SocketAddr, source: &str) -> Result<TlsWs, Refused> {
     within("open_tls", open_tls_inner(server, source)).await
 }
 
-async fn open_tls_inner(server: SocketAddr, source: &str) -> Option<TlsWs> {
+async fn open_tls_inner(server: SocketAddr, source: &str) -> Result<TlsWs, Refused> {
     let sock = TcpSocket::new_v4().unwrap();
     sock.bind(format!("{source}:0").parse().unwrap()).unwrap();
-    let stream = sock.connect(server).await.ok()?;
+    let stream = sock
+        .connect(server)
+        .await
+        .map_err(|e| Refused::Connection(format!("tcp connect: {e}")))?;
     let config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -167,14 +199,26 @@ async fn open_tls_inner(server: SocketAddr, source: &str) -> Option<TlsWs> {
     let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
         .connect(ServerName::try_from("localhost").unwrap().to_owned(), stream)
         .await
-        .ok()?;
-    client_async("wss://localhost/", tls).await.ok().map(|(ws, _)| ws)
+        .map_err(|e| Refused::Connection(format!("tls: {e}")))?;
+    client_async("wss://localhost/", tls)
+        .await
+        .map(|(ws, _)| ws)
+        .map_err(upgrade_failure)
 }
 
 async fn open_unix(path: &std::path::Path) -> Option<WebSocketStream<UnixStream>> {
+    open_unix_result(path).await.ok()
+}
+
+async fn open_unix_result(path: &std::path::Path) -> Result<WebSocketStream<UnixStream>, Refused> {
     within("open_unix", async {
-        let s = UnixStream::connect(path).await.ok()?;
-        client_async("ws://localhost/", s).await.ok().map(|(ws, _)| ws)
+        let s = UnixStream::connect(path)
+            .await
+            .map_err(|e| Refused::Connection(format!("unix connect: {e}")))?;
+        client_async("ws://localhost/", s)
+            .await
+            .map(|(ws, _)| ws)
+            .map_err(upgrade_failure)
     })
     .await
 }
@@ -250,9 +294,10 @@ async fn a_saturated_network_pool_leaves_the_local_socket_usable() {
     }
     assert_eq!(held.len(), 8);
     // Saturated now: a fresh source (under its own cap) gets HTTP 503.
-    assert!(
-        open_tls(s.tcp, "127.0.0.6").await.is_none(),
-        "network pool is saturated"
+    assert_eq!(
+        open_tls_result(s.tcp, "127.0.0.6").await.err().map(|r| format!("{r:?}")),
+        Some("Http(503)".to_string()),
+        "a full network pool answers the upgrade with HTTP 503"
     );
     let mut local = open_unix(&s.unix)
         .await
@@ -263,8 +308,14 @@ async fn a_saturated_network_pool_leaves_the_local_socket_usable() {
 #[tokio::test]
 async fn one_source_holds_at_most_two_pre_auth_connections() {
     let s = serve().await;
-    let held = idle_tls(s.tcp, "127.0.0.1", 8).await;
+    let held = idle_tls(s.tcp, "127.0.0.1", 2).await;
     assert_eq!(held.len(), 2, "per-source cap");
+    // The third is closed right after TCP accept, before TLS: a
+    // connection-level failure, never an HTTP status.
+    match open_tls_result(s.tcp, "127.0.0.1").await {
+        Err(Refused::Connection(_)) => {}
+        other => panic!("expected a pre-TLS connection failure, got {:?}", other.map(|_| "ws")),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -297,34 +348,54 @@ async fn idle_raw_tcp_from_one_source_does_not_block_another_tls_handshake() {
     assert!(hello_ok(&mut other).await);
 }
 
-/// The slots come back when the server cuts the idle connections. The wait
-/// is a poll bounded by `STEP`-sized attempts, not a fixed sleep: the
-/// server's own 1 s hello timeout is what frees them.
+/// The slots come back when the server cuts the idle connections at the
+/// hello timeout. The two deadlines are kept apart: the hello timeout (3 s)
+/// is far shorter than the TCP pre-auth deadline (60 s, longer than any
+/// wait here), so only the hello timeout can release the slots. The test
+/// waits for the server to close the held connections, then checks at once.
 #[tokio::test]
 async fn the_saturating_source_is_released_after_the_hello_timeout() {
-    let s = serve_with(
-        Duration::from_secs(1),
-        Duration::from_secs(1),
-        Duration::from_secs(3),
-    )
-    .await;
-    let held = idle_tls(s.tcp, "127.0.0.1", 8).await;
+    let s = serve_with(HELLO_SHORT, HOLD, HOLD).await;
+    let started = tokio::time::Instant::now();
+    let mut held = idle_tls(s.tcp, "127.0.0.1", 2).await;
     assert_eq!(held.len(), 2, "slots were held before the deadline");
+    let capped = open_tls_result(s.tcp, "127.0.0.1").await;
     assert!(
-        open_tls(s.tcp, "127.0.0.1").await.is_none(),
-        "still capped before the deadline (a failure here means the runner \
-         took longer than the 1 s hello timeout to get this far)"
+        started.elapsed() < HELLO_SHORT,
+        "runner too slow: the hello timeout expired before the saturation check"
     );
-    let give_up = tokio::time::Instant::now() + Duration::from_secs(15);
-    let mut again = loop {
+    assert!(
+        matches!(capped, Err(Refused::Connection(_))),
+        "still capped while the slots are held"
+    );
+    // Deterministic sync: the server's hello timeout closes both held
+    // connections; wait for those closes instead of sleeping.
+    for ws in &mut held {
+        let closed = tokio::time::timeout(Duration::from_secs(15), async {
+            while let Some(Ok(m)) = ws.next().await {
+                if matches!(m, Message::Close(_)) {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the server never closed the idle connection");
+    }
+    assert!(
+        started.elapsed() < HOLD,
+        "the TCP deadline must not be what freed the slots"
+    );
+    let mut again = None;
+    for _ in 0..20 {
+        // The slot is freed just after the close; allow a brief lag.
         if let Some(ws) = open_tls(s.tcp, "127.0.0.1").await {
-            break ws;
+            again = Some(ws);
+            break;
         }
-        assert!(tokio::time::Instant::now() < give_up, "slots never came back");
         tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    }
+    let mut again = again.expect("slots never came back after the hello timeout");
     assert!(hello_ok(&mut again).await);
-    drop(held);
 }
 
 #[tokio::test]
@@ -335,7 +406,11 @@ async fn filling_the_local_pool_does_not_block_tcp() {
         local.push(open_unix(&s.unix).await.expect("local upgrade"));
     }
     assert_eq!(local.len(), 8, "all eight local slots are held");
-    assert!(open_unix(&s.unix).await.is_none(), "local pool is full");
+    assert_eq!(
+        open_unix_result(&s.unix).await.err().map(|r| format!("{r:?}")),
+        Some("Http(503)".to_string()),
+        "a full local pool answers the upgrade with HTTP 503"
+    );
     let mut remote = open_tls(s.tcp, "127.0.0.1")
         .await
         .expect("tcp pool is separate from the local pool");
