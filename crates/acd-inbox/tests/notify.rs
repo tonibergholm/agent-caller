@@ -47,7 +47,7 @@ fn view(cards: Vec<CardView>) -> InboxView {
 }
 
 fn key(id: &str, revision: u64) -> NoteKey {
-    NoteKey { card: format!("m1/{id}"), request: format!("r-{id}"), revision }
+    NoteKey { card: format!("m1/{id}"), request: format!("r-{id}"), revision, opened_at: "2026-10-08T00:00:00Z".parse().unwrap() }
 }
 
 fn shown(cmds: &[NoteCmd]) -> Vec<NoteKey> {
@@ -63,6 +63,59 @@ fn one_notification_per_request_revision_and_none_for_repeats() {
     assert!(bumped.contains(&NoteCmd::Close { key: key("a1", 1) }));
     assert_eq!(shown(&bumped), [key("a1", 2)]);
     assert_eq!(r.reconcile(&view(vec![]), true, false), [NoteCmd::Close { key: key("a1", 2) }]);
+}
+
+#[test]
+fn a_flap_does_not_announce_again_but_a_new_revision_or_request_does() {
+    let mut r = Reconciler::default();
+    assert_eq!(shown(&r.reconcile(&view(vec![card("a1", 1, false)]), true, false)), [key("a1", 1)]);
+    // The machine disconnects: the card leaves the view, then comes back.
+    assert_eq!(r.reconcile(&view(vec![]), true, false), [NoteCmd::Close { key: key("a1", 1) }]);
+    assert!(r.reconcile(&view(vec![card("a1", 1, false)]), true, false).is_empty(), "same request and revision");
+    r.reconcile(&view(vec![]), true, false);
+    assert_eq!(shown(&r.reconcile(&view(vec![card("a1", 2, false)]), true, false)), [key("a1", 2)], "new revision");
+    assert_eq!(shown(&r.reconcile(&view(vec![card("a1", 2, false), card("b1", 1, false)]), true, false)), [key("b1", 1)], "new request");
+}
+
+#[test]
+fn a_request_id_reused_after_an_acd_restart_still_announces() {
+    // acd numbers requests from r1 on every start, and the agent id survives
+    // (a herdr pane id does), so only `opened_at` tells the two apart.
+    let mut r = Reconciler::default();
+    assert_eq!(shown(&r.reconcile(&view(vec![card("a1", 1, false)]), true, false)).len(), 1);
+    r.reconcile(&view(vec![]), true, false);
+    let mut again = card("a1", 1, false);
+    again.agent.pending.as_mut().unwrap().opened_at = "2026-10-09T00:00:00Z".parse().unwrap();
+    assert_eq!(shown(&r.reconcile(&view(vec![again]), true, false)).len(), 1, "same id and revision, opened later");
+}
+
+#[test]
+fn the_announced_history_is_bounded_and_evicts_the_oldest_first() {
+    let mut r = Reconciler::default();
+    let n = SEEN_HISTORY_MAX + 1;
+    for i in 0..n {
+        let id = format!("c{i}");
+        assert_eq!(shown(&r.reconcile(&view(vec![card(&id, 1, false)]), true, false)), [key(&id, 1)]);
+    }
+    r.reconcile(&view(vec![]), true, false);
+    // The newest is still remembered; the oldest was evicted and announces again.
+    let newest = format!("c{}", n - 1);
+    assert!(r.reconcile(&view(vec![card(&newest, 1, false)]), true, false).is_empty());
+    r.reconcile(&view(vec![]), true, false);
+    // Only the oldest went: the next one is still remembered (a cap one too low would drop it).
+    assert!(r.reconcile(&view(vec![card("c1", 1, false)]), true, false).is_empty());
+    r.reconcile(&view(vec![]), true, false);
+    assert_eq!(shown(&r.reconcile(&view(vec![card("c0", 1, false)]), true, false)), [key("c0", 1)]);
+}
+
+#[test]
+fn requests_still_in_view_are_never_evicted_from_the_history() {
+    let mut r = Reconciler::default();
+    let n = SEEN_HISTORY_MAX + 5;
+    let ids: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+    let cards = || view(ids.iter().map(|id| card(id, 1, false)).collect());
+    assert_eq!(shown(&r.reconcile(&cards(), true, false)).len(), n);
+    assert!(r.reconcile(&cards(), true, false).is_empty(), "open requests are not announced again");
 }
 
 #[test]

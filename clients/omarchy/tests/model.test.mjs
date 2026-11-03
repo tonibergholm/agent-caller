@@ -616,3 +616,13 @@ test("a question card shows its header and text beyond the detail", () => {
   const panel = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
   assert.match(panel, /Model\.questionLines\(cardItem\.card\)/);
 });
+
+test("scrollToCard moves the list only when the card is outside the view", () => {
+  // viewport 100 high, content 500 high
+  assert.equal(M.scrollToCard(0, 100, 500, 10, 50), 0, "fully visible: unchanged");
+  assert.equal(M.scrollToCard(0, 100, 500, 120, 50), 70, "below: its bottom edge meets the view bottom");
+  assert.equal(M.scrollToCard(200, 100, 500, 120, 50), 120, "above: its top meets the view top");
+  assert.equal(M.scrollToCard(0, 100, 500, 0, 300), 0, "taller than the view: shows its top");
+  assert.equal(M.scrollToCard(0, 100, 500, 480, 50), 400, "clamped to the end");
+  assert.equal(M.scrollToCard(0, 100, 60, 10, 50), 0, "content shorter than the view");
+});

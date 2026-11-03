@@ -31,6 +31,12 @@ config and the `acd/1` protocol may change without a major version bump.
   still runs what it did before, so one Esc can stop speech and undo the
   newest inbox countdown.
 
+### Fixed
+
+- Omarchy: a request that left the view when its machine disconnected no longer
+  notifies again on reconnect; the last 256 announced requests are remembered.
+- Omarchy: J/K now scrolls the card list so the selected card stays in view.
+
 ## [0.9.0] - 2026-10-13
 
 ### Added

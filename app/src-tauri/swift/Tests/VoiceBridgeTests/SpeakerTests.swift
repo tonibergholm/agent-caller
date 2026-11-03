@@ -122,11 +122,18 @@ final class SpeakerTests: XCTestCase {
         // only the short fixed tail is waited.
         synth.set(speaking: true)
         synth.quietsOnStop = true
-        started = Date()
-        speaker.silenceForCapture()
-        var waited = Date().timeIntervalSince(started)
-        XCTAssertGreaterThanOrEqual(waited, Double(Speaker.tailMs) / 1000 - 0.005, "the output tail")
-        XCTAssertLessThan(waited, 0.12)
+        // The best of five: a loaded CI runner can stall one wait by 150 ms, and a
+        // wait that really polled out the drain would be slow every time.
+        var shortest = Double.infinity
+        for _ in 0..<5 {
+            synth.set(speaking: true)
+            started = Date()
+            speaker.silenceForCapture()
+            shortest = min(shortest, Date().timeIntervalSince(started))
+        }
+        XCTAssertGreaterThanOrEqual(shortest, Double(Speaker.tailMs) / 1000 - 0.005, "the output tail")
+        XCTAssertLessThan(shortest, 0.12)
+        var waited = shortest
         // A synthesizer that never reports quiet: bounded by `drainMs` plus the tail.
         synth.set(speaking: true)
         synth.quietsOnStop = false
