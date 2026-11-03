@@ -2,9 +2,9 @@
 //
 // `cfg(unix)` is not enough: Android has it set, but acd's owner/mode checks
 // have not been proved there, and an app sandbox is no reason to trust them.
-// So only the targets below take the real path; every other target (Windows,
-// Android, anything new) refuses. A new unix target is refused until it is
-// added here on purpose.
+// So every unix target except Android takes the real path, and Windows and
+// Android refuse. A future unix target would take the real path too: exclude
+// it here if its owner and mode checks are not proved.
 //
 // This file is `include!`d by the build.rs of `acd-securefs` and `acd-client`,
 // which turn it into `cfg(owner_checks)`. It is also compiled into
