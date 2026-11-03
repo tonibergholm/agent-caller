@@ -1,6 +1,6 @@
 //! Notifications (omarchy spec §8, plan D15 to D17). Views are reconciled into
 //! show and close commands; the D-Bus side sits behind `NotifyBackend`.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,12 +17,21 @@ pub const OPEN_ACTION: &str = "open";
 pub const PLUGIN_ID: &str = "tonibergholm.agentcaller";
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const TITLE_MAX: usize = 60;
+/// How many announced (card, request, revision) keys are remembered after they
+/// leave the view. Without it a machine that flaps (disconnect, reconnect)
+/// would announce the same request and revision again. Oldest are evicted
+/// first so the history cannot grow without bound. Requests still in the view
+/// are never evicted, so the history can exceed this while more are open.
+pub const SEEN_HISTORY_MAX: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NoteKey {
     pub card: String,
     pub request: String,
     pub revision: u64,
+    /// Request ids restart at `r1` whenever `acd` restarts, so the id alone can
+    /// repeat for a new request. `opened_at` is set once and never changes.
+    pub opened_at: acd_protocol::Timestamp,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -35,6 +44,8 @@ pub enum NoteCmd {
 #[derive(Default)]
 pub struct Reconciler {
     seen: HashSet<NoteKey>,
+    /// `seen` in insertion order, for eviction.
+    order: VecDeque<NoteKey>,
     shown: HashSet<NoteKey>,
 }
 
@@ -47,7 +58,7 @@ impl Reconciler {
             .filter_map(|c| {
                 let p = c.agent.pending.as_ref()?;
                 (p.status == RequestStatus::Open)
-                    .then(|| (NoteKey { card: c.key.clone(), request: p.id.clone(), revision: p.revision }, c))
+                    .then(|| (NoteKey { card: c.key.clone(), request: p.id.clone(), revision: p.revision, opened_at: p.opened_at }, c))
             })
             .collect();
         let mut out = Vec::new();
@@ -56,17 +67,26 @@ impl Reconciler {
             self.shown.remove(&key);
             out.push(NoteCmd::Close { key });
         }
-        self.seen.retain(|k| current.contains_key(k));
         let mut fresh: Vec<(&NoteKey, &&CardView)> = current.iter().filter(|(k, _)| !self.seen.contains(*k)).collect();
         fresh.sort_by(|a, b| a.0.card.cmp(&b.0.card));
         for (key, card) in fresh {
-            self.seen.insert(key.clone());
+            if self.seen.insert(key.clone()) {
+                self.order.push_back(key.clone());
+            }
             if !enabled || panel_open || card.action.is_some() {
                 continue;
             }
             if let Some((summary, body)) = text(card) {
                 self.shown.insert(key.clone());
                 out.push(NoteCmd::Show { key: key.clone(), summary, body });
+            }
+        }
+        // Evict the oldest keys that have left the view. A key still in the
+        // view stays, or its unchanged request would be announced again.
+        while self.order.len() > SEEN_HISTORY_MAX {
+            let Some(at) = self.order.iter().position(|k| !current.contains_key(k)) else { break };
+            if let Some(old) = self.order.remove(at) {
+                self.seen.remove(&old);
             }
         }
         out

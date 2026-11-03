@@ -200,3 +200,12 @@ test("model.mjs avoids syntax the QML JS engine rejects", () => {
   assert.doesNotMatch(src, /\bcatch\s*\{/, "optional catch binding");
   assert.doesNotMatch(src, /\{\s*\.\.\./, "object spread");
 });
+
+// J/K returns a `select` effect; the panel must scroll the card Flickable to it.
+// UNVERIFIED in a real Quickshell: only the wiring is pinned here.
+test("Panel.run handles the select effect by scrolling the card list", () => {
+  const panel = read("Panel.qml");
+  assert.match(panel, /case "select":\s*revealCard\(effect\.key\);/);
+  assert.match(panel, /id: cardsFlick/);
+  assert.match(panel, /function revealCard\(key\) \{[\s\S]*cardsFlick\.contentY = Model\.scrollToCard\(/);
+});
