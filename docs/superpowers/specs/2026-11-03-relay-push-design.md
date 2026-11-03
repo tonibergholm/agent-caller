@@ -1,7 +1,9 @@
 # Relay and push: design spec
 
 Date: 2026-11-03
-Status: draft for independent adversarial review. No code yet.
+Status: draft, reviewed once by Sol (gpt-6.1-sol, 2026-11-03): **accept with
+changes**. Not implementation-ready: apply the changes in "Review status"
+below first. No code yet.
 Roadmap: [Road to 1.0, step 3](../plans/2026-10-07-roadmap.md) ("A relay
 that carries a wake-up, never request content, and push delivery").
 Reads with: [the v1 design spec](2026-10-07-agent-inbox-design.md), the
@@ -21,6 +23,63 @@ Words in this document:
 - **Handle**: an opaque blob the relay issues to a device. It seals the
   push address. `acd` stores handles, never push addresses.
 - **Wake**: one content-free push to one device.
+
+## Review status (2026-11-03)
+
+An independent review found no mechanism by which the relay alone can read
+request content or approve anything. It also found six blocking problems and
+one missing decision. Until they are folded into the sections named, treat
+those sections as superseded by this list.
+
+Blocking, with the ruling for each:
+
+1. **Transient outage silences alerts for good (§5.4, §7).** After two failed
+   sends the registration becomes `relay_error` and wakes stop until
+   re-registration, which contradicts "recovers when the relay returns". Retry
+   transient failures on later wakes with bounded backoff; disable only on an
+   invalid registration.
+2. **A wake gives no route to the machines (§1, §2.4, §7, §9).** With
+   Tailscale off the phone gets the alert and cannot fetch or answer. Generic
+   alert plus manual VPN is the supported behaviour; rich background fetch is
+   optional and conditional.
+3. **"Fixed notification text" is false under relay compromise (§2.4, §4.3,
+   §4.7).** A compromised relay controls the text and can phish ("Tap to
+   approve deploy"). It still cannot approve anything. State this as a limit;
+   audit click actions, categories, links, images and inherited actions.
+4. **Replay and wake-flooding need device-side limits (§3.5, §4.5-4.6).** A
+   stolen handle allows 120 wakes per hour, each possibly connecting to every
+   paired machine, and a compromised relay skips its own limits. Add a
+   device-wide fetch cooldown, a bound on concurrent connections, total
+   deadlines and notification replacement.
+5. **No individual handle revocation (§4.5, §4.8, §5.3).** Ruling: accept a
+   30-day abuse window plus the device-side limits from 4, unless the owner
+   asks for relay-side revocation.
+6. **The registration challenge is underspecified (§4.4, §5.3, §8-9).** Define
+   code entropy, confirmation attempt limits, atomic single use, a cap on
+   outstanding challenges, and binding to platform, app and address; IP-only
+   issuance limits allow distributed flooding. Resolve "reads only `v`" versus
+   the registration's required `c` field.
+
+Factual corrections: `acd pair` prints the existing client token and does not
+rotate it (`crates/acd/src/pair.rs`); "no push capability" cannot tell an old
+daemon from a new unconfigured one by capability presence alone; the V1
+fallback gives only seconds in `onMessageReceived`, so extra fetching needs
+WorkManager; do not map every `INVALID_ARGUMENT` to a dead address; do not
+expect immediate token invalidation after reinstall (APNs may keep returning
+success); the metadata-privacy claims overstate: self-hosting changes who sees
+the metadata, not whether it exists; session presence does not prove the app
+is in the foreground.
+
+**Missing decision for the owner (undecided):** may a locked phone show
+request content (machine name, permission title) in the notification? The
+reviewer and the author recommend generic text only by default, with opt-in
+enrichment.
+
+Phase order: move P3 (the Android probe) before freezing the P1 and P2
+registration contract; add flood protection and challenge-abuse tests before
+P4 and P5 are deployed; P6 needs a minimal registration and fetch
+implementation; keep APNs optional until its routing, Keychain and extension
+probes pass. §3.3's reference to "P6" should read P8.
 
 ## 0. Facts this design starts from
 
