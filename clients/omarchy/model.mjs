@@ -585,6 +585,19 @@ export function disarm(st) {
   return st.armed ? Object.assign({}, st, { armed: null }) : st;
 }
 
+/**
+ * The `contentY` that shows a card of `height` at `top` in a viewport of
+ * `viewHeight`, moving as little as possible: unchanged when the card is
+ * already fully visible. A card taller than the viewport shows its top.
+ */
+export function scrollToCard(contentY, viewHeight, contentHeight, top, height) {
+  const maxY = Math.max(0, contentHeight - viewHeight);
+  let y = contentY;
+  if (top + height > y + viewHeight) y = top + height - viewHeight;
+  if (top < y) y = top;
+  return Math.min(maxY, Math.max(0, y));
+}
+
 /** `openCard`: select that card and close any reply box. */
 export function selectCard(key) {
   return { selected: key, replyFor: null };
