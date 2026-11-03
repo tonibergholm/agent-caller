@@ -1,3 +1,6 @@
+// Unix only: these drive the fake server over a unix socket (no local endpoint on Windows).
+#![cfg(unix)]
+
 mod common;
 use acd_client::{conn::*, fake::*};
 use acd_protocol::*;

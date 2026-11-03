@@ -149,6 +149,16 @@ enum End {
 
 async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), End> {
     timeout_at(deadline, async {
+        #[cfg(not(unix))]
+        if matches!(cfg.endpoint, Endpoint::Local { .. }) {
+            // The local endpoint is a unix socket whose peer is proved by file
+            // mode and owner. Windows has neither yet, so it is refused before
+            // any token is read, never replaced by anything weaker. Remote
+            // TCP + TLS is unaffected.
+            // shortcut: no local machine on Windows, upgrade with a named-pipe
+            // transport that checks the server's SID (feasibility note B1).
+            return Err(End::Local(LOCAL_UNSUPPORTED.into()));
+        }
         let token = match &cfg.credential {
             Credential::Token(t) => t.clone(),
             Credential::LocalFile(dir) => {
@@ -156,6 +166,7 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
             }
         };
         match &cfg.endpoint {
+            #[cfg(unix)]
             Endpoint::Local { config_dir } => {
                 let stream = tokio::net::UnixStream::connect(local::socket_path(config_dir))
                     .await
@@ -168,6 +179,8 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
                 .map_err(|e| End::Offline(e.to_string()))?;
                 Ok((ws, token))
             }
+            #[cfg(not(unix))]
+            Endpoint::Local { .. } => unreachable!("refused above"),
             Endpoint::Tcp { host, port, pin } => {
                 let addrs = endpoint::vet(host, *port)
                     .await
@@ -247,7 +260,13 @@ fn connect_reason(e: &std::io::Error) -> String {
     }
 }
 
+/// Shown for a `local` machine on a platform without unix sockets.
+#[cfg(not(unix))]
+const LOCAL_UNSUPPORTED: &str =
+    "the local acd.sock endpoint is unavailable on this platform; pair a remote machine instead";
+
 /// The local socket is missing or dead when the daemon is not running.
+#[cfg(unix)]
 fn local_reason(e: &std::io::Error) -> String {
     use std::io::ErrorKind::*;
     match e.kind() {
@@ -760,7 +779,9 @@ pub fn spawn_machine(cfg: MachineConfig) -> MachineHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{connect_reason, local_reason};
+    use super::connect_reason;
+    #[cfg(unix)]
+    use super::local_reason;
     use std::io::{Error, ErrorKind};
 
     #[test]
@@ -779,6 +800,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_missing_local_socket_says_acd_is_not_running() {
         assert_eq!(
@@ -790,5 +812,35 @@ mod tests {
             "acd is not running on this machine"
         );
         assert_eq!(local_reason(&Error::other("boom")), "boom");
+    }
+
+    /// Windows only; not run in the Linux sandbox. A `local` machine is refused
+    /// before any token is read, whatever the credential.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn local_endpoint_is_refused_on_windows() {
+        use super::{open, Credential, End, MachineConfig, LOCAL_UNSUPPORTED};
+        use crate::endpoint::Endpoint;
+        use std::time::Duration;
+        use tokio::time::Instant;
+        for credential in [
+            Credential::Token("x".into()),
+            Credential::LocalFile(std::env::temp_dir()),
+        ] {
+            let cfg = MachineConfig {
+                key: "local".into(),
+                instance: 1,
+                endpoint: Endpoint::Local { config_dir: std::env::temp_dir() },
+                credential,
+                client: acd_protocol::ClientInfo {
+                    id: "t".into(),
+                    name: "t".into(),
+                    version: "0".into(),
+                },
+                timing: crate::Timing::default(),
+            };
+            let r = open(&cfg, Instant::now() + Duration::from_secs(5)).await;
+            assert!(matches!(r, Err(End::Local(m)) if m == LOCAL_UNSUPPORTED));
+        }
     }
 }

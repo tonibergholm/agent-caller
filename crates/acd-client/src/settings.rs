@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Mutex;
@@ -283,21 +284,29 @@ impl Settings {
         }
     }
 
-    /// Atomic write, mode 0600, parent directory 0700.
+    /// Atomic write. On unix: mode 0600, parent directory 0700.
+    ///
+    /// shortcut: on Windows the file and its directory are created with the
+    /// default ACL inherited from the per-user config dir (the caller passes
+    /// the app config dir under the user profile), with no mode bits and no
+    /// owner or DACL check. Anything that can read that profile directory can
+    /// read settings.json. It holds no secrets (tokens live in the secret
+    /// store), but it does hold the pinned machine list. Upgrade when the
+    /// Windows shell ships: create it with a protected DACL (user SID only).
     pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
         let io = |e| SettingsError::Io(path.display().to_string(), e);
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(io)?;
+            #[cfg(unix)]
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(io)?;
         }
         let tmp = path.with_extension("json.tmp");
         let _ = fs::remove_file(&tmp);
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)
-            .map_err(io)?;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let mut f = opts.open(&tmp).map_err(io)?;
         f.write_all(
             serde_json::to_string_pretty(self)
                 .expect("serializable")
@@ -512,11 +521,14 @@ mod tests {
             again.client_id, s.client_id,
             "client.id is created once per installation"
         );
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]
