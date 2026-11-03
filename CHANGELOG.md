@@ -38,7 +38,7 @@ config and the `acd/1` protocol may change without a major version bump.
   after any other close: 1 s, doubling to 30 s, reset when a session is ready.
 - After an `acd` restart, a new request that reuses an id the app already announced
   now notifies, and is spoken when alerts are on. `acd` numbers requests from `r1`
-  on every start.
+  on every start. A request first seen in a reconnect snapshot stays silent, as before.
 - Omarchy: a request that left the view when its machine disconnected no longer
   notifies again on reconnect; the last 256 announced requests are remembered.
 - Omarchy: J/K now scrolls the card list so the selected card stays in view.

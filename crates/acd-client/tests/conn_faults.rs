@@ -274,6 +274,29 @@ async fn repeated_too_slow_closes_back_off() {
     assert!(f.connections() <= 3, "{} connections in 700 ms", f.connections());
 }
 
+/// The same, when each connection first delivers a snapshot: the session is
+/// Ready and the backoff resets, so the delay stays at its base, never zero.
+#[tokio::test]
+async fn repeated_too_slow_closes_after_a_snapshot_back_off() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let ms = Duration::from_millis;
+    let timing = acd_client::Timing { backoff_base: ms(300), backoff_max: ms(1000), ..common::fast() };
+    let _h = spawn_machine(cfg_for(&f, common::TOKEN, timing));
+    let f = std::sync::Arc::new(f);
+    let closer = f.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let c = closer.next_connection().await;
+            c.send(snapshot("e1", 1, &[])).await;
+            c.close(4408).await;
+        }
+    });
+    tokio::time::sleep(ms(700)).await;
+    task.abort();
+    // About one connection per base delay (0, 300, 600 ms); no delay makes hundreds.
+    assert!(f.connections() <= 3, "{} connections in 700 ms", f.connections());
+}
+
 #[tokio::test]
 async fn silent_server_triggers_ping_then_reconnect() {
     let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
