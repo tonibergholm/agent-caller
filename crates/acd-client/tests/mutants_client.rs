@@ -257,3 +257,19 @@ fn a_pin_mismatch_is_recognised() {
     assert!(is_pin_mismatch(&std::io::Error::other(format!("tls: {PIN_MISMATCH}"))));
     assert!(!is_pin_mismatch(&std::io::Error::other("connection refused")));
 }
+
+/// voice.rs:39 `is_terminal -> true / false`, `!=` -> `==`: only `Fired` is not final.
+#[test]
+fn only_fired_is_not_terminal() {
+    use acd_client::voice::{ActionOutcome, NotSentReason};
+    assert!(!ActionOutcome::Fired.is_terminal());
+    for o in [
+        ActionOutcome::Delivered,
+        ActionOutcome::Rejected { code: acd_protocol::ErrorCode::BadRequest },
+        ActionOutcome::Uncertain,
+        ActionOutcome::Cancelled,
+        ActionOutcome::NotSent { reason: NotSentReason::Offline },
+    ] {
+        assert!(o.is_terminal(), "{o:?}");
+    }
+}
