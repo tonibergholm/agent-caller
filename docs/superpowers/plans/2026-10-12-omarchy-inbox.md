@@ -1,5 +1,7 @@
 # Omarchy Inbox Implementation Plan
 
+> **Historical: executed, do not replay.** Read the code and the [known gaps](2026-10-07-p1-followups.md) before changing this area.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build `acd-inbox`, a systemd user service that runs the `acd-client` inbox and serves it over a local socket, and the Omarchy shell plugin `tonibergholm.agentcaller` that shows it, with Secret Service storage for remote secrets, freedesktop notifications and an installer.

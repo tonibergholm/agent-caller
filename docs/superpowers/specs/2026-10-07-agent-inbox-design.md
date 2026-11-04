@@ -1,5 +1,7 @@
 # Agent inbox v1: design spec
 
+Implementation status (2026-11-04): implemented. Core, herdr, hooks, T3 and the Mac app merged in PRs #1 to #25; live fixes in #10 to #23; released as 0.9.0 (#65). Voice, Omarchy and the external source have their own specs. Open items: [known gaps](../plans/2026-10-07-p1-followups.md).
+
 Date: 2026-10-07
 Status: revision 5.0. It folds in the P0 findings, the P1 review rulings,
 Sol rounds 4 and 5, gates 3 and 6, and the P3 gates 2, 4, 5 and 7 with the

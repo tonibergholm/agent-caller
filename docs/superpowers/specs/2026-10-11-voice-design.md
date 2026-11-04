@@ -1,5 +1,7 @@
 # Voice control for agent-caller
 
+Implementation status (2026-11-04): steps 1 to 4 implemented on macOS (#24, #27, #54 to #67, #71). The 16-item live check for steps 3 and 4 has not been run. The optional cloud model, the Linux and Windows backend ([research](../../research/2026-10-12-voice-backend-b.md), #26) and step 5 are not built.
+
 Status: draft for review, 2026-10-11 (revised after an independent
 review). Extends the v1 spec (`2026-10-07-agent-inbox-design.md`), which
 lists the voice router under "Not in v1". Visual language:
