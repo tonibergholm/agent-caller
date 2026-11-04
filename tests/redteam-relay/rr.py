@@ -96,12 +96,12 @@ def last_code():
     raise RuntimeError("no challenge push seen")
 
 
-def make_handle(addr, xff=None):
+def make_handle(addr, xff=None, src=None):
     h = {"X-Forwarded-For": xff} if xff else {}
-    st, b = post("/v1/handles", reg_body(addr), headers=h)
+    st, b = post("/v1/handles", reg_body(addr), headers=h, src=src)
     assert st == 202, (st, b)
     code = last_code()
-    st, b = post("/v1/handles/confirm", confirm_body(b["challenge_id"], code, addr), headers=h)
+    st, b = post("/v1/handles/confirm", confirm_body(b["challenge_id"], code, addr), headers=h, src=src)
     assert st == 200, (st, b)
     return b["handle"]
 
