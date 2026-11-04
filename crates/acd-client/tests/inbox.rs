@@ -88,13 +88,24 @@ fn answers(f: &FakeServer) -> usize {
         .filter(|v| v["type"] == "request.answer")
         .count()
 }
+/// Waits until the fake daemon has received `n` frames of type `ty`. The
+/// deadline only bounds a hung test; it is never asserted as a latency.
+async fn received_at_least(f: &FakeServer, ty: &str, n: usize) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while f.received().iter().filter(|v| v["type"] == ty).count() < n {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {n} {ty} frame(s)"));
+}
 #[tokio::test]
 async fn pick_waits_for_the_undo_then_sends_once() {
     let (f, _, ib) = setup().await;
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(answers(&f), 0);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    received_at_least(&f, "request.answer", 1).await;
     assert_eq!(answers(&f), 1);
 }
 #[tokio::test]
@@ -263,7 +274,7 @@ async fn reply_goes_through_the_undo() {
             .count(),
         0
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    received_at_least(&f, "agent.send", 1).await;
     let sent = f
         .received()
         .iter()
@@ -544,7 +555,7 @@ async fn repairing_inside_the_undo_window_sends_nothing() {
             .is_some_and(|n| n.text == "Offline. Nothing was sent.")
     );
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    received_at_least(&f, "request.answer", 1).await;
     assert_eq!(answers(&f), 1);
 }
 
@@ -980,7 +991,7 @@ async fn typed_answer_needs_a_free_text_request_and_goes_through_the_undo() {
     assert_eq!(action.detail.as_deref(), Some("purple\nplease"));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(answers(&f), 0);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    received_at_least(&f, "request.answer", 1).await;
     let sent: Vec<_> = f
         .received()
         .into_iter()
@@ -1129,7 +1140,7 @@ async fn a_reply_countdown_survives_the_agent_turning_idle_with_idle_hidden() {
     })
     .await;
     assert_eq!(ib.view().borrow().hidden_idle, 0);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    received_at_least(&f, "agent.send", 1).await;
     let sent = f
         .received()
         .iter()
@@ -1730,7 +1741,7 @@ async fn a_pending_hook_only_countdown_survives_turning_the_setting_off() {
         v.actions.len() == 1 && v.cards.iter().any(|c| c.key == "m1/a3")
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    received_at_least(&f, "request.answer", 1).await;
     assert_eq!(answers(&f), 1, "the countdown still fired");
 }
 
