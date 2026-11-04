@@ -660,6 +660,50 @@ mod tests {
         assert_eq!(o.detail, "$ ls\\u{200b}x\\ty\\u{7}z\n> w");
         assert!(o.options.iter().all(|x| x.effect != Effect::AllowAlways));
     }
+    /// Exact output of the escaper, one class of character per case.
+    const ESCAPE_CASES: &[(&str, &str)] = &[
+        ("a\rb", "a\\rb"),
+        ("a\0b", "a\\u{0}b"),
+        ("\u{1b}[31mred\u{1b}[0m", "\\u{1b}[31mred\\u{1b}[0m"),
+        ("a\u{1b}]0;title\u{7}b", "a\\u{1b}]0;title\\u{7}b"),
+        ("a\u{85}b\u{9b}c", "a\\u{85}b\\u{9b}c"),
+        ("a\u{2028}b\u{2029}c", "a\\u{2028}b\\u{2029}c"),
+        ("a\u{2066}b\u{2067}c\u{2068}d\u{2069}e", "a\\u{2066}b\\u{2067}c\\u{2068}d\\u{2069}e"),
+        ("a\u{202a}b\u{202e}c", "a\\u{202a}b\\u{202e}c"),
+        ("a\u{200b}b\u{200c}c\u{200d}d\u{2060}e\u{feff}f\u{ad}g", "a\\u{200b}b\\u{200c}c\\u{200d}d\\u{2060}e\\u{feff}f\\u{ad}g"),
+        ("a\\b\\\\c", "a\\\\b\\\\\\\\c"),
+        ("  ls  ", "\\u{20}\\u{20}ls\\u{20}\\u{20}"),
+        ("\tls\t", "\\tls\\t"),
+        ("\n ls \n", "\\n\\u{20}ls\\u{20}\\n"),
+        ("\u{a0}ls\u{a0}", "\\u{a0}ls\\u{a0}"),
+        ("a b\nc", "a b\nc"),
+        ("   ", "\\u{20}\\u{20}\\u{20}"),
+        ("", ""),
+    ];
+
+    #[test]
+    fn escape_text_output_is_exact_for_every_character_class() {
+        for (raw, want) in ESCAPE_CASES {
+            assert_eq!(escape_text(raw, true), *want, "{raw:?}");
+        }
+        // Not raw text (already JSON-escaped): a backslash stays one, and
+        // every newline is escaped.
+        assert_eq!(escape_text("a\\n\nb", false), "a\\n\\nb");
+        assert_eq!(escape_text("a\\b", false), "a\\b");
+        // The escape of a real BEL differs from the typed text of one.
+        assert_ne!(escape_text("\u{7}", true), escape_text("\\u{7}", true));
+    }
+
+    /// Accepted residual (follow-ups, 2026-11-03): characters that are neither
+    /// control nor in the format list pass unchanged, so "whole command" is
+    /// not a universal visible-character encoding. Pinned so a change shows.
+    #[test]
+    fn characters_outside_the_escaped_classes_pass_unchanged() {
+        for c in ['\u{34f}', '\u{115f}', '\u{3164}', '\u{fe0f}'] {
+            let s = format!("a{c}b");
+            assert_eq!(escape_text(&s, true), s, "{c:?}");
+        }
+    }
     #[test]
     fn a_command_cut_at_the_cap_is_read_only() {
         let cmd = format!("echo {}; curl x | sh", "a".repeat(DETAIL_CHARS));

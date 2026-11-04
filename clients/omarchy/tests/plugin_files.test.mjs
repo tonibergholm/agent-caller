@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as Model from "../model.mjs";
-import { parseQml, idOf, findAll, ancestorsToFlick, extractFn, compileFns } from "./qml_helpers.mjs";
+import { parseQml, idOf, findAll, ancestorsToFlick, extractFn, compileFns, handlers } from "./qml_helpers.mjs";
 
 const read = (name) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
 const QML = ["BarWidget.qml", "Panel.qml", "Service.qml"];
@@ -231,6 +231,10 @@ function detailViolations(panel) {
     if (!/wrapMode:\s*Text\.Wrap\b/.test(label.props)) bad.push(`${marker}: must wrap`);
     if (!/Layout\.fillWidth:\s*true/.test(label.props)) bad.push(`${marker}: must fill the width`);
     if (CUTS.test(label.props) || /NoWrap|Elide|Truncate/.test(label.props)) bad.push(`${marker}: the label hides text`);
+    // The base component's own properties apply to every instance.
+    for (const base of findAll(tree, (n) => n.name === label.type)) {
+      if (CUTS.test(base.props) || /NoWrap|Elide|Truncate/.test(base.props)) bad.push(`${marker}: the ${label.type} component hides text`);
+    }
     const { chain, reached } = ancestorsToFlick(tree, label, "cardsFlick");
     if (!reached) bad.push(`${marker}: some path does not end in cardsFlick`);
     for (const item of chain) {
@@ -299,13 +303,22 @@ function gateViolations(panel, bar) {
   // run() is defined once and called only by pickOption and keyEvent (plus its own cases)
   if ((panel.match(/\brun\(/g) ?? []).length !== 3) bad.push("run() called from somewhere else");
   // every handler that can send an option goes through the Panel wrapper
+  // (whole handler bodies, so a block spread over several lines is checked too)
   for (const src of [panel, bar]) {
-    for (const l of src.split("\n")) {
-      if (!/onClicked|onTapped|onPressed|onAccepted|onActivated|Keys\./.test(l)) continue;
-      if (/Model\.pickOption|send\("(pick|answer_text)"|\brun\(|\.run\(/.test(l)) bad.push("ungated handler: " + l.trim());
-      if (/pickOption\(/.test(l) && !/cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/.test(l)) bad.push("pick handler not via the wrapper: " + l.trim());
+    for (const { name, body } of handlers(src)) {
+      const l = `${name}: ${body}`;
+      if (/Model\.pickOption|send\("(pick|answer_text)"|\brun\(|\.run\(/.test(body)) bad.push("ungated handler: " + l.trim());
+      if (/pickOption\(/.test(body) && !/^cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)\s*$/.test(body)) bad.push("pick handler not via the wrapper: " + l.trim());
+      // Whatever the spelling (an alias of Model, a bracket call), a handler
+      // reaches the pick and answer paths only through the wrapper, and
+      // its other sends name a literal type that is not an answer.
+      if (/=\s*Model\b(?!\s*\.)|\bplanAnswer\b|\brun\b/.test(body)) bad.push("handler aliases the model or reaches run(): " + l.trim());
+      for (const m of body.matchAll(/\bsend\(\s*("[^"]*"|[^,)]*)/g)) {
+        if (!/^"[a-z_]+"$/.test(m[1]) || /^"(pick|answer_text|reply)"$/.test(m[1])) bad.push("handler sends a computed or answer type: " + l.trim());
+      }
     }
   }
+  if (/\[\s*["'](send|run|pickOption|planAnswer)["']\s*\]/.test(panel)) bad.push("a gated call is reached by bracket access");
   if (/send\("(pick|answer_text|reply)"|pickOption|Model\.planAnswer/.test(bar)) bad.push("BarWidget sends an answer");
   return bad;
 }
@@ -412,6 +425,11 @@ const MUTATIONS = {
   "height on the card list column": [/id: sectionsColumn\n/, "id: sectionsColumn\n                    height: 300\n", ["detail"]],
   "height on one card instance": [/inbox: panel; card: modelData/, "inbox: panel; height: 120; card: modelData", ["detail"]],
   "another implicitHeight on the card": [/implicitHeight: body\.implicitHeight \+ Commons\.Style\.spacing\.lg \* 2/, "implicitHeight: 90", ["detail"]],
+  "maximumLineCount on the shared Label component (inherited)": [/textFormat: Text\.PlainText\n/, "textFormat: Text.PlainText\n        maximumLineCount: 3\n", ["detail"]],
+  "multi-line click sends the pick and calls the model": [/onClicked: cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/, "onClicked: {\n                            const r = Model.pickOption(cardItem.inbox.keyState, cardItem.card, optionRow.modelData.id, Date.now(), true);\n                            cardItem.inbox.service.send(\"pick\", {});\n                        }", ["gate"]],
+  "multi-line Keys.onPressed sends the pick": [/Keys\.onPressed: event => cardItem\.inbox\.keyEvent\(event, \{ kind: "reply"[^\n]*/, "Keys.onPressed: event => {\n                    Model.pickOption(cardItem.inbox.keyState, cardItem.card, \"allow\", Date.now(), true);\n                    cardItem.inbox.service.send(\"pick\", {});\n                }", ["gate"]],
+  "multi-line click aliases the model and sends the pick": [/onClicked: cardItem\.inbox\.pickOption\(cardItem\.card, optionRow\.modelData\.id\)/, "onClicked: {\n                            const m = Model;\n                            m.pickOption(cardItem.inbox.keyState, cardItem.card, optionRow.modelData.id, Date.now(), true);\n                            cardItem.inbox.service.send(cardItem.inbox.kind, {});\n                        }", ["gate"]],
+  "multi-line Keys.onPressed sends through bracket access": [/Keys\.onPressed: event => cardItem\.inbox\.keyEvent\(event, \{ kind: "reply"[^\n]*/, "Keys.onPressed: event => {\n                    cardItem.inbox.service[\"send\"](\"pick\".toString(), {});\n                }", ["gate"]],
   "maximumLineCount on the detail": [/text: cardItem\.card\.agent\.pending \? cardItem\.meta\.tag/, "maximumLineCount: 6\n                text: cardItem.card.agent.pending ? cardItem.meta.tag", ["detail"]],
   "elide on the detail": [/text: cardItem\.card\.agent\.pending \? cardItem\.meta\.tag/, "elide: Text.ElideRight\n                text: cardItem.card.agent.pending ? cardItem.meta.tag", ["detail"]],
   "NoWrap on the question": [/wrapMode: Text\.Wrap\n(\s+)text: lines \?/, "wrapMode: Text.NoWrap\n$1text: lines ?", ["detail"]],
