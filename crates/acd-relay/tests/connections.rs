@@ -1,12 +1,13 @@
 //! Connection limits, head deadline and the periodic sweep (spec §4.6, §8).
 //!
-//! The head-deadline tests run on the real clock with a short deadline and
-//! wait for the server to close; `GUARD` only turns a missing deadline
-//! (hyper's own default is 30 s) into a failure instead of a hang. A paused
-//! clock does not work for them: with loopback sockets pending, tokio
-//! advances it before the kernel has delivered the data, which moved hyper's
-//! own timers by whole seconds. The sweep tests pause the clock only while
-//! no socket is waiting, and move the relay's `ManualClock` by hand.
+//! No test here waits on the wall clock. The head-deadline tests drive one
+//! connection over an in-memory pipe (`tokio::io::duplex`) with tokio's
+//! clock paused and moved by `advance`, using the same hyper settings as
+//! `serve_with` (`connection_builder`). The connection-cap test uses real
+//! sockets and waits for events only: a head deadline too long to matter is
+//! configured and a slot is freed by closing a client. The sweep tests pause
+//! the clock only while no socket is waiting, and move the relay's
+//! `ManualClock` by hand.
 
 mod common;
 
@@ -15,36 +16,63 @@ use std::time::Duration;
 
 use acd_relay::ManualClock;
 use acd_relay::limits::Limit;
-use acd_relay::server::{AppState, Options, Rates, SWEEP_INTERVAL, ServeOptions, serve_with};
+use acd_relay::server::{
+    AppState, Options, Rates, SWEEP_INTERVAL, ServeOptions, connection_builder, router, serve_with,
+};
+use axum::extract::ConnectInfo;
 use common::*;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use hyper_util::rt::TokioIo;
+use hyper_util::service::TowerToHyperService;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::TcpStream;
 
 const CAP: usize = 4;
 const HEAD: Duration = Duration::from_millis(250);
-/// Fail instead of hang if the server never closes.
-const GUARD: Duration = Duration::from_secs(10);
 
-fn small_limits() -> ServeOptions {
-    ServeOptions { max_connections: CAP, head_timeout: HEAD, ..ServeOptions::default() }
+/// A relay state with no sweeper, for the in-memory connection tests.
+fn state() -> Arc<AppState> {
+    AppState::new(
+        Options { keys: keys(), allowed_apps: vec![APP.into()], trusted_proxy: None, rates: Rates::default() },
+        Arc::new(FakeSender::default()),
+        Arc::new(ManualClock::new(T0)),
+    )
 }
 
-async fn relay() -> Relay {
-    let s = Arc::new(FakeSender::default());
-    start_serving(Setup::default(), s, Arc::new(ManualClock::new(T0)), small_limits()).await
+/// Serve one connection over a pipe with the relay's own connection
+/// settings and a head deadline of `HEAD`. Returns the client end and the
+/// server task. The task has been polled once when this returns, so its
+/// deadline timer is armed at the current (paused) instant.
+async fn pipe_connection() -> (DuplexStream, tokio::task::JoinHandle<()>) {
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let app = router(state()).layer(axum::Extension(ConnectInfo(peer)));
+    let task = tokio::spawn(async move {
+        let _ = connection_builder(HEAD)
+            .serve_connection(TokioIo::new(server), TowerToHyperService::new(app))
+            .await;
+    });
+    tokio::task::yield_now().await;
+    (client, task)
 }
 
-/// Read until the peer closes; returns what arrived.
-async fn until_closed(mut s: TcpStream) -> Vec<u8> {
-    let mut got = vec![];
-    let mut buf = [0u8; 512];
-    loop {
-        match tokio::time::timeout(GUARD, s.read(&mut buf)).await {
-            Err(_) => panic!("connection still open after {GUARD:?}: no head deadline"),
-            Ok(Ok(0)) | Ok(Err(_)) => return got,
-            Ok(Ok(n)) => got.extend_from_slice(&buf[..n]),
-        }
-    }
+/// The server must still hold the connection one tick before the deadline
+/// and must have closed it at the deadline.
+async fn assert_closed_exactly_at_the_deadline(
+    mut client: DuplexStream,
+    task: tokio::task::JoinHandle<()>,
+) {
+    tokio::time::advance(HEAD - Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    assert!(!task.is_finished(), "closed before the deadline");
+    tokio::time::advance(Duration::from_millis(1)).await;
+    // Not `task.await`: with the clock paused an idle runtime would advance
+    // it to the next timer, hiding a deadline that is too long.
+    tokio::task::yield_now().await;
+    assert!(task.is_finished(), "still open at the deadline");
+    task.await.unwrap();
+    let mut rest = vec![];
+    client.read_to_end(&mut rest).await.unwrap();
+    assert!(!String::from_utf8_lossy(&rest).contains("200 OK"), "no answer to a silent peer");
 }
 
 /// Move virtual time forward with the clock paused, then let it run again.
@@ -57,51 +85,45 @@ async fn virtual_sleep(d: Duration) {
     tokio::time::resume();
 }
 
-async fn later_request_succeeds(r: &Relay) {
-    let ip = r.ip();
-    let (st, b) = r.post("/v1/wake", &serde_json::json!({"v":1,"handle":"x"}), &ip).await;
-    assert_eq!((st, b["error"].as_str()), (400, Some("invalid_handle")));
+#[tokio::test(start_paused = true)]
+async fn an_idle_connection_is_closed_at_the_head_deadline() {
+    let (client, task) = pipe_connection().await;
+    assert_closed_exactly_at_the_deadline(client, task).await;
 }
 
-#[tokio::test]
-async fn idle_connections_beyond_the_cap_are_closed_after_the_deadline() {
-    let r = relay().await;
-    let start = std::time::Instant::now();
-    let mut conns = vec![];
-    for _ in 0..CAP + 3 {
-        conns.push(TcpStream::connect(r.addr).await.unwrap());
-    }
-    let closers: Vec<_> = conns.into_iter().map(|c| tokio::spawn(until_closed(c))).collect();
-    for c in closers {
-        assert!(c.await.unwrap().iter().all(|b| *b != b'2'), "no 200 for a silent connection");
-    }
-    assert!(start.elapsed() >= HEAD, "not closed early: {:?}", start.elapsed());
-    later_request_succeeds(&r).await;
+#[tokio::test(start_paused = true)]
+async fn an_incomplete_request_head_is_closed_at_the_head_deadline() {
+    let (mut client, task) = pipe_connection().await;
+    // No blank line ends this head.
+    client.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n").await.unwrap();
+    assert_closed_exactly_at_the_deadline(client, task).await;
 }
 
-#[tokio::test]
-async fn incomplete_request_heads_are_closed_after_the_deadline() {
-    let r = relay().await;
-    let start = std::time::Instant::now();
-    let mut closers = vec![];
-    for _ in 0..CAP + 3 {
-        let mut c = TcpStream::connect(r.addr).await.unwrap();
-        // No blank line ends this head.
-        c.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n").await.unwrap();
-        closers.push(tokio::spawn(until_closed(c)));
-    }
-    for c in closers {
-        let got = c.await.unwrap();
-        assert!(!String::from_utf8_lossy(&got).contains("200 OK"), "no answer to half a head");
-    }
-    assert!(start.elapsed() >= HEAD, "{:?}", start.elapsed());
-    later_request_succeeds(&r).await;
-}
-
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_keep_alive_connection_that_goes_idle_after_a_response_is_closed() {
-    let r = relay().await;
-    let mut c = TcpStream::connect(r.addr).await.unwrap();
+    let (mut client, task) = pipe_connection().await;
+    client.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+    let mut got = vec![];
+    let mut buf = [0u8; 512];
+    while !String::from_utf8_lossy(&got).contains("\"ok\":true") {
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(n > 0, "closed before the answer");
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert!(String::from_utf8_lossy(&got).starts_with("HTTP/1.1 200"));
+    // The deadline restarts after the response: it is measured from here.
+    tokio::task::yield_now().await;
+    tokio::time::advance(HEAD - Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    assert!(!task.is_finished(), "idle keep-alive closed before the deadline");
+    tokio::time::advance(Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    assert!(task.is_finished(), "idle keep-alive still open at the deadline");
+    task.await.unwrap();
+}
+
+/// One request/response on a keep-alive connection.
+async fn healthz(c: &mut TcpStream) {
     c.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
     let mut got = vec![];
     let mut buf = [0u8; 512];
@@ -110,32 +132,41 @@ async fn a_keep_alive_connection_that_goes_idle_after_a_response_is_closed() {
         assert!(n > 0, "closed before the answer");
         got.extend_from_slice(&buf[..n]);
     }
-    assert!(String::from_utf8_lossy(&got).starts_with("HTTP/1.1 200"));
-    let idle_from = std::time::Instant::now();
-    assert!(until_closed(c).await.is_empty());
-    assert!(idle_from.elapsed() >= HEAD, "{:?}", idle_from.elapsed());
 }
 
-/// Real clock: the only wait is for the server's own head deadline. The
-/// check is an ordering, not a duration: a response to the extra connection
-/// can exist only after the server closed an idle one, so by then at least
-/// one idle socket must already read as closed.
+/// Real sockets, no timers: the head deadline is an hour, so it cannot be
+/// what frees a slot. All `CAP` slots are shown to be held (each connection
+/// has been answered), an extra connection's request is written, and a
+/// round trip on another held connection is awaited so the server has had
+/// every chance to answer the extra one. It must not have. Closing one held
+/// client frees a slot and only then is the extra connection answered.
 #[tokio::test]
 async fn a_connection_over_the_cap_is_served_only_after_a_slot_frees() {
     let s = Arc::new(FakeSender::default());
-    let opts = ServeOptions { max_connections: CAP, head_timeout: HEAD, ..ServeOptions::default() };
+    let opts = ServeOptions {
+        max_connections: CAP,
+        head_timeout: Duration::from_secs(3600),
+        sweep_interval: None,
+    };
     let r = start_serving(Setup::default(), s, Arc::new(ManualClock::new(T0)), opts).await;
-    let mut idle = vec![];
+    let mut held = vec![];
     for _ in 0..CAP {
-        idle.push(TcpStream::connect(r.addr).await.unwrap());
+        let mut c = TcpStream::connect(r.addr).await.unwrap();
+        healthz(&mut c).await; // accepted and answered: its slot is taken
+        held.push(c);
     }
     let mut extra = TcpStream::connect(r.addr).await.unwrap();
     extra.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
-    let got = until_closed(extra).await;
-    assert!(String::from_utf8_lossy(&got).starts_with("HTTP/1.1 200"), "served once a slot freed");
+    healthz(&mut held[1]).await;
     let mut buf = [0u8; 8];
-    let closed = idle.iter().filter(|c| matches!(c.try_read(&mut buf), Ok(0))).count();
-    assert!(closed >= 1, "the extra connection was served while the cap was full");
+    assert!(
+        matches!(extra.try_read(&mut buf), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the extra connection was answered while the cap was full"
+    );
+    drop(held.swap_remove(0)); // a slot frees
+    let mut got = vec![];
+    extra.read_to_end(&mut got).await.unwrap();
+    assert!(String::from_utf8_lossy(&got).starts_with("HTTP/1.1 200"), "served once a slot freed");
 }
 
 /// Small helper: how many entries do the bounded maps hold?

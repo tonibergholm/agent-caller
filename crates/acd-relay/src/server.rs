@@ -245,6 +245,15 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// The per-connection HTTP/1 settings: the head deadline. One place, used by
+/// [`serve_with`] and by tests that drive a connection over an in-memory pipe
+/// under controlled time.
+pub fn connection_builder(head_timeout: Duration) -> http1::Builder {
+    let mut builder = http1::Builder::new();
+    builder.timer(TokioTimer::new()).header_read_timeout(head_timeout);
+    builder
+}
+
 /// Serve one HTTP/1 connection per accept, at most `max_connections` at a
 /// time (`accept` waits for a slot, which lives in the connection's task).
 /// The head deadline is hyper's own `header_read_timeout`: it covers a head
@@ -278,8 +287,7 @@ pub async fn serve_with(
         // Reap finished connections so the set does not grow.
         while connections.try_join_next().is_some() {}
         let service = TowerToHyperService::new(app.clone().layer(axum::Extension(ConnectInfo(peer))));
-        let mut builder = http1::Builder::new();
-        builder.timer(TokioTimer::new()).header_read_timeout(opts.head_timeout);
+        let builder = connection_builder(opts.head_timeout);
         let mut stopped = stopped.clone();
         connections.spawn(async move {
             let _slot = slot;

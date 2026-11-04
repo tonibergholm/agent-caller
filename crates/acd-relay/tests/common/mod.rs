@@ -265,13 +265,35 @@ pub async fn stalled_oauth() -> (FakeFcm, tokio::task::JoinHandle<()>) {
     let fake = fake_fcm().await;
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
+    let st = fake.st.clone();
     let held = tokio::spawn(async move {
         let mut open = vec![];
         loop {
             if let Ok((s, _)) = l.accept().await {
+                st.token_requests.fetch_add(1, Ordering::SeqCst);
                 open.push(s);
             }
         }
     });
     (FakeFcm { addr, st: fake.st.clone() }, held)
+}
+
+/// A clock that follows tokio time (paused or not): `start` plus the time
+/// since this clock was made. The relay's own clocks and its tokio timers
+/// then move together, as they do in production.
+pub struct TokioClock {
+    start: u64,
+    since: tokio::time::Instant,
+}
+
+impl TokioClock {
+    pub fn new(start: u64) -> TokioClock {
+        TokioClock { start, since: tokio::time::Instant::now() }
+    }
+}
+
+impl Clock for TokioClock {
+    fn now_secs(&self) -> u64 {
+        self.start + self.since.elapsed().as_secs()
+    }
 }

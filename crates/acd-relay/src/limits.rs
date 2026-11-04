@@ -53,8 +53,11 @@ impl Counter {
         true
     }
 
+    /// A counter is kept while EITHER window is live: the minute window can
+    /// outlast the hour window (it may start in the hour's last minute).
     fn live(&self, now: u64) -> bool {
-        self.hour_n > 0 && now < self.hour_start + 3600
+        (self.hour_n > 0 && now < self.hour_start + 3600)
+            || (self.min_n > 0 && now < self.min_start + 60)
     }
 }
 
@@ -219,5 +222,31 @@ mod tests {
         // After the windows end, sweeping makes room again.
         assert!(l.check(k(300), 10 + 3601));
         assert!(l.len() <= 2);
+    }
+
+    #[test]
+    fn a_sweep_keeps_a_counter_whose_minute_window_outlives_the_hour_window() {
+        let limit = Limit { per_minute: 10, per_hour: 1000 };
+        let l = Limiter::new(8, limit);
+        assert!(l.check(k(1), 100)); // hour window 100..3700
+        for _ in 0..10 {
+            assert!(l.check(k(1), 3690)); // minute window 3690..3750
+        }
+        l.sweep(3700); // hour window over, minute window live
+        assert_eq!(l.len(), 1, "counter with a live minute window survives");
+        assert!(!l.check(k(1), 3700), "budget not reset by the sweep");
+        assert!(l.check(k(1), 3750), "minute window ends at 3750");
+    }
+
+    #[test]
+    fn the_full_map_sweep_keeps_a_counter_whose_minute_window_is_live() {
+        let l = Limiter::new(1, Limit { per_minute: 10, per_hour: 1000 });
+        assert!(l.check(k(1), 100));
+        for _ in 0..10 {
+            assert!(l.check(k(1), 3690));
+        }
+        // A new key at 3700 finds the map full and sweeps; key 1 must stay.
+        l.check(k(2), 3700);
+        assert!(!l.check(k(1), 3701), "key 1 still limited");
     }
 }

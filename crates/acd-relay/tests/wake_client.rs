@@ -244,20 +244,25 @@ async fn redirects_are_not_followed() {
     let r = rig().await;
     let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let other_addr = other.local_addr().unwrap();
-    let conns = Arc::new(AtomicUsize::new(0));
-    let c2 = conns.clone();
+    // Every accepted connection's peer address, in accept order.
+    let (seen, mut accepted) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         loop {
-            if other.accept().await.is_ok() {
-                c2.fetch_add(1, Ordering::SeqCst);
+            if let Ok((s, peer)) = other.accept().await {
+                let _ = seen.send(peer);
+                std::mem::forget(s);
             }
         }
     });
     r.fake.replies.lock().unwrap().push_back((307, vec![], Some(format!("http://{other_addr}/v1/wake"))));
     let mut st = WakeState::default();
     assert_eq!(r.sender.wake("H", &mut st).await, Outcome::Failed);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(conns.load(Ordering::SeqCst), 0, "the redirect target was contacted");
+    // `wake` has returned, so a followed redirect has already connected and
+    // sits in the listener's queue ahead of this probe (the queue is FIFO).
+    // The probe is the first connection the target sees, or the test fails.
+    let probe = tokio::net::TcpStream::connect(other_addr).await.unwrap();
+    let first = accepted.recv().await.unwrap();
+    assert_eq!(first, probe.local_addr().unwrap(), "the redirect target was contacted");
     assert_eq!(r.hits(), 1);
 }
 

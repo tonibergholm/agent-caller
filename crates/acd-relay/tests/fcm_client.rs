@@ -180,7 +180,7 @@ async fn failed_token_refresh_is_not_retried_until_the_backoff_ends() {
 #[tokio::test(start_paused = true)]
 async fn concurrent_sends_against_a_stalled_oauth_endpoint_all_end_by_the_deadline() {
     let (fake, _held) = stalled_oauth().await;
-    let clock = Arc::new(ManualClock::new(T0));
+    let clock = Arc::new(TokioClock::new(T0));
     let c = fcm_client_with_http_timeout(&fake, clock.clone(), std::time::Duration::from_secs(120));
     let start = tokio::time::Instant::now();
     let tasks: Vec<_> = (0..64)
@@ -195,8 +195,19 @@ async fn concurrent_sends_against_a_stalled_oauth_endpoint_all_end_by_the_deadli
     let took = start.elapsed();
     assert!(took <= SEND_DEADLINE, "{took:?}");
     assert!(took >= SEND_DEADLINE, "the deadline, not an early failure: {took:?}");
-    // The abandoned refresh is remembered: the next send fails at once.
+    // The abandoned refresh is remembered from the moment it was cancelled
+    // (the deadline), not from when it started: sends inside the backoff
+    // fail at once and start no refresh.
+    let asked = fake.st.token_requests.load(Ordering::SeqCst);
+    assert_eq!(asked, 1, "one refresh for all 64 sends");
     let again = tokio::time::Instant::now();
     assert_eq!(c.wake(&addr()).await, Err(SendError::Unavailable));
     assert_eq!(again.elapsed(), std::time::Duration::ZERO);
+    tokio::time::advance(std::time::Duration::from_secs(REFRESH_BACKOFF_SECS - 1)).await;
+    assert_eq!(c.wake(&addr()).await, Err(SendError::Unavailable));
+    assert_eq!(fake.st.token_requests.load(Ordering::SeqCst), asked, "still inside the backoff");
+    // Once the backoff has passed, the next send asks again.
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert_eq!(c.wake(&addr()).await, Err(SendError::Unavailable));
+    assert_eq!(fake.st.token_requests.load(Ordering::SeqCst), asked + 1);
 }

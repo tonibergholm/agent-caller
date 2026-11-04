@@ -213,14 +213,17 @@ pub const REFRESH_BACKOFF_SECS: u64 = 5;
 /// miss.
 struct RefreshGuard<'a> {
     state: &'a mut TokenState,
-    until: u64,
+    clock: &'a dyn Clock,
     done: bool,
 }
 
 impl Drop for RefreshGuard<'_> {
     fn drop(&mut self) {
         if !self.done {
-            self.state.retry_after = self.until;
+            // From the moment of failure or cancellation, not from the start
+            // of the refresh: a refresh that stalled to the deadline must
+            // still hold off the next one for the full backoff (spec §5.7).
+            self.state.retry_after = self.clock.now_secs() + REFRESH_BACKOFF_SECS;
         }
     }
 }
@@ -261,7 +264,7 @@ impl FcmClient {
         if now < g.retry_after {
             return Err(SendError::Unavailable);
         }
-        let mut guard = RefreshGuard { until: now + REFRESH_BACKOFF_SECS, state: &mut g, done: false };
+        let mut guard = RefreshGuard { state: &mut g, clock: &*self.clock, done: false };
         let jwt = self.account.assertion(now).map_err(|_| {
             tracing::error!(class = "oauth", "cannot sign the assertion");
             SendError::Unavailable
