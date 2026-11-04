@@ -291,19 +291,23 @@ needs a decision or a small follow-up.
   and edge whitespace. Characters such as U+034F pass the escaper unchanged,
   so "whole command" is not a universal visible-character encoding.
 - **Restart notifications (#81).** A request first seen in a reconnect
-  snapshot stays silent, as before. The client's notified set is unbounded
-  (security review finding 5).
+  snapshot stays silent, as before. The client's notified set is bounded
+  (256 keys) and notifications are rate limited per machine (security review
+  finding 5; see the findings entry below).
 - **Security review findings still open** (`docs/research/2026-11-03-security-review-core.md`
   and `-local.md`): core 3 (16 MiB frames, unbounded agent state), 7 and 8
   (pairing host and `agent.send` character rules); local F2 (T3 token goes
   to whoever holds the loopback port), F3 (hook listeners have no read
   timeout), F4 (herdr socket discovery checks no owner), F5 (service files
   from unescaped paths). Core 1, 2, 4, 5 and 6 and local F1 are fixed.
-  Core 4 logs each accepted and rejected `hello` (peer address, client id,
-  name, version, reason; never a token) at 10 lines per 10 s per kind. Lines
+  Core 4 logs each accepted and rejected `hello` at 10 lines per 10 s per
+  kind: peer address, protocol, outcome and reason. Peer free text is never
+  logged; client id and name appear only as byte length plus an 8-hex SHA-256
+  prefix, so a client that names itself after its token leaks nothing. Lines
   over the limit are counted into `suppressed` on the next line. TLS
   handshake failures and pre-auth slot refusals are not logged. Core 5 bounds the client's notified set
-  (256) and limits notifications to 5 per 10 s per machine. Left open: it
+  (256) and limits notifications to 5 per 10 s per machine; a removed
+  machine's rate-limit entry is dropped. Left open: it
   still notifies for a request whose agent is not in the snapshot, because
   the daemon sends `request.opened` before the agent update (tested in
   `hook_only_agents_show_with_a_request_and_notify_as_before`); the rate

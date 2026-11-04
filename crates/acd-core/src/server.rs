@@ -9,6 +9,7 @@ use axum::http::{HeaderMap, StatusCode, header::ORIGIN};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
@@ -82,10 +83,14 @@ impl LogLimiter {
     /// `Some((suppressed_since_last_line, total_events))` when the line may
     /// be written, `None` when it is held back.
     fn pass(&self) -> Option<(u64, u64)> {
+        self.pass_at(Instant::now())
+    }
+    /// `pass` with the clock passed in, so a test controls the window.
+    fn pass_at(&self, now: Instant) -> Option<(u64, u64)> {
         let mut s = self.state.lock().unwrap();
         s.total += 1;
-        if s.window_start.elapsed() >= Self::WINDOW {
-            s.window_start = Instant::now();
+        if now.saturating_duration_since(s.window_start) >= Self::WINDOW {
+            s.window_start = now;
             s.in_window = 0;
         }
         if s.in_window >= Self::MAX {
@@ -97,10 +102,17 @@ impl LogLimiter {
     }
 }
 
-/// Peer-chosen text for a log line: cut to `max` characters, and the caller
-/// prints it with `{:?}` so control characters are escaped.
-fn clip(s: &str, max: usize) -> String {
-    s.chars().take(max).collect()
+/// A peer-chosen string is never logged, because it may be the token itself.
+/// Its log form is the byte length and the first 8 hex characters of its
+/// SHA-256, enough to tell clients apart and nothing to read back.
+fn log_tag(s: &str) -> (usize, String) {
+    use std::fmt::Write;
+    let digest = Sha256::digest(s.as_bytes());
+    let mut hex = String::with_capacity(8);
+    for b in &digest[..4] {
+        let _ = write!(hex, "{b:02x}");
+    }
+    (s.len(), hex)
 }
 
 #[derive(Clone)]
@@ -309,8 +321,12 @@ async fn session(
         admit.authenticated();
     }
     if let Some((suppressed, total)) = st.accept_log.pass() {
-        tracing::info!(target: "acd::auth", %peer, client_id = ?clip(&client.id, 64),
-            client_name = ?clip(&client.name, 64), client_version = ?clip(&client.version, 32),
+        let (id_len, id_sha) = log_tag(&client.id);
+        let (name_len, name_sha) = log_tag(&client.name);
+        tracing::info!(target: "acd::auth", %peer, protocol = %protocol,
+            client_id_len = id_len, client_id_sha = %id_sha,
+            client_name_len = name_len, client_name_sha = %name_sha,
+            client_version_len = client.version.len(),
             accepted_total = total, suppressed, "hello accepted");
     }
 
@@ -636,10 +652,14 @@ mod log_limit_tests {
     #[test]
     fn a_flood_passes_a_bounded_number_of_lines_and_counts_the_rest() {
         let l = LogLimiter::new();
-        let passed = (0..1000).filter(|_| l.pass().is_some()).count();
+        let t0 = l.state.lock().unwrap().window_start;
+        // The clock stands still inside the window: no real time involved.
+        let passed = (0..1000).filter(|_| l.pass_at(t0).is_some()).count();
         assert_eq!(passed, LogLimiter::MAX as usize);
+        // Just short of the window: still held back.
+        let almost = t0 + LogLimiter::WINDOW - Duration::from_millis(1);
+        assert_eq!(l.pass_at(almost), None);
         // A new window lets lines through again and reports what was held back.
-        l.state.lock().unwrap().window_start = Instant::now() - LogLimiter::WINDOW;
-        assert_eq!(l.pass(), Some((990, 1001)));
+        assert_eq!(l.pass_at(t0 + LogLimiter::WINDOW), Some((991, 1002)));
     }
 }

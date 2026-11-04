@@ -136,6 +136,11 @@ struct NotifyGate {
     recent: HashMap<String, VecDeque<Instant>>,
 }
 impl NotifyGate {
+    /// Drop the rate-limit state of a removed machine, so the map holds only
+    /// configured machines.
+    fn forget_machine(&mut self, machine_key: &str) {
+        self.recent.remove(machine_key);
+    }
     fn admit(
         &mut self,
         machine_key: &str,
@@ -197,6 +202,44 @@ mod tests {
         // Another machine has its own budget, and the first recovers later.
         assert!(g.admit("m2", "mid2".into(), "r1".into(), at(1), now));
         assert!(g.admit("m1", "mid".into(), "late".into(), at(1), now + NOTIFY_RATE_WINDOW));
+    }
+
+    #[test]
+    fn removing_a_machine_drops_its_rate_limit_entry() {
+        use crate::settings::{EndpointConfig, MachineEntry, MemorySecrets, Settings, DEFAULT_HOTKEY};
+        use super::{Inbox, InboxOptions};
+        let machine = |key: &str| MachineEntry {
+            key: key.into(),
+            name: key.into(),
+            endpoint: EndpointConfig::Tcp { host: "127.0.0.1".into(), port: 1 },
+        };
+        let settings = Settings {
+            client_id: "00000000-0000-4000-8000-000000000001".into(),
+            hotkey: DEFAULT_HOTKEY.into(),
+            hotkey_migrated: true,
+            show_idle: false,
+            show_subagents: false,
+            show_hook_only: false,
+            machines: vec![machine("m1"), machine("m2")],
+        };
+        let ib = Inbox::new(
+            settings,
+            std::sync::Arc::new(MemorySecrets::default()),
+            InboxOptions {
+                timing: Default::default(),
+                settings_path: None,
+                client_name: "t".into(),
+                client_version: "0".into(),
+            },
+        );
+        let now = Instant::now();
+        for k in ["m1", "m2"] {
+            assert!(ib.inner.lock().unwrap().notified.admit(k, "mid".into(), format!("r-{k}"), at(1), now));
+        }
+        ib.remove_machine("m2").unwrap();
+        let inner = ib.inner.lock().unwrap();
+        assert!(inner.notified.recent.contains_key("m1"));
+        assert!(!inner.notified.recent.contains_key("m2"), "removed machine keeps no state");
     }
 
     #[test]
@@ -586,6 +629,7 @@ impl Inbox {
             }
         }
         inner.machines.retain(|m| m.entry.key != key);
+        inner.notified.forget_machine(key);
         for action in inner.actions.end_machine(key) {
             self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
             inner.notices.insert(
