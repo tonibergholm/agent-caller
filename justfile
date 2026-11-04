@@ -63,3 +63,8 @@ test-scripts:
 # committed corpus. Not part of CI.
 fuzz-smoke:
     cd fuzz && for t in $(cargo +nightly fuzz list); do mkdir -p "target/smoke/$t"; extra=""; [ "$t" = herdr_screen ] && extra="../tests/fixtures/herdr"; cargo +nightly fuzz run "$t" "target/smoke/$t" "corpus/$t" $extra -- -max_total_time=30 -rss_limit_mb=4096 || exit 1; done
+
+# Type-check the portable client crates for Windows and Android, as the CI
+# portability job does (scripts/portability-check.sh). Needs rustup; no NDK.
+portability-check:
+    scripts/portability-check.sh
