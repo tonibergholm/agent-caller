@@ -18,6 +18,27 @@ use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
+/// The host of `uri` without the square brackets of an IPv6 literal.
+pub(crate) fn bare_host(uri: &Uri) -> Result<String, HttpError> {
+    let host = uri.host().ok_or(HttpError::BadUrl)?;
+    let bare = match host.strip_prefix('[') {
+        Some(inner) => inner.strip_suffix(']').ok_or(HttpError::BadUrl)?,
+        None => host,
+    };
+    if bare.is_empty() {
+        return Err(HttpError::BadUrl);
+    }
+    Ok(bare.to_string())
+}
+
+/// An IP literal is verified as an IP address (no SNI); a name as a DNS name.
+pub(crate) fn tls_server_name(host: &str) -> Result<ServerName<'static>, HttpError> {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => Ok(ServerName::IpAddress(ip.into())),
+        Err(_) => ServerName::try_from(host.to_string()).map_err(|_| HttpError::BadUrl),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum HttpError {
     #[error("bad url")]
@@ -47,7 +68,12 @@ pub struct HttpClient {
     allow_plain: bool,
     timeout: Duration,
     max_body: usize,
+    /// Tests only: where a connection comes from instead of TCP.
+    connector: Option<Connector>,
 }
+
+/// Makes the client end of an in-memory connection (tests).
+pub type Connector = Arc<dyn Fn() -> tokio::io::DuplexStream + Send + Sync>;
 
 impl HttpClient {
     /// HTTPS only, trusting exactly the certificates in `ca_pem`.
@@ -68,13 +94,19 @@ impl HttpClient {
             .map_err(|_| HttpError::Tls)?
             .with_root_certificates(roots)
             .with_no_client_auth();
-        Ok(HttpClient { tls: Some(Arc::new(cfg)), allow_plain: false, timeout, max_body })
+        Ok(HttpClient { tls: Some(Arc::new(cfg)), allow_plain: false, timeout, max_body, connector: None })
     }
 
     /// Plain `http://` only. For tests against local fakes; production code
     /// uses [`HttpClient::https`].
     pub fn plain_for_tests(timeout: Duration, max_body: usize) -> HttpClient {
-        HttpClient { tls: None, allow_plain: true, timeout, max_body }
+        HttpClient { tls: None, allow_plain: true, timeout, max_body, connector: None }
+    }
+
+    /// Plain `http://` over connections `connect` makes in memory, so a test
+    /// needs no sockets and no real I/O wake-ups under paused time. Tests only.
+    pub fn in_memory_for_tests(timeout: Duration, max_body: usize, connect: Connector) -> HttpClient {
+        HttpClient { tls: None, allow_plain: true, timeout, max_body, connector: Some(connect) }
     }
 
     pub async fn post(
@@ -97,7 +129,10 @@ impl HttpClient {
         body: Vec<u8>,
     ) -> Result<HttpResponse, HttpError> {
         let uri: Uri = url.parse().map_err(|_| HttpError::BadUrl)?;
-        let host = uri.host().ok_or(HttpError::BadUrl)?.to_string();
+        // `Uri::host()` keeps the brackets of an IPv6 literal. Connecting and
+        // the TLS name need the bare address; the Host header keeps the
+        // authority as written.
+        let host = bare_host(&uri)?;
         let https = match uri.scheme_str() {
             Some("https") => true,
             Some("http") => false,
@@ -107,22 +142,22 @@ impl HttpClient {
             return Err(HttpError::BadUrl);
         }
         let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
+        if let Some(connect) = &self.connector {
+            if https || !self.allow_plain {
+                return Err(HttpError::PlainNotAllowed);
+            }
+            let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+            let req = Self::request(&uri, &host, path, content_type, headers, body)?;
+            return self.exchange(TokioIo::new(connect()), req).await;
+        }
         let tcp = TcpStream::connect((host.as_str(), port))
             .await
             .map_err(|_| HttpError::Connect)?;
         let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-        let mut req = Request::post(path)
-            .header("host", uri.authority().map(|a| a.as_str()).unwrap_or(&host))
-            .header("content-type", content_type)
-            .header("content-length", body.len())
-            .header("connection", "close");
-        for (k, v) in headers {
-            req = req.header(*k, *v);
-        }
-        let req = req.body(Full::new(Bytes::from(body))).map_err(|_| HttpError::BadUrl)?;
+        let req = Self::request(&uri, &host, path, content_type, headers, body)?;
         if https {
             let cfg = self.tls.clone().ok_or(HttpError::Tls)?;
-            let name = ServerName::try_from(host.clone()).map_err(|_| HttpError::BadUrl)?;
+            let name = tls_server_name(&host)?;
             let tls = TlsConnector::from(cfg)
                 .connect(name, tcp)
                 .await
@@ -134,6 +169,25 @@ impl HttpClient {
             }
             self.exchange(TokioIo::new(tcp), req).await
         }
+    }
+
+    fn request(
+        uri: &Uri,
+        host: &str,
+        path: &str,
+        content_type: &str,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> Result<Request<Full<Bytes>>, HttpError> {
+        let mut req = Request::post(path)
+            .header("host", uri.authority().map(|a| a.as_str()).unwrap_or(host))
+            .header("content-type", content_type)
+            .header("content-length", body.len())
+            .header("connection", "close");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        req.body(Full::new(Bytes::from(body))).map_err(|_| HttpError::BadUrl)
     }
 
     async fn exchange<T>(&self, io: T, req: Request<Full<Bytes>>) -> Result<HttpResponse, HttpError>
@@ -170,5 +224,41 @@ impl HttpClient {
         };
         task.abort();
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn split(url: &str) -> (String, u16, String) {
+        let uri: Uri = url.parse().unwrap();
+        let https = uri.scheme_str() == Some("https");
+        (
+            bare_host(&uri).unwrap(),
+            uri.port_u16().unwrap_or(if https { 443 } else { 80 }),
+            uri.authority().unwrap().as_str().to_string(),
+        )
+    }
+
+    #[test]
+    fn an_ipv6_literal_is_unbracketed_for_connect_and_bracketed_in_the_host_header() {
+        assert_eq!(split("https://[fd7a:115c:a1e0::1]/v1/wake"), ("fd7a:115c:a1e0::1".into(), 443, "[fd7a:115c:a1e0::1]".into()));
+        assert_eq!(split("https://[fd7a:115c:a1e0::1]:8443/v1/wake"), ("fd7a:115c:a1e0::1".into(), 8443, "[fd7a:115c:a1e0::1]:8443".into()));
+    }
+
+    #[test]
+    fn ipv4_and_names_are_unchanged() {
+        assert_eq!(split("https://100.64.0.1:9/x"), ("100.64.0.1".into(), 9, "100.64.0.1:9".into()));
+        assert_eq!(split("https://relay.example.com/x"), ("relay.example.com".into(), 443, "relay.example.com".into()));
+    }
+
+    #[test]
+    fn tls_names_are_ip_addresses_for_literals_and_dns_names_otherwise() {
+        assert!(matches!(tls_server_name("fd7a:115c:a1e0::1"), Ok(ServerName::IpAddress(_))));
+        assert!(matches!(tls_server_name("100.64.0.1"), Ok(ServerName::IpAddress(_))));
+        assert!(matches!(tls_server_name("relay.example.com"), Ok(ServerName::DnsName(_))));
+        // The bracketed form is what the old code passed; it must not be a valid name.
+        assert!(tls_server_name("[fd7a:115c:a1e0::1]").is_err());
     }
 }

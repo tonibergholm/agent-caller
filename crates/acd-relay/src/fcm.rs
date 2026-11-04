@@ -237,6 +237,8 @@ pub struct FcmClient {
     project_id: String,
     clock: Arc<dyn Clock>,
     token: tokio::sync::Mutex<TokenState>,
+    /// Token requests started (counted before the request is sent).
+    refreshes: std::sync::atomic::AtomicU64,
 }
 
 impl FcmClient {
@@ -247,7 +249,14 @@ impl FcmClient {
         project_id: String,
         clock: Arc<dyn Clock>,
     ) -> FcmClient {
-        FcmClient { http, account, endpoint, project_id, clock, token: tokio::sync::Mutex::new(TokenState::default()) }
+        FcmClient { http, account, endpoint, project_id, clock, token: tokio::sync::Mutex::new(TokenState::default()),
+            refreshes: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// How many token refreshes this client has started.
+    pub fn refresh_attempts(&self) -> u64 {
+        self.refreshes.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// A cached token, refreshed under the lock (single flight) when it is
@@ -272,6 +281,7 @@ impl FcmClient {
         let form = format!(
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={jwt}"
         );
+        self.refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let res = self
             .http
             .post(&self.account.token_uri, "application/x-www-form-urlencoded", &[], form.into_bytes())
