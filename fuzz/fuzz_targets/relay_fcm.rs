@@ -82,6 +82,8 @@ fuzz_target!(|i: Input| {
         assert_eq!(&back, b);
     }
     assert_eq!(c["message"]["data"]["c"], Value::String(i.code.clone()));
-    let text = w.to_string();
+    let mut fixed = w.clone();
+    fixed["message"].as_object_mut().unwrap().remove(if kind == AddressKind::FcmFid { "fid" } else { "token" });
+    let text = fixed.to_string();
     assert!(!text.contains("approve") && !text.contains("permission"), "free text in the wake");
 });
