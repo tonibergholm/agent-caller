@@ -46,7 +46,8 @@ fn a_pin_of_the_right_length_but_the_wrong_alphabet_is_refused() {
 fn pairing_debug_hides_the_token_only() {
     let p = Pairing { host: "devbox.example".into(), port: 47800, pin: PIN.into(), token: TOKEN.into() };
     let s = format!("{p:?}");
-    assert!(!s.contains(TOKEN), "{s}");
+    // No message: a failing assert must not print the token.
+    assert!(!s.contains(TOKEN));
     assert!(s.contains("devbox.example") && s.contains("47800") && s.contains("REDACTED"), "{s}");
 }
 
@@ -60,7 +61,8 @@ fn client_message_debug_never_prints_tokens_or_text() {
         resume: None,
     };
     let s = format!("{hello:?}");
-    assert!(!s.contains("SECRET-TOKEN-VALUE") && s.contains("Hello") && s.contains("18"), "{s}");
+    assert!(!s.contains("SECRET-TOKEN-VALUE"));
+    assert!(s.contains("Hello") && s.contains("18"), "{s}");
     let answer = ClientMessage::RequestAnswer {
         id: "c1".into(),
         request_id: "r1".into(),
