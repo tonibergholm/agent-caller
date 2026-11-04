@@ -70,7 +70,7 @@ static SECRET_INDICATORS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ]
 });
 static BEARER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)bearer[ \t]+[A-Za-z0-9._~+/=-]+").unwrap());
 static KNOWN_PREFIX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bsk-[A-Za-z0-9_-]{6,}").unwrap());
 
@@ -134,6 +134,21 @@ pub(crate) fn is_format_character(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Found by the `text_rules` fuzz target. `\s+` after `bearer` crossed a
+    /// line end, so a line ending in the word swallowed the next line's
+    /// `Bearer` keyword and left the token after it in the log.
+    #[test]
+    fn a_bearer_keyword_does_not_swallow_the_next_lines_bearer_token() {
+        let crash = include_bytes!("../../../tests/fixtures/fuzz/text_rules-bearer-newline.crash");
+        let s = String::from_utf8_lossy(&crash[1..]);
+        let noise: String = s.chars().filter(|c| *c != '\n').take(40).collect();
+        let secret = "AbBhorizationabBearer";
+        let out = redact_log(&format!("{noise}\nBearer {secret}"));
+        assert!(!out.contains(secret), "{out:?}");
+        let out = redact_log("proxy scheme is bearer\nBearer s3cr3tvalue1");
+        assert!(!out.contains("s3cr3tvalue1"), "{out:?}");
+    }
 
     #[test]
     fn redact_log_masks_any_secret_like_json_key() {

@@ -1,0 +1,44 @@
+{
+ "hooks": {
+  "UserPromptSubmit": [
+   {
+    "hooks": [
+     {
+      "type": "http",
+      "url": "http://127.0.0.1:47931/hook/claude/UserPromptSubmit",
+      "timeout": 1,
+      "headers": {
+       "X-Acd-Token": "$ACP3_TOKEN",
+       "X-Herdr-Pane": "$HERDR_PANE_ID",
+       "X-Not-Allowed": "$ACP3_NOTALLOWED"
+      },
+      "allowedEnvVars": [
+       "ACP3_TOKEN",
+       "HERDR_PANE_ID"
+      ]
+     }
+    ]
+   }
+  ],
+  "PermissionRequest": [
+   {
+    "hooks": [
+     {
+      "type": "http",
+      "url": "http://127.0.0.1:47931/hook/claude/PermissionRequest?h=main",
+      "timeout": 30,
+      "headers": {
+       "X-Acd-Token": "$ACP3_TOKEN",
+       "X-Herdr-Pane": "$HERDR_PANE_ID",
+       "X-Not-Allowed": "$ACP3_NOTALLOWED"
+      },
+      "allowedEnvVars": [
+       "ACP3_TOKEN",
+       "HERDR_PANE_ID"
+      ]
+     }
+    ]
+   }
+  ]
+ }
+}

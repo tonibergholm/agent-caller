@@ -294,6 +294,14 @@ pub struct Inbox {
     /// Test hook: while set, `rebuild` publishes nothing.
     rebuild_held: AtomicBool,
     wake: Notify,
+    /// Test barrier: requests made, and the request each finished timer pass had seen when it began.
+    #[cfg(feature = "testing")]
+    sync_req: AtomicU64,
+    #[cfg(feature = "testing")]
+    sync_ack: watch::Sender<u64>,
+    /// Test: countdowns that ended and were handed to `fire_due`.
+    #[cfg(feature = "testing")]
+    fired: AtomicU64,
     next_instance: AtomicU64,
     started: std::sync::atomic::AtomicBool,
 }
@@ -360,6 +368,12 @@ impl Inbox {
             stamped_tx,
             rebuild_held: AtomicBool::new(false),
             wake: Notify::new(),
+            #[cfg(feature = "testing")]
+            sync_req: AtomicU64::new(0),
+            #[cfg(feature = "testing")]
+            sync_ack: watch::channel(0).0,
+            #[cfg(feature = "testing")]
+            fired: AtomicU64::new(0),
             next_instance: AtomicU64::new(1),
             started: std::sync::atomic::AtomicBool::new(false),
         })
@@ -414,6 +428,45 @@ impl Inbox {
     pub fn expire_countdowns_for_test(&self) {
         self.inner.lock().unwrap().actions.expire_all(Instant::now());
         self.wake();
+    }
+    /// Test hook: end every notice now (as if `notice_ttl` had passed).
+    #[cfg(feature = "testing")]
+    pub fn expire_notices_for_test(&self) {
+        let now = Instant::now();
+        for (_, expires) in self.inner.lock().unwrap().notices.values_mut() {
+            *expires = now;
+        }
+        self.wake();
+    }
+    /// Test: how many countdowns have ended so far (each is then sent or
+    /// ends `NotSent`). Read it around `sync_for_test` to prove none ended.
+    #[cfg(feature = "testing")]
+    pub fn fired_for_test(&self) -> u64 {
+        self.fired.load(Ordering::SeqCst)
+    }
+    /// Test barrier: returns once a timer pass that began after this call
+    /// (fire, rebuild) has finished. A wake or expiry sent earlier is
+    /// therefore fully processed, so an absence check after it cannot pass
+    /// merely because the task was slow.
+    #[cfg(feature = "testing")]
+    pub async fn sync_for_test(&self) {
+        let req = self.sync_req.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut ack = self.sync_ack.subscribe();
+        self.wake();
+        loop {
+            if *ack.borrow_and_update() >= req {
+                return;
+            }
+            ack.changed().await.expect("the inbox is alive");
+        }
+    }
+    /// Test: the machine's state channel. It closes when the machine's
+    /// connection task has ended (all its senders are dropped), which is the
+    /// completion evidence for "cancelled, will not retry or reconnect".
+    #[cfg(feature = "testing")]
+    pub fn machine_state_for_test(&self, key: &str) -> Option<watch::Receiver<crate::conn::MachineState>> {
+        let inner = self.inner.lock().unwrap();
+        Some(inner.machines.iter().find(|m| m.entry.key == key)?.handle.as_ref()?.state())
     }
     /// Test hook: callers blocked on the edit lock right now.
     #[cfg(feature = "testing")]
@@ -834,8 +887,12 @@ impl Inbox {
         let this = self.clone();
         tokio::spawn(async move {
             loop {
+                #[cfg(feature = "testing")]
+                let seen = this.sync_req.load(Ordering::SeqCst);
                 this.fire_due().await;
                 this.rebuild().await;
+                #[cfg(feature = "testing")]
+                this.sync_ack.send_replace(seen);
                 let due = {
                     let inner = this.inner.lock().unwrap();
                     inner
@@ -930,6 +987,8 @@ impl Inbox {
         let due = { self.inner.lock().unwrap().actions.due(Instant::now()) };
         for action in due {
             // The countdown ended: `cancel(id)` can no longer stop it.
+            #[cfg(feature = "testing")]
+            self.fired.fetch_add(1, Ordering::SeqCst);
             self.emit(&action, ActionOutcome::Fired);
             let data = {
                 let inner = self.inner.lock().unwrap();

@@ -11,9 +11,10 @@ use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
+use crate::idem::Origin;
 use crate::engine::{Core, MAX_ID_BYTES, RING_CAPACITY};
 
 pub const CLOSE_BAD_PROTOCOL: u16 = 4400;
@@ -153,7 +154,7 @@ struct AppState {
     opts: ServerOptions,
     /// Pre-auth slots for network peers. Each source address is also capped in
     /// `tls::Admission`, so one peer cannot hold more than a few of them.
-    preauth: Arc<Semaphore>,
+    preauth: Arc<SourcePool>,
     /// Pre-auth slots for the Unix socket, apart from the network pool so
     /// that no remote peer can starve the local client.
     local_preauth: Arc<Semaphore>,
@@ -167,7 +168,7 @@ struct AppState {
 /// The acd/1 WebSocket server. Serve clones of one router on every listener
 /// so the limits apply daemon-wide.
 pub fn router(core: Arc<Core>, auth: Arc<Auth>, opts: ServerOptions) -> Router {
-    let preauth = Arc::new(Semaphore::new(opts.max_preauth));
+    let preauth = Arc::new(SourcePool::new(opts.max_preauth));
     let local_preauth = Arc::new(Semaphore::new(opts.max_preauth));
     let inflight_total = Arc::new(Semaphore::new(opts.max_inflight_total));
     Router::new().route("/", get(upgrade)).with_state(AppState {
@@ -199,18 +200,84 @@ async fn upgrade(
     }
     // A connection without admission info did not come through the TLS
     // listener: it is on the Unix socket.
-    let pool = if admit.is_some() {
-        &st.preauth
-    } else {
-        &st.local_preauth
-    };
-    let Ok(permit) = pool.clone().try_acquire_owned() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    let permit: Box<dyn Send> = match &admit {
+        Some(a) => {
+            let Some(source) = a.peer().map(|p| p.ip()) else {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
+            match st.preauth.try_acquire(source) {
+                Some(slot) => Box::new(slot),
+                None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            }
+        }
+        None => match st.local_preauth.clone().try_acquire_owned() {
+            Ok(permit) => Box::new(permit),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        },
     };
     let max = st.opts.max_frame;
     ws.max_message_size(max)
         .max_frame_size(max)
         .on_upgrade(move |socket| session(st, socket, permit, admit.map(|ConnectInfo(a)| a)))
+}
+
+/// Slots of the post-upgrade pre-auth pool that only a source with no
+/// connection waiting for its hello may take. Without them, a few sources
+/// holding their per-source share each could take the whole pool.
+const PREAUTH_RESERVE: usize = 2;
+
+/// The post-upgrade pre-auth pool for network peers. Like `tls::Admission`
+/// it remembers each source: a source holds at most
+/// `tls::MAX_UNAUTHENTICATED_PER_SOURCE` slots, and the last
+/// `PREAUTH_RESERVE` slots go only to sources holding none.
+struct SourcePool {
+    capacity: usize,
+    held: Mutex<std::collections::HashMap<std::net::IpAddr, usize>>,
+}
+
+struct SourceSlot {
+    pool: Arc<SourcePool>,
+    source: std::net::IpAddr,
+}
+
+impl SourcePool {
+    fn new(capacity: usize) -> Self {
+        Self { capacity, held: Mutex::default() }
+    }
+
+    fn try_acquire(self: &Arc<Self>, source: std::net::IpAddr) -> Option<SourceSlot> {
+        let source = source.to_canonical();
+        let mut held = self.held.lock().unwrap();
+        let total: usize = held.values().sum();
+        let mine = held.get(&source).copied().unwrap_or(0);
+        let reserve = PREAUTH_RESERVE.min(self.capacity.saturating_sub(1));
+        if mine >= crate::tls::MAX_UNAUTHENTICATED_PER_SOURCE
+            || total >= self.capacity
+            || (mine > 0 && total >= self.capacity - reserve)
+        {
+            return None;
+        }
+        *held.entry(source).or_insert(0) += 1;
+        Some(SourceSlot { pool: self.clone(), source })
+    }
+}
+
+impl Drop for SourceSlot {
+    fn drop(&mut self) {
+        let mut held = self.pool.held.lock().unwrap();
+        if let Some(n) = held.get_mut(&self.source) {
+            *n -= 1;
+            if *n == 0 {
+                held.remove(&self.source);
+            }
+        }
+    }
+}
+
+/// The idempotency origin of a session: its TLS source address, or the local
+/// socket when there is none.
+fn origin_of(source: Option<std::net::IpAddr>) -> Origin {
+    source.map_or(Origin::Local, Origin::net)
 }
 
 fn text(msg: &ServerMessage) -> Message {
@@ -256,12 +323,13 @@ async fn reply(out: &mpsc::Sender<Message>, msg: &ServerMessage) -> Result<(), C
 async fn session(
     st: AppState,
     mut socket: WebSocket,
-    permit: OwnedSemaphorePermit,
+    permit: Box<dyn Send>,
     admit: Option<crate::tls::Admit>,
 ) {
     if let Some(mut gate) = st.opts.hello_gate.clone() {
         let _ = gate.wait_for(|open| *open).await;
     }
+    let source = admit.as_ref().and_then(|a| a.peer()).map(|p| p.ip());
     let peer = match &admit {
         Some(a) => a.peer().map_or_else(|| "tcp".to_string(), |p| p.to_string()),
         None => "local".to_string(),
@@ -340,6 +408,7 @@ async fn session(
     }
 
     let (mut sink, mut stream) = socket.split();
+    let origin = origin_of(source);
     let (out, mut out_rx) = mpsc::channel::<Message>(RING_CAPACITY);
     let (close_tx, close_rx) = oneshot::channel::<Closing>();
     let mut writer = tokio::spawn(async move {
@@ -359,6 +428,7 @@ async fn session(
     let closing = run(
         &st,
         &client.id,
+        origin,
         resume,
         generation,
         &mut gen_rx,
@@ -388,6 +458,7 @@ async fn session(
 async fn run(
     st: &AppState,
     client_id: &str,
+    origin: Origin,
     resume: Option<Cursor>,
     generation: u64,
     gen_rx: &mut watch::Receiver<u64>,
@@ -410,7 +481,7 @@ async fn run(
                 if *gen_rx.borrow() != generation { return Err(ROTATED); }
                 let handled = async {
                     match frame {
-                        Some(Ok(Message::Text(t))) => on_frame(st, client_id, generation, t.as_str(), out, inflight, tasks).await.map(|()| true),
+                        Some(Ok(Message::Text(t))) => on_frame(st, client_id, origin, generation, t.as_str(), out, inflight, tasks).await.map(|()| true),
                         Some(Ok(Message::Binary(_))) => reply(out, &error(ErrorCode::BadRequest, "binary frames are not supported")).await.map(|()| true),
                         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => Ok(false),
                         Some(Ok(_)) => Ok(true),
@@ -436,9 +507,11 @@ async fn run(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn on_frame(
     st: &AppState,
     client_id: &str,
+    origin: Origin,
     generation: u64,
     raw: &str,
     out: &mpsc::Sender<Message>,
@@ -492,7 +565,7 @@ async fn on_frame(
             let client = client_id.to_owned();
             let gen_rx = st.auth.subscribe();
             tasks.spawn(run_command(
-                core, client, command, generation, gen_rx, out, permits,
+                core, client, origin, command, generation, gen_rx, out, permits,
             ));
             Ok(())
         }
@@ -504,9 +577,11 @@ async fn on_frame(
 /// under an older token, detached ones included. Dropping `handle` runs the
 /// core's abandon guard: an undelivered claim is released and a delivery in
 /// flight resolves `uncertain`. Nothing is re-sent.
+#[allow(clippy::too_many_arguments)]
 async fn run_command<P: Send>(
     core: Arc<Core>,
     client: String,
+    origin: Origin,
     command: ClientMessage,
     generation: u64,
     mut gen_rx: watch::Receiver<u64>,
@@ -522,7 +597,7 @@ async fn run_command<P: Send>(
         // ready in the same instant as a rotation is dropped, not completed.
         biased;
         () = revoked(&mut gen_rx, generation) => {}
-        result = core.handle(&client, command) => {
+        result = core.handle_from(&client, origin, command) => {
             drop(permits);
             let _ = reply(&out, &ServerMessage::Result(result)).await;
         }
@@ -534,6 +609,56 @@ async fn run_command<P: Send>(
 async fn revoked(gen_rx: &mut watch::Receiver<u64>, generation: u64) {
     if gen_rx.wait_for(|g| *g != generation).await.is_err() {
         std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(test)]
+mod source_pool_tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    fn ip(n: u8) -> IpAddr {
+        IpAddr::from([10, 0, 0, n])
+    }
+
+    /// Each source takes two slots until the reserve is reached, so with a
+    /// pool of 8 the sources fill it as 2 + 2 + 2 + 1 + 1: five sources, not
+    /// four. The reserve closes only the four-source case.
+    #[test]
+    fn five_sources_still_fill_the_pool_but_four_cannot() {
+        let pool = Arc::new(SourcePool::new(8));
+        let mut held = Vec::new();
+        for n in 1..=4 {
+            held.extend(pool.try_acquire(ip(n)));
+            held.extend(pool.try_acquire(ip(n)));
+        }
+        assert_eq!(held.len(), 7, "the fourth source cannot take a reserved slot for its second connection");
+        let fifth = pool.try_acquire(ip(5)).expect("a source holding none takes a reserved slot");
+        assert!(pool.try_acquire(ip(6)).is_none(), "five sources fill the pool: the residual");
+        drop(fifth);
+        assert!(pool.try_acquire(ip(6)).is_some(), "a freed slot is usable at once");
+    }
+
+    /// Fails with `PREAUTH_RESERVE = 0`: four sources would hold all 8 slots.
+    #[test]
+    fn a_source_holding_one_slot_is_refused_a_second_once_six_are_taken() {
+        let pool = Arc::new(SourcePool::new(8));
+        let mut held: Vec<_> = (1..=6).filter_map(|n| pool.try_acquire(ip(n))).collect();
+        assert_eq!(held.len(), 6);
+        assert!(pool.try_acquire(ip(1)).is_none(), "holds one, pool at 6/8: refused despite spare capacity");
+        assert!(pool.try_acquire(ip(7)).is_some(), "a source holding none is admitted");
+        held.clear();
+        assert!(pool.try_acquire(ip(1)).is_some());
+    }
+
+    #[test]
+    fn a_source_holds_at_most_its_cap_and_mapped_addresses_count_as_ipv4() {
+        let pool = Arc::new(SourcePool::new(8));
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let mapped: IpAddr = "::ffff:192.0.2.1".parse().unwrap();
+        let _a = pool.try_acquire(v4).unwrap();
+        let _b = pool.try_acquire(mapped).unwrap();
+        assert!(pool.try_acquire(v4).is_none(), "two slots per source, mapped or not");
     }
 }
 
@@ -607,7 +732,7 @@ mod revocation_tests {
             let generation = auth.generation();
             let gen_rx = auth.subscribe();
             let (out, mut out_rx) = mpsc::channel(8);
-            let task = run_command(core.clone(), "cl".into(), cmd, generation, gen_rx, out, ());
+            let task = run_command(core.clone(), "cl".into(), Origin::Local, cmd, generation, gen_rx, out, ());
             auth.rotate("new".into()); // spawned but not yet polled
             task.await;
             assert!(fake.delivered().is_empty(), "delivered after revocation");
@@ -631,6 +756,7 @@ mod revocation_tests {
             let task = tokio::spawn(run_command(
                 core.clone(),
                 "cl".into(),
+                Origin::Local,
                 cmd,
                 generation,
                 gen_rx,

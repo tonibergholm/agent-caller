@@ -1,0 +1,24 @@
+{
+ "data": {
+  "pane": {
+   "agent_status": "unknown",
+   "cwd": "/tmp/acp2/proj",
+   "focused": false,
+   "foreground_cwd": "/private/tmp/acp2/proj",
+   "pane_id": "w1:p2",
+   "revision": 8,
+   "scroll": {
+    "max_offset_from_bottom": 0,
+    "offset_from_bottom": 0,
+    "viewport_rows": 47
+   },
+   "tab_id": "w1:t1",
+   "terminal_id": "term_65d4be91bf58b2",
+   "terminal_title": "clear; claude",
+   "terminal_title_stripped": "clear; claude",
+   "workspace_id": "w1"
+  },
+  "type": "pane_updated"
+ },
+ "event": "pane_updated"
+}

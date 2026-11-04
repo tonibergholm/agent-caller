@@ -29,6 +29,10 @@ protocol. The reference client is a Tauri menubar app for macOS.
   workspace.
 - `apps/ios/`: iOS shell (`apps/ios/src-tauri`) for the foreground inbox over Tailscale. Own Cargo workspace, like `app/src-tauri`.
 - `tests/fixtures/`: recorded herdr screens and other fixtures.
+- `tests/redteam/`: Python reproducers for the red-team findings (not run in CI).
+- `scripts/`: install, version check, release notes and `portability-check.sh`.
+- `docs/`: start at `docs/README.md`. `docs/windows.md` is the Windows groundwork (type-checked only), `docs/release.md` the release steps.
+- `SECURITY.md`: threat model and how to report.
 
 ## Docs
 
@@ -69,7 +73,9 @@ with `libdbus-1-dev` and `pkg-config` installed (`apt-get`), then
 builds the release binary.
 
 CI runs the workspace tests and clippy on Ubuntu and macOS, and the app
-on macOS. A workspace change is ready when both workspace commands pass.
+on macOS. The CI `portability` job (`just portability-check`) type-checks the client
+crates for Windows and Android; a unix-only call on their paths fails it.
+A workspace change is ready when both workspace commands pass.
 A change under `app/` also needs `npm run verify`. On Linux, report that
 check as pending for CI.
 
