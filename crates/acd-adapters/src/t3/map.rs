@@ -270,7 +270,21 @@ pub fn request_obs(
             // renders a text input). A zero-option question T3 does not let
             // the user type into stays read-only.
             let free_text = takes_free_text(q0, provider);
-            if questions.len() == 1 && !q0.multi_select && (!q0.options.is_empty() || free_text) {
+            // Whole or read-only: text, header, label or description that
+            // cleaning cut or altered must not be answerable from the card.
+            let whole = questions.iter().zip(&qs).all(|(q, shown)| {
+                shown.text == q.question.trim()
+                    && shown.header.as_deref() == q.header.as_deref().map(str::trim)
+                    && q.options.iter().zip(&shown.options).all(|(o, so)| {
+                        so.label == o.label.trim()
+                            && so.description.as_deref() == o.description.as_deref().map(str::trim)
+                    })
+            });
+            if whole
+                && questions.len() == 1
+                && !q0.multi_select
+                && (!q0.options.is_empty() || free_text)
+            {
                 answer = TargetAnswer::Question {
                     question_id: q0.id.clone(),
                     choices: q0
@@ -413,6 +427,41 @@ mod tests {
                 }
             ));
         }
+    }
+
+    /// Whole or read-only: a cut question, header, label or description is
+    /// not answerable (including by free text).
+    #[test]
+    fn a_cut_question_is_read_only() {
+        for (field, value) in [
+            ("question", json!("x".repeat(5000))),
+            ("header", json!("H".repeat(300))),
+        ] {
+            let mut projection = question_projection("thread", "request");
+            let item = projection["turnItems"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|item| item["type"] == "user_input_request")
+                .unwrap();
+            item["questions"][0][field] = value;
+            let (detail, _) = ThreadDetail::from_projection(&projection);
+            let (obs, target) = obs_for(Some("claudeAgent"), &detail.pending_view("request").unwrap());
+            assert_eq!(obs.answer_path, AnswerPath::None, "{field}");
+            assert!(!obs.free_text, "{field}");
+            assert!(matches!(target.answer, TargetAnswer::ReadOnly), "{field}");
+        }
+        let mut projection = question_projection("thread", "request");
+        let item = projection["turnItems"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["type"] == "user_input_request")
+            .unwrap();
+        item["questions"][0]["options"][0]["label"] = json!("L".repeat(300));
+        let (detail, _) = ThreadDetail::from_projection(&projection);
+        let (obs, _) = obs_for(Some("claudeAgent"), &detail.pending_view("request").unwrap());
+        assert_eq!(obs.answer_path, AnswerPath::None, "label");
     }
 
     #[test]

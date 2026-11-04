@@ -119,7 +119,7 @@ fn check_permission(p: &Payload, obs: &RequestObs, codex: bool) {
     }
 }
 
-fn check_question(obs: &RequestObs) {
+fn check_question(p: &Payload, obs: &RequestObs) {
     check_shown(obs);
     fuzzlib::assert_agent_fits(None, Some(obs));
     if obs.answer_path != AnswerPath::Keys {
@@ -130,6 +130,17 @@ fn check_question(obs: &RequestObs) {
     assert!(!qs[0].multi_select);
     let n = qs[0].options.len();
     assert!((1..=9).contains(&n));
+    // Whole or read-only: nothing the user is asked to choose between was
+    // cut or altered against the original payload.
+    let specs = question_specs(&p.tool_input).expect("an answerable question has valid specs");
+    assert_eq!(specs.len(), 1);
+    assert_eq!(qs[0].text, specs[0].question.trim(), "question text cut or altered");
+    assert_eq!(qs[0].header.as_deref(), Some(specs[0].header.trim()), "header cut or altered");
+    assert_eq!(specs[0].options.len(), n, "options dropped");
+    for (o, (label, d)) in qs[0].options.iter().zip(&specs[0].options) {
+        assert_eq!(o.label, label.trim(), "label cut or altered");
+        assert_eq!(o.description.as_deref(), d.as_deref().map(str::trim), "description cut or altered");
+    }
     let keys = question_keys(n);
     let mut seen = std::collections::HashSet::new();
     for (i, o) in qs[0].options.iter().enumerate() {
@@ -154,7 +165,7 @@ fn run(p: &Payload) -> (Option<RequestObs>, Option<RequestObs>) {
     }
     for bound in [false, true] {
         if let Some(q) = claude_question("a", key(), None, p, bound) {
-            check_question(&q);
+            check_question(p, &q);
         }
     }
     let _ = question_specs(&p.tool_input);

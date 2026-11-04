@@ -42,6 +42,9 @@ config and the `acd/1` protocol may change without a major version bump.
   field cap in 4-byte characters) is published read-only, and a working
   directory is cut to 8 KiB of JSON. Over 64 KiB an agent made every client
   drop the connection and resync, in a loop, for as long as it existed.
+- acd: a question whose text, header, option label or description was cut or
+  altered by cleaning (hooks and T3) is read-only: it can no longer be answered
+  from a card that shows it cut.
 - A sub-millisecond timestamp is cut to the millisecond on the way in, so a
   message decodes to what it re-encodes to.
 - Log redaction masks a `Bearer` token even when the previous line ends in the

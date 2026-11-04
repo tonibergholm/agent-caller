@@ -355,7 +355,18 @@ pub fn claude_question(
         })
         .collect();
     let first = questions.first()?.clone();
+    // Whole or read-only: a question, header, label or description that was
+    // cut or altered by cleaning cannot be answered by key from the card.
+    let whole = specs.iter().zip(&questions).all(|(q, shown)| {
+        shown.text == q.question.trim()
+            && shown.header.as_deref() == Some(q.header.trim())
+            && q.options.iter().zip(&shown.options).all(|((label, d), o)| {
+                o.label == label.trim()
+                    && o.description.as_deref() == d.as_deref().map(str::trim)
+            })
+    });
     let answerable = bound
+        && whole
         && questions.len() == 1
         && !first.multi_select
         && (1..=9).contains(&first.options.len());
@@ -897,6 +908,31 @@ mod tests {
         let agent = registry.agents().remove(0);
         assert!(serde_json::to_vec(&agent).unwrap().len() <= acd_protocol::MAX_AGENT_BYTES);
         assert!(!agent.pending.unwrap().is_answerable());
+    }
+    /// Whole or read-only (as #83 for permission cards): question text,
+    /// header, label or description that was cut or altered is never
+    /// answerable by key. Fixture: a 5000-char question, one option.
+    #[test]
+    fn a_cut_question_is_read_only() {
+        let p = payload("../fuzz/hook_mapping-cut-question.json");
+        let o = claude_question("a", k(), None, &p, true).unwrap();
+        assert!(o.detail.ends_with('…'), "the text is cut");
+        assert_eq!(o.answer_path, AnswerPath::None);
+        assert!(!o.free_text);
+        for (field, v) in [
+            ("header", serde_json::json!({"question":"Q","header":"H".repeat(300),"options":[{"label":"A"}]})),
+            ("label", serde_json::json!({"question":"Q","header":"H","options":[{"label":"L".repeat(300)}]})),
+            ("description", serde_json::json!({"question":"Q","header":"H","options":[{"label":"A","description":"d".repeat(500)}]})),
+            ("control char", serde_json::json!({"question":"Q\u{7}","header":"H","options":[{"label":"A"}]})),
+        ] {
+            let mut p = p.clone();
+            p.tool_input = serde_json::json!({ "questions": [v] });
+            let o = claude_question("a", k(), None, &p, true).unwrap();
+            assert_eq!(o.answer_path, AnswerPath::None, "{field}");
+        }
+        let mut ok = p.clone();
+        ok.tool_input = serde_json::json!({"questions":[{"question":" Q ","header":"H","options":[{"label":"A","description":"d"}]}]});
+        assert_eq!(claude_question("a", k(), None, &ok, true).unwrap().answer_path, AnswerPath::Keys);
     }
     #[test]
     fn logged_payloads_are_redacted() {

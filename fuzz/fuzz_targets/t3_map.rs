@@ -66,6 +66,16 @@ fn check(provider: Option<&str>, agent: Option<&AgentObs>, view: &acd_adapters::
             let qs = obs.questions.as_ref().expect("answerable question has questions");
             assert_eq!(qs.len(), 1);
             assert!(!qs[0].multi_select);
+            // Whole or read-only: nothing shown was cut or altered.
+            let Some(TurnItem::UserInputRequest { questions, .. }) = &view.item else { panic!("question without request") };
+            let q = &questions[0];
+            assert_eq!(qs[0].text, q.question.trim(), "question text cut or altered");
+            assert_eq!(qs[0].header.as_deref(), q.header.as_deref().map(str::trim), "header cut or altered");
+            assert_eq!(qs[0].options.len(), q.options.len(), "options dropped");
+            for (so, o) in qs[0].options.iter().zip(&q.options) {
+                assert_eq!(so.label, o.label.trim(), "label cut or altered");
+                assert_eq!(so.description.as_deref(), o.description.as_deref().map(str::trim), "description cut or altered");
+            }
             assert_eq!(choices.len(), obs.options.len());
             assert_eq!(obs.free_text, *free_text);
             assert!(!choices.is_empty() || *free_text, "answerable with nothing to answer");
