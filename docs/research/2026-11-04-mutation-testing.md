@@ -84,8 +84,20 @@ in the `acd` binary crate; see the pull request).
 
 **Base.** All mutation runs were made on `origin/main` 3404287 plus the new tests. Main moved afterwards
 (for example `acd-core` `idem.rs`, `server.rs` and `registry.rs`, and `acd-securefs`, which gained
-Windows ACL code). The branch was merged with main afterwards and the full suite re-run, but the
-mutation counts were **not** re-measured on the merged code.
+Windows ACL code). The branch was merged with main afterwards and the full suite re-run. Only
+`acd-securefs` and `acd-protocol` were measured again on the merged code (both with `--jobs 4`, 1.5 and
+6 min):
+
+- `acd-protocol`: unchanged, 86 mutants, 71 caught, 2 missed (the two equivalent ones), 13 unviable.
+- `acd-securefs`: now 236 mutants (main added Windows code): 128 caught, 100 missed, 7 unviable,
+  1 timeout. Of the missed, 82 are in `windows.rs` and 4 in `paths.rs` (`windows_*_dir`), which are
+  `cfg(windows)` and cannot be built here; the 12 in `lib.rs` are the ones listed below (their line
+  numbers moved by 11); `paths.rs:29:36` (`p.len() < 3` in `is_absolute_windows`) was killed by a test
+  added afterwards, `a_windows_drive_root_is_absolute`; `paths.rs:34:20` is equivalent, because the
+  length check above it already returned. The Windows code itself has no mutation evidence at all.
+
+The other crates were not measured again; main's changes to them (idempotency, `server.rs`,
+`registry.rs`) may have added mutants that the new tests do not cover.
 
 ## What was added
 
