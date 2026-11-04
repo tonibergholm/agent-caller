@@ -8,6 +8,7 @@ mod identity;
 mod local_socket;
 mod pair;
 mod paths;
+mod push;
 mod secrets;
 mod service;
 mod status;
@@ -57,11 +58,43 @@ enum Cmd {
         #[command(subcommand)]
         cmd: HooksCmd,
     },
+    /// Wake-up pushes for registered phones (off unless `[push]` is set).
+    #[command(long_about = PUSH_HELP)]
+    Push {
+        #[command(subcommand)]
+        cmd: PushCmd,
+    },
     /// Install acd as a launchd agent or systemd user service.
     Service {
         #[command(subcommand)]
         cmd: ServiceCmd,
     },
+}
+
+/// `acd push --help`. The relay spec is
+/// docs/superpowers/specs/2026-11-03-relay-push-design.md.
+const PUSH_HELP: &str = "Wake-up pushes for registered phones.
+
+Off by default. To turn it on, add to config.toml and restart acd:
+
+  [push]
+  relay = \"https://relay.example.net\"   # https only
+  ca_file = \"/etc/ssl/certs/ca-certificates.crt\"   # optional
+
+`relay` is the base URL of an acd-relay. `ca_file` is a PEM file; the relay's
+certificate must chain to a certificate in it, so it can be a CA bundle or the
+relay's own pinned certificate. Without it acd tries the usual system bundle
+locations and turns push off if none exists. Any other key, a non-https URL
+or an unusable CA file turns push off (see `acd status`).
+
+When a request opens, acd sends each registered device one wake that carries
+no request, agent or machine text. Devices register themselves over acd/1
+(`push.register`); the registrations are handles kept in push.json (0600).";
+
+#[derive(Subcommand)]
+enum PushCmd {
+    /// List the registered devices (read from push.json; never prints handles).
+    List,
 }
 
 #[derive(Subcommand)]
@@ -223,6 +256,16 @@ fn real_main() -> Result<()> {
             println!(
                 "TLS key replaced. Re-pair every app with `acd pair`. If you rotated because the key may be compromised, also run `acd token rotate client`."
             );
+            Ok(())
+        }
+        Cmd::Push { cmd } => {
+            if !dir.is_dir() {
+                bail!("{} not initialized; run `acd init`", dir.display());
+            }
+            let cfg = config::Config::load(&dir)?;
+            match cmd {
+                PushCmd::List => push::list(&dir, &cfg, &mut std::io::stdout().lock())?,
+            }
             Ok(())
         }
         Cmd::Pair { host } => {

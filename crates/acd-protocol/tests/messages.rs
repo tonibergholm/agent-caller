@@ -84,6 +84,9 @@ fn every_message_type_has_a_golden_example() {
         "agent.send",
         "agent.mark_seen",
         "ping",
+        "push.register",
+        "push.unregister",
+        "push.status",
     ];
     client.sort();
     assert_eq!(example_types("examples/client"), client);
@@ -366,4 +369,54 @@ fn timestamps_are_date_time_in_the_schema() {
         s["$defs"]["Agent"]["properties"]["state_since"]["format"],
         "date-time"
     );
+}
+
+// ---- push.* (additive; capability `push`) ----
+
+#[test]
+fn push_commands_debug_shows_the_handle_length_only() {
+    let m: ClientMessage = serde_json::from_str(include_str!("../examples/client/push.register.json")).unwrap();
+    let shown = format!("{m:?}");
+    let ClientMessage::PushRegister { handle, .. } = &m else { panic!("not a push.register") };
+    assert!(!shown.contains(handle.as_str()), "handle shown in Debug");
+    assert!(shown.contains(&format!("handle_bytes: {}", handle.len())), "{shown}");
+}
+
+#[test]
+fn push_register_needs_every_field_and_a_known_platform() {
+    for bad in [
+        r#"{"type":"push.register","id":"1","relay":"r","handle":"h","platform":"android"}"#,
+        r#"{"type":"push.register","id":"1","relay":"r","handle":"h","expires_at":"2026-12-04T10:00:00Z"}"#,
+        r#"{"type":"push.register","id":"1","relay":"r","handle":"h","platform":"symbian","expires_at":"2026-12-04T10:00:00Z"}"#,
+        r#"{"type":"push.register","id":"1","relay":"r","handle":"h","platform":"android","expires_at":"soon"}"#,
+    ] {
+        assert!(serde_json::from_str::<ClientMessage>(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn push_commands_are_commands_with_ids() {
+    for f in ["push.register", "push.unregister", "push.status"] {
+        let raw = fs::read_to_string(dir(&format!("examples/client/{f}.json"))).unwrap();
+        let m: ClientMessage = serde_json::from_str(&raw).unwrap();
+        assert!(m.command_id().is_some(), "{f}");
+    }
+}
+
+#[test]
+fn a_result_without_push_still_parses_and_stays_without_it() {
+    let r: ServerMessage = serde_json::from_str(r#"{"type":"result","id":"c","ok":true}"#).unwrap();
+    let ServerMessage::Result(r) = r else { panic!("not a result") };
+    assert_eq!(r.push, None);
+    assert_eq!(serde_json::to_string(&r).unwrap(), r#"{"id":"c","ok":true}"#);
+}
+
+#[test]
+fn a_push_status_this_version_does_not_know_decodes_as_unknown() {
+    let r: ServerMessage = serde_json::from_str(
+        r#"{"type":"result","id":"c","ok":true,"push":{"registered":true,"status":"quarantined","last_wake_at":null}}"#,
+    )
+    .unwrap();
+    let ServerMessage::Result(r) = r else { panic!("not a result") };
+    assert_eq!(r.push.unwrap().status, Some(PushDeviceStatus::Unknown));
 }

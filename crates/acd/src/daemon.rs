@@ -494,6 +494,9 @@ pub async fn run(dir: &Path) -> Result<()> {
         machine,
         vec![herdr.clone(), t3.clone(), hooks.clone(), external.clone()],
     );
+    // Off unless `[push]` resolves: then the core advertises `push`, routes
+    // `push.*` commands and tells the sender when a request opens.
+    let _push = crate::push::enable(dir, &cfg, &core);
     herdr.set_evidence(hooks.evidence());
     herdr.start(core.clone());
     t3.start(core.clone());
