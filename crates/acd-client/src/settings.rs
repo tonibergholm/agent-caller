@@ -730,3 +730,7 @@ mod tests {
         assert_eq!(c.get("k").unwrap().as_deref(), Some("external"));
     }
 }
+
+pub fn scratch_unix_only() -> u32 {
+    acd_securefs::euid()
+}
