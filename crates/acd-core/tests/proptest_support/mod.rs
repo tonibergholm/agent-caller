@@ -13,7 +13,7 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestError, TestRng, TestRunner};
 
-pub const DEFAULT_SEED: u64 = 0x00ac_d1_0000_1104;
+pub const DEFAULT_SEED: u64 = 0x0000_acd1_0000_1104;
 
 fn env_u64(name: &str) -> Option<u64> {
     let raw = std::env::var(name).ok()?;
