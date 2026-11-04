@@ -37,13 +37,13 @@ if [ -n "${ARCH_TEST_TOOLCHAIN:-}" ]; then
 	if [ -n "${ARCH_TEST_GIT:-}" ]; then
 		# git and the shared libraries it needs, copied from the host.
 		mkdir -p "$tmp/hostgit/lib"
-		cp "$(command -v git)" "$tmp/hostgit/git-real"
+		mkdir -p "$tmp/hostgit/real" && cp "$(command -v git)" "$tmp/hostgit/real/git"
 		cp -a "$(git --exec-path)" "$tmp/hostgit/git-core"
 		# Not libc: the container's own libc must serve every process.
 		ldd "$(command -v git)" "$tmp/hostgit/git-core/git-remote-https" 2>/dev/null | awk '$3 ~ /^\// { print $3 }' | sort -u |
 			grep -Ev '/(libc|libm|libdl|libpthread|librt|ld-linux[^/]*)\.so' | xargs -r cp -L -t "$tmp/hostgit/lib"
 		# A wrapper, so the host libraries reach git and nothing else.
-		printf '#!/bin/sh\nexec env GIT_EXEC_PATH=/opt/hostgit/git-core LD_LIBRARY_PATH=/opt/hostgit/lib /opt/hostgit/git-real "$@"\n' >"$tmp/hostgit/git"
+		printf '#!/bin/sh\nexec env GIT_EXEC_PATH=/opt/hostgit/git-core LD_LIBRARY_PATH=/opt/hostgit/lib /opt/hostgit/real/git "$@"\n' >"$tmp/hostgit/git"
 		chmod +x "$tmp/hostgit/git"
 		args+=(-v "$tmp/hostgit:/opt/hostgit:ro")
 		gitpath=/opt/hostgit:
