@@ -409,4 +409,26 @@ mod tests {
             Applied::Ignored
         );
     }
+
+    // Demonstration for docs/research/2026-11-04-security-review-apps-voice.md (F10).
+    // Fails today: a peer's text reaches the card model unchanged, bidi controls included.
+    #[test]
+    #[ignore = "finding F10: peer-supplied agent text is stored with bidi controls"]
+    fn peer_text_with_bidi_controls_does_not_reach_the_card_model() {
+        let mut hostile = agent("a");
+        hostile.title = "safe\u{202E}fdp.exe".into();
+        let mut s = Session::default();
+        s.welcome(machine(), vec![], "e1", 0);
+        let msg = ServerMessage::Snapshot {
+            epoch: "e1".into(),
+            seq: 1,
+            agents: vec![hostile],
+        };
+        s.apply(&msg);
+        let stored = &s.agents["a"].title;
+        assert!(
+            !acd_protocol::text::has_forbidden_chars(stored),
+            "stored as {stored:?}"
+        );
+    }
 }
