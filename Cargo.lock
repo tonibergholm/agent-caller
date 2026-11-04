@@ -9,6 +9,7 @@ dependencies = [
  "acd-adapters",
  "acd-core",
  "acd-protocol",
+ "acd-relay",
  "acd-securefs",
  "anyhow",
  "axum",

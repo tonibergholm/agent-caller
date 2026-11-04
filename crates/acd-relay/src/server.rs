@@ -172,6 +172,16 @@ pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> s
     axum::serve(listener, router(state).into_make_service_with_connect_info::<SocketAddr>()).await
 }
 
+/// A refusal: status and error code. Small, so `Result` stays cheap.
+#[derive(Debug, Clone, Copy)]
+struct Refuse(StatusCode, &'static str);
+
+impl Refuse {
+    fn into_response(self) -> Response {
+        err(self.0, self.1)
+    }
+}
+
 fn err(status: StatusCode, code: &'static str) -> Response {
     let mut r = (status, axum::Json(json!({"error": code}))).into_response();
     if status == StatusCode::TOO_MANY_REQUESTS {
@@ -195,13 +205,13 @@ fn log(route: &str, status: u16, platform: Option<Platform>, tag: Option<[u8; 16
     );
 }
 
-async fn read_json<T: DeserializeOwned>(body: Body) -> Result<T, Response> {
+async fn read_json<T: DeserializeOwned>(body: Body) -> Result<T, Refuse> {
     let bytes = match tokio::time::timeout(READ_DEADLINE, to_bytes(body, MAX_BODY)).await {
-        Err(_) => return Err(err(StatusCode::REQUEST_TIMEOUT, "timeout")),
-        Ok(Err(_)) => return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "too_large")),
+        Err(_) => return Err(Refuse(StatusCode::REQUEST_TIMEOUT, "timeout")),
+        Ok(Err(_)) => return Err(Refuse(StatusCode::PAYLOAD_TOO_LARGE, "too_large")),
         Ok(Ok(b)) => b,
     };
-    serde_json::from_slice(&bytes).map_err(|_| err(StatusCode::BAD_REQUEST, "bad_request"))
+    serde_json::from_slice(&bytes).map_err(|_| Refuse(StatusCode::BAD_REQUEST, "bad_request"))
 }
 
 async fn healthz() -> Response {
@@ -227,7 +237,7 @@ async fn wake_inner(
 ) -> (Response, Option<Platform>, Option<[u8; 16]>) {
     let req: WakeRequest = match read_json(body).await {
         Ok(r) => r,
-        Err(e) => return (e, None, None),
+        Err(e) => return (e.into_response(), None, None),
     };
     if req.v != 1 {
         return (err(StatusCode::BAD_REQUEST, "bad_request"), None, None);
@@ -277,14 +287,14 @@ struct Fields {
     address: String,
 }
 
-fn validate(st: &AppState, platform: &str, app: &str, kind: &str, address: &str) -> Result<Fields, Response> {
-    let bad = || err(StatusCode::BAD_REQUEST, "bad_request");
-    let platform = Platform::parse(platform).ok_or_else(|| err(StatusCode::BAD_REQUEST, "unsupported_platform"))?;
+fn validate(st: &AppState, platform: &str, app: &str, kind: &str, address: &str) -> Result<Fields, Refuse> {
+    let bad = || Refuse(StatusCode::BAD_REQUEST, "bad_request");
+    let platform = Platform::parse(platform).ok_or(Refuse(StatusCode::BAD_REQUEST, "unsupported_platform"))?;
     if !st.sender.supports(platform) {
-        return Err(err(StatusCode::BAD_REQUEST, "unsupported_platform"));
+        return Err(Refuse(StatusCode::BAD_REQUEST, "unsupported_platform"));
     }
     if !app_ok(app) || !st.allowed_apps.iter().any(|a| a == app) {
-        return Err(err(StatusCode::BAD_REQUEST, "unsupported_app"));
+        return Err(Refuse(StatusCode::BAD_REQUEST, "unsupported_app"));
     }
     let kind = AddressKind::parse(kind).ok_or_else(bad)?;
     if kind.platform() != platform || !address_ok(address) {
@@ -312,11 +322,11 @@ async fn register_inner(
 ) -> (Response, Option<Platform>, Option<[u8; 16]>) {
     let req: RegisterRequest = match read_json(body).await {
         Ok(r) => r,
-        Err(e) => return (e, None, None),
+        Err(e) => return (e.into_response(), None, None),
     };
     let f = match validate(st, &req.platform, &req.app, &req.address_kind, &req.address) {
         Ok(f) => f,
-        Err(e) => return (e, None, None),
+        Err(e) => return (e.into_response(), None, None),
     };
     let platform = Some(f.platform);
     let now = st.clock.now_secs();
@@ -374,7 +384,7 @@ async fn confirm_inner(
 ) -> (Response, Option<Platform>) {
     let req: ConfirmRequest = match read_json(body).await {
         Ok(r) => r,
-        Err(e) => return (e, None),
+        Err(e) => return (e.into_response(), None),
     };
     let now = st.clock.now_secs();
     let ip = st.client_ip(peer, headers);
@@ -383,7 +393,7 @@ async fn confirm_inner(
     }
     let f = match validate(st, &req.platform, &req.app, &req.address_kind, &req.address) {
         Ok(f) => f,
-        Err(e) => return (e, None),
+        Err(e) => return (e.into_response(), None),
     };
     let platform = Some(f.platform);
     let binding = st.binding(f.platform, &f.app, f.kind, &f.address);
