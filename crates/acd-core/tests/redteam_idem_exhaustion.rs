@@ -1,26 +1,10 @@
-//! Red-team finding (docs/research/2026-11-04-red-team-acd.md,
-//! "idempotency table exhaustion"): one authenticated-but-hostile client
-//! can fill the daemon-wide idempotency table
-//! (`crates/acd-core/src/idem.rs`, `IDEM_CAPACITY` = 16,384 entries,
-//! shared by every connected client) in well under a second, by sending
-//! `request.answer` for nonexistent `request_id`s. The resulting
-//! `RequestGone` result is treated as `cacheable` by
-//! `Core::handle`'s delivery/`cacheable` computation
-//! (`crates/acd-core/src/engine.rs`, the `cacheable = delivery !=
-//! Delivery::NotDelivered && !matches!(result.error_code(), Some(...))`
-//! line), unlike `RequestNotReady`/`RequestBusy`/`SourceUnavailable`/
-//! `RequestChanged`, which release their reservation. Once the table is
-//! full, *every* client's *next new* command id gets `bad_request: "too
-//! many recent commands; retry later"` -- not just the flooder's -- for
-//! up to the 15-minute TTL (`IDEM_TTL`).
-//!
-//! This is `#[ignore]`d because it is slow (>16,384 real `Core::handle`
-//! calls) and is a demonstration of accepted-but-underweighted behavior,
-//! not a regression to gate CI on; the dynamic reproducer against a real
-//! running daemon is `tests/redteam/idem_table_flood.py`. No production
-//! code is changed. Run with:
-//!
-//!     cargo test -p acd-core --test redteam_idem_exhaustion -- --ignored --nocapture
+//! Regression for the red-team finding "idempotency table exhaustion"
+//! (docs/research/2026-11-04-red-team-acd.md). One authenticated client used
+//! to fill the daemon-wide idempotency table with `request_gone` results and
+//! make every other client's next new command fail with "too many recent
+//! commands". Now refusals release their reservation, and one client is held
+//! to a fixed share of the table whatever it sends. The live reproducer is
+//! `tests/redteam/idem_table_flood.py`.
 use acd_core::testing::*;
 use acd_core::*;
 use acd_protocol::*;
@@ -36,8 +20,7 @@ fn answer_nonexistent(id: &str, request_id: &str) -> ClientMessage {
 }
 
 #[tokio::test]
-#[ignore = "slow (fills the real 16,384-entry idempotency table); see docs/research/2026-11-04-red-team-acd.md"]
-async fn one_hostile_client_locks_out_every_other_client_s_next_command() {
+async fn a_flood_of_request_gone_does_not_lock_out_other_clients() {
     let fake = FakeAdapter::new();
     let core = Core::new(test_machine(), vec![fake]);
 
@@ -69,10 +52,8 @@ async fn one_hostile_client_locks_out_every_other_client_s_next_command() {
     }
     assert_eq!(
         last_code,
-        Some(ErrorCode::BadRequest),
-        "the flood should have filled the table well before {fill} calls \
-         (IDEM_CAPACITY = {IDEM_CAPACITY}); if this fails, the table did \
-         not fill -- re-check cacheable's exclusion list in engine.rs"
+        Some(ErrorCode::RequestGone),
+        "a refusal must not be cached, so the flood never hits the table cap"
     );
 
     // The actual finding: a brand-new client.id's very first command --
@@ -85,10 +66,66 @@ async fn one_hostile_client_locks_out_every_other_client_s_next_command() {
     assert_eq!(
         victim_after.error_code(),
         Some(ErrorCode::RequestGone),
-        "FINDING: a brand-new, unrelated client's first-ever command was \
-         refused with {:?} because one hostile peer filled the shared \
-         idempotency table. Expected request_gone (as before the flood), \
-         got the daemon-wide 'too many recent commands' refusal instead.",
+        "a brand-new client's first command was refused with {:?} after another client's flood",
         victim_after.error_code()
     );
+}
+
+fn mark_seen(id: &str) -> ClientMessage {
+    ClientMessage::AgentMarkSeen { id: id.into(), agent_id: "a1".into() }
+}
+
+fn open_request(core: &Core) -> String {
+    core.observe(Observation::AgentUpsert(agent_obs("a1")));
+    core.observe(Observation::RequestSeen(permission_obs("a1", "k1")));
+    let (initial, _) = core.attach(None);
+    let ServerMessage::Snapshot { agents, .. } = &initial[0] else { panic!("expected snapshot") };
+    agents[0].pending.as_ref().unwrap().id.clone()
+}
+
+/// Commands that DO get cached (successful ones) fill only the sender's own
+/// share; another client still gets in and a delivered answer still replays.
+#[tokio::test]
+async fn a_flood_of_cached_commands_cannot_starve_other_clients_or_break_replay() {
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    let rid = open_request(&core);
+    let first = core.handle("victim", answer_to("ans", &rid, "allow")).await;
+    assert_eq!(first, CommandResult::delivered("ans"));
+
+    let share = IDEM_CAPACITY / IDEM_CLIENT_SHARE_DIVISOR;
+    for i in 0..share * 2 + 50 {
+        let r = core.handle("attacker", mark_seen(&format!("f-{i}"))).await;
+        assert!(r.ok, "the flooder's own commands keep working by evicting its oldest: {r:?}");
+    }
+    // Another client's first command works.
+    assert!(core.handle("other", mark_seen("o1")).await.ok);
+    // The victim's delivered answer replays with the original result, and is not re-sent.
+    let replay = core.handle("victim", answer_to("ans", &rid, "allow")).await;
+    assert_eq!(replay, CommandResult::delivered("ans"));
+    assert_eq!(fake.delivered().len(), 1);
+    // A different payload under the same key is still refused.
+    let other = core.handle("victim", answer_to("ans", &rid, "deny")).await;
+    assert_eq!(other.error_code(), Some(ErrorCode::DuplicateMismatch));
+}
+
+fn answer_to(id: &str, request_id: &str, option: &str) -> ClientMessage {
+    ClientMessage::RequestAnswer {
+        id: id.into(),
+        request_id: request_id.into(),
+        revision: None,
+        option_id: Some(option.into()),
+        text: None,
+    }
+}
+
+/// A refusal changed no state, so it releases its id: the same id may be
+/// reused with a different payload without a duplicate_mismatch.
+#[tokio::test]
+async fn a_request_gone_refusal_does_not_hold_its_command_id() {
+    let core = Core::new(test_machine(), vec![FakeAdapter::new()]);
+    let a = core.handle("cl", answer_nonexistent("same", "nope-1")).await;
+    assert_eq!(a.error_code(), Some(ErrorCode::RequestGone));
+    let b = core.handle("cl", answer_nonexistent("same", "nope-2")).await;
+    assert_eq!(b.error_code(), Some(ErrorCode::RequestGone), "not duplicate_mismatch");
 }

@@ -9,7 +9,7 @@ pub mod testing;
 
 pub use adapter::{Adapter, DeliverError};
 pub use engine::{Core, IDEM_TTL, MAX_ID_BYTES, MAX_TEXT_BYTES, RING_CAPACITY, Txn};
-pub use idem::{Begin, IDEM_CAPACITY, IdemCache};
+pub use idem::{Begin, IDEM_CAPACITY, IDEM_CLIENT_SHARE_DIVISOR, IdemCache};
 pub use log::EventLog;
 pub use registry::*;
 pub mod server;

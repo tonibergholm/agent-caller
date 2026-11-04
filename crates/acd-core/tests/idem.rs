@@ -75,3 +75,27 @@ fn full_table_rejects_new_reservations_until_entries_expire() {
     assert!(matches!(c.begin("cl", "2", H1, t), Begin::Wait(_)));
     assert!(matches!(c.begin("cl", "3", H1, t + Duration::from_secs(901)), Begin::Run), "expired entry freed a slot");
 }
+
+#[test]
+fn a_client_over_its_share_loses_its_own_oldest_entry_only() {
+    let mut c = IdemCache::with_limits(Duration::from_secs(900), 100, 2);
+    let t = Instant::now();
+    for (cl, id) in [("b", "1"), ("a", "1"), ("a", "2")] {
+        assert!(matches!(c.begin(cl, id, H1, t), Begin::Run));
+        c.finish(cl, id, CommandResult::ok(id), true, t);
+    }
+    assert!(matches!(c.begin("a", "3", H1, t), Begin::Run), "a evicts its own oldest");
+    c.finish("a", "3", CommandResult::ok("3"), true, t);
+    assert!(matches!(c.begin("a", "1", H1, t), Begin::Run), "a's oldest was evicted");
+    assert!(matches!(c.begin("b", "1", H1, t), Begin::Done(_)), "b is untouched");
+}
+
+#[test]
+fn a_client_whose_entries_are_all_pending_is_refused_not_others() {
+    let mut c = IdemCache::with_limits(Duration::from_secs(900), 100, 2);
+    let t = Instant::now();
+    assert!(matches!(c.begin("a", "1", H1, t), Begin::Run));
+    assert!(matches!(c.begin("a", "2", H1, t), Begin::Run));
+    assert!(matches!(c.begin("a", "3", H1, t), Begin::Full));
+    assert!(matches!(c.begin("b", "1", H1, t), Begin::Run));
+}

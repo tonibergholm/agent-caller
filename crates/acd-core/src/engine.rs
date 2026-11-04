@@ -243,17 +243,10 @@ impl Core {
         };
         let (result, delivery) = self.execute(&id, msg, &guard.phase).await;
         guard.armed = false;
-        // Nothing reached the agent: the id stays retryable whatever the code.
-        let cacheable = delivery != Delivery::NotDelivered
-            && !matches!(
-                result.error_code(),
-                Some(
-                    ErrorCode::RequestNotReady
-                        | ErrorCode::RequestBusy
-                        | ErrorCode::SourceUnavailable
-                        | ErrorCode::RequestChanged
-                )
-            );
+        // Only a command that reached the agent is cached (exactly-once). Any
+        // refusal changed no state and is cheap to recompute, so it releases
+        // its reservation: a client cannot fill the table with refusals.
+        let cacheable = delivery != Delivery::NotDelivered && result.ok;
         self.inner.lock().unwrap().idem.finish(
             client_id,
             &id,
