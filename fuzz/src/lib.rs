@@ -71,16 +71,17 @@ pub fn host_ok(h: &str) -> bool {
         || hostname_ok(h)
 }
 
-/// Feeds an observation to a registry, as the daemon does, and checks that
-/// no agent it then publishes encodes to more than the 64 KiB a client keeps
-/// (PROTOCOL.md, client state limits): over it, every client drops the
-/// connection and resyncs, in a loop for as long as the request is pending.
-pub fn assert_agent_fits(obs: &acd_core::RequestObs) {
+/// Feeds an agent and a request observation to a registry, as the daemon
+/// does, and checks that no agent it then publishes encodes to more than the
+/// 64 KiB a client keeps (PROTOCOL.md, client state limits): over it, every
+/// client drops the connection and resyncs, in a loop for as long as the
+/// agent or its request exists. Without an agent, a plain one is used.
+pub fn assert_agent_fits(agent: Option<&acd_core::AgentObs>, req: Option<&acd_core::RequestObs>) {
     use acd_core::{AgentObs, Observation, Registry};
     use acd_protocol::{AgentKind, AgentRole, AgentState, MAX_AGENT_BYTES, Source};
-    let mut r = Registry::new("m".into());
-    r.apply(Observation::AgentUpsert(AgentObs {
-        id: obs.agent_id.clone(),
+    let id = req.map(|r| r.agent_id.clone()).or_else(|| agent.map(|a| a.id.clone())).unwrap_or_default();
+    let plain = AgentObs {
+        id: id.clone(),
         source: Source::Herdr,
         kind: AgentKind::Claude,
         title: "agent".into(),
@@ -92,8 +93,14 @@ pub fn assert_agent_fits(obs: &acd_core::RequestObs) {
         can_send: true,
         role: AgentRole::Main,
         parent_title: None,
-    }));
-    r.apply(Observation::RequestSeen(obs.clone()));
+    };
+    let mut r = Registry::new("m".into());
+    let mut agent = agent.cloned().unwrap_or(plain);
+    agent.id = id;
+    r.apply(Observation::AgentUpsert(agent));
+    if let Some(req) = req {
+        r.apply(Observation::RequestSeen(req.clone()));
+    }
     for a in r.agents() {
         let n = serde_json::to_vec(&a).unwrap().len();
         assert!(n <= MAX_AGENT_BYTES, "an agent of {n} bytes is published; clients keep at most {MAX_AGENT_BYTES}");

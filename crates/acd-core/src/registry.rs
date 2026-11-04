@@ -48,6 +48,10 @@ pub struct RequestObs {
 /// the connection on one, so the rest of that limit is left to the agent.
 const MAX_REQUEST_BYTES: usize = 48 * 1024;
 const TOO_LARGE: &str = "This request is too large to show here. Answer it in the terminal.";
+/// Longest working directory an agent carries, in characters: a Linux
+/// `PATH_MAX`. The adapters cap every other agent text, but a T3 worktree
+/// path, a herdr cwd or a hook session cwd is as long as its sender says.
+const MAX_CWD_CHARS: usize = 4096;
 
 impl RequestObs {
     /// A request that does not fit is read-only, like a cut command: nothing
@@ -511,6 +515,7 @@ impl Registry {
 
     fn upsert_agent(&mut self, mut o: AgentObs) -> Vec<Change> {
         let now = Utc::now();
+        o.cwd = o.cwd.map(|c| c.chars().take(MAX_CWD_CHARS).collect());
         // `Unknown` is a source outage, not a state change: the seen marker
         // survives it.
         if o.state != AgentState::Done && o.state != AgentState::Unknown {
@@ -914,10 +919,10 @@ mod tests {
         }
     }
 
-    /// Found by the `hook_mapping` fuzz target: four questions at their
-    /// per-field caps encode to about 99 KB, and a client keeps no agent over
-    /// 64 KiB (PROTOCOL.md), so it dropped the connection on every snapshot
-    /// for as long as the question was pending. Too large to show whole means
+    /// Four questions at their per-field caps, in characters JSON escapes,
+    /// encode to about 99 KB, and a client keeps no agent over 64 KiB
+    /// (PROTOCOL.md), so it dropped the connection on every snapshot for as
+    /// long as the question was pending. Too large to show whole means
     /// read-only, as for a cut command.
     #[test]
     fn a_request_too_large_for_the_agent_limit_is_published_read_only() {
@@ -933,6 +938,33 @@ mod tests {
         assert_eq!(pending.answer_path, AnswerPath::None);
         assert!(pending.options.is_empty() && pending.questions.is_none());
         assert!(pending.detail.contains("too large"));
+    }
+
+    /// A T3 worktree path, a herdr cwd and a hook session cwd are as long as
+    /// their sender says; one over 64 KiB made every client drop the agent's
+    /// machine, for as long as the agent existed.
+    #[test]
+    fn an_agent_with_a_huge_cwd_is_published_within_the_agent_limit() {
+        let mut registry = Registry::new("machine".into());
+        registry.apply(Observation::AgentUpsert(AgentObs {
+            id: "agent".into(),
+            source: Source::T3,
+            kind: AgentKind::Claude,
+            title: "agent".into(),
+            cwd: Some("é".repeat(70_000)),
+            project: None,
+            state: AgentState::Working,
+            failed: false,
+            last_message: None,
+            can_send: true,
+            role: AgentRole::Main,
+            parent_title: None,
+        }));
+        let agent = registry.agents().remove(0);
+        assert!(serde_json::to_vec(&agent).unwrap().len() <= MAX_AGENT_BYTES);
+        assert_eq!(agent.cwd.unwrap().chars().count(), 4096);
+        upsert(&mut registry);
+        assert_eq!(registry.agents()[0].cwd.as_deref(), Some("/work"));
     }
 
     #[test]

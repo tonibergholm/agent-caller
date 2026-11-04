@@ -25,10 +25,12 @@ jobs:
       - run: cargo install cargo-fuzz --locked
       - name: Run every target
         working-directory: fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds }}
         run: |
           for t in $(cargo +nightly fuzz list); do
             mkdir -p "target/run/$t"
-            cargo +nightly fuzz run "$t" "target/run/$t" "corpus/$t" -- -max_total_time=${{ inputs.seconds }} -rss_limit_mb=4096
+            cargo +nightly fuzz run "$t" "target/run/$t" "corpus/$t" -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=4096
           done
       - name: Keep the crashing inputs
         if: failure()

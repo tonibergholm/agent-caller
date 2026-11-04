@@ -13,7 +13,7 @@ use acd_adapters::t3::map::{DECISIONS, DETAIL_CHARS, TargetAnswer, agent_obs, re
 use acd_adapters::t3::wire::{
     Project, ShellItem, ShellThread, ThreadEvent, ThreadItem, TurnItem, is_project_only, item_sequence, parse_frames,
 };
-use acd_core::{Answer, RequestObs};
+use acd_core::{AgentObs, Answer, RequestObs};
 use acd_protocol::{AnswerPath, Request};
 use fuzzlib::{hidden_or_forbidden, unescape_raw};
 use libfuzzer_sys::fuzz_target;
@@ -31,10 +31,10 @@ fn as_request(obs: &RequestObs) -> Request {
     .expect("an observation is a valid request")
 }
 
-fn check(provider: Option<&str>, view: &acd_adapters::t3::detail::PendingView) {
+fn check(provider: Option<&str>, agent: Option<&AgentObs>, view: &acd_adapters::t3::detail::PendingView) {
     let (obs, target) = request_obs("a", "t", provider, view);
     assert!(!obs.title.chars().any(char::is_control), "{:?}", obs.title);
-    fuzzlib::assert_agent_fits(&obs);
+    fuzzlib::assert_agent_fits(agent, Some(&obs));
     let req = as_request(&obs);
     let answerable = obs.answer_path != AnswerPath::None;
     assert_eq!(answerable, !matches!(target.answer, TargetAnswer::ReadOnly), "path and target disagree");
@@ -89,12 +89,15 @@ fuzz_target!(|data: &[u8]| {
     let _ = ShellItem::decode(&v);
     let _ = ThreadItem::decode(&v);
     let _ = (is_project_only(&v), item_sequence(&v));
+    let mut shell_agent = None;
     if let Ok(t) = ShellThread::decode(&v) {
         let project = v.get("project").and_then(|p| Project::decode(p).ok());
         let hidden: HashSet<String> = t.pending_runtime_request.iter().map(|p| p.id.clone()).take(1).collect();
         for h in [&HashSet::new(), &hidden] {
             let o = agent_obs(&t, project.as_ref(), h);
             assert!(!o.title.chars().any(char::is_control));
+            fuzzlib::assert_agent_fits(Some(&o), None);
+            shell_agent = Some(o);
         }
     }
     if !ThreadDetail::valid_projection(&v) {
@@ -110,7 +113,7 @@ fuzz_target!(|data: &[u8]| {
     let ids: Vec<String> = d.requests.keys().cloned().collect();
     for id in &ids {
         if let Some(view) = d.pending_view(id) {
-            check(provider, &view);
+            check(provider, shell_agent.as_ref(), &view);
         }
     }
     d.prune(&[]);

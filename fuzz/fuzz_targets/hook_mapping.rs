@@ -80,7 +80,7 @@ fn check_shown(obs: &RequestObs) {
 
 fn check_permission(p: &Payload, obs: &RequestObs, codex: bool) {
     check_shown(obs);
-    fuzzlib::assert_agent_fits(obs);
+    fuzzlib::assert_agent_fits(None, Some(obs));
     assert_eq!(obs.kind, RequestKind::Permission);
     let answerable = obs.answer_path != AnswerPath::None;
     assert_eq!(answerable, !obs.options.is_empty(), "options and path disagree");
@@ -121,7 +121,7 @@ fn check_permission(p: &Payload, obs: &RequestObs, codex: bool) {
 
 fn check_question(obs: &RequestObs) {
     check_shown(obs);
-    fuzzlib::assert_agent_fits(obs);
+    fuzzlib::assert_agent_fits(None, Some(obs));
     if obs.answer_path != AnswerPath::Keys {
         return;
     }

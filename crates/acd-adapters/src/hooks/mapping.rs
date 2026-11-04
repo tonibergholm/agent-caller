@@ -868,23 +868,14 @@ mod tests {
         assert_eq!(o.title, "Ba[31msh");
         assert!(o.detail.chars().count() <= DETAIL_CHARS && !o.detail.contains('\u{7}'));
     }
-    /// Found by the `hook_mapping` fuzz target's size check: one answerable
-    /// question at its field caps, in 4-byte characters, encodes to about
-    /// 77 KB (the first question is carried twice), and a client drops any
-    /// agent over 64 KiB. The daemon publishes it read-only instead
-    /// (registry `bounded`).
+    /// Hand-built while writing the `hook_mapping` size check (the fuzzer has
+    /// not reached it on its own): one answerable question at its field caps,
+    /// in 4-byte characters, encodes to about 77 KB (the first question is
+    /// carried twice), and a client drops any agent over 64 KiB. The daemon
+    /// publishes it read-only instead (registry `bounded`).
     #[test]
     fn a_single_question_at_every_cap_is_published_read_only() {
-        let q = || {
-            serde_json::json!({
-                "question": "😀".repeat(4000), "header": "😀".repeat(200), "multiSelect": false,
-                "options": (0..9).map(|i| serde_json::json!({
-                    "label": format!("{i}{}", "😀".repeat(199)), "description": "😀".repeat(400)
-                })).collect::<Vec<_>>(),
-            })
-        };
-        let mut p = payload("claude/payload-PreToolUse-AskUserQuestion.json");
-        p.tool_input["questions"] = serde_json::json!([q()]);
+        let p = payload("../fuzz/hook_mapping-oversize-question.json");
         let obs = claude_question("a", k(), None, &p, true).unwrap();
         assert_eq!(obs.answer_path, AnswerPath::Keys, "the mapping alone offers it");
         let mut registry = acd_core::Registry::new("m".into());
