@@ -420,3 +420,15 @@ fn a_push_status_this_version_does_not_know_decodes_as_unknown() {
     let ServerMessage::Result(r) = r else { panic!("not a result") };
     assert_eq!(r.push.unwrap().status, Some(PushDeviceStatus::Unknown));
 }
+
+/// Found by the `protocol_frames` fuzz target: a `state_since` finer than a
+/// millisecond was kept on the way in and cut on the way out, so
+/// parse(serialise(x)) != x. Timestamps have millisecond precision.
+#[test]
+fn a_sub_millisecond_timestamp_is_cut_on_the_way_in() {
+    let raw = std::fs::read_to_string(dir("../../tests/fixtures/fuzz/protocol_frames-submillisecond-state-since.json")).unwrap();
+    assert!(raw.contains("11:58:00.000888888"), "the fixture holds a time finer than a millisecond");
+    let msg = acd_protocol::decode_server(&raw).unwrap().expect("a snapshot");
+    let again = serde_json::to_string(&msg).unwrap();
+    assert_eq!(acd_protocol::decode_server(&again).unwrap(), Some(msg));
+}

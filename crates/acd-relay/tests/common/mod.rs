@@ -260,22 +260,31 @@ pub fn fcm_client_with_http_timeout(fake: &FakeFcm, clock: Arc<dyn Clock>, http:
     ))
 }
 
-/// An OAuth endpoint that accepts connections and never answers.
-pub async fn stalled_oauth() -> (FakeFcm, tokio::task::JoinHandle<()>) {
-    let fake = fake_fcm().await;
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    let st = fake.st.clone();
-    let held = tokio::spawn(async move {
-        let mut open = vec![];
-        loop {
-            if let Ok((s, _)) = l.accept().await {
-                st.token_requests.fetch_add(1, Ordering::SeqCst);
-                open.push(s);
-            }
-        }
+/// An FCM client whose OAuth endpoint is in memory and never answers. Every
+/// connection is held open (the returned list keeps the far ends alive), so
+/// the only thing that can end a refresh is a deadline. No sockets: nothing
+/// outside the runtime can wake it, so paused time is deterministic.
+pub fn client_with_stalled_oauth(
+    fake: &FakeFcm,
+    clock: Arc<dyn Clock>,
+    http: Duration,
+) -> (Arc<FcmClient>, Arc<Mutex<Vec<tokio::io::DuplexStream>>>) {
+    let held = Arc::new(Mutex::new(vec![]));
+    let sink = held.clone();
+    let connect: acd_relay::http::Connector = Arc::new(move || {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        sink.lock().unwrap().push(server);
+        client
     });
-    (FakeFcm { addr, st: fake.st.clone() }, held)
+    let account = ServiceAccount::from_json_for_tests(credentials_json(fake).as_bytes()).unwrap();
+    let c = Arc::new(FcmClient::new(
+        HttpClient::in_memory_for_tests(http, 64 * 1024, connect),
+        account,
+        format!("http://{}", fake.addr),
+        "p-1".into(),
+        clock,
+    ));
+    (c, held)
 }
 
 /// A clock that follows tokio time (paused or not): `start` plus the time

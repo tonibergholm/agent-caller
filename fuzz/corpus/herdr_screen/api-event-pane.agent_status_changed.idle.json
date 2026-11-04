@@ -1,0 +1,9 @@
+{
+ "data": {
+  "agent": "claude",
+  "agent_status": "idle",
+  "pane_id": "w1:p2",
+  "workspace_id": "w1"
+ },
+ "event": "pane.agent_status_changed"
+}

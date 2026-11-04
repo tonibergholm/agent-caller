@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
 use crate::adapter::{Adapter, DeliverError};
-use crate::idem::{Begin, IdemCache};
+use crate::idem::{Begin, IdemCache, Origin};
 use crate::log::EventLog;
 use crate::push::{PushControl, PushRegistration};
 use crate::registry::{Answer, Change, CorrelationKey, Observation, Registry};
@@ -202,7 +202,14 @@ impl Core {
         (initial, rx)
     }
 
+    /// `handle_from` for a command that came in on the local socket.
     pub async fn handle(&self, client_id: &str, msg: ClientMessage) -> CommandResult {
+        self.handle_from(client_id, Origin::Local, msg).await
+    }
+
+    /// Runs one command. `origin` is the connection's source, which the
+    /// idempotency table charges alongside `client_id` (the peer chooses that).
+    pub async fn handle_from(&self, client_id: &str, origin: Origin, msg: ClientMessage) -> CommandResult {
         if let ClientMessage::Hello { .. } | ClientMessage::Ping { .. } = msg {
             let id = msg.command_id().unwrap_or("");
             return CommandResult::err(id, ErrorCode::BadRequest, "not a command");
@@ -218,12 +225,27 @@ impl Core {
         hash.copy_from_slice(&Sha256::digest(
             serde_json::to_vec(&msg).expect("serializable"),
         ));
+        // Re-running mark_seen gives the same result and delivers nothing, so
+        // it needs no exactly-once entry. Keeping it out of the table means a
+        // peer cannot fill the table with it. It still may not reuse the id of
+        // a command that holds an entry.
+        if let ClientMessage::AgentMarkSeen { .. } = msg {
+            if self.inner.lock().unwrap().idem.conflicts(client_id, &id, hash, Instant::now()) {
+                return CommandResult::err(
+                    &id,
+                    ErrorCode::DuplicateMismatch,
+                    ErrorCode::DuplicateMismatch.describe(),
+                );
+            }
+            let phase = Mutex::new(Phase::Start);
+            return self.execute(client_id, &id, msg, &phase).await.0;
+        }
         let begin = self
             .inner
             .lock()
             .unwrap()
             .idem
-            .begin(client_id, &id, hash, Instant::now());
+            .begin_from(client_id, origin, &id, hash, Instant::now());
         match begin {
             Begin::Done(result) => return result,
             Begin::Mismatch => {
@@ -263,17 +285,10 @@ impl Core {
         };
         let (result, delivery) = self.execute(client_id, &id, msg, &guard.phase).await;
         guard.armed = false;
-        // Nothing reached the agent: the id stays retryable whatever the code.
-        let cacheable = delivery != Delivery::NotDelivered
-            && !matches!(
-                result.error_code(),
-                Some(
-                    ErrorCode::RequestNotReady
-                        | ErrorCode::RequestBusy
-                        | ErrorCode::SourceUnavailable
-                        | ErrorCode::RequestChanged
-                )
-            );
+        // Only a command that reached the agent is cached (exactly-once). Any
+        // refusal changed no state and is cheap to recompute, so it releases
+        // its reservation: a client cannot fill the table with refusals.
+        let cacheable = delivery != Delivery::NotDelivered && result.ok;
         self.inner.lock().unwrap().idem.finish(
             client_id,
             &id,
