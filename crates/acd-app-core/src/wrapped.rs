@@ -278,6 +278,7 @@ impl<W: KeyWrap> SecureStoreReset for WrappedFileSecrets<W> {
     ///    about to go, plus any already in the record);
     /// 2. delete the ciphertext, so a failure leaves the old key in place;
     /// 3. replace the key.
+    ///
     /// The record outlives all three. A record with a usable key means an
     /// earlier run finished steps 2 and 3 (or lost the alias after step 2 and
     /// the next write creates one): nothing is deleted again, since the
