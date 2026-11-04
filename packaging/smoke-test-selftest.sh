@@ -53,6 +53,8 @@ cat >"$stubs/systemctl" <<'STUB'
 [ "${FAKE_ACTIVE:-1}" = 1 ]
 STUB
 printf '#!/usr/bin/env bash\nexit 0\n' >"$stubs/systemd-analyze"
+# The fake is what a bare `acd-inbox` resolves to, even where a real one is installed.
+ln -s "$prefix/bin/acd-inbox" "$stubs/acd-inbox"
 chmod +x "$stubs/systemctl" "$stubs/systemd-analyze"
 
 fails=0
