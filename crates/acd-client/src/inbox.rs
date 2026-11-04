@@ -127,8 +127,9 @@ pub const NOTIFY_RATE_WINDOW: Duration = Duration::from_secs(10);
 
 /// Decides which opened requests raise a notification: each key once (bounded
 /// history), and at most `NOTIFY_RATE_MAX` per machine per window.
+#[doc(hidden)]
 #[derive(Default)]
-struct NotifyGate {
+pub struct NotifyGate {
     // `opened_at` tells a request from an earlier acd run: ids restart at r1.
     seen: HashSet<(String, String, acd_protocol::Timestamp)>,
     order: VecDeque<(String, String, acd_protocol::Timestamp)>,
@@ -138,10 +139,10 @@ struct NotifyGate {
 impl NotifyGate {
     /// Drop the rate-limit state of a removed machine, so the map holds only
     /// configured machines.
-    fn forget_machine(&mut self, machine_key: &str) {
+    pub fn forget_machine(&mut self, machine_key: &str) {
         self.recent.remove(machine_key);
     }
-    fn admit(
+    pub fn admit(
         &mut self,
         machine_key: &str,
         machine_id: String,
