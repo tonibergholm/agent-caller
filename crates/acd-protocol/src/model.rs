@@ -6,7 +6,7 @@ pub type Timestamp = DateTime<Utc>;
 
 /// RFC 3339 UTC with millisecond precision, as required by acd/1.
 pub(crate) mod ts {
-    use chrono::{DateTime, SecondsFormat, Utc};
+    use chrono::{DateTime, SecondsFormat, SubsecRound, Utc};
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(t: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error> {
@@ -16,7 +16,9 @@ pub(crate) mod ts {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<DateTime<Utc>, D::Error> {
         let s = String::deserialize(d)?;
         DateTime::parse_from_rfc3339(&s)
-            .map(|t| t.with_timezone(&Utc))
+            // The wire has millisecond precision (PROTOCOL.md): a finer
+            // time is cut on the way in, so parse(serialise(x)) == x.
+            .map(|t| t.with_timezone(&Utc).trunc_subsecs(3))
             .map_err(serde::de::Error::custom)
     }
 }

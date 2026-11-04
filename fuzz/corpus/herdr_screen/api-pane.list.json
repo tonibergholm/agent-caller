@@ -1,0 +1,26 @@
+{
+ "id": "1",
+ "result": {
+  "type": "pane_list",
+  "panes": [
+   {
+    "pane_id": "w1:p1",
+    "terminal_id": "term_65d4be8194b791",
+    "workspace_id": "w1",
+    "tab_id": "w1:t1",
+    "focused": true,
+    "cwd": "/tmp/acp2/proj",
+    "foreground_cwd": "/private/tmp/acp2/proj",
+    "terminal_title": "user@M3Air:/tmp/acp2/proj",
+    "terminal_title_stripped": "user@M3Air:/tmp/acp2/proj",
+    "agent_status": "unknown",
+    "scroll": {
+     "offset_from_bottom": 0,
+     "max_offset_from_bottom": 0,
+     "viewport_rows": 49
+    },
+    "revision": 1
+   }
+  ]
+ }
+}

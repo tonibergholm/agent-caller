@@ -421,9 +421,10 @@ decision before 1.0.
 
 ### Whole-or-read-only (PR #83), accepted residuals
 
-- Question text and option labels that the adapters cut earlier (T3 in
-  `t3/map.rs`, hooks in `hooks/mapping.rs`) stay answerable. Only permission
-  commands follow the whole-or-read-only rule at the adapter.
+- Question text, headers, option labels and descriptions that the adapters
+  cut or altered (T3 in `t3/map.rs`, hooks in `hooks/mapping.rs`) are now
+  read-only too (fixed with PR #102; tests `a_cut_question_is_read_only`).
+  More than 9 options was already rejected whole by `question_specs`.
 - Read-only for an oversized inbox view is a presentation guarantee.
   `Inbox::pick` in `acd-client` checks the original request, so a direct
   socket caller can still answer a card the view showed cut.

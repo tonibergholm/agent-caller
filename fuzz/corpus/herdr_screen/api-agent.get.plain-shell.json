@@ -1,0 +1,7 @@
+{
+ "id": "1",
+ "error": {
+  "code": "agent_not_found",
+  "message": "agent target w1:p1 not found"
+ }
+}

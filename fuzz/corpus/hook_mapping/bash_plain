@@ -1,0 +1,1 @@
+{"session_id": "s1", "prompt_id": "p1", "turn_id": "t1", "cwd": "/w", "tool_name": "Bash", "tool_input": {"command": "npm test", "description": "run"}}
