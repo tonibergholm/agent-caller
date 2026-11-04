@@ -1,8 +1,13 @@
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use acd_protocol::*;
 use chrono::Utc;
+
+/// How many resolved non-reusable keys keep their tombstone. Older ones are
+/// forgotten, so the key table follows live state, not an agent's history.
+/// A replay of an occurrence resolved this long ago would reopen it.
+pub const RETIRED_KEYS_CAP: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CorrelationKey(pub String);
@@ -156,6 +161,8 @@ pub struct Registry {
     keys: HashMap<(String, CorrelationKey), KeyState>,
     /// Agents whose current `done` was marked seen; cleared when the agent leaves `done`.
     seen: HashSet<String>,
+    /// Resolved non-reusable keys, oldest first; see `RETIRED_KEYS_CAP`.
+    retired: VecDeque<(String, CorrelationKey)>,
     next_id: u64,
 }
 
@@ -167,6 +174,7 @@ impl Registry {
             requests: HashMap::new(),
             keys: HashMap::new(),
             seen: HashSet::new(),
+            retired: VecDeque::new(),
             next_id: 0,
         }
     }
@@ -356,10 +364,17 @@ impl Registry {
             (ResolvedBy::Inbox, Some(Answer::Option(o))) => Some(o.clone()),
             _ => None,
         };
-        for k in self.keys.values_mut() {
+        let mut unique = Vec::new();
+        for (id, k) in self.keys.iter_mut() {
             if k.open_request.as_deref() == Some(request_id) {
                 k.open_request = None;
+                if !k.reusable {
+                    unique.push(id.clone());
+                }
             }
+        }
+        for id in unique {
+            self.retire(id);
         }
         let mut out = vec![Change::RequestResolved {
             request_id: request_id.to_string(),
@@ -376,6 +391,18 @@ impl Registry {
             out.push(Change::AgentUpdated(a.clone()));
         }
         out
+    }
+
+    /// Remembers a resolved non-reusable key and forgets the oldest ones past
+    /// the cap. Such a key never reopens, so its state is only a tombstone.
+    fn retire(&mut self, id: (String, CorrelationKey)) {
+        self.retired.push_back(id);
+        while self.retired.len() > RETIRED_KEYS_CAP {
+            let Some(old) = self.retired.pop_front() else { break };
+            if self.keys.get(&old).is_some_and(|k| k.open_request.is_none() && !k.reusable) {
+                self.keys.remove(&old);
+            }
+        }
     }
 
     fn mark_gone_by_id(&mut self, request_id: &str) {
