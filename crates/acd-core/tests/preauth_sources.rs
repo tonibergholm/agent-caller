@@ -33,10 +33,13 @@ async fn within<T>(what: &str, f: impl std::future::Future<Output = T>) -> T {
 }
 
 /// Loopback aliases other than 127.0.0.1 exist on Linux, not by default on
-/// macOS. Tests that need distinct sources skip when they cannot bind them.
+/// macOS. On Linux they must exist, so a missing alias fails the test; only
+/// elsewhere does a test needing distinct sources skip (the pool rules are
+/// also covered without sockets by the `source_pool_tests` unit tests).
 fn can_bind(ips: &[&str]) -> bool {
     ips.iter().all(|ip| match std::net::TcpListener::bind(format!("{ip}:0")) {
         Ok(_) => true,
+        Err(e) if cfg!(target_os = "linux") => panic!("cannot bind loopback alias {ip} on Linux: {e}"),
         Err(e) => {
             eprintln!("SKIPPED: cannot bind {ip}: {e}");
             false
@@ -290,26 +293,27 @@ async fn one_source_cannot_lock_the_local_socket_out() {
     assert!(hello_ok(&mut local).await);
 }
 
-/// Saturates the whole network pool (8 slots) from four sources, so the
+/// Saturates the whole network pool (8 slots) from eight sources, so the
 /// per-source cap cannot be what protects the local socket. Fails if the
 /// local socket shares the network pool.
 #[tokio::test]
 async fn a_saturated_network_pool_leaves_the_local_socket_usable() {
-    let sources = ["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5"];
-    if !can_bind(&["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5", "127.0.0.6"]) {
+    let sources: Vec<String> = (2..10).map(|i| format!("127.0.0.{i}")).collect();
+    let all: Vec<&str> = sources.iter().map(String::as_str).chain(["127.0.0.10"]).collect();
+    if !can_bind(&all) {
         return;
     }
     let s = serve().await;
     let mut held = Vec::new();
-    for src in sources {
-        let h = idle_tls(s.tcp, src, 2).await;
-        assert_eq!(h.len(), 2, "{src} holds its two slots");
+    for src in &sources {
+        let h = idle_tls(s.tcp, src, 1).await;
+        assert_eq!(h.len(), 1, "{src} holds one slot");
         held.extend(h);
     }
     assert_eq!(held.len(), 8);
     // Saturated now: a fresh source (under its own cap) gets HTTP 503.
     assert_eq!(
-        open_tls_result(s.tcp, "127.0.0.6").await.err().map(|r| format!("{r:?}")),
+        open_tls_result(s.tcp, "127.0.0.10").await.err().map(|r| format!("{r:?}")),
         Some("Http(503)".to_string()),
         "a full network pool answers the upgrade with HTTP 503"
     );
@@ -317,6 +321,40 @@ async fn a_saturated_network_pool_leaves_the_local_socket_usable() {
         .await
         .expect("local upgrade is not refused while the network pool is full");
     assert!(hello_ok(&mut local).await);
+}
+
+/// Four sources holding two slots each used to take all 8 post-upgrade slots
+/// and lock out every new client. The last two slots are reserved for sources
+/// holding none, so a fifth source still gets in. Fails if the router goes
+/// back to a plain semaphore for the network pool.
+///
+/// Event-driven: the hello gate is never opened, so no hello timeout runs,
+/// and the other deadlines are a day, so nothing is released by time. Each
+/// step awaits its upgrade result directly.
+#[tokio::test]
+async fn four_sources_at_their_cap_cannot_lock_a_fifth_source_out() {
+    let sources = ["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5"];
+    if !can_bind(&["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5", "127.0.0.6"]) {
+        return;
+    }
+    const NEVER: Duration = Duration::from_secs(24 * 60 * 60);
+    let (_gate_stays_closed, gate) = watch::channel(false);
+    let s = serve_opts(NEVER, NEVER, NEVER, Some(gate)).await;
+    let mut held = Vec::new();
+    for src in sources {
+        held.push(open_tls_inner(s.tcp, src).await.expect("first slot"));
+        match open_tls_inner(s.tcp, src).await {
+            Ok(ws) => held.push(ws),
+            Err(r) => assert!(
+                src == "127.0.0.5" && matches!(r, Refused::Http(503)),
+                "only the fourth source's second connection is refused, with 503: {src} {r:?}"
+            ),
+        }
+    }
+    assert_eq!(held.len(), 7, "the fourth source cannot take a reserved slot for its second connection");
+    open_tls_inner(s.tcp, "127.0.0.6")
+        .await
+        .expect("a source with nothing outstanding takes a reserved slot");
 }
 
 #[tokio::test]

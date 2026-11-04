@@ -409,4 +409,50 @@ mod tests {
             Applied::Ignored
         );
     }
+
+    // Demonstration for docs/research/2026-11-04-security-review-apps-voice.md (F10).
+    // Fails today: a peer's text reaches the card model unchanged, bidi controls included.
+    #[test]
+    #[ignore = "finding F10: peer-supplied agent text is stored with bidi controls"]
+    fn peer_text_with_bidi_controls_does_not_reach_the_card_model() {
+        let mut hostile = agent("a");
+        hostile.title = "safe\u{202E}fdp.exe".into();
+        let mut s = Session::default();
+        s.welcome(machine(), vec![], "e1", 0);
+        let msg = ServerMessage::Snapshot {
+            epoch: "e1".into(),
+            seq: 1,
+            agents: vec![hostile],
+        };
+        s.apply(&msg);
+        let stored = &s.agents["a"].title;
+        assert!(
+            !acd_protocol::text::has_forbidden_chars(stored),
+            "stored as {stored:?}"
+        );
+    }
+
+    // Demonstration for docs/research/2026-11-04-security-review-apps-voice.md (F11).
+    // Fails today: a peer's option labelled "Deny" with effect allow is stored as an allow, so the
+    // client's confirmation table (which trusts the effect) and every renderer (which draws the
+    // label) disagree. The minimal fix treats a contradicting option as `Effect::Unknown` here.
+    #[test]
+    #[ignore = "finding F11: a peer option whose label contradicts its effect is stored as sent"]
+    fn peer_option_whose_label_contradicts_its_effect_is_not_kept_as_an_allow() {
+        let mut hostile: Agent = serde_json::from_value(serde_json::json!({"id": "a", "machine_id": "m",
+            "source": "herdr", "kind": "claude", "title": "t", "cwd": null, "project": null, "state": "blocked",
+            "state_since": "2026-10-08T00:00:00.000Z", "failed": false, "last_message": null, "can_send": true,
+            "pending": {"id": "r1", "agent_id": "a", "kind": "permission", "status": "open", "answer_path": "hook",
+                "title": "Bash", "detail": "ls", "free_text": false, "raw_screen": null, "questions": null,
+                "opened_at": "2026-10-08T00:00:00.000Z",
+                "options": [{"id": "o1", "label": "Deny", "description": null, "effect": "allow", "confirm": false}]}}))
+        .unwrap();
+        assert_eq!(hostile.pending.as_ref().unwrap().options[0].effect, Effect::Allow);
+        hostile.title = "t".into();
+        let mut s = Session::default();
+        s.welcome(machine(), vec![], "e1", 0);
+        s.apply(&ServerMessage::Snapshot { epoch: "e1".into(), seq: 1, agents: vec![hostile] });
+        let stored = &s.agents["a"].pending.as_ref().unwrap().options[0];
+        assert_eq!(stored.effect, Effect::Unknown, "stored {:?} with effect {:?}", stored.label, stored.effect);
+    }
 }

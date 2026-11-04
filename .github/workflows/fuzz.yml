@@ -1,0 +1,41 @@
+name: Fuzz
+
+# Manual only. Fuzzing is not part of the CI test job (fuzz/README.md).
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to run each target
+        default: '300'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: Run every target
+        working-directory: fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds }}
+        run: |
+          for t in $(cargo +nightly fuzz list); do
+            mkdir -p "target/run/$t"
+            extra=""; [ "$t" = herdr_screen ] && extra="../tests/fixtures/herdr"
+            cargo +nightly fuzz run "$t" "target/run/$t" "corpus/$t" $extra -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=4096
+          done
+      - name: Keep the crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
