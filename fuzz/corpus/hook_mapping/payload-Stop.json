@@ -1,0 +1,21 @@
+{
+ "session_id": "4e3885ee-7454-410d-a2e2-86f4dc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885ee-7454-410d-a2e2-86f4dc2533c0.jsonl",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "e7cf77ea-660e-4ab0-84c5-6314e83ae50a",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "Stop",
+ "stop_hook_active": false,
+ "last_assistant_message": "The command was denied, so `/tmp/acp0/t1.txt` was not created. The denial message was \"Denied from agent inbox.\" I haven't retried or tried another way to create the file. If you want it created, you could approve the command or run `! touch /tmp/acp0/t1.txt` yourself.",
+ "background_tasks": [],
+ "session_crons": [],
+ "_env": {
+  "HERDR_PANE_ID": "w1:p2",
+  "HERDR_SOCKET_PATH": "/Users/user/.config/herdr/sessions/p0/herdr.sock",
+  "HERDR_ENV": "1",
+  "CLAUDE_CODE_ENTRYPOINT": "sdk-ts"
+ }
+}

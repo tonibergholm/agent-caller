@@ -27,7 +27,7 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
   `acd pair` prints a pairing line containing the pin and client token. TCP
   clients must verify the configured pin; there is no plaintext fallback.
   The pairing host is an ASCII hostname (at most 253 bytes; labels of 1 to 63
-  letters, digits and hyphens) or an IP literal, with IPv6 in brackets, then
+  letters, digits and hyphens, not starting or ending with a hyphen) or an IP literal, with IPv6 in brackets, then
   `:port`. Anything else (whitespace, control or bidi characters, userinfo,
   path, query, non-ASCII) is not a pairing line.
   `acd tls rotate` changes the certificate for new sessions, keeps existing
@@ -39,46 +39,79 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
 |---|---|
 | A. TCP accept → TLS finished | At most 16 handshakes at once per listener. 5 s each, then the socket is dropped. |
 | B. TLS finished → HTTP upgrade request complete | Covered by the 10 s pre-authentication deadline; silent or trickling HTTP clients are cut when it passes. |
-| C. Upgrade → `hello` authenticated | At most 8 at once on the network pool; `hello` within 5 s. The Unix socket has its own pool of 8. |
+| C. Upgrade → `hello` authenticated | At most 8 at once on the network pool, at most 2 per source IP, and the last 2 slots only for a source holding none; `hello` within 5 s. The Unix socket has its own pool of 8. |
 | A + B + C | At most 32 unauthenticated TCP connections shared by the daemon across all TCP listeners, and at most 2 of them from one source IP (IPv4-mapped IPv6 counts as the IPv4 address). Each must authenticate within 10 s of TCP accept. |
 
 **Limits.**
 - `hello` must arrive within 5 s.
 - Frames are limited to 1 MiB, in both directions. A client drops a
-  connection whose peer sends a larger frame or message, as the daemon does,
-  and reconnects without `resume` (a resync), like the state limits below.
+  connection whose peer sends a larger frame or message, as the daemon does.
+  After `welcome` the client then reconnects without `resume` (a resync), like
+  the state limits below. Before the next `welcome` (the first frames after a
+  drop) the client treats the same error as offline and keeps its resume
+  cursor, so no resync happens on that path. Memory stays bounded. PR #105
+  closes this gap; it is not merged yet.
 - **Client state limits.** A client holds at most 1000 agents per machine,
   and no single agent may encode to more than 64 KiB of JSON. A snapshot or
   `agent.updated` past either limit ends the connection as a resync: the
   client reconnects without `resume` and keeps none of the offending state.
+  The daemon keeps its agents under that limit: a request whose text exceeds
+  40 KiB is published read-only (no options, `answer_path: none`, a detail that
+  says to answer in the terminal), and a working directory is cut to what
+  encodes to 8 KiB of JSON.
 - **Unauthenticated connections.** Counted from TCP accept until `hello`
   authenticates, the connection is cut, or it closes.
   - Per source IP: at most 2. A third connection from the same address is
     closed right after TCP accept, before TLS starts. The client sees a
     connection reset or EOF, not an HTTP status.
-  - Network pool: at most 8 past the upgrade, shared by all TCP listeners.
-    When it is full, the upgrade request gets HTTP 503.
+  - Network pool: at most 8 past the upgrade, shared by all TCP listeners,
+    counted per source IP (IPv4-mapped IPv6 counts as the IPv4 address).
+    Admission to a slot:
+    - a source holding 2 slots is refused;
+    - a source that already holds a slot is refused once 6 of the 8 are
+      taken, even though 2 are free, because those 2 are kept for sources
+      holding none;
+    - a source holding none is admitted while any slot is free;
+    - a TLS connection whose peer address is unknown is refused.
+    A refusal is HTTP 503 on the upgrade request.
   - Unix socket: a separate pool of 8. Network peers cannot take these
     slots; when they are full, the upgrade request gets HTTP 503.
-  Authenticated connections do not count. Fewer than 4 source IPs cannot
-  fill the network pool.
+  Authenticated connections do not count. Fewer than 5 source IPs cannot
+  fill the network pool (2 + 2 + 2 + 1 + 1 fills it with five). Residual:
+  an attacker with 5 or more source IPs still locks new network clients out
+  until their hellos time out; the Unix socket is unaffected.
 - A request carrying an `Origin` header is rejected with HTTP 403 unless
   the origin is in `allowed_origins`, which is empty by default. This
   blocks connections opened from web pages.
 - **Ids and text.** A command `id`, `request_id`, `agent_id` and
   `hello.client.id` are at most 128 bytes. Answer `text` and `agent.send`
   `text` are at most 64 KiB. Both texts hold no control character other
-  than newline and tab, no bidi override and no line or paragraph separator;
-  otherwise the command gets `bad_request`. An oversized command gets a `bad_request`
+  than newline and tab, no bidi control (U+061C, U+200E, U+200F, U+202A to
+  U+202E, U+2066 to U+2069) and no line or paragraph separator (U+2028,
+  U+2029), and are not empty or only whitespace; otherwise the command gets
+  `bad_request`. An oversized command gets a `bad_request`
   result and reserves nothing. A `hello` with an oversized `client.id` gets
   `error {code: "bad_request"}` and the connection is closed with 4401.
 - **Commands in flight.** At most 32 per session and 256 across the daemon,
   counting commands whose session has already closed. Past either cap the
   command gets a `bad_request` result with the message
   `too many in-flight commands` and reserves nothing.
-- **Idempotency table.** At most 16384 reservations and cached results.
-  When it is full, a new command id gets a `bad_request` result
-  (`too many recent commands; retry later`) until cached results expire.
+- **Idempotency table.** Holds reservations (commands running) and cached
+  results (commands that delivered), at most 16384 together. A new command
+  must fit under all of these bounds, or it gets a `bad_request` result
+  (`too many recent commands; retry later`) and reserves nothing:
+  - per `client.id`: 4096 entries;
+  - per network source IP: 2048 entries, whatever `client.id`s it uses, and
+    entries under at most 8 distinct `client.id`s;
+  - network sources together: 12288 entries; the local socket has its own
+    4096, which no network peer can use;
+  - the 16384 total.
+  A refused command is safe to retry once earlier results have expired
+  (15 minutes after they finished). Entries are never evicted early. The
+  quotas are charged to the connection that created the entry. Residual:
+  many source IPs (or two sources sharing one `client.id`) can still fill
+  the table, and then every new `request.answer` and `agent.send` is
+  refused until entries expire.
 
 **Tokens.**
 - The config directory is `$ACD_CONFIG_DIR`, or `~/.config/acd/`. It has
@@ -244,7 +277,17 @@ code 4408.
   - Once the command finishes, the same retry returns the cached result.
   - The same id with a different payload returns `duplicate_mismatch`.
 - **Retention.** Reservations and results are kept for 15 minutes after
-  the command finishes.
+  the command finishes. An entry is never evicted before that, so a replay
+  within 15 minutes always returns the original result or
+  `duplicate_mismatch`.
+- **Only deliveries are cached.** A result is cached only if the command
+  succeeded (`ok`). Every error releases its reservation (see below), so
+  the same id may be retried or reused.
+- **`agent.mark_seen` is not recorded.** Running it twice has the same
+  result and delivers nothing, so it takes no entry: a retry runs it again,
+  and reusing the id of an earlier `agent.mark_seen` with a different payload
+  is not `duplicate_mismatch`. It still gets `duplicate_mismatch` if the id
+  belongs to a live entry of another command.
 - **Pre-delivery errors are not cached.** If a command fails before
   anything is delivered (`request_not_ready`, `request_busy`,
   `source_unavailable`, or any error the adapter reports as not delivered,
