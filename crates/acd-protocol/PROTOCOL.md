@@ -51,6 +51,10 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
   and no single agent may encode to more than 64 KiB of JSON. A snapshot or
   `agent.updated` past either limit ends the connection as a resync: the
   client reconnects without `resume` and keeps none of the offending state.
+  The daemon keeps its agents under that limit: a request whose text exceeds
+  40 KiB is published read-only (no options, `answer_path: none`, a detail that
+  says to answer in the terminal), and a working directory is cut to what
+  encodes to 8 KiB of JSON.
 - **Unauthenticated connections.** Counted from TCP accept until `hello`
   authenticates, the connection is cut, or it closes.
   - Per source IP: at most 2. A third connection from the same address is

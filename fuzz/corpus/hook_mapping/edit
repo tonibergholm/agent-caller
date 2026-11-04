@@ -1,0 +1,1 @@
+{"session_id": "s1", "prompt_id": "p1", "turn_id": "t1", "cwd": "/w", "tool_name": "Edit", "tool_input": {"file_path": "/a/b", "old_string": "x\u0007y", "new_string": "z"}}
