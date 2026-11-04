@@ -411,14 +411,22 @@ fn captured_log() -> &'static std::sync::Mutex<Vec<u8>> {
     })
 }
 
-async fn hello_with(port: u16, token: &str, client_id: &str) {
+async fn hello_with(port: u16, token: &str, client_id: &str) -> (std::net::SocketAddr, bool) {
     hello_named(port, token, client_id, "log-test").await
 }
 
-async fn hello_named(port: u16, token: &str, client_id: &str, name: &str) {
+/// Sends one hello. Returns this connection's own address, as the daemon logs
+/// it as `peer`, and whether this hello got a Welcome.
+async fn hello_named(
+    port: u16,
+    token: &str,
+    client_id: &str,
+    name: &str,
+) -> (std::net::SocketAddr, bool) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
     let tls = tls_connect(port).await;
+    let local = tls.get_ref().0.local_addr().unwrap();
     let (mut ws, _) = tokio_tungstenite::client_async("wss://localhost/", tls)
         .await
         .unwrap();
@@ -436,10 +444,10 @@ async fn hello_named(port: u16, token: &str, client_id: &str, name: &str) {
         .await
         .unwrap();
     // Wait for the verdict: a welcome, or the connection ending.
-    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+    let welcomed = tokio::time::timeout(Duration::from_secs(5), async {
         while let Some(Ok(m)) = ws.next().await {
             if matches!(m, Message::Close(_)) {
-                break;
+                return false;
             }
             if let Message::Text(t) = m
                 && matches!(
@@ -447,32 +455,47 @@ async fn hello_named(port: u16, token: &str, client_id: &str, name: &str) {
                     Ok(Some(acd_protocol::ServerMessage::Welcome { .. }))
                 )
             {
-                break;
+                return true;
             }
         }
+        false
     })
-    .await;
+    .await
+    .unwrap_or(false);
+    (local, welcomed)
+}
+
+/// The captured log line that has every needle, once it appears. The deadline
+/// only bounds a hung test.
+async fn log_line_with(needles: &[&str]) -> Option<String> {
+    for _ in 0..500 {
+        let log = String::from_utf8(captured_log().lock().unwrap().clone()).unwrap();
+        if let Some(line) = log.lines().find(|l| needles.iter().all(|n| l.contains(n))) {
+            return Some(line.to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    None
 }
 
 #[tokio::test]
 async fn accepted_and_rejected_hellos_are_logged_without_the_token() {
     captured_log();
     let s = serve(short(), tls::Admission::new(tls::MAX_UNAUTHENTICATED_TCP)).await;
-    hello_with(s.port, "wrong-token-7f3a", "bad-client").await;
-    hello_with(s.port, "secret", "good-client-1").await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let log = String::from_utf8(captured_log().lock().unwrap().clone()).unwrap();
-    let rejected = log
-        .lines()
-        .find(|l| l.contains("hello rejected") && l.contains("invalid token"))
+    let (bad_peer, bad_welcomed) = hello_with(s.port, "wrong-token-7f3a", "bad-client").await;
+    let (good_peer, good_welcomed) = hello_with(s.port, "secret", "good-client-1").await;
+    assert!(!bad_welcomed, "the wrong token got a welcome");
+    assert!(good_welcomed, "this hello was not welcomed");
+    // Match this test's own connections, not any other test's line.
+    let rejected = log_line_with(&["hello rejected", "invalid token", &format!("peer={bad_peer} ")])
+        .await
         .expect("a rejected hello is logged");
     assert!(rejected.contains("invalid token"), "{rejected}");
-    assert!(rejected.contains("127.0.0.1:"), "{rejected}");
-    let accepted = log
-        .lines()
-        .find(|l| l.contains("hello accepted") && l.contains("client_id_len=13"))
+    let accepted = log_line_with(&["hello accepted", &format!("peer={good_peer} ")])
+        .await
         .expect("an accepted hello is logged");
-    assert!(accepted.contains("127.0.0.1:"), "{accepted}");
+    assert!(accepted.contains("client_id_len=13"), "{accepted}");
+    let log = String::from_utf8(captured_log().lock().unwrap().clone()).unwrap();
     // Peer free text is not logged: only lengths and a short hash.
     assert!(!accepted.contains("good-client-1"), "{accepted}");
     assert!(!accepted.contains("log-test"), "{accepted}");
@@ -488,12 +511,14 @@ async fn a_hello_naming_itself_after_the_token_does_not_log_the_token() {
     captured_log();
     let token = "tok-Zq81xKd4Wm9vRb27";
     let s = serve_with_token(short(), tls::Admission::new(tls::MAX_UNAUTHENTICATED_TCP), token).await;
-    hello_named(s.port, token, token, token).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (peer, welcomed) = hello_named(s.port, token, token, token).await;
+    assert!(welcomed, "this hello was not welcomed");
+    log_line_with(&["hello accepted", &format!("peer={peer} ")])
+        .await
+        .expect("this hello was accepted and logged");
     let log = String::from_utf8(captured_log().lock().unwrap().clone()).unwrap();
-    assert!(log.contains("hello accepted"), "the hello was accepted and logged");
     for i in 0..=token.len() - 8 {
-        let piece = &token[i..i + 8];
-        assert!(!log.contains(piece), "token piece {piece:?} leaked");
+        // Static message: a failure must not print the token piece.
+        assert!(!log.contains(&token[i..i + 8]), "a token piece leaked into the log");
     }
 }
