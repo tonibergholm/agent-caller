@@ -1,0 +1,27 @@
+[package]
+name = "agent-caller-android"
+version = "0.9.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+publish = false
+
+# Its own workspace, like apps/ios and app/src-tauri: the Android targets and
+# the JNI dependency stay out of the root workspace.
+[workspace]
+
+[lib]
+name = "agent_caller_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+acd-app-core = { path = "../../crates/acd-app-core" }
+acd-client = { path = "../../crates/acd-client" }
+acd-protocol = { path = "../../crates/acd-protocol" }
+jni = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
+
+[dev-dependencies]
+tempfile = "3"
