@@ -1,0 +1,332 @@
+{
+ "session_id": "4e3885ee-7454-410d-a2e2-86f4dc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885ee-7454-410d-a2e2-86f4dc2533c0.jsonl",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885el",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885ee-7454-410d-a2e2-86f4dc2533c0.jsonl",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQuestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "descripti;n": "Chouestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "descdestion": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "description": "Choose blue"
+     }
+    ],
+    "multiSelect": false
+   }
+  ],
+  "answers": {
+   "Pick a color": "Red"
+  },
+  "annotations": {}
+ },
+ "tool_response": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885el",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885ee-7454-410d-a2e2-86f4dc2533c0.jsonl",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQuestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "descripti;n": "Chouestion",
+ "tool_input": {
+  "stqeuions": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "description": "Choose blue"
+     }
+    ],
+    "multiSelect": false
+   }
+  ],
+  "answers": {
+   "Pick a color": "Red"
+  },
+  "annotations": {}
+ },
+ "tool_response": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "description": "Choose blue"
+     }
+    ],
+    "multiSnlns": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "descripti;n": "Chouestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "descdestion": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "description": "Choose blue"
+     }
+    ],
+    "multiSelect": false
+   }
+  ],
+  "answers": {
+   "Pick a color": "Red"
+  },
+  "annotations": {}
+ },
+ "tool_response": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885el",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885ee-7454-410d-a2e2-86f4dc2533c0.jsonl",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQuestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "descripti;n": "Chouestion",
+ "tool_input": {
+  "stqeuions": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "description": "Choose blue"
+     }
+    ],
+    "multiSelect": false
+   }
+  ],
+  "answers": {
+   "Pick a color": "Red"
+  },
+  "annotations": {}
+ },
+ "tool_response": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "description": "Choose blue"
+     }
+    ],
+    "multiSnlect": false
+   }
+  ],
+  "answers": e-7454-410d-a2e2-86f4dc2533c0.jsonl",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQuestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "header      "description": "Choose blue"
+     }
+    ],
+    "multiSelect": false
+   }
+  ],
+  "answers": {
+   "Pick a color": "Red"
+  },
+ect": false
+   }
+  ],
+  "answers": e-7454-410d-a2e2-86f4dc2533c0.jsonl",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "2cbc7996-b6c1-458b-b340-e1ab239338b1",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQuestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "Pick a color",
+    "header      "description": "Choose blue"
+     }
+    ],
+    "multiSelect": false
+   }
+  ],
+  "answers": {
+   "Pick a color": "Red"
+  },
+  "annotations": {}
+ },
+ "tool_response": {
+  "questions": [
+   {
+    "question":("Pick a color",
+    "header": "Color",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Choose red"
+     },
+     {
+      "label": "Blue",
+      "description": "Choose blue"
+     }
+    ],
+    "mul"CLAUDE_CODE_ENTRYPOINT": "sdk-ts"
+ }
+}
