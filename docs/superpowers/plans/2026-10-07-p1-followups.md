@@ -307,15 +307,19 @@ needs a decision or a small follow-up.
   `/proc/net/tcp` on Linux, or a narrower and shorter-lived T3 token; needs an
   owner decision), F4 (herdr socket discovery checks no owner), F5 (service
   files from unescaped paths). Core 1, 2 and 6 and local F1 are fixed; local F3 is fixed apart from the residual below.
-  F3 fix: the hook listeners drop a connection that has not sent a
-  complete request head 10 s after accept, and every response carries
-  `Connection: close`, so a connection never idles between requests (a 401
-  to an unauthenticated `GET /` no longer leaves a keep-alive socket holding
-  a slot). A held permission request is unaffected: it sends no response
-  until it is decided. F3 residual: a slow body after the token check is
-  bounded only by the 5 s `body_timeout`, and there is no per-peer
-  connection cap, so a peer can still fill the 128 slots for up to 10 s at a
-  time by sending nothing. Local F2 stays **open**, as above.
+  F3 fix: the hook listeners are served through hyper's own
+  `http1::Builder::header_read_timeout` (`serve_capped`, hyper 1.12 with
+  `hyper_util::rt::TokioTimer`), 10 s. The deadline starts at accept, covers
+  a head that never completes (nothing sent, or only blank lines), is cleared
+  by hyper when it has parsed a head, and starts again after each response,
+  so an idle keep-alive connection is closed too. No byte of the request is
+  scanned by acd, so it cannot disagree with hyper about where a head ends
+  (the first fix did, for blank-line and LF-only heads). A held permission
+  request is not cut: hyper reads no head while a request is in flight.
+  F3 residual: a slow body after the token check is bounded only by the 5 s
+  `body_timeout`, there is no per-peer connection cap, so a peer can still
+  fill the 128 slots for up to 10 s at a time by sending nothing, and the
+  slot is taken before accept. Local F2 stays **open**, as above.
 - **Owner decisions still open:** same-user denial of service on the local
   socket and the four-source pre-auth residual (see Pre-auth residuals); the
   relay spec's lock-screen content rule and handle revocation (see its review
