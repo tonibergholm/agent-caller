@@ -21,7 +21,7 @@ idempotency table, per-source quotas, registry eviction of resolved keys, the
 | acd-core, `origin/main` (before this PR's tests) | 357 | 233 | 31 | 25 | 68 |
 | acd-core, this PR's first-round tests | 357 | 253 | 9 | 27 | 68 |
 | acd-core, plus `mutants_core_quota.rs` and `mutants_pool.rs` | 357 | 259 | 3 | 27 | 68 |
-| question gate (`claude_question`, `request_obs`), before | 42 | 39 | 1 | 0 | 2 |
+| question gate (`claude_question`, `request_obs`), first-round tests | 42 | 39 | 1 | 0 | 2 |
 | question gate, plus `mutants_adapters_t3.rs` | 42 | 40 | 0 | 0 | 2 |
 
 The third acd-core row is derived: the nine mutants missed by the second row
@@ -57,10 +57,10 @@ by `true` makes the new test fail with an index panic) and was not rerun.
   only created by `claim_key`, which bumps the generation to at least 1, or
   copied by `migrate`; a generation of 0 never occurs.
 
-### Remaining after the new tests, not security-relevant
+### Closed by the first round
 
-The first run also reported 22 further misses on `origin/main` that the
-first-round tests already closed (for example `Txn` accessors, `LogLimiter`
+The `origin/main` run reported 22 further misses that the first-round tests
+already closed (for example `Txn` accessors, `LogLimiter`
 methods and `Registry::fallback_ended`); they are not repeated here.
 
 ### Real bugs found
