@@ -58,6 +58,11 @@ check-version:
 test-scripts:
     scripts/tests/run.sh
 
+# Type-check the portable client crates for Windows and Android, as the CI
+# portability job does (scripts/portability-check.sh). Needs rustup; no NDK.
+portability-check:
+    scripts/portability-check.sh
+
 # Android inbox: the debug APK (apps/android/build/agent-caller-debug.apk).
 # Needs ANDROID_NDK_HOME (a real NDK) or ACD_SANDBOX_NDK (tools/sandbox-ndk.sh
 # output), plus aapt, zipalign, apksigner and dx|d8. See docs/android.md.

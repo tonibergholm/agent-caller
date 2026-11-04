@@ -1,13 +1,13 @@
-//! The secret store for platforms that have no secure one yet (Windows). It implements the same `SecretStore` trait as the Apple Keychain
+//! The secret store for platforms that have no secure one yet. It implements the same `SecretStore` trait as the Apple Keychain
 //! store and refuses every call, so a machine secret is never written
 //! anywhere and never read from anywhere. The user sees a plain error, not a
 //! pairing that silently lost its token.
 //!
-//! shortcut: no machine secret can be stored on Windows, so a remote machine
-//! cannot be paired there; upgrade with Credential Manager behind this same
-//! trait. Android has its own store (`wrapped`, an Android Keystore key
-//! wrapping a file); it refuses until the shell installs it. Do not add a
-//! file or plain-settings fallback in place of either.
+//! shortcut: no machine secret can be stored on such a platform, so a remote
+//! machine cannot be paired there. Windows has `credman`; Android has its own
+//! store (`wrapped`, an Android Keystore key wrapping a file); it refuses
+//! until the shell installs it. Do not add a file or plain-settings fallback
+//! in place of either.
 use std::sync::Arc;
 
 use acd_client::settings::{SecretError, SecretStore};
@@ -31,18 +31,23 @@ impl SecretStore for UnsupportedSecrets {
 }
 
 /// The store a shell hands to `setup::open_inbox` without naming a platform:
-/// the Keychain on Apple targets, the Keystore-wrapped store on Android (the
-/// refusing one until the shell installs it), the refusing store elsewhere.
+/// the Keychain on Apple targets, the Credential Manager on Windows, the
+/// Keystore-wrapped store on Android (the refusing one until the shell
+/// installs it), the refusing store elsewhere.
 pub fn platform_secrets() -> Arc<dyn SecretStore> {
     #[cfg(target_vendor = "apple")]
     {
         crate::keychain::cached_secrets()
     }
+    #[cfg(windows)]
+    {
+        crate::credman::cached_secrets()
+    }
     #[cfg(target_os = "android")]
     {
         crate::wrapped::installed_or_refusing()
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
+    #[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
     {
         Arc::new(UnsupportedSecrets)
     }
@@ -63,10 +68,22 @@ mod tests {
         assert_eq!(s.status("k"), SecretStatus::Unreadable);
     }
 
-    #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
+    #[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
     #[test]
     fn the_platform_store_refuses_here() {
         assert!(platform_secrets().set("k", "v").is_err());
         assert!(platform_secrets().get("k").is_err());
+    }
+
+    /// Windows only: `platform_secrets()` is the Credential Manager store.
+    #[cfg(windows)]
+    #[test]
+    fn the_platform_store_is_the_credential_manager_on_windows() {
+        let s = platform_secrets();
+        let key = format!("acd-platform-test-{}", std::process::id());
+        s.set(&key, "v").unwrap();
+        assert_eq!(s.get(&key).unwrap().as_deref(), Some("v"));
+        s.delete(&key).unwrap();
+        assert_eq!(s.get(&key).unwrap(), None);
     }
 }

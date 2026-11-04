@@ -12,8 +12,21 @@ use std::{
 mod platform;
 pub use platform::platform_supports_owner_checks;
 
-/// True when this build has the real owner-only checks (`cfg(owner_checks)`):
-/// unix except Android. Everywhere else every check refuses.
+pub mod paths;
+pub mod winacl;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{
+    check_private_dir, check_private_file, create_private_dir, create_private_dir_all,
+    create_private_file, current_user_sid, open_owned_file, read_private,
+};
+
+/// True when this build has the unix owner-only checks (`cfg(owner_checks)`):
+/// unix except Android. Windows has its own implementation (`windows.rs`, DACL
+/// based) and keeps this false: it has no mode bits and no `acd.sock`, and the
+/// client uses this flag to decide whether the local socket endpoint exists.
+/// Android refuses every check.
 pub const OWNER_CHECKS: bool = cfg!(owner_checks);
 
 #[derive(Debug)]
@@ -193,28 +206,25 @@ fn unsupported(path: &Path) -> SecureFsError {
     )
 }
 
-// shortcut: every owner-only check refuses where `cfg(owner_checks)` is unset (Windows, Android),
-// upgrade when a Windows client needs to read acd's local files or the acd
-// daemon itself is ported: open with FILE_FLAG_OPEN_REPARSE_POINT, check the
-// owner SID and that the DACL grants nobody else (see the feasibility note,
-// section B4). Until then a caller gets an error, never "ok".
-#[cfg(not(owner_checks))]
+// Android: every owner-only check refuses. Windows has its own versions in
+// `windows.rs`. A caller gets an error, never "ok", where nothing is proved.
+#[cfg(not(any(owner_checks, windows)))]
 pub fn check_private_dir(dir: &Path, _max_mode: u32) -> Result<(), SecureFsError> {
     Err(unsupported(dir))
 }
 
-#[cfg(not(owner_checks))]
+#[cfg(not(any(owner_checks, windows)))]
 pub fn check_private_file(path: &Path, _max_mode: u32) -> Result<(), SecureFsError> {
     Err(unsupported(path))
 }
 
 /// Refusing targets: always refuses. Returns `std::fs::File` on unix.
-#[cfg(not(owner_checks))]
+#[cfg(not(any(owner_checks, windows)))]
 pub fn open_owned_file(path: &Path) -> Result<std::fs::File, SecureFsError> {
     Err(unsupported(path))
 }
 
-#[cfg(not(owner_checks))]
+#[cfg(not(any(owner_checks, windows)))]
 pub fn read_private(path: &Path, _max_mode: u32, _max_len: u64) -> Result<Vec<u8>, SecureFsError> {
     Err(unsupported(path))
 }
@@ -415,8 +425,8 @@ mod tests {
         );
     }
 
-    /// Runs on Windows and Android, where this is the whole implementation.
-    #[cfg(not(owner_checks))]
+    /// Runs on Android, where this is the whole implementation.
+    #[cfg(not(any(owner_checks, windows)))]
     #[test]
     fn every_check_refuses_even_for_a_good_file() {
         let dir = std::env::temp_dir();
