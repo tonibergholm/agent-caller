@@ -149,3 +149,13 @@ async fn wait_retry_waits_for_retry_now() {
     drop(ctl_tx);
     assert!(!wait_retry(&mut ctl_rx, &mut never).await, "handle dropped");
 }
+
+/// `credential_hash -> [0; 32] / [1; 32]`: the hash tells a rotated token from
+/// the old one, which is what revokes commands sent under the old token.
+#[test]
+fn credential_hash_tells_tokens_apart() {
+    assert_eq!(credential_hash("a"), credential_hash("a"));
+    assert_ne!(credential_hash("a"), credential_hash("b"));
+    assert_ne!(credential_hash("a"), [0; 32]);
+    assert_ne!(credential_hash("a"), [1; 32]);
+}
