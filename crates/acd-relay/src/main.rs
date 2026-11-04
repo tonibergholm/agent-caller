@@ -13,9 +13,8 @@ const FCM_ENDPOINT: &str = "https://fcm.googleapis.com";
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-    ).init();
+    let user = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
+    tracing_subscriber::fmt().with_env_filter(acd_relay::log_filter(&user)).init();
     if let Err(e) = run().await {
         eprintln!("acd-relay: {e}");
         std::process::exit(1);

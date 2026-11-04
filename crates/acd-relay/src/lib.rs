@@ -31,6 +31,18 @@ pub mod server;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// The log filter: the user's directives (`RUST_LOG`), then third-party
+/// targets pinned to `warn`. At `trace`, `axum::serve` logs every peer
+/// address, and spec §8 says IPs never reach a log.
+#[cfg(feature = "server")]
+pub fn log_filter(user: &str) -> tracing_subscriber::EnvFilter {
+    let mut f = tracing_subscriber::EnvFilter::new(user);
+    for d in ["axum=warn", "hyper=warn", "hyper_util=warn", "rustls=warn", "tokio_rustls=warn"] {
+        f = f.add_directive(d.parse().expect("static directive"));
+    }
+    f
+}
+
 /// Seconds since the Unix epoch. A trait so tests can move time.
 pub trait Clock: Send + Sync {
     fn now_secs(&self) -> u64;
