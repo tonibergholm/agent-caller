@@ -148,6 +148,9 @@ fn a_file_owned_by_someone_else_is_refused() {
 }
 
 const CHILD: &str = "ACD_MUTANTS_SECUREFS_CHILD";
+/// The child's exit code for "I cannot even reach the files" (a parent directory that
+/// uid 65534 cannot enter, such as a 0700 `/tmp` in some sandboxes).
+const UNREACHABLE: i32 = 77;
 
 /// Runs inside the unprivileged child started by the next test; a no-op when
 /// the test suite runs it directly.
@@ -158,6 +161,10 @@ fn unprivileged_child() {
     assert_ne!(euid(), 0, "the child must have dropped root");
     // Root-owned and world-readable: opens fine, but the owner is not us.
     let open = dir.join("open");
+    if fs::metadata(&open).is_err() {
+        println!("child cannot reach the files");
+        std::process::exit(UNREACHABLE);
+    }
     assert!(matches!(check_private_file(&open, 0o644), Err(SecureFsError::Owner(_))));
     assert!(matches!(read_private(&open, 0o644, 8), Err(SecureFsError::Owner(_))));
     assert!(matches!(open_owned_file(&open), Err(SecureFsError::Owner(_))));
@@ -173,41 +180,51 @@ fn unprivileged_child() {
 /// `euid -> 0`, `PermissionDenied` guard mutants in `open_path`: with the euid
 /// forced to 0 root-owned files look like ours. Needs root to drop privileges,
 /// so it returns early otherwise (the mutant is then caught by every test
-/// that creates a file of its own).
+/// that creates a file of its own). It tries a few temp locations, because uid
+/// 65534 must be able to enter every parent directory.
 #[test]
 fn root_owned_files_are_refused_to_an_unprivileged_user() {
     if !is_root() || std::env::var(CHILD).is_ok() {
         return;
     }
     use std::os::unix::process::CommandExt;
-    let d = tempfile::tempdir().unwrap();
-    mode(d.path(), 0o755);
-    let open = d.path().join("open");
-    fs::write(&open, b"x").unwrap();
-    mode(&open, 0o644);
-    private_file(d.path(), "secret", b"x");
-    let exe = d.path().join("exe");
-    fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
-    mode(&exe, 0o755);
-    let out = match std::process::Command::new(&exe)
-        .args(["--exact", "unprivileged_child", "--nocapture", "--test-threads=1"])
-        .env(CHILD, d.path())
-        .uid(65534)
-        .gid(65534)
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("cannot drop privileges here: {e}");
-            return;
+    let std_tmp = std::env::temp_dir();
+    for base in [Path::new("/var/tmp"), Path::new("/dev/shm"), std_tmp.as_path()] {
+        let Ok(d) = tempfile::Builder::new().prefix("acd-mut").tempdir_in(base) else { continue };
+        mode(d.path(), 0o755);
+        let open = d.path().join("open");
+        fs::write(&open, b"x").unwrap();
+        mode(&open, 0o644);
+        private_file(d.path(), "secret", b"x");
+        let exe = d.path().join("exe");
+        fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        mode(&exe, 0o755);
+        let out = match std::process::Command::new(&exe)
+            .args(["--exact", "unprivileged_child", "--nocapture", "--test-threads=1"])
+            .env(CHILD, d.path())
+            .uid(65534)
+            .gid(65534)
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("cannot start the child under {}: {e}", base.display());
+                continue;
+            }
+        };
+        if out.status.code() == Some(UNREACHABLE) {
+            eprintln!("uid 65534 cannot reach {}", base.display());
+            continue;
         }
-    };
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success() && stdout.contains("child checked"),
-        "{stdout}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("child checked"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    eprintln!("no location uid 65534 can reach; the unprivileged checks did not run");
 }
 
 /// KNOWN BUG, not fixed here (docs/research/2026-11-04-mutation-testing.md): a symlinked
