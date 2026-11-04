@@ -290,3 +290,72 @@ async fn disabled_config_opens_no_connection() {
     assert_eq!(r.hits(), 0);
     assert!(matches!(resolve(Some(&parse("[push]\nrelay = \"https://relay.example\"\n"))), PushSetting::On(_)));
 }
+
+#[test]
+fn relay_urls_accept_ip_literals_and_names_but_only_https() {
+    for ok in [
+        "https://[fd7a:115c:a1e0::1]",
+        "https://[fd7a:115c:a1e0::1]:8443/prefix",
+        "https://100.64.0.1",
+        "https://100.64.0.1:8443",
+        "https://relay.example.com",
+    ] {
+        assert!(RelayUrl::parse(ok).is_ok(), "{ok}");
+    }
+    for bad in [
+        "http://[fd7a:115c:a1e0::1]",
+        "http://100.64.0.1",
+        "http://relay.example.com",
+        "[fd7a:115c:a1e0::1]:8443",
+        "https://[fd7a:115c:a1e0::1",
+        "https://user@[fd7a:115c:a1e0::1]",
+    ] {
+        assert!(RelayUrl::parse(bad).is_err(), "{bad}");
+    }
+}
+
+/// Posts to `url` (whose listener is `listener`) and returns the `Host`
+/// header the listener saw. `None` when the host could not be bound or
+/// reached (no IPv6 in the sandbox is reported by the caller).
+async fn host_header_seen(listener: tokio::net::TcpListener, url: String) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        let mut buf = [0u8; 512];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = s.read(&mut buf).await.unwrap();
+            assert!(n > 0, "closed before the head ended");
+            head.extend_from_slice(&buf[..n]);
+        }
+        s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await.unwrap();
+        String::from_utf8_lossy(&head).into_owned()
+    });
+    let http = HttpClient::plain_for_tests(Duration::from_secs(10), 4096);
+    let res = http.post(&url, "application/json", &[], b"{}".to_vec()).await.expect("connected");
+    assert_eq!(res.status, 200);
+    let head = server.await.unwrap();
+    head.lines()
+        .find_map(|l| l.strip_prefix("host: ").or_else(|| l.strip_prefix("Host: ")))
+        .expect("host header")
+        .to_string()
+}
+
+#[tokio::test]
+async fn an_ipv4_literal_connects_and_the_host_header_has_the_port() {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let host = host_header_seen(l, format!("http://127.0.0.1:{port}/v1/wake")).await;
+    assert_eq!(host, format!("127.0.0.1:{port}"));
+}
+
+#[tokio::test]
+async fn an_ipv6_literal_connects_and_the_host_header_stays_bracketed_with_the_port() {
+    let Ok(l) = tokio::net::TcpListener::bind("[::1]:0").await else {
+        eprintln!("no IPv6 loopback in this sandbox: covered by the http::tests splitting tests only");
+        return;
+    };
+    let port = l.local_addr().unwrap().port();
+    let host = host_header_seen(l, format!("http://[::1]:{port}/v1/wake")).await;
+    assert_eq!(host, format!("[::1]:{port}"));
+}
