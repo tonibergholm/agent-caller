@@ -417,18 +417,19 @@ async fn status_change_before_resubscribe_is_caught() {
         (r.state("w1:p5") == Some(AgentState::NeedsYou)).then_some(())
     })
     .await;
-    // Every resubscribe also runs one full list (it would catch this too),
-    // but the new pane is still fetched with its own agent.get.
+    // Either path catches the change: the new pane's own agent.get, or the
+    // full list every resubscribe runs. Which one lands first depends on
+    // scheduling, so accept both, but only after the last subscription.
     let calls = r.fake.calls();
     let subscribed = calls
         .iter()
         .rposition(|(m, _)| m == "events.subscribe")
         .unwrap();
     assert!(
-        calls[subscribed..]
-            .iter()
-            .any(|(m, p)| m == "agent.get" && p["target"] == "w1:p5"),
-        "the new pane gets an agent.get after its subscription"
+        calls[subscribed..].iter().any(|(m, p)| {
+            m == "agent.list" || (m == "agent.get" && p["target"] == "w1:p5")
+        }),
+        "the change is caught by a get or a full list after the subscription"
     );
 }
 

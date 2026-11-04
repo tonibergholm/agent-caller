@@ -145,7 +145,12 @@ impl Herdr {
         }
         let deadline = deadline.min(now + CALL_TIMEOUT);
         let connect_by = deadline.min(now + CONNECT_TIMEOUT);
-        let stream = timeout_at(connect_by, UnixStream::connect(&self.path))
+        // Every connection re-proves the socket is ours and that no other user
+        // can swap it: a socket replaced since discovery is not dialled.
+        let real = acd_securefs::check_socket_path(&self.path).map_err(|e| {
+            CallError::Connect(io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))
+        })?;
+        let stream = timeout_at(connect_by, UnixStream::connect(&real))
             .await
             .map_err(|_| {
                 CallError::Connect(io::Error::new(io::ErrorKind::TimedOut, "connect timed out"))
@@ -377,5 +382,33 @@ impl Subscription {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn reconnect_refuses_a_socket_that_is_no_longer_trusted() {
+        let t = tempfile::Builder::new().prefix("acd").tempdir_in("/tmp").unwrap();
+        let d = t.path().join("w");
+        std::fs::create_dir(&d).unwrap();
+        let sock = d.join("herdr.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let h = Herdr::new(sock);
+        let deadline = || Instant::now() + Duration::from_secs(2);
+        assert!(h.connect_until(deadline()).await.is_ok(), "trusted");
+        // The directory becomes world-writable, non-sticky: another user could
+        // now unlink the socket and bind their own.
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o777)).unwrap();
+        match h.connect_until(deadline()).await {
+            Err(CallError::Connect(e)) => {
+                assert_eq!(e.kind(), io::ErrorKind::PermissionDenied)
+            }
+            other => panic!("expected a refused connect, got ok={}", other.is_ok()),
+        }
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

@@ -268,38 +268,48 @@ Open items from the live end-to-end run, the v1 acceptance checks and the panel 
 Found by independent review and left on purpose. None blocks a merge; each
 needs a decision or a small follow-up.
 
-- **Flaky test, macOS CI.** `status_change_before_resubscribe_is_caught`
-  (`crates/acd-adapters/tests/herdr_sync.rs` around line 427) failed once on a
-  docs-only commit (main `b76b93e`). It asserts the new pane gets its own
-  `agent.get` after the last `events.subscribe`, but its own comment says a
-  full list after resubscribe also catches the change, so on a slow runner
-  the order can flip. Fix: accept either path, or synchronise on the
-  resubscribe. Seen once; rerun when it fails.
-- **Omarchy approval card guards (#80).** The QML checks in
-  `clients/omarchy/tests/plugin_files.test.mjs` match text and cannot prove
-  wiring. Mutations that still pass: `maximumLineCount` added to the shared
-  `Label` component (inherited), and a multiline `onClicked` or
-  `Keys.onPressed` handler that calls `Model.pickOption` and `service.send`
-  directly. The code itself was traced by review and found gated. Real proof
-  is the manual Omarchy check in the PR body, not yet done.
-- **Pre-auth recovery test (#82).** `preauth_sources.rs` around lines 359-365
-  needs two sequential TLS upgrades and a rejected third attempt inside three
-  seconds; a very slow runner can fail correct code. Synchronise the setup
-  before advancing the expiry clock.
-- **T3 and hooks escaping tests (#83).** Exact-output tests are missing for
-  CR, NUL, ESC sequences, bidi isolates, zero-width characters, backslashes
-  and edge whitespace. Characters such as U+034F pass the escaper unchanged,
-  so "whole command" is not a universal visible-character encoding.
+- **Test hardening, fixed (branch `claude/test-hardening-1103-faqnrl`).**
+  `status_change_before_resubscribe_is_caught` now accepts the new pane's own
+  `agent.get` or the full list after the last subscribe. The pre-auth recovery
+  test (#82) no longer races the hello timeout: a hidden `ServerOptions::hello_gate`
+  seam (default `None`, no behaviour change) keeps the timeout from starting
+  until the test has held two upgrades and seen the third refused, then opens
+  the gate. The remaining wall-clock bounds are hang guards only (5 s per
+  network step, 15 s to wait for the close, 60 s TCP deadline). The Omarchy plugin test (#80)
+  checks the shared `Label` component's own properties and every handler body
+  (block handlers too), so an inherited `maximumLineCount` and an aliased or
+  bracket-called pick in a multi-line handler now fail it. T3 and hooks have
+  exact-output escape tests (CR, NUL, ESC, bidi isolates, zero-width,
+  backslashes, edge whitespace).
+- **Omarchy approval card guards (#80), still open.** The QML checks match
+  text and cannot prove wiring. Real proof is the manual Omarchy check in the
+  PR body, not yet done.
+- **T3 and hooks escaping (#83), accepted residual.** Characters such as
+  U+034F, U+115F, U+3164 and U+FE0F pass the escaper unchanged, so "whole
+  command" is not a universal visible-character encoding. Pinned by
+  `characters_outside_the_escaped_classes_pass_unchanged` (hooks) and
+  `a_combining_grapheme_joiner_in_a_command_passes_unchanged` (T3); a change
+  to the escaper must update them on purpose.
 - **Restart notifications (#81).** A request first seen in a reconnect
   snapshot stays silent, as before. The client's notified set is bounded
   (256 keys) and notifications are rate limited per machine (security review
   finding 5; see the findings entry below).
 - **Security review findings still open** (`docs/research/2026-11-03-security-review-core.md`
-  and `-local.md`): core 3 (16 MiB frames, unbounded agent state), 7 and 8
-  (pairing host and `agent.send` character rules); local F2 (T3 token goes
-  to whoever holds the loopback port), F3 (hook listeners have no read
-  timeout), F4 (herdr socket discovery checks no owner), F5 (service files
-  from unescaped paths). Core 1, 2, 4, 5 and 6 and local F1 are fixed.
+  and `-local.md`): local F2 (T3 token goes to whoever holds the loopback
+  port), F3 (hook listeners have no read timeout).
+  Core 1, 2, 3, 4, 5, 6, 7 and 8 and local F1, F4 and F5 are fixed. Core 3 limits the client
+  (1 MiB frames, 1000 agents, 64 KiB per agent; each breach, an oversized
+  frame included, ends as a resync without the resume cursor); the daemon registry is fed
+  by local adapters, not by peers, so it has no new cap. Core 7 accepts ASCII
+  hostnames only; IDNA names must be paired as punycode.
+  F4: discovery and
+  every herdr reconnect require the socket to be a socket owned by the
+  effective uid and every ancestor directory (checked root-first) to be
+  owned by root or us and not group/other-writable, unless sticky and the
+  next component is ours (`acd_securefs::check_socket_path`). Not covered:
+  a same-user process, and the instant between the check and the connect
+  (closing it would need a peer-credential check on the connection). F5 rejects control characters in the home,
+  executable and config-dir paths; other characters were already escaped.
   Core 4 logs each accepted and rejected `hello` at 10 lines per 10 s per
   kind: peer address, protocol, outcome and reason. Peer free text is never
   logged; client id and name appear only as byte length plus an 8-hex SHA-256
