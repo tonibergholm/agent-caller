@@ -1,6 +1,12 @@
 //! Connection limits, head deadline and the periodic sweep (spec §4.6, §8).
-//! Time is tokio's paused clock plus the harness `ManualClock`: nothing here
-//! waits on the wall clock.
+//!
+//! The head-deadline tests run on the real clock with a short deadline and
+//! wait for the server to close; `GUARD` only turns a missing deadline
+//! (hyper's own default is 30 s) into a failure instead of a hang. A paused
+//! clock does not work for them: with loopback sockets pending, tokio
+//! advances it before the kernel has delivered the data, which moved hyper's
+//! own timers by whole seconds. The sweep tests pause the clock only while
+//! no socket is waiting, and move the relay's `ManualClock` by hand.
 
 mod common;
 
@@ -13,18 +19,19 @@ use acd_relay::server::{AppState, Options, Rates, SWEEP_INTERVAL, ServeOptions, 
 use common::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::Instant;
 
 const CAP: usize = 4;
-const HEAD: Duration = Duration::from_secs(2);
-/// Upper bound on a wait for a close, in virtual time, so a missing
-/// deadline fails the test instead of hanging it.
-const GIVE_UP: Duration = Duration::from_secs(120);
+const HEAD: Duration = Duration::from_millis(250);
+/// Fail instead of hang if the server never closes.
+const GUARD: Duration = Duration::from_secs(10);
+
+fn small_limits() -> ServeOptions {
+    ServeOptions { max_connections: CAP, head_timeout: HEAD, ..ServeOptions::default() }
+}
 
 async fn relay() -> Relay {
     let s = Arc::new(FakeSender::default());
-    let opts = ServeOptions { max_connections: CAP, head_timeout: HEAD, ..ServeOptions::default() };
-    start_serving(Setup::default(), s, Arc::new(ManualClock::new(T0)), opts).await
+    start_serving(Setup::default(), s, Arc::new(ManualClock::new(T0)), small_limits()).await
 }
 
 /// Read until the peer closes; returns what arrived.
@@ -32,8 +39,8 @@ async fn until_closed(mut s: TcpStream) -> Vec<u8> {
     let mut got = vec![];
     let mut buf = [0u8; 512];
     loop {
-        match tokio::time::timeout(GIVE_UP, s.read(&mut buf)).await {
-            Err(_) => panic!("connection still open after {GIVE_UP:?} (virtual)"),
+        match tokio::time::timeout(GUARD, s.read(&mut buf)).await {
+            Err(_) => panic!("connection still open after {GUARD:?}: no head deadline"),
             Ok(Ok(0)) | Ok(Err(_)) => return got,
             Ok(Ok(n)) => got.extend_from_slice(&buf[..n]),
         }
@@ -51,16 +58,15 @@ async fn virtual_sleep(d: Duration) {
 }
 
 async fn later_request_succeeds(r: &Relay) {
-    tokio::time::resume();
     let ip = r.ip();
     let (st, b) = r.post("/v1/wake", &serde_json::json!({"v":1,"handle":"x"}), &ip).await;
     assert_eq!((st, b["error"].as_str()), (400, Some("invalid_handle")));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn idle_connections_beyond_the_cap_are_closed_after_the_deadline() {
     let r = relay().await;
-    let start = Instant::now();
+    let start = std::time::Instant::now();
     let mut conns = vec![];
     for _ in 0..CAP + 3 {
         conns.push(TcpStream::connect(r.addr).await.unwrap());
@@ -69,15 +75,14 @@ async fn idle_connections_beyond_the_cap_are_closed_after_the_deadline() {
     for c in closers {
         assert!(c.await.unwrap().iter().all(|b| *b != b'2'), "no 200 for a silent connection");
     }
-    // Two rounds of slots at most; hyper's own default (30 s) would fail this.
-    assert!(start.elapsed() >= HEAD && start.elapsed() <= 3 * HEAD, "{:?}", start.elapsed());
+    assert!(start.elapsed() >= HEAD, "not closed early: {:?}", start.elapsed());
     later_request_succeeds(&r).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn incomplete_request_heads_are_closed_after_the_deadline() {
     let r = relay().await;
-    let start = Instant::now();
+    let start = std::time::Instant::now();
     let mut closers = vec![];
     for _ in 0..CAP + 3 {
         let mut c = TcpStream::connect(r.addr).await.unwrap();
@@ -89,11 +94,11 @@ async fn incomplete_request_heads_are_closed_after_the_deadline() {
         let got = c.await.unwrap();
         assert!(!String::from_utf8_lossy(&got).contains("200 OK"), "no answer to half a head");
     }
-    assert!(start.elapsed() >= HEAD && start.elapsed() <= 3 * HEAD, "{:?}", start.elapsed());
+    assert!(start.elapsed() >= HEAD, "{:?}", start.elapsed());
     later_request_succeeds(&r).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn a_keep_alive_connection_that_goes_idle_after_a_response_is_closed() {
     let r = relay().await;
     let mut c = TcpStream::connect(r.addr).await.unwrap();
@@ -101,14 +106,14 @@ async fn a_keep_alive_connection_that_goes_idle_after_a_response_is_closed() {
     let mut got = vec![];
     let mut buf = [0u8; 512];
     while !String::from_utf8_lossy(&got).contains("\"ok\":true") {
-        let n = tokio::time::timeout(GIVE_UP, c.read(&mut buf)).await.unwrap().unwrap();
+        let n = c.read(&mut buf).await.unwrap();
         assert!(n > 0, "closed before the answer");
         got.extend_from_slice(&buf[..n]);
     }
     assert!(String::from_utf8_lossy(&got).starts_with("HTTP/1.1 200"));
-    let idle_from = Instant::now();
+    let idle_from = std::time::Instant::now();
     assert!(until_closed(c).await.is_empty());
-    assert!(idle_from.elapsed() >= HEAD && idle_from.elapsed() <= 2 * HEAD, "{:?}", idle_from.elapsed());
+    assert!(idle_from.elapsed() >= HEAD, "{:?}", idle_from.elapsed());
 }
 
 /// Real clock: the only wait is for the server's own head deadline. The
@@ -118,7 +123,7 @@ async fn a_keep_alive_connection_that_goes_idle_after_a_response_is_closed() {
 #[tokio::test]
 async fn a_connection_over_the_cap_is_served_only_after_a_slot_frees() {
     let s = Arc::new(FakeSender::default());
-    let opts = ServeOptions { max_connections: CAP, head_timeout: Duration::from_millis(300), ..ServeOptions::default() };
+    let opts = ServeOptions { max_connections: CAP, head_timeout: HEAD, ..ServeOptions::default() };
     let r = start_serving(Setup::default(), s, Arc::new(ManualClock::new(T0)), opts).await;
     let mut idle = vec![];
     for _ in 0..CAP {

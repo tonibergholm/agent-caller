@@ -213,12 +213,13 @@ pub fn router(state: Arc<AppState>) -> Router {
 pub struct ServeOptions {
     pub max_connections: usize,
     pub head_timeout: Duration,
-    pub sweep_interval: Duration,
+    /// `None` runs no sweeper (tests that need a quiet timer wheel).
+    pub sweep_interval: Option<Duration>,
 }
 
 impl Default for ServeOptions {
     fn default() -> ServeOptions {
-        ServeOptions { max_connections: MAX_CONNECTIONS, head_timeout: HEAD_TIMEOUT, sweep_interval: SWEEP_INTERVAL }
+        ServeOptions { max_connections: MAX_CONNECTIONS, head_timeout: HEAD_TIMEOUT, sweep_interval: Some(SWEEP_INTERVAL) }
     }
 }
 
@@ -259,7 +260,7 @@ pub async fn serve_with(
     opts: ServeOptions,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> std::io::Result<()> {
-    let sweeper = AbortOnDrop(tokio::spawn(state.clone().sweep_loop(opts.sweep_interval)));
+    let sweeper = opts.sweep_interval.map(|every| AbortOnDrop(tokio::spawn(state.clone().sweep_loop(every))));
     let app = router(state);
     let slots = Arc::new(Semaphore::new(opts.max_connections));
     let (stop, stopped) = tokio::sync::watch::channel(false);
@@ -294,7 +295,9 @@ pub async fn serve_with(
     }
     stop.send_replace(true);
     while connections.join_next().await.is_some() {}
-    sweeper.stop().await;
+    if let Some(s) = sweeper {
+        s.stop().await;
+    }
     Ok(())
 }
 
