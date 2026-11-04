@@ -779,10 +779,11 @@ POST /v1/wake   {"v":1, "handle":"<base64url, 1 to 512 bytes>"}
 ```
 
 Order of checks, cheapest first and each before anything is sent: size and
-JSON shape; global limit; per-IP limit; per-handle limit (keyed on the
-handle string, inserted only after the handle opens, so garbage handles
-cannot fill the per-handle map); open the handle; expiry; per-address limit;
-in-flight cap; send.
+JSON shape (`413 too_large`, or `408 timeout` after the 5 s read deadline);
+`v == 1`; global limit; per-IP limit; open the handle (`invalid_handle`,
+`gone`, and `invalid_handle` if its app is no longer in `allowed_apps`);
+per-handle limit and per-address limit (keyed only now, so garbage handles
+cannot fill those maps); in-flight cap; send.
 
 #### 5.3.3 Handle format
 
@@ -848,8 +849,8 @@ FCM HTTP v1 errors map as follows. The relay never forwards FCM's body.
 | FCM | Relay answer |
 |---|---|
 | 2xx | 204 (wake) or 202 (challenge) |
-| `UNREGISTERED`, `NOT_FOUND` | `404 gone` |
-| `INVALID_ARGUMENT` | `503 unavailable`. It may mean a malformed request on the relay's side (a deploy bug) as well as a bad token, so it must not disable a registration. Logged with the FCM status string only. |
+| `UNREGISTERED` (in `error.status` or an `errorCode` detail) | `404 gone` |
+| `INVALID_ARGUMENT`, `NOT_FOUND` | `503 unavailable`. `INVALID_ARGUMENT` may mean a malformed request on the relay's side (a deploy bug) as well as a bad token, so it must not disable a registration. Logged with the FCM status string only. |
 | `UNAVAILABLE`, `INTERNAL`, `QUOTA_EXCEEDED`, `DEADLINE_EXCEEDED`, any 5xx, timeout, connect error | `503 unavailable` |
 | `UNAUTHENTICATED`, `PERMISSION_DENIED`, `SENDER_ID_MISMATCH`, OAuth token failure | `503 unavailable`; the log line names the class, never the credential or the response body |
 | anything else | `503 unavailable` |
@@ -984,8 +985,8 @@ the same text.
   instead" and says the field also accepts a Firebase Installation ID during
   the transition. Token refresh rules (`onNewToken`), staleness windows and
   error codes (`UNREGISTERED`, `INVALID_ARGUMENT`): **unverified**. The relay
-  maps only the "not registered" class (`UNREGISTERED`, `NOT_FOUND`) to
-  `gone`. `INVALID_ARGUMENT` is not a dead address: it can also mean the
+  maps only `UNREGISTERED` to `gone` (`NOT_FOUND` can also mean a wrong
+  project in the relay's own config, and must not disable registrations). `INVALID_ARGUMENT` is not a dead address: it can also mean the
   relay's own request is malformed, so it maps to `503 unavailable` and never
   disables a registration (§5.3.5).
 - **Testing aid.** `SendMessageRequest.validateOnly`: "testing the request
@@ -1055,7 +1056,7 @@ the same text.
 | Handles, push addresses | Not stored. Opened in memory per call. | Request duration. |
 | Pending challenges `{challenge_id → code_mac, binding_mac, attempts, expires_at}` (MACs under a per-boot key; no code, no address) | Memory, at most 256 | 120 s, or until used or burned. |
 | Rate-limit counters keyed by HMAC(handle), HMAC(address), HMAC(source IP /64 or /32) under a per-boot key | Memory, at most 4096 keys per map plus one overflow bucket each | Fixed windows of 1 minute and 1 hour. Lost on restart. |
-| Logs | stdout / journal | Fields: time, route, status, platform, 8 hex chars of HMAC(handle) (per-boot key). Never handles, addresses, codes, IPs, bodies, credentials. Retention is the host's journal setting; recommend 7 days. |
+| Logs | stdout / journal | Fields: time, route, status, platform, 8 hex chars of HMAC(handle) (per-boot key). Never handles, addresses, codes, IPs, bodies, credentials. Third-party targets (axum, hyper, rustls) are pinned to `warn` whatever `RUST_LOG` says, because at `trace` `axum::serve` logs every peer address (found by `logs_never_contain_secrets`). Retention is the host's journal setting; recommend 7 days. |
 
 Metadata does exist even though the relay stores almost nothing: while a
 request is being handled the process sees the source IP, the handle and the
@@ -1125,7 +1126,8 @@ function names.
 |---|---|
 | The wake request type has exactly `v` and `handle`, no free-text field (schema property set) | `wake_request_has_exactly_v_and_handle` |
 | An extra `text` field is refused | `wake_request_rejects_extra_text_field` |
-| `v` other than 1 is refused | `wake_request_rejects_wrong_version` |
+| A non-integer `v` never parses | `wake_request_rejects_wrong_version` |
+| FCM errors: only `UNREGISTERED` is `gone` | `only_unregistered_maps_to_gone` |
 | Golden FCM wake body; fixed title and body are the P-A constants | `fcm_wake_body_is_golden` |
 | Golden FCM challenge body | `fcm_challenge_body_is_golden` |
 | The FCM bodies carry exactly the listed keys, no handle, no extra data | `fcm_bodies_have_exactly_the_listed_keys` |
@@ -1141,6 +1143,7 @@ function names.
 | Push says unregistered → 404 `gone` | `push_gone_maps_to_404_gone` |
 | `INVALID_ARGUMENT` is not `gone` | `push_invalid_argument_does_not_map_to_gone` |
 | Push outage → 503 | `push_unavailable_maps_to_503` |
+| `v != 1` and extra fields are 400 | `wake_with_wrong_version_or_extra_field_is_400` |
 | Per-handle limit | `wake_rate_limited_per_handle` |
 | Per-address limit across two handles of one address | `wake_rate_limited_per_address_across_two_handles` |
 | Per-IP limit | `wake_rate_limited_per_ip` |
@@ -1281,8 +1284,8 @@ Each phase is one PR unless noted, with tests per CLAUDE.md.
 | P1 | Protocol: `push` capability, `push.register`/`unregister`/`status` types, `result.push`, schema and examples, PROTOCOL.md section. No behavior. **Freeze after the P3 probe** (the registration contract depends on what the probe shows). | No |
 | P2 | acd: `[push]` config, `push.json` store (securefs, 0600), commands, deletion on client token rotation, `acd push list/remove`. Still no outbound calls (a trait `WakeSink` with a no-op). | No |
 | P3 | Android probe app (throwaway, like the iOS spike): get FCM address, receive data and `RemoteNotification` pushes, check the fixed text and timing (no rewrite under P-A). Sent by hand with `curl` and an OAuth token. Research note in `docs/research/`. Decides D5. | Emulator, then phone |
-| P4 | `crates/acd-relay`: handles, challenge, FCM sender, rate limits, logs. Fake FCM in tests. Deployment notes for self-hosting. Includes the flood and challenge-abuse tests; **no deployment before they pass**. | No |
-| P5a | acd: `[push]` config (default off), the sender and its retry and disable rules, against a fake relay. No engine wiring. The HTTP client dependency is reviewed with this PR. | No |
+| P4 | **Implemented in this PR.** `crates/acd-relay`: handles, challenge, FCM sender, rate limits, logs. Fake FCM in tests. Deployment notes for self-hosting. Includes the flood and challenge-abuse tests; **no deployment before they pass**. | No |
+| P5a | **Implemented in this PR** (sender in `acd-relay`, feature `client`). acd: `[push]` config (default off), the sender and its retry and disable rules, against a fake relay. No engine wiring. The HTTP client dependency is reviewed with this PR. | No |
 | P5b | acd: wiring (triggers, debounce, `push.json`, `acd push test`), canary tests, the P1 types. **Flood and challenge-abuse tests must pass before this is deployed.** | No |
 | P6 | Live Android check end to end: real `acd` on two machines, real relay, probe app; §9.2 tests 1-7. Needs a **minimal registration and fetch implementation** in the probe, not only receiving pushes. Research note. | Phone |
 | P7 | Android client registration and post-wake fetch in the step 4 Android app, with the device-side limits of §4.6; §9.2 tests 8-11. | Phone |
