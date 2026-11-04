@@ -49,6 +49,7 @@ if [ -n "${ARCH_TEST_TOOLCHAIN:-}" ]; then
 		gitpath=/opt/hostgit:
 	fi
 	[ -n "${ARCH_TEST_SHELLCHECK:-}" ] && args+=(-v "$ARCH_TEST_SHELLCHECK:/usr/local/bin/shellcheck:ro")
+	# shellcheck disable=SC2016 # $PATH expands in the container, on purpose
 	prep='mkdir -p /opt/rust && cp -a /opt/rust-ro/. /opt/rust/ && chmod -R a+rX /opt/rust && chmod -R go+w /opt/rust/cargo && export PATH='"${gitpath:-}"'/opt/rust/cargo/bin:$PATH && '
 else
 	image=archlinux:latest

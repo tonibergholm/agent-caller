@@ -1,8 +1,10 @@
 //! packaging/systemd/acd.service is the unit the Arch package installs. It
 //! must stay what `acd service install` writes, with only the executable
 //! (`/usr/bin/acd`) and the home directory (`%h`) fixed by the package.
+#[cfg(target_os = "linux")]
 mod common;
 
+#[cfg(target_os = "linux")]
 use common::{acd_home, init_dir};
 
 #[cfg(target_os = "linux")]

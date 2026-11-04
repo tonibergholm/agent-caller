@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2012 # `cmd && ok || bad` reports; file names here are plain
 # Runs INSIDE an archlinux container as root, started by packaging/test-arch.sh.
 # It builds both packages with makepkg as a non-root user, installs them,
 # runs the smoke test, then checks upgrade, removal and reproducibility.
@@ -113,7 +114,7 @@ step "binaries are stripped"
 for p in agent-caller:acd agent-caller-omarchy:acd-inbox; do
 	pkg=${p%%:*}; bin=${p##*:}
 	rm -rf /tmp/x && mkdir /tmp/x && bsdtar -xf "$(pk "$pkg")" -C /tmp/x
-	if readelf -S /tmp/x/usr/bin/$bin | grep -q '\.symtab\|\.debug_info'; then bad "$bin still has symbols/debug info"; else ok "$bin stripped"; fi
+	if readelf -S /tmp/x/usr/bin/"$bin" | grep -q '\.symtab\|\.debug_info'; then bad "$bin still has symbols/debug info"; else ok "$bin stripped"; fi
 done
 
 step "install both packages (root, pacman -U)"
@@ -196,7 +197,7 @@ fi
 step "reproducibility: same tag, another directory, same bytes"
 for p in agent-caller agent-caller-omarchy; do
 	build "$p" "$p-3" || { bad "rebuild $p"; continue; }
-	a=$(pk "$p"); b=$(ls /out/$p-3/$p-$ver-1-*.pkg.tar.zst)
+	a=$(pk "$p"); b=$(ls /out/"$p"-3/"$p"-"$ver"-1-*.pkg.tar.zst)
 	bin=acd; [ "$p" = agent-caller-omarchy ] && bin=acd-inbox
 	ba=$(bsdtar -xOf "$a" usr/bin/$bin | sha256sum | cut -c1-16)
 	bb=$(bsdtar -xOf "$b" usr/bin/$bin | sha256sum | cut -c1-16)
