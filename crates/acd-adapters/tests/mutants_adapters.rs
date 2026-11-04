@@ -201,3 +201,82 @@ fn prune_keeps_pending_and_named_requests() {
     assert_eq!(d.request_status("done"), None);
     assert_eq!(d.retained().0, 2);
 }
+
+// ---- t3 mapping, outcome, targets ----
+use acd_adapters::t3::conn::CallError;
+use acd_adapters::t3::detail::PendingView;
+use acd_adapters::t3::map::{self, Target, TargetAnswer};
+use acd_adapters::t3::outcome::{Outcome, classify};
+use acd_adapters::t3::targets::Targets;
+use acd_adapters::t3::wire::{Failure, RuntimeRequest, TurnItem};
+
+/// map.rs:41 match guard `starts_with("codex")` (`kind`): only a codex provider instance is Codex.
+#[test]
+fn provider_instances_map_to_their_agent_kind() {
+    assert_eq!(map::kind(Some("claude-main")), AgentKind::Claude);
+    assert_eq!(map::kind(Some("codex")), AgentKind::Codex);
+    assert_eq!(map::kind(Some("codex-2")), AgentKind::Codex);
+    assert_eq!(map::kind(Some("gemini")), AgentKind::Other);
+    assert_eq!(map::kind(None), AgentKind::Other);
+}
+
+/// map.rs:239 match guard `!questions.is_empty()` (`request_obs`): a question
+/// request with no questions is shown read-only; it must not be indexed.
+#[test]
+fn a_question_request_without_questions_is_read_only() {
+    let view = PendingView {
+        request: RuntimeRequest { id: "rq".into(), kind: "user-input".into(), status: "pending".into() },
+        item: Some(TurnItem::UserInputRequest { id: "i".into(), request_id: "rq".into(), questions: vec![] }),
+        command: None,
+    };
+    let (obs, target) = map::request_obs("t3:a", "thread", Some("codex"), &view);
+    assert_eq!(obs.answer_path, acd_protocol::AnswerPath::None);
+    assert!(obs.options.is_empty() && obs.questions.is_none() && !obs.free_text);
+    assert_eq!(target.answer, TargetAnswer::ReadOnly);
+}
+
+/// outcome.rs:58 match guard `tag == DISPATCH_ERROR` (`classify`): only T3's dispatch
+/// error can be read as "this request is already over"; the same words under any
+/// other tag are an unknown refusal (fail closed: uncertain, never "not delivered").
+#[test]
+fn only_a_dispatch_error_can_say_the_request_is_over() {
+    let fail = |tag: &str, message: &str| -> Result<serde_json::Value, CallError> {
+        Err(CallError::Failed(Failure::Fail { tag: tag.into(), message: message.into() }))
+    };
+    let dispatch = "OrchestrationV2DispatchCommandError";
+    assert!(matches!(
+        classify(&fail(dispatch, "Runtime request rq is resolved."), Some("rq")),
+        Outcome::NotDelivered { code: acd_protocol::ErrorCode::RequestGone, .. }
+    ));
+    for message in ["Runtime request rq is resolved.", "Runtime request rq was not found."] {
+        assert!(matches!(classify(&fail("SomethingElse", message), Some("rq")), Outcome::Uncertain(_)), "{message}");
+    }
+    assert!(matches!(classify(&fail(dispatch, "Runtime request rq is resolved."), None), Outcome::Uncertain(_)));
+    assert!(matches!(classify(&fail(dispatch, "Runtime request other is resolved."), Some("rq")), Outcome::Uncertain(_)));
+    assert!(matches!(classify(&Ok(json!({})), Some("rq")), Outcome::Delivered));
+}
+
+fn target(agent: &str, thread: &str, request: &str) -> Target {
+    Target { agent_id: agent.into(), thread_id: thread.into(), t3_request_id: request.into(), answer: TargetAnswer::Decision }
+}
+
+/// targets.rs:26 / 29 / 33 / 37 (`retain_thread`, `len`, `is_empty`): a thread's targets
+/// are dropped except the one named; other threads are left alone.
+#[test]
+fn retain_thread_keeps_the_named_target_and_other_threads() {
+    let targets = Targets::default();
+    assert!(targets.is_empty());
+    assert_eq!(targets.len(), 0);
+    targets.insert(target("t3:a", "ta", "r1"));
+    targets.insert(target("t3:a", "ta", "r2"));
+    targets.insert(target("t3:a", "ta", "r3"));
+    targets.insert(target("t3:b", "tb", "r4"));
+    assert!(!targets.is_empty());
+    assert_eq!(targets.len(), 4);
+    targets.retain_thread("ta", Some("r2"));
+    assert_eq!(targets.len(), 2, "r2 and the other thread's r4 remain");
+    targets.retain_thread("ta", None);
+    assert_eq!(targets.len(), 1, "only the other thread's target remains");
+    targets.remove("r4");
+    assert!(targets.is_empty());
+}
