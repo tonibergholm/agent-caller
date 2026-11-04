@@ -409,3 +409,194 @@ async fn the_live_machine_list_follows_rename_and_remove() {
     ib.remove_machine_checked(&second.key).unwrap();
     view_until(&ib, "one machine", |v| v.machines.len() == 1 && v.machines[0].key == "m1").await;
 }
+
+// ---- session limits ----
+use acd_client::session::{Applied, Session};
+use acd_protocol::{MAX_AGENT_BYTES, MAX_AGENTS_PER_MACHINE, ServerMessage};
+
+fn proto_agent(id: &str, title: &str) -> acd_protocol::Agent {
+    serde_json::from_value(json!({"id":id,"machine_id":"m","source":"herdr","kind":"claude","title":title,"cwd":null,"project":null,"state":"working","state_since":"2026-10-08T00:00:00Z","failed":false,"last_message":null,"can_send":true,"pending":null})).unwrap()
+}
+
+/// An agent whose JSON encoding is exactly `bytes` long.
+fn agent_of_size(id: &str, bytes: usize) -> acd_protocol::Agent {
+    let base = serde_json::to_vec(&proto_agent(id, "")).unwrap().len();
+    let a = proto_agent(id, &"x".repeat(bytes - base));
+    assert_eq!(serde_json::to_vec(&a).unwrap().len(), bytes);
+    a
+}
+
+fn welcomed() -> Session {
+    let mut s = Session::default();
+    let machine: acd_protocol::Machine = serde_json::from_value(json!({"id":"m","name":"M","acd_version":"0","sources":{"hooks":{"state":"ok"},"herdr":{"state":"ok"},"t3":{"state":"ok"}}})).unwrap();
+    s.welcome(machine, vec!["answer".into()], "e", 0);
+    s
+}
+
+fn snapshot_msg(seq: u64, agents: Vec<acd_protocol::Agent>) -> ServerMessage {
+    ServerMessage::Snapshot { epoch: "e".into(), seq, agents }
+}
+
+fn updated(seq: u64, agent: acd_protocol::Agent) -> ServerMessage {
+    ServerMessage::AgentUpdated { epoch: "e".into(), seq, agent }
+}
+
+/// session.rs:42 `>` -> `>=` (`agent_too_big`): an agent of exactly 64 KiB is kept, one byte more ends the sync.
+#[test]
+fn an_agent_may_be_exactly_64_kib() {
+    let mut s = welcomed();
+    assert_eq!(s.apply(&snapshot_msg(1, vec![agent_of_size("a", MAX_AGENT_BYTES)])), Applied::Changed);
+    assert!(matches!(s.apply(&updated(2, agent_of_size("a", MAX_AGENT_BYTES))), Applied::Changed));
+    let mut s = welcomed();
+    assert!(matches!(s.apply(&snapshot_msg(1, vec![agent_of_size("a", MAX_AGENT_BYTES + 1)])), Applied::Resync(_)));
+    let mut s = welcomed();
+    s.apply(&snapshot_msg(1, vec![]));
+    assert!(matches!(s.apply(&updated(2, agent_of_size("a", MAX_AGENT_BYTES + 1))), Applied::Resync(_)));
+}
+
+/// session.rs:119 `>` -> `>=` and :157 `delete !`: 1000 agents are kept, the 1001st ends
+/// the sync, and a full machine still takes updates to agents it already has.
+#[test]
+fn a_machine_may_hold_exactly_1000_agents() {
+    let agents = |n: usize| (0..n).map(|i| proto_agent(&format!("a{i}"), "t")).collect::<Vec<_>>();
+    let mut s = welcomed();
+    assert_eq!(s.apply(&snapshot_msg(1, agents(MAX_AGENTS_PER_MACHINE))), Applied::Changed);
+    assert_eq!(s.agents.len(), MAX_AGENTS_PER_MACHINE);
+    assert!(matches!(s.apply(&updated(2, proto_agent("a0", "renamed"))), Applied::Changed), "an existing agent");
+    assert!(matches!(s.apply(&updated(3, proto_agent("brand-new", "t"))), Applied::Resync(_)), "a 1001st agent");
+    let mut s = welcomed();
+    assert!(matches!(s.apply(&snapshot_msg(1, agents(MAX_AGENTS_PER_MACHINE + 1))), Applied::Resync(_)));
+}
+
+/// session.rs:70 `&&` -> `||` (`synced`): a session with no cursor is not synced.
+#[test]
+fn a_session_is_synced_only_with_a_cursor_and_a_snapshot() {
+    assert!(!Session::default().synced());
+    let mut s = welcomed();
+    assert!(!s.synced());
+    s.apply(&snapshot_msg(0, vec![]));
+    assert!(s.synced());
+    s.force_resync();
+    assert!(!s.synced());
+}
+
+// ---- settings ----
+
+/// settings.rs:156 `Debug` for `MachineSecret`: the token never prints.
+#[test]
+fn a_machine_secret_prints_without_its_token() {
+    let s = MachineSecret { token: common::TOKEN.into(), pin: "sha256:PIN".into() };
+    let shown = format!("{s:?}");
+    assert!(!shown.contains(common::TOKEN), "{shown}");
+    assert!(shown.starts_with("MachineSecret") && shown.contains("sha256:PIN") && shown.contains("redacted"), "{shown}");
+}
+
+fn tcp_entry(name: &str, host: &str, port: u16) -> MachineEntry {
+    MachineEntry {
+        key: "11111111-1111-4111-8111-111111111111".into(),
+        name: name.into(),
+        endpoint: EndpointConfig::Tcp { host: host.into(), port },
+    }
+}
+
+/// settings.rs:193 / 198 / 199 (`MachineEntry::validate`): the name, host and port limits.
+#[test]
+fn machine_entries_are_validated_at_their_limits() {
+    assert!(tcp_entry(&"n".repeat(64), "box.example", 1).validate().is_ok());
+    assert!(tcp_entry(&"n".repeat(65), "box.example", 1).validate().is_err());
+    assert!(tcp_entry("  ", "box.example", 1).validate().is_err());
+    assert!(tcp_entry("n", &"h".repeat(253), 1).validate().is_ok());
+    assert!(tcp_entry("n", &"h".repeat(254), 1).validate().is_err());
+    assert!(tcp_entry("n", "", 1).validate().is_err());
+    for bad in ["ws://box", "box host", "box/path", "box\tx"] {
+        assert!(tcp_entry("n", bad, 1).validate().is_err(), "{bad}");
+    }
+    assert!(tcp_entry("n", "box.example", 0).validate().is_err());
+    assert!(tcp_entry("n", "100.64.0.1", 65535).validate().is_ok());
+    let mut k = tcp_entry("n", "box.example", 1);
+    k.key = "not-a-uuid".into();
+    assert!(k.validate().is_err());
+    k.key = "11111111-1111-4111-8111-11111111111".into();
+    assert!(k.validate().is_err());
+}
+
+/// settings.rs:60 `default_hotkey`, :235 and :278 match guards (`load_or_init`).
+#[test]
+fn settings_load_with_defaults_and_refuse_what_they_cannot_read() {
+    let dir = tempfile::tempdir().unwrap();
+    // A file without a hotkey takes the default one.
+    let ok = dir.path().join("ok.json");
+    std::fs::write(&ok, json!({"client_id": CLIENT_ID, "machines": []}).to_string()).unwrap();
+    let s = Settings::load_or_init(&ok).unwrap();
+    assert_eq!(s.hotkey, DEFAULT_HOTKEY);
+    assert_eq!(s.client_id, CLIENT_ID);
+    // A client id that is not a UUID: the file is set aside and replaced.
+    let bad = dir.path().join("bad.json");
+    std::fs::write(&bad, json!({"client_id": "nope", "machines": []}).to_string()).unwrap();
+    let s = Settings::load_or_init(&bad).unwrap();
+    assert_ne!(s.client_id, "nope");
+    assert!(dir.path().join("bad.json.bad").exists());
+    // No file yet: created. A path that cannot be read as a file is an error, not a fresh start.
+    let missing = dir.path().join("sub").join("new.json");
+    assert!(Settings::load_or_init(&missing).is_ok() && missing.exists());
+    assert!(Settings::load_or_init(dir.path()).is_err());
+}
+
+// ---- inbox: mark seen, owners, hiding ----
+
+/// inbox.rs:1401 / 1407 / 1409 (`mark_seen`): a known card with the capability sends
+/// `agent.mark_seen`; an unknown card or a missing capability is refused.
+#[tokio::test]
+async fn mark_seen_sends_for_a_known_card_only() {
+    let mut done = agent(|_| {});
+    done["pending"] = Value::Null;
+    done["state"] = json!("done");
+    let (f, ib) = inbox_with(&ALL, done.clone()).await;
+    assert_eq!(ib.mark_seen("m1/nobody"), Err(PickError::UnknownCard));
+    ib.mark_seen("m1/a1").unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !f.received().iter().any(|v| v["type"] == "agent.mark_seen" && v["agent_id"] == "a1") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the mark_seen frame reached the daemon");
+
+    let (_f, ib) = inbox_with(&["answer", "send"], done).await;
+    assert_eq!(ib.mark_seen("m1/a1"), Err(PickError::CannotReply));
+}
+
+/// inbox.rs:1395 `delete !` (`cancel_owned`) and :1360: only the owner's countdowns end, and the count is right.
+#[tokio::test]
+async fn cancel_owned_ends_only_that_owners_countdowns() {
+    let (_f, ib) = inbox_with(&ALL, agent(|_| {})).await;
+    ib.pick_owned(ActionOwner(1), "m1/a1", REQ, "allow", 1).unwrap();
+    view_until(&ib, "the countdown", |v| v.actions.len() == 1).await;
+    assert_eq!(ib.cancel_owned(ActionOwner(2)), 0);
+    assert_eq!(ib.view().borrow().actions.len(), 1);
+    assert_eq!(ib.cancel_owned(ActionOwner(1)), 1);
+    view_until(&ib, "no countdown", |v| v.actions.is_empty()).await;
+}
+
+/// inbox.rs:1431 `set_show_idle -> ()` and :1466 `delete !` (`drop_hidden_actions`):
+/// turning idle agents off stops a countdown on an idle card, and the setting is stored.
+#[tokio::test]
+async fn hiding_idle_agents_cancels_a_countdown_on_one() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let mut settings = settings_for(&f);
+    settings.show_idle = true;
+    let ib = Inbox::new(settings, secrets_for(&f), options());
+    ib.start();
+    let c = f.next_connection().await;
+    let mut idle = quiet_agent();
+    idle["state"] = json!("idle");
+    c.send(json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[idle]})).await;
+    view_until(&ib, "the idle card", |v| v.cards.iter().any(|c| c.key == "m1/a1")).await;
+    ib.reply("m1/a1", "hello".into()).unwrap();
+    view_until(&ib, "the countdown", |v| v.actions.len() == 1).await;
+    ib.set_show_idle(false);
+    assert!(!ib.settings().show_idle);
+    view_until(&ib, "the countdown to end", |v| v.actions.is_empty()).await;
+    ib.set_show_idle(true);
+    assert!(ib.settings().show_idle);
+}
