@@ -1,0 +1,31 @@
+{
+ "session_id": "4e3885ee-7454-410d-a2e2-86f4dc2533c0",
+ "transcript_path": "/Users/user/.claude/projects/-private-tmp-acp0-claude1/4e3885ee-7454-410d-a2e2-86f4dc2533c0.jsonl",
+ "cwd": "/private/tmp/acp0/claude1",
+ "prompt_id": "08141f73-f77a-4b46-9128-968d5acef44d",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "touch /tmp/acp0/t2.txt",
+  "description": "Create empty file"
+ },
+ "tool_response": {
+  "stdout": "",
+  "stderr": "",
+  "interrupted": false,
+  "isImage": false,
+  "noOutputExpected": true
+ },
+ "tool_use_id": "toolu_017ngLYCFp3wC7u7rjfon3ss",
+ "duration_ms": 1346,
+ "_env": {
+  "HERDR_PANE_ID": "w1:p2",
+  "HERDR_SOCKET_PATH": "/Users/user/.config/herdr/sessions/p0/herdr.sock",
+  "HERDR_ENV": "1",
+  "CLAUDE_CODE_ENTRYPOINT": "sdk-ts"
+ }
+}
