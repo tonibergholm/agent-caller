@@ -227,6 +227,36 @@ async fn frames(p: &Proc, dir: &Path) {
     }
 }
 
+/// One client fills the idempotency cache; what does another one get?
+async fn idem_flood(p: &Proc, dir: &Path) {
+    let token = std::fs::read_to_string(dir.join("client.token")).unwrap_or_default().trim().to_owned();
+    let Ok(mut a) = ws_hello(&p.acd_sock(), &token, "lt-flood").await else { return };
+    let Ok(mut b) = ws_hello(&p.acd_sock(), &token, "lt-victim").await else { return };
+    let _ = read_until(&mut a, |v| v["type"] == "snapshot", Duration::from_secs(3)).await;
+    let _ = read_until(&mut b, |v| v["type"] == "snapshot", Duration::from_secs(3)).await;
+    let t = std::time::Instant::now();
+    let mut first_refused = None;
+    for i in 0..17_000u32 {
+        let id = format!("f{i}");
+        let msg = ClientMessage::AgentMarkSeen { id: id.clone(), agent_id: "nobody".into() };
+        let _ = a.send(Message::text(serde_json::to_string(&msg).unwrap())).await;
+        let (got, _) = read_until(&mut a, |v| v["type"] == "result" && v["id"] == id.as_str(), Duration::from_secs(5)).await;
+        let Some((_, v)) = got else { break };
+        if v["error"]["message"].as_str().is_some_and(|m| m.contains("too many recent")) && first_refused.is_none() {
+            first_refused = Some(i);
+        }
+    }
+    out("idem_flood_17000_commands_s", format!("{:.1}", t.elapsed().as_secs_f64()));
+    out("idem_flood_first_refused_command_index", first_refused.map_or("never".into(), |i| i.to_string()));
+    let msg = ClientMessage::AgentMarkSeen { id: "victim-1".into(), agent_id: "nobody".into() };
+    let _ = b.send(Message::text(serde_json::to_string(&msg).unwrap())).await;
+    let (got, end) = read_until(&mut b, |v| v["type"] == "result", Duration::from_secs(5)).await;
+    out("idem_flood_other_client_next_command", match got {
+        Some((_, v)) => format!("{}: {}", v["error"]["code"].as_str().unwrap_or("?"), v["error"]["message"].as_str().unwrap_or("")),
+        None => format!("no result: {end}"),
+    });
+}
+
 async fn snapshot_bytes(dir: &Path) -> Option<usize> {
     let token = std::fs::read_to_string(dir.join("client.token")).ok()?.trim().to_owned();
     let mut ws = ws_hello(&dir.join("acd.sock"), &token, "lt-snap").await.ok()?;
@@ -296,6 +326,7 @@ pub async fn run(a: Args) -> Result<(), String> {
         unix_preauth(&p).await;
         tcp_preauth(&p).await;
         hook_cap(&p).await;
+        idem_flood(&p, &dir).await;
         p.stop(true);
     }
     if which == "all" || which == "agents" {

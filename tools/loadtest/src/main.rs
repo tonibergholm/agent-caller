@@ -7,6 +7,7 @@ mod hist;
 mod http;
 mod limits;
 mod metrics;
+mod micro;
 mod procfs;
 mod producers;
 mod rng;
@@ -35,6 +36,7 @@ async fn main() {
         })
         .await,
         "limits" => limits::run(a).await,
+        "micro" => { micro::run(); Ok(()) }
         other => Err(format!("unknown command {other}")),
     };
     if let Err(e) = r {
