@@ -291,11 +291,25 @@ needs a decision or a small follow-up.
   `a_combining_grapheme_joiner_in_a_command_passes_unchanged` (T3); a change
   to the escaper must update them on purpose.
 - **Restart notifications (#81).** A request first seen in a reconnect
-  snapshot stays silent, as before. The client's notified set is unbounded
-  (security review finding 5).
+  snapshot stays silent, as before. The client's notified set is bounded
+  (256 keys) and notifications are rate limited per machine (security review
+  finding 5; see the findings entry below).
+- **Flaky test, macOS CI (seen 2026-11-04).** `repairing_inside_the_undo_window_sends_nothing`
+  (`crates/acd-client/tests/inbox.rs`, final `assert_eq!(answers(&f), 1)` after
+  a fixed 400 ms sleep) failed once on PR #87, which does not touch
+  `acd-client`; a rerun passed. Fix: wait for the answer to arrive (poll with
+  a deadline) instead of sleeping.
+- **Core limits (#88), left open.** After an established session drops, a peer
+  can send a frame over 1 MiB before the next `welcome`; `next_server()` in
+  `crates/acd-client/src/conn.rs` maps that capacity error to `End::Offline`,
+  so the following connection still sends the old resume cursor. Memory stays
+  bounded; only the documented resync does not happen on that path.
+- **Auth log test (#90).** `crates/acd-core/tests/tls.rs` (about lines 494 and
+  497) accepts any shared "hello accepted" line, so another test can mask this
+  hello timing out, and prints a token substring in its failure message
+  (CLAUDE.md: use a static message).
 - **Security review findings still open** (`docs/research/2026-11-03-security-review-core.md`
-  and `-local.md`): core 4 (no connection or auth log), 5 (unbounded
-  notifications); local F2 (T3 token goes to whoever holds
+  and `-local.md`): local F2 (T3 token goes to whoever holds
   the loopback port; **not fixed by the review's ticket fix**: the ticket
   request `POST /api/auth/websocket-ticket` itself needs `Authorization:
   Bearer <t3.token>` over plain HTTP to the same port, so a squatter receives
@@ -305,7 +319,7 @@ needs a decision or a small follow-up.
   prove who holds the port first, for example the listener's owner uid from
   `/proc/net/tcp` on Linux, or a narrower and shorter-lived T3 token; needs an
   owner decision).
-  Core 1, 2, 3, 6, 7 and 8 and local F1, F3 (apart from its residual), F4 and F5 are fixed. Core 3 limits the client
+  Core 1, 2, 3, 4, 5, 6, 7 and 8 and local F1, F3 (apart from its residual), F4 and F5 are fixed. Core 3 limits the client
   (1 MiB frames, 1000 agents, 64 KiB per agent; each breach, an oversized
   frame included, ends as a resync without the resume cursor); the daemon registry is fed
   by local adapters, not by peers, so it has no new cap. Core 7 accepts ASCII
@@ -331,6 +345,18 @@ needs a decision or a small follow-up.
   `body_timeout`, there is no per-peer connection cap, so a peer can still
   fill the 128 slots for up to 10 s at a time by sending nothing, and the
   slot is taken before accept. Local F2 stays **open**, as above.
+  Core 4 logs each accepted and rejected `hello` at 10 lines per 10 s per
+  kind: peer address, protocol, outcome and reason. Peer free text is never
+  logged; client id and name appear only as byte length plus an 8-hex SHA-256
+  prefix, so a client that names itself after its token leaks nothing. Lines
+  over the limit are counted into `suppressed` on the next line. TLS
+  handshake failures and pre-auth slot refusals are not logged. Core 5 bounds the client's notified set
+  (256) and limits notifications to 5 per 10 s per machine; a removed
+  machine's rate-limit entry is dropped. Left open: it
+  still notifies for a request whose agent is not in the snapshot, because
+  the daemon sends `request.opened` before the agent update (tested in
+  `hook_only_agents_show_with_a_request_and_notify_as_before`); the rate
+  limit is the bound on that lure.
 - **Owner decisions still open:** same-user denial of service on the local
   socket and the four-source pre-auth residual (see Pre-auth residuals); the
   relay spec's lock-screen content rule and handle revocation (see its review

@@ -14,14 +14,14 @@ use crate::{
 use acd_protocol::{Effect, pairing::Pairing};
 use std::sync::Mutex;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
-use std::{net::IpAddr, time::Instant};
+use std::{net::IpAddr, time::{Duration, Instant}};
 use tokio::sync::{Notify, broadcast, watch};
 
 /// Longest typed answer, matching the T3 adapter's prompt cap.
@@ -117,9 +117,141 @@ fn default_machine_name(host: &str) -> String {
         .to_owned()
 }
 
+/// How many announced (machine, request, opened_at) keys are remembered. A
+/// hostile peer can send endless new ids, so the oldest are evicted first.
+pub const NOTIFIED_HISTORY_MAX: usize = 256;
+/// Notifications per machine per window. The rest are dropped: the card still
+/// shows in the inbox, only the OS notification is withheld.
+pub const NOTIFY_RATE_MAX: usize = 5;
+pub const NOTIFY_RATE_WINDOW: Duration = Duration::from_secs(10);
+
+/// Decides which opened requests raise a notification: each key once (bounded
+/// history), and at most `NOTIFY_RATE_MAX` per machine per window.
+#[derive(Default)]
+struct NotifyGate {
+    // `opened_at` tells a request from an earlier acd run: ids restart at r1.
+    seen: HashSet<(String, String, acd_protocol::Timestamp)>,
+    order: VecDeque<(String, String, acd_protocol::Timestamp)>,
+    /// Recent notification times by configured machine key (never peer text).
+    recent: HashMap<String, VecDeque<Instant>>,
+}
+impl NotifyGate {
+    /// Drop the rate-limit state of a removed machine, so the map holds only
+    /// configured machines.
+    fn forget_machine(&mut self, machine_key: &str) {
+        self.recent.remove(machine_key);
+    }
+    fn admit(
+        &mut self,
+        machine_key: &str,
+        machine_id: String,
+        request_id: String,
+        opened_at: acd_protocol::Timestamp,
+        now: Instant,
+    ) -> bool {
+        let key = (machine_id, request_id, opened_at);
+        if !self.seen.insert(key.clone()) {
+            return false;
+        }
+        self.order.push_back(key);
+        while self.order.len() > NOTIFIED_HISTORY_MAX {
+            if let Some(old) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+        let recent = self.recent.entry(machine_key.to_owned()).or_default();
+        while recent.front().is_some_and(|t| now.duration_since(*t) >= NOTIFY_RATE_WINDOW) {
+            recent.pop_front();
+        }
+        if recent.len() >= NOTIFY_RATE_MAX {
+            return false;
+        }
+        recent.push_back(now);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::default_machine_name;
+    use super::{default_machine_name, NotifyGate, NOTIFIED_HISTORY_MAX, NOTIFY_RATE_MAX, NOTIFY_RATE_WINDOW};
+    use std::time::{Duration, Instant};
+
+    fn at(secs: i64) -> acd_protocol::Timestamp {
+        chrono::DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    #[test]
+    fn a_flood_of_distinct_ids_keeps_the_history_bounded() {
+        let mut g = NotifyGate::default();
+        let mut now = Instant::now();
+        for i in 0..5_000 {
+            // Spread the flood out so the rate limit is not what bounds it.
+            now += NOTIFY_RATE_WINDOW;
+            g.admit("m1", "mid".into(), format!("r{i}"), at(1), now);
+        }
+        assert!(g.seen.len() <= NOTIFIED_HISTORY_MAX);
+        assert!(g.order.len() <= NOTIFIED_HISTORY_MAX);
+    }
+
+    #[test]
+    fn a_burst_is_rate_limited_per_machine() {
+        let mut g = NotifyGate::default();
+        let now = Instant::now();
+        let n = (0..100).filter(|i| g.admit("m1", "mid".into(), format!("r{i}"), at(1), now)).count();
+        assert_eq!(n, NOTIFY_RATE_MAX);
+        // Another machine has its own budget, and the first recovers later.
+        assert!(g.admit("m2", "mid2".into(), "r1".into(), at(1), now));
+        assert!(g.admit("m1", "mid".into(), "late".into(), at(1), now + NOTIFY_RATE_WINDOW));
+    }
+
+    #[test]
+    fn removing_a_machine_drops_its_rate_limit_entry() {
+        use crate::settings::{EndpointConfig, MachineEntry, MemorySecrets, Settings, DEFAULT_HOTKEY};
+        use super::{Inbox, InboxOptions};
+        let machine = |key: &str| MachineEntry {
+            key: key.into(),
+            name: key.into(),
+            endpoint: EndpointConfig::Tcp { host: "127.0.0.1".into(), port: 1 },
+        };
+        let settings = Settings {
+            client_id: "00000000-0000-4000-8000-000000000001".into(),
+            hotkey: DEFAULT_HOTKEY.into(),
+            hotkey_migrated: true,
+            show_idle: false,
+            show_subagents: false,
+            show_hook_only: false,
+            machines: vec![machine("m1"), machine("m2")],
+        };
+        let ib = Inbox::new(
+            settings,
+            std::sync::Arc::new(MemorySecrets::default()),
+            InboxOptions {
+                timing: Default::default(),
+                settings_path: None,
+                client_name: "t".into(),
+                client_version: "0".into(),
+            },
+        );
+        let now = Instant::now();
+        for k in ["m1", "m2"] {
+            assert!(ib.inner.lock().unwrap().notified.admit(k, "mid".into(), format!("r-{k}"), at(1), now));
+        }
+        ib.remove_machine("m2").unwrap();
+        let inner = ib.inner.lock().unwrap();
+        assert!(inner.notified.recent.contains_key("m1"));
+        assert!(!inner.notified.recent.contains_key("m2"), "removed machine keeps no state");
+    }
+
+    #[test]
+    fn an_id_reused_after_an_acd_restart_still_notifies() {
+        let mut g = NotifyGate::default();
+        let now = Instant::now();
+        assert!(g.admit("m1", "mid".into(), "r1".into(), at(100), now));
+        assert!(!g.admit("m1", "mid".into(), "r1".into(), at(100), now), "same request repeats");
+        // acd restarted: the same id with a new opened_at is a new request.
+        let later = now + Duration::from_secs(60);
+        assert!(g.admit("m1", "mid".into(), "r1".into(), at(200), later));
+    }
 
     #[test]
     fn default_names_preserve_ip_addresses_and_use_dns_first_label() {
@@ -135,8 +267,7 @@ struct Inner {
     busy: HashSet<String>,
     notices: HashMap<String, (Notice, Instant)>,
     #[allow(dead_code)] // Reserved for the notification state added by Task 11.
-    // `opened_at` tells a request from an earlier acd run: ids restart at r1.
-    notified: HashSet<(String, String, acd_protocol::Timestamp)>,
+    notified: NotifyGate,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum InboxEvent {
@@ -218,7 +349,7 @@ impl Inbox {
                 actions: Actions::default(),
                 busy: HashSet::new(),
                 notices: HashMap::new(),
-                notified: HashSet::new(),
+                notified: NotifyGate::default(),
             }),
             edits: EditLock::default(),
             secrets,
@@ -498,6 +629,7 @@ impl Inbox {
             }
         }
         inner.machines.retain(|m| m.entry.key != key);
+        inner.notified.forget_machine(key);
         for action in inner.actions.end_machine(key) {
             self.emit(&action, ActionOutcome::NotSent { reason: NotSentReason::Offline });
             inner.notices.insert(
@@ -930,7 +1062,7 @@ impl Inbox {
                     .map(|a| a.title.clone())
                     .unwrap_or_else(|| req.agent_id.clone());
                 drop(state);
-                if !hidden_subagent && inner.notified.insert((machine_id, req.id.clone(), req.opened_at)) {
+                if !hidden_subagent && inner.notified.admit(key, machine_id, req.id.clone(), req.opened_at, Instant::now()) {
                     let _ = self.events_tx.send(InboxEvent::RequestOpened {
                         machine_key: key.to_owned(),
                         machine_name,
