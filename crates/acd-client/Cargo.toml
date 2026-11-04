@@ -39,3 +39,4 @@ hyper-util = { version = "0.1", features = ["tokio", "service"] }
 tempfile.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+proptest = { version = "1", default-features = false, features = ["std"] }
