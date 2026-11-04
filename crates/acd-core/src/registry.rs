@@ -43,15 +43,35 @@ pub struct RequestObs {
     pub reusable_key: bool,
 }
 
-/// Most JSON bytes the request text may add to an agent. A client keeps no
-/// agent that encodes to more than `MAX_AGENT_BYTES` (PROTOCOL.md) and drops
-/// the connection on one, so the rest of that limit is left to the agent.
-const MAX_REQUEST_BYTES: usize = 48 * 1024;
+/// A client keeps no agent that encodes to more than `MAX_AGENT_BYTES`
+/// (PROTOCOL.md) and drops the connection on one. The budget is split so the
+/// parts add up whatever order they arrive in: the request text (40 KiB), the
+/// working directory (8 KiB encoded), and the rest, which the adapters cap
+/// (id 128 bytes, title, project and parent title 200 characters, last
+/// message 500: about 6 KiB at 4 bytes a character) with room to spare.
+const MAX_REQUEST_BYTES: usize = 40 * 1024;
+const MAX_CWD_BYTES: usize = 8 * 1024;
 const TOO_LARGE: &str = "This request is too large to show here. Answer it in the terminal.";
-/// Longest working directory an agent carries, in characters: a Linux
-/// `PATH_MAX`. The adapters cap every other agent text, but a T3 worktree
-/// path, a herdr cwd or a hook session cwd is as long as its sender says.
-const MAX_CWD_CHARS: usize = 4096;
+
+/// `cwd` cut to what encodes to at most `MAX_CWD_BYTES` of JSON. The
+/// adapters pass a T3 worktree path, a herdr cwd or a hook session cwd as
+/// long as its sender says.
+fn cut_cwd(cwd: String) -> String {
+    let mut used = 0;
+    let mut out = String::new();
+    for c in cwd.chars() {
+        used += match c {
+            '"' | '\\' => 2,
+            c if c.is_control() => 6,
+            c => c.len_utf8(),
+        };
+        if used > MAX_CWD_BYTES {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
 
 impl RequestObs {
     /// A request that does not fit is read-only, like a cut command: nothing
@@ -515,7 +535,7 @@ impl Registry {
 
     fn upsert_agent(&mut self, mut o: AgentObs) -> Vec<Change> {
         let now = Utc::now();
-        o.cwd = o.cwd.map(|c| c.chars().take(MAX_CWD_CHARS).collect());
+        o.cwd = o.cwd.map(cut_cwd);
         // `Unknown` is a source outage, not a state change: the seen marker
         // survives it.
         if o.state != AgentState::Done && o.state != AgentState::Unknown {
@@ -962,9 +982,62 @@ mod tests {
         }));
         let agent = registry.agents().remove(0);
         assert!(serde_json::to_vec(&agent).unwrap().len() <= MAX_AGENT_BYTES);
-        assert_eq!(agent.cwd.unwrap().chars().count(), 4096);
+        assert_eq!(agent.cwd.unwrap().len(), 8 * 1024, "cut at 8 KiB encoded");
         upsert(&mut registry);
         assert_eq!(registry.agents()[0].cwd.as_deref(), Some("/work"));
+    }
+
+    /// The two caps have to add up: a request just under the request cap on
+    /// an agent whose cwd is as long as the cwd cap allows, whichever of the
+    /// two the registry saw last.
+    #[test]
+    fn the_request_cap_and_the_cwd_cap_together_stay_within_the_agent_limit() {
+        let screen = |n: usize| RequestObs {
+            agent_id: "agent".into(),
+            key: CorrelationKey("key".into()),
+            upgrade_from: None,
+            kind: RequestKind::BlockedUnparsed,
+            answer_path: AnswerPath::None,
+            title: "t".repeat(200),
+            detail: "d".into(),
+            options: vec![],
+            questions: None,
+            free_text: false,
+            raw_screen: Some("x".repeat(n)),
+            ready: false,
+            reusable_key: true,
+        };
+        let agent_with = |cwd: String| AgentObs {
+            id: "agent".into(),
+            source: Source::Herdr,
+            kind: AgentKind::Claude,
+            title: "😀".repeat(200),
+            cwd: Some(cwd),
+            project: Some("😀".repeat(200)),
+            state: AgentState::Working,
+            failed: false,
+            last_message: Some("😀".repeat(500)),
+            can_send: true,
+            role: AgentRole::Main,
+            parent_title: Some("😀".repeat(200)),
+        };
+        for cwd in ["😀".repeat(5000), "\"".repeat(5000)] {
+            for screen_len in [40_000, 48_000] {
+                // The request last, then the agent last.
+                let mut a = Registry::new("machine".into());
+                a.apply(Observation::AgentUpsert(agent_with("/w".into())));
+                a.apply(Observation::RequestSeen(screen(screen_len)));
+                a.apply(Observation::AgentUpsert(agent_with(cwd.clone())));
+                let mut b = Registry::new("machine".into());
+                b.apply(Observation::AgentUpsert(agent_with(cwd.clone())));
+                b.apply(Observation::RequestSeen(screen(screen_len)));
+                for registry in [a, b] {
+                    let agent = registry.agents().remove(0);
+                    let size = serde_json::to_vec(&agent).unwrap().len();
+                    assert!(size <= MAX_AGENT_BYTES, "{size} bytes (screen {screen_len})");
+                }
+            }
+        }
     }
 
     #[test]

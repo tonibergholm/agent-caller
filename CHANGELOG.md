@@ -38,9 +38,9 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Fixed
 
-- acd: a request whose text exceeds 48 KiB (for example a question at every
+- acd: a request whose text exceeds 40 KiB (for example a question at every
   field cap in 4-byte characters) is published read-only, and a working
-  directory is cut at 4096 characters. Over 64 KiB an agent made every client
+  directory is cut to 8 KiB of JSON. Over 64 KiB an agent made every client
   drop the connection and resync, in a loop, for as long as it existed.
 - A sub-millisecond timestamp is cut to the millisecond on the way in, so a
   message decodes to what it re-encodes to.
