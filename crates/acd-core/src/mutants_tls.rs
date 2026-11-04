@@ -114,5 +114,9 @@ async fn abort_on_drop_aborts_the_task() {
     // Let the task start so it owns `held`.
     tokio::task::yield_now().await;
     drop(AbortOnDrop(task));
-    assert!(watcher.await.is_err(), "the task was dropped");
+    // The generous timeout only matters on failure; success returns at once.
+    let seen = tokio::time::timeout(Duration::from_secs(30), watcher)
+        .await
+        .expect("the task was not aborted");
+    assert!(seen.is_err(), "the task was dropped");
 }
