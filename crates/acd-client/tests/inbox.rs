@@ -457,15 +457,28 @@ async fn notifications_only_for_opened_events_and_deduped() {
     );
     c.close(1001).await;
     let c2 = f.next_connection().await;
-    c2.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]}))
+    // The refresh snapshot carries a second, never announced request (r8 on
+    // a2). Events are delivered in order, so a notification made from the
+    // snapshot (r8, or r1 again) would arrive before r9's and fail the first
+    // assertion; it cannot hide behind r8's own opened event, which comes later.
+    let mut second = pending_agent();
+    second["id"] = "a2".into();
+    second["pending"]["id"] = "r8".into();
+    second["pending"]["agent_id"] = "a2".into();
+    c2.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent(), second.clone()]}))
         .await;
     c2.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":2,"request":pending_agent()["pending"]})).await;
-    // Events are delivered in order: if the snapshot or the repeated opened
-    // frame had notified, that event would precede the sentinel's.
     let mut sentinel = pending_agent()["pending"].clone();
     sentinel["id"] = "r9".into();
     c2.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":3,"request":sentinel})).await;
-    assert_eq!(next_opened_id(&mut events).await, "r9", "no notification before the sentinel");
+    assert_eq!(next_opened_id(&mut events).await, "r9", "the snapshot and the repeated r1 stay silent");
+    // The real opened event for the snapshot's request notifies exactly once.
+    c2.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":4,"request":second["pending"]})).await;
+    assert_eq!(next_opened_id(&mut events).await, "r8", "the real opened event notifies");
+    let mut last = pending_agent()["pending"].clone();
+    last["id"] = "r10".into();
+    c2.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":5,"request":last})).await;
+    assert_eq!(next_opened_id(&mut events).await, "r10", "r8 notified once");
     assert_eq!(f.connections(), 2);
 }
 
