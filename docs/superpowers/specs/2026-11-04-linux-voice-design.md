@@ -364,10 +364,22 @@ process, or in the audio server's buffer.
   its core lock, and `start_listening` would already have opened capture before the callback could be handled.
 - **Required change to the port trait (`acd-voice/src/speak.rs`):** `fn stop(&self)` becomes
   `fn stop(&self) -> Result<(), SilenceFailed>` (a unit-like error carrying no text). The doc comment keeps "before it returns".
-  Every existing implementor changes with it: the Swift-bridge adapter in `app/src-tauri` (the Swift `stop` is documented to run to
-  completion before returning, so it maps to `Ok(())`; a bridge-level failure to call it maps to `Err`), and the test
-  doubles in `acd-voice/src/speak.rs` and `crates/acd-voice-client/tests/speaking.rs`. The Mac change is mechanical and cannot be
-  verified on Linux (CLAUDE.md platform limits).
+  Every existing implementor changes with it: the Swift-bridge adapter in `app/src-tauri/src/voice/speaker.rs`
+  (`MacSpeaker`), and the test doubles in `acd-voice/src/speak.rs` and `crates/acd-voice-client/tests/speaking.rs`.
+  **Adapter obligation (both platforms): `Ok(())` means silence was established, not that a stop was requested.** An adapter
+  may return `Ok` only after it observed the output quiet; if it cannot observe that within its bound, it returns `Err`.
+  - **Mac.** The existing Swift stop does **not** establish silence: `Speaker.stop()` (`Speaker.swift`, "Returns after the
+    synthesizer was told to stop") calls `engine.stop()` and returns without checking `isSpeaking`, and `vb_speech_stop`
+    returns at once after it. The adapter therefore must not map `vb_speech_stop` to `Ok(())`. It must call a stop that waits
+    for quiet and reports the outcome: Swift polls `engine.isSpeaking` on the speech queue (or waits for the synthesizer's
+    `didFinish`/`didCancel` delegate callback) until it is false, bounded by the existing `Speaker.drainMs`, and the bridge
+    returns a status (quiet / still speaking). `MacSpeaker::stop` returns `Ok` on quiet and `Err(SilenceFailed)` on still
+    speaking at the bound or on a bridge failure. This changes the C header (`voice_bridge.h`) and
+    `Speaker.silenceForCapture`, which today waits up to `drainMs` and then returns to open the microphone regardless; that
+    "bounded, then proceed" behaviour is intentionally replaced by "bounded, then fail closed". The Mac change cannot be
+    verified on Linux (CLAUDE.md platform limits) and is reported as pending for macOS CI.
+  - **Linux.** Same rule: `Ok` only when every child was reaped and the playback process is confirmed gone (§ above); an
+    unreapable child returns `Err`, never `Ok` on a timeout.
 - **Required change to the controller (`acd-voice-client`):** `Controller::silence` and `stop_speech` return that result.
   `start_listening` calls `silence` and, on `Err`, **refuses to start capture**: it does not call `input.start`, it
   invalidates voice exactly as `overflow()` does (epoch bump, recorder cancelled, HUD error), and reports a refusal through
@@ -385,6 +397,12 @@ process, or in the audio server's buffer.
      `input.start` is **never** called (the `SpeechInput` double records zero starts), the HUD shows the error, and a later
      press after `stop` returns `Ok` starts capture normally. This test fails without the change (today `stop` returns `()` and
      capture opens).
+  4. Mac adapter (`app/src-tauri/swift/Tests/VoiceBridgeTests/SpeakerTests.swift`): reuse `FakeSynth` with
+     `quietsOnStop = false` and `set(speaking: true)` (a synthesizer that keeps speaking after `stop`, the mode
+     `testSilenceForCaptureWaitsBrieflyForTheAudioToDrain` already uses for its bounded case). The new stop-with-status call
+     returns "still speaking" at the `drainMs` bound; with `quietsOnStop = true` it returns "quiet". A Rust test on
+     `MacSpeaker` (or a `Speaker` double mirroring it) maps "still speaking" to `Err(SilenceFailed)`. These fail with
+     the old behaviour (stop returns without checking, capture opens while playback continues).
   All synchronised on the doubles' events and a controlled clock, not on sleeps.
 
 Playback is the part of "kill the child" still to prove on the machine (§13). Text goes to the child on **stdin**,
