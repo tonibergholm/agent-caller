@@ -1,0 +1,57 @@
+# Maintainer: Toni Bergholm
+#
+# acd, the agent-caller daemon, built from the git tag v$pkgver.
+# Release steps and testing: docs/packaging.md.
+#
+# The source is the tag, not a tarball, so there is no checksum to keep in
+# step: git verifies the object ids. The tag is not GPG-checked yet because
+# releases are not signed (docs/packaging.md, "Signing, later").
+pkgname=agent-caller
+pkgver=0.9.0
+pkgrel=1
+pkgdesc='Inbox daemon (acd) for coding-agent permission requests and questions'
+arch=(x86_64 aarch64)
+url='https://github.com/tonibergholm/agent-caller'
+license=(MIT)
+depends=(glibc gcc-libs)
+makedepends=(cargo git)
+source=("$pkgname::git+$url.git#tag=v$pkgver")
+sha256sums=(SKIP)
+
+prepare() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  # --locked: Cargo.lock decides every version. Nothing is resolved here.
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # Keep the build directory and the cargo registry out of the binary, so the
+  # same tag gives the same bytes wherever it is built.
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$PWD=/build/$pkgname --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+  cargo build --frozen --release -p acd
+}
+
+check() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$PWD=/build/$pkgname --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+  # The packaged unit must still be what `acd service install` writes. The
+  # whole suite runs in CI; some of it needs a real session.
+  cargo test --frozen --release -p acd --test packaging_unit
+}
+
+package() {
+  cd "$pkgname"
+  install -Dm755 target/release/acd "$pkgdir/usr/bin/acd"
+  # A copy in ~/.config/systemd/user (from `acd service install`) wins over
+  # this one, so both can exist.
+  install -Dm644 packaging/systemd/acd.service "$pkgdir/usr/lib/systemd/user/acd.service"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # No shell completions: the CLI has no completion generator yet. No
+  # backup=() entries: the package owns no file under /etc or in a home.
+}

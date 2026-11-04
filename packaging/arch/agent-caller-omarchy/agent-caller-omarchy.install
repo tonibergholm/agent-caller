@@ -1,0 +1,29 @@
+# Nothing here touches a home directory, a token or a secret. The messages
+# say what each user does by hand.
+
+post_install() {
+  cat <<'MSG'
+Run once per user, from a login session on Omarchy:
+    acd-inbox install
+It writes ~/.config/systemd/user/acd-inbox.service, copies the binary to
+~/.local/bin and the plugin to ~/.config/omarchy/plugins/tonibergholm.agentcaller,
+and offers a keybinding. Check it with: acd-inbox status
+MSG
+}
+
+post_upgrade() {
+  cat <<'MSG'
+acd-inbox install keeps its own copy of the binary in ~/.local/bin and its
+own plugin files. After an upgrade each user runs `acd-inbox install` again
+to refresh them, then restarts the shell: omarchy-restart-shell.
+Settings and pairing secrets are not touched.
+MSG
+}
+
+post_remove() {
+  cat <<'MSG'
+Per-user copies are left in place. To remove them run `acd-inbox uninstall`
+(the copy in ~/.local/bin works). Settings in ~/.config/acd-inbox and pairing
+secrets in the keyring are never deleted by the package.
+MSG
+}
