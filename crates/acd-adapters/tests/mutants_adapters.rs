@@ -327,3 +327,40 @@ fn prune_drops_questions_of_requests_that_are_gone() {
     d.prune(&[]);
     assert_eq!(d.retained(), (1, 1), "only the pending request's question stays");
 }
+
+fn native_of(d: &mut ThreadDetail, thread: &str) -> Option<String> {
+    d.apply(&event("thread.metadata-updated", json!({"activeProviderThreadId": thread}))).unwrap();
+    d.native_session_id().map(str::to_owned)
+}
+
+/// detail.rs:168 `>` -> `==` / `>=` and :172 `!=` -> `==` (`prune`): eight provider threads
+/// are kept, the ninth pushes out the oldest one that is not the active thread.
+#[test]
+fn prune_keeps_eight_provider_threads_and_never_the_active_one_out() {
+    let fill = |n: usize| {
+        let mut d = ThreadDetail::default();
+        for i in 0..n {
+            d.apply(&event("provider-thread.updated", provider_thread(&format!("p{i}"), Some(&format!("n{i}"))))).unwrap();
+        }
+        d
+    };
+    // Exactly eight: nothing is dropped.
+    let mut d = fill(8);
+    d.prune(&[]);
+    for i in 0..8 {
+        assert_eq!(native_of(&mut d, &format!("p{i}")).as_deref(), Some(format!("n{i}").as_str()), "p{i}");
+    }
+    // Nine: the oldest goes, the rest stay.
+    let mut d = fill(9);
+    d.prune(&[]);
+    assert_eq!(native_of(&mut d, "p0"), None);
+    for i in 1..9 {
+        assert_eq!(native_of(&mut d, &format!("p{i}")).as_deref(), Some(format!("n{i}").as_str()), "p{i}");
+    }
+    // The oldest is the active one: it stays, and the next oldest goes instead.
+    let mut d = fill(9);
+    d.apply(&event("thread.metadata-updated", json!({"activeProviderThreadId": "p0"}))).unwrap();
+    d.prune(&[]);
+    assert_eq!(d.native_session_id(), Some("n0"));
+    assert_eq!(native_of(&mut d, "p1"), None);
+}
