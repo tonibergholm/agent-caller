@@ -82,6 +82,7 @@ pub async fn run(a: Args) -> Result<(), String> {
                 withdraw_after_s: a.f64("withdraw-after", 15.0),
                 turnover: a.f64("turnover", 0.02),
                 p_odd_ack: a.f64("odd-ack", 0.03),
+                sticky: a.usize("sticky", 0) == 1,
                 run_id: format!("{:x}", crate::rng::now_us() & 0xffff_ffff),
                 burst: burst.clone(),
             },

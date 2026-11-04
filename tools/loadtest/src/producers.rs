@@ -31,6 +31,9 @@ pub struct ProducerCfg {
     pub turnover: f64,
     /// Chance that an ack is `rejected` or `failed` instead of `applied`.
     pub p_odd_ack: f64,
+    /// Keep each agent listed between requests (a read-only placeholder item), so
+    /// agents live for the whole run and only their request keys change.
+    pub sticky: bool,
     pub run_id: String,
     /// Bumped by the orchestrator: every producer opens all free slots.
     pub burst: Arc<AtomicU64>,
@@ -48,6 +51,9 @@ struct Item {
 struct Slot {
     incarnation: u32,
     item: Option<Item>,
+    /// Key of the placeholder shown while the agent has no request (sticky mode).
+    ph_key: Option<String>,
+    started: bool,
 }
 
 struct Ack {
@@ -67,7 +73,7 @@ pub fn spawn_producers(cfg: &ProducerCfg, m: Arc<Metrics>, stop: watch::Receiver
     let n = cfg.producers.min(8);
     for p in 0..n {
         let shared = Arc::new(Mutex::new(Shared {
-            slots: (0..cfg.slots.min(32)).map(|_| Slot { incarnation: 0, item: None }).collect(),
+            slots: (0..cfg.slots.min(32)).map(|_| Slot { incarnation: 0, item: None, ph_key: None, started: false }).collect(),
             acks: Vec::new(),
             seen_answers: HashSet::new(),
             seen_order: VecDeque::new(),
@@ -200,6 +206,8 @@ async fn main_loop(
                 if rng.chance(cfg.turnover) {
                     s.slots[i].incarnation += 1;
                 }
+                s.slots[i].started = true;
+                s.slots[i].ph_key = None;
                 s.slots[i].item = Some(Item { key, t0_us: 0, opened: Instant::now(), answered: false, lost: false });
                 Metrics::inc(&m.opened_at_source);
             }
@@ -209,8 +217,20 @@ async fn main_loop(
             let counter = s.counter;
             for (i, slot) in s.slots.iter_mut().enumerate() {
                 let incarnation = slot.incarnation;
-                let Some(it) = &mut slot.item else { continue };
+                let placeholder = cfg.sticky && slot.started;
+                if placeholder && slot.item.as_ref().is_none_or(|it| it.answered) && slot.ph_key.is_none() {
+                    slot.ph_key = Some(format!("{}-{}-ph{}", cfg.run_id, pid, now_us()));
+                }
+                let Some(it) = &mut slot.item else {
+                    if let (true, Some(k)) = (placeholder, &slot.ph_key) {
+                        items.push(json!({"key": k, "agent_key": format!("a{i}-{incarnation}"), "agent": {"title": format!("agent {i}"), "project": "loadtest"}, "title": "Idle"}));
+                    }
+                    continue;
+                };
                 if it.answered {
+                    if let (true, Some(k)) = (placeholder, &slot.ph_key) {
+                        items.push(json!({"key": k, "agent_key": format!("a{i}-{incarnation}"), "agent": {"title": format!("agent {i}"), "project": "loadtest"}, "title": "Idle"}));
+                    }
                     continue;
                 }
                 if it.lost {
