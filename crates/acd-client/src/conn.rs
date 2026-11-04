@@ -878,3 +878,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mutants_conn.rs"]
+mod mutants_conn;
