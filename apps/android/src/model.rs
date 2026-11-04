@@ -7,8 +7,11 @@
 //! disabled; every other request shows where to answer instead ("Answer in
 //! terminal"); a request is shown with its whole detail text.
 
+use std::collections::HashMap;
+
 use acd_client::{
     conn::MachineStatus,
+    settings::SecretStatus,
     view::{CardGroup, CardView, InboxView, NoticeTone},
 };
 use acd_protocol::{Effect, RequestKind, Source};
@@ -73,15 +76,35 @@ pub struct UndoRow {
     pub detail: Option<String>,
 }
 
-pub fn screen(view: &InboxView) -> ScreenModel {
+/// The text for a machine whose stored secret cannot be used. The client
+/// reports such a machine as "Pair this machine", which is wrong when the
+/// secret exists but the Keystore cannot open it.
+pub const SECRET_UNUSABLE: &str =
+    "The saved pairing cannot be read here. Remove this machine and pair it again.";
+
+/// `secrets` is the secret status per machine key (`Inbox::machines`).
+pub fn screen(view: &InboxView, secrets: &HashMap<String, SecretStatus>) -> ScreenModel {
     ScreenModel {
-        machines: view.machines.iter().filter(|m| m.duplicate_of.is_none()).map(machine_row).collect(),
+        machines: view
+            .machines
+            .iter()
+            .filter(|m| m.duplicate_of.is_none())
+            .map(|m| machine_row(m, secrets.get(&m.key).copied()))
+            .collect(),
         cards: view.cards.iter().map(card_row).collect(),
         needs_you: view.tray.needs_you,
     }
 }
 
-fn machine_row(machine: &acd_client::view::MachineView) -> MachineRow {
+fn machine_row(machine: &acd_client::view::MachineView, secret: Option<SecretStatus>) -> MachineRow {
+    if matches!(secret, Some(SecretStatus::Unreadable | SecretStatus::Locked | SecretStatus::Unknown)) {
+        return MachineRow {
+            key: machine.key.clone(),
+            name: machine.name.clone(),
+            status: "attention".into(),
+            problem: Some(SECRET_UNUSABLE.into()),
+        };
+    }
     let (status, problem) = match &machine.status {
         MachineStatus::Connecting | MachineStatus::Syncing => ("connecting", None),
         MachineStatus::Online => ("online", None),
@@ -283,7 +306,7 @@ mod tests {
             show_subagents: true,
             show_hook_only: true,
         });
-        screen(&view)
+        screen(&view, &HashMap::new())
     }
 
     fn only_card(s: &ScreenModel) -> &CardRow {
@@ -430,8 +453,40 @@ mod tests {
             tray: acd_client::view::TraySummary { color: acd_client::view::TrayColor::Grey, needs_you: 0 },
             actions: vec![],
         };
-        let s = screen(&view);
+        let s = screen(&view, &HashMap::new());
         let rows: Vec<_> = s.machines.iter().map(|m| (m.key.as_str(), m.status.as_str(), m.problem.as_deref())).collect();
         assert_eq!(rows, vec![("a", "connecting", None), ("b", "attention", Some("pin changed"))]);
+    }
+
+    /// A secret that exists but cannot be opened is not "not paired", and the
+    /// machine never reads as online.
+    #[test]
+    fn an_unusable_secret_overrides_the_machine_status() {
+        let view = InboxView {
+            machines: vec![acd_client::view::MachineView {
+                key: "k".into(),
+                name: "devbox".into(),
+                machine_id: None,
+                status: MachineStatus::Online,
+                is_local: false,
+                duplicate_of: None,
+            }],
+            cards: vec![],
+            hidden_idle: 0,
+            show_idle: true,
+            show_subagents: true,
+            show_hook_only: true,
+            tray: acd_client::view::TraySummary { color: acd_client::view::TrayColor::Grey, needs_you: 0 },
+            actions: vec![],
+        };
+        for bad in [SecretStatus::Unreadable, SecretStatus::Locked, SecretStatus::Unknown] {
+            let s = screen(&view, &HashMap::from([("k".to_owned(), bad)]));
+            assert_eq!(s.machines[0].status, "attention", "{bad:?}");
+            assert_eq!(s.machines[0].problem.as_deref(), Some(SECRET_UNUSABLE));
+        }
+        for fine in [SecretStatus::Ok, SecretStatus::Missing] {
+            let s = screen(&view, &HashMap::from([("k".to_owned(), fine)]));
+            assert_eq!(s.machines[0].status, "online", "{fine:?}");
+        }
     }
 }

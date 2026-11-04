@@ -58,7 +58,8 @@ impl Bridge {
 
     /// The screen as JSON (`model::ScreenModel`).
     pub fn view_json(&self) -> String {
-        let screen = model::screen(&core::get_view(&self.inbox));
+        let secrets = self.inbox.machines().into_iter().map(|m| (m.key, m.secret)).collect();
+        let screen = model::screen(&core::get_view(&self.inbox), &secrets);
         serde_json::to_string(&screen).unwrap_or_else(|_| "{}".into())
     }
 
@@ -171,6 +172,22 @@ mod tests {
         assert_eq!(view["machines"].as_array().unwrap().len(), 1, "{view}");
         // Not "Pair this machine": the secret was read back.
         assert!(!second.view_json().contains("Pair this machine"));
+    }
+
+    #[test]
+    fn a_machine_whose_secret_cannot_be_opened_says_so_and_never_reads_as_not_paired() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::default();
+        let first = Bridge::open(dir.path(), secrets(dir.path(), &fake)).unwrap();
+        first.import_pairing(&line()).unwrap();
+        drop(first);
+        fake.0.store(true, Ordering::SeqCst);
+        let second = Bridge::open(dir.path(), secrets(dir.path(), &fake)).unwrap();
+        let view = view_with_machines(&second, 1);
+        let machine = &view["machines"][0];
+        assert_eq!(machine["status"], "attention", "{view}");
+        assert_eq!(machine["problem"], model::SECRET_UNUSABLE, "{view}");
+        assert!(!view.to_string().contains("Pair this machine"));
     }
 
     #[test]
