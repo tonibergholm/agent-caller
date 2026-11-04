@@ -48,6 +48,7 @@ if [ "$usegit" = 1 ]; then
 		git -C src/agent-caller -c user.name=t -c user.email=t@example.invalid commit -q -m "v$ver"
 	git -C src/agent-caller tag "v$ver"
 	git clone -q --bare src/agent-caller /mirror.git
+	echo "mirror v$ver: $(git -C /mirror.git ls-tree -r --name-only "v$ver" | wc -l) files, $(git -C /mirror.git ls-tree -r --name-only "v$ver" | grep -c "^packaging/") under packaging/"
 	git config --global url."file:///mirror.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
 	cp /root/.gitconfig /home/builder/.gitconfig && chown builder /home/builder/.gitconfig
 else
