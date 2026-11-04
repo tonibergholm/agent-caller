@@ -28,6 +28,63 @@ fn write_marker(dir: &Path, text: &[u8]) -> Result<(), String> {
     f.write_all(text).map_err(|e| format!("marker: {}", e.kind()))
 }
 
+fn real_config_dir() -> Option<PathBuf> {
+    let d = std::env::var_os("ACD_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config/acd")))?;
+    std::fs::canonicalize(d).ok()
+}
+
+/// Checks that `dir` is a harness-owned run directory: a real directory (not a link), owned by
+/// the current user, not the real acd configuration directory, with a regular marker file.
+/// It changes nothing.
+pub fn validate(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(dir).map_err(|e| format!("{}: {}", dir.display(), e.kind()))?;
+    if !m.file_type().is_dir() {
+        return Err(format!("refusing {}: not a real directory (a symlink is never followed)", dir.display()));
+    }
+    // SAFETY: geteuid has no preconditions.
+    if m.uid() != unsafe { libc::geteuid() } {
+        return Err(format!("refusing {}: not owned by the current user", dir.display()));
+    }
+    if let (Ok(c), Some(real)) = (std::fs::canonicalize(dir), real_config_dir())
+        && c == real
+    {
+        return Err(format!("refusing {}: it is the real acd configuration directory", dir.display()));
+    }
+    if !marker_state(dir)? {
+        return Err(format!("refusing {}: no {MARKER} marker; it was not created by acd-loadtest", dir.display()));
+    }
+    Ok(())
+}
+
+/// Creates `dir` (with parents) and marks it, or accepts one that already validates. An existing
+/// directory without the marker is refused, empty or not.
+pub fn claim(dir: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(_) => validate(dir),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = dir.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {}", parent.display(), e.kind()))?;
+            }
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(dir).map_err(|e| format!("create {}: {}", dir.display(), e.kind()))?;
+            write_marker(dir, b"acd-loadtest run directory\n")?;
+            validate(dir)
+        }
+        Err(e) => Err(format!("{}: {}", dir.display(), e.kind())),
+    }
+}
+
+/// A new, unique, marked directory for a direct `host` run (never an existing one).
+pub fn unique_host_dir() -> Result<PathBuf, String> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("acd-loadtest-host-{}-{nanos}", std::process::id()));
+    claim(&dir)?;
+    Ok(dir)
+}
+
 /// Returns a fresh `<work>/loadtest-<pid>` directory. `work` is created if missing; if it exists
 /// and is not empty it must carry the marker this tool writes, otherwise the run is refused and
 /// nothing is deleted. Only the child (which must also carry the marker) is ever removed.

@@ -25,7 +25,15 @@ async fn main() {
     let r = match cmd.as_str() {
         "soak" => soak::run(a).await,
         "host" => host::run(host::HostArgs {
-            dir: a.str("dir", "/tmp/acd-loadtest-host").into(),
+            // Without --dir a new unique marked directory is created; an explicit one must
+            // already be marked (soak and limits do that).
+            dir: match a.opt("dir") {
+                Some(d) => d.into(),
+                None => match workdir::unique_host_dir() {
+                    Ok(d) => { eprintln!("host: using {}", d.display()); d }
+                    Err(e) => { eprintln!("error: {e}"); std::process::exit(1); }
+                },
+            },
             agents: a.usize("agents", 128),
             rate: a.f64("rate", 8.0),
             ack_delay_ms: a.f64("ack-delay-ms", 5.0) as u64,

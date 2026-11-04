@@ -18,6 +18,9 @@ impl Args {
     pub fn str(&self, k: &str, d: &str) -> String {
         self.0.get(k).cloned().unwrap_or_else(|| d.to_owned())
     }
+    pub fn opt(&self, k: &str) -> Option<String> {
+        self.0.get(k).cloned()
+    }
     pub fn f64(&self, k: &str, d: f64) -> f64 {
         self.0.get(k).and_then(|v| v.parse().ok()).unwrap_or(d)
     }

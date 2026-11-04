@@ -64,4 +64,4 @@ and the sizes columns.
 
 ## `host`
 
-Internal: started by `soak --target host` and `limits`.
+Internal: started by `soak --target host` and `limits`, which mark the run directory first. `host` refuses any `--dir` that is not a harness-marked directory (real directory, owned by you, not the acd config directory). Without `--dir` it creates a new unique `acd-loadtest-host-<pid>-<nanos>` directory in the temp dir.

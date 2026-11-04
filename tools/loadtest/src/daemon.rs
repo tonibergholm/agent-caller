@@ -60,7 +60,7 @@ impl Proc {
 
     /// One-time setup: `acd init` and the config. Never prints a token.
     pub fn init(&self) -> Result<(), String> {
-        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        crate::workdir::claim(&self.dir)?;
         if let Target::Acd { bin } = &self.target {
             let out = acd_cmd(bin, &self.dir).arg("init").output().map_err(|e| e.to_string())?;
             if !out.status.success() {
