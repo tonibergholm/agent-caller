@@ -22,7 +22,8 @@ machines connected by Tailscale.
 - **Known limits:** Claude's HTTP hooks cannot authenticate the daemon (spec
   §9, R7). The T3 token goes to whoever holds the T3 port. A same-user process
   can fill the local pre-auth slots, four source IPs the network pool, and one
-  paired client the idempotency table. These are open [owner decisions](docs/superpowers/plans/2026-10-07-p1-followups.md).
+  paired client the idempotency table. These are open: see the
+  [known gaps](docs/superpowers/plans/2026-10-07-p1-followups.md).
 - **Out of scope:** a compromised machine, account or tailnet. Windows and
   Android are type-checked only. There is no relay or push yet.
 
