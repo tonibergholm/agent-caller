@@ -43,6 +43,30 @@ pub struct RequestObs {
     pub reusable_key: bool,
 }
 
+/// Most JSON bytes the request text may add to an agent. A client keeps no
+/// agent that encodes to more than `MAX_AGENT_BYTES` (PROTOCOL.md) and drops
+/// the connection on one, so the rest of that limit is left to the agent.
+const MAX_REQUEST_BYTES: usize = 48 * 1024;
+const TOO_LARGE: &str = "This request is too large to show here. Answer it in the terminal.";
+
+impl RequestObs {
+    /// A request that does not fit is read-only, like a cut command: nothing
+    /// is left that could be answered without seeing all of it.
+    fn bounded(mut self) -> Self {
+        let size = serde_json::to_vec(&(&self.title, &self.detail, &self.options, &self.questions, &self.raw_screen))
+            .map_or(usize::MAX, |v| v.len());
+        if size > MAX_REQUEST_BYTES {
+            self.answer_path = AnswerPath::None;
+            self.detail = TOO_LARGE.into();
+            self.options.clear();
+            self.questions = None;
+            self.free_text = false;
+            self.raw_screen = None;
+        }
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Observation {
     AgentUpsert(AgentObs),
@@ -554,6 +578,7 @@ impl Registry {
     }
 
     fn request_seen(&mut self, o: RequestObs) -> Vec<Change> {
+        let o = o.bounded();
         let Some(agent) = self.agents.get(&o.agent_id) else {
             return vec![];
         };
@@ -836,6 +861,90 @@ mod tests {
             RequestStatus::Unknown
         );
         assert!(registry.requests["request"].claimed.is_none());
+    }
+
+    fn upsert(registry: &mut Registry) {
+        registry.apply(Observation::AgentUpsert(AgentObs {
+            id: "agent".into(),
+            source: Source::Herdr,
+            kind: AgentKind::Claude,
+            title: "agent".into(),
+            cwd: Some("/work".into()),
+            project: None,
+            state: AgentState::Working,
+            failed: false,
+            last_message: None,
+            can_send: true,
+            role: AgentRole::Main,
+            parent_title: None,
+        }));
+    }
+
+    fn question_obs(text: &str, label: &str, n: usize) -> RequestObs {
+        let option = |i: usize| RequestOption {
+            id: format!("o{i}"),
+            label: label.into(),
+            description: Some(label.repeat(2)),
+            effect: Effect::Choose,
+            confirm: false,
+        };
+        let questions: Vec<Question> = (0..n)
+            .map(|q| Question {
+                id: format!("q{q}"),
+                header: None,
+                text: text.into(),
+                multi_select: false,
+                options: (0..9).map(option).collect(),
+            })
+            .collect();
+        RequestObs {
+            agent_id: "agent".into(),
+            key: CorrelationKey("key".into()),
+            upgrade_from: None,
+            kind: RequestKind::Question,
+            answer_path: AnswerPath::Keys,
+            title: "Question".into(),
+            detail: text.into(),
+            options: questions[0].options.clone(),
+            questions: Some(questions),
+            free_text: false,
+            raw_screen: None,
+            ready: true,
+            reusable_key: true,
+        }
+    }
+
+    /// Found by the `hook_mapping` fuzz target: four questions at their
+    /// per-field caps encode to about 99 KB, and a client keeps no agent over
+    /// 64 KiB (PROTOCOL.md), so it dropped the connection on every snapshot
+    /// for as long as the question was pending. Too large to show whole means
+    /// read-only, as for a cut command.
+    #[test]
+    fn a_request_too_large_for_the_agent_limit_is_published_read_only() {
+        let mut registry = Registry::new("machine".into());
+        upsert(&mut registry);
+        let quote = "\"".repeat(4000);
+        registry.apply(Observation::RequestSeen(question_obs(&quote, &"\"".repeat(199), 4)));
+        let agent = registry.agents().remove(0);
+        let size = serde_json::to_vec(&agent).unwrap().len();
+        assert!(size <= MAX_AGENT_BYTES, "{size} bytes");
+        let pending = agent.pending.expect("the request is still shown");
+        assert!(!pending.is_answerable());
+        assert_eq!(pending.answer_path, AnswerPath::None);
+        assert!(pending.options.is_empty() && pending.questions.is_none());
+        assert!(pending.detail.contains("too large"));
+    }
+
+    #[test]
+    fn a_request_within_the_agent_limit_is_published_unchanged() {
+        let mut registry = Registry::new("machine".into());
+        upsert(&mut registry);
+        let obs = question_obs("Which one?", "Option", 1);
+        registry.apply(Observation::RequestSeen(obs.clone()));
+        let pending = registry.agents().remove(0).pending.unwrap();
+        assert!(pending.is_answerable());
+        assert_eq!(pending.questions, obs.questions);
+        assert_eq!(pending.detail, obs.detail);
     }
 
     #[test]

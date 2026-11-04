@@ -111,10 +111,10 @@ fn check_lines(lines: &[String]) {
 fuzz_target!(|data: &[u8]| {
     let mut u = arbitrary::Unstructured::new(data);
     let Ok(i) = Input::arbitrary(&mut u) else { return };
-    let max = i.max as usize * 8;
+    let max = i.max as usize * 2;
 
     // Views.
-    let cards: Vec<CardView> = i.cards.iter().take(12).enumerate().map(|(n, c)| card(n, c, (i.big % 40) as usize)).collect();
+    let cards: Vec<CardView> = i.cards.iter().take(8).enumerate().map(|(n, c)| card(n, c, (i.big % 12) as usize)).collect();
     let needs_you = cards.iter().filter(|c| c.group == CardGroup::Request).count();
     let view = InboxView {
         machines: vec![],

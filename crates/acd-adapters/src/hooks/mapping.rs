@@ -868,6 +868,45 @@ mod tests {
         assert_eq!(o.title, "Ba[31msh");
         assert!(o.detail.chars().count() <= DETAIL_CHARS && !o.detail.contains('\u{7}'));
     }
+    /// Found by the `hook_mapping` fuzz target's size check: one answerable
+    /// question at its field caps, in 4-byte characters, encodes to about
+    /// 77 KB (the first question is carried twice), and a client drops any
+    /// agent over 64 KiB. The daemon publishes it read-only instead
+    /// (registry `bounded`).
+    #[test]
+    fn a_single_question_at_every_cap_is_published_read_only() {
+        let q = || {
+            serde_json::json!({
+                "question": "😀".repeat(4000), "header": "😀".repeat(200), "multiSelect": false,
+                "options": (0..9).map(|i| serde_json::json!({
+                    "label": format!("{i}{}", "😀".repeat(199)), "description": "😀".repeat(400)
+                })).collect::<Vec<_>>(),
+            })
+        };
+        let mut p = payload("claude/payload-PreToolUse-AskUserQuestion.json");
+        p.tool_input["questions"] = serde_json::json!([q()]);
+        let obs = claude_question("a", k(), None, &p, true).unwrap();
+        assert_eq!(obs.answer_path, AnswerPath::Keys, "the mapping alone offers it");
+        let mut registry = acd_core::Registry::new("m".into());
+        registry.apply(acd_core::Observation::AgentUpsert(acd_core::AgentObs {
+            id: "a".into(),
+            source: acd_protocol::Source::Herdr,
+            kind: acd_protocol::AgentKind::Claude,
+            title: "t".into(),
+            cwd: None,
+            project: None,
+            state: acd_protocol::AgentState::Working,
+            failed: false,
+            last_message: None,
+            can_send: true,
+            role: acd_protocol::AgentRole::Main,
+            parent_title: None,
+        }));
+        registry.apply(acd_core::Observation::RequestSeen(obs));
+        let agent = registry.agents().remove(0);
+        assert!(serde_json::to_vec(&agent).unwrap().len() <= acd_protocol::MAX_AGENT_BYTES);
+        assert!(!agent.pending.unwrap().is_answerable());
+    }
     #[test]
     fn logged_payloads_are_redacted() {
         let s = payload_for_log(br#"{"tool_input":{"command":"GITHUB_TOKEN=ghp_secret make"}}"#);

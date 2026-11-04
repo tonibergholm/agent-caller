@@ -70,3 +70,32 @@ pub fn host_ok(h: &str) -> bool {
         || h.parse::<std::net::Ipv6Addr>().is_ok()
         || hostname_ok(h)
 }
+
+/// Feeds an observation to a registry, as the daemon does, and checks that
+/// no agent it then publishes encodes to more than the 64 KiB a client keeps
+/// (PROTOCOL.md, client state limits): over it, every client drops the
+/// connection and resyncs, in a loop for as long as the request is pending.
+pub fn assert_agent_fits(obs: &acd_core::RequestObs) {
+    use acd_core::{AgentObs, Observation, Registry};
+    use acd_protocol::{AgentKind, AgentRole, AgentState, MAX_AGENT_BYTES, Source};
+    let mut r = Registry::new("m".into());
+    r.apply(Observation::AgentUpsert(AgentObs {
+        id: obs.agent_id.clone(),
+        source: Source::Herdr,
+        kind: AgentKind::Claude,
+        title: "agent".into(),
+        cwd: Some("/work".into()),
+        project: Some("work".into()),
+        state: AgentState::Working,
+        failed: false,
+        last_message: None,
+        can_send: true,
+        role: AgentRole::Main,
+        parent_title: None,
+    }));
+    r.apply(Observation::RequestSeen(obs.clone()));
+    for a in r.agents() {
+        let n = serde_json::to_vec(&a).unwrap().len();
+        assert!(n <= MAX_AGENT_BYTES, "an agent of {n} bytes is published; clients keep at most {MAX_AGENT_BYTES}");
+    }
+}

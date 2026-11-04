@@ -34,6 +34,7 @@ fn as_request(obs: &RequestObs) -> Request {
 fn check(provider: Option<&str>, view: &acd_adapters::t3::detail::PendingView) {
     let (obs, target) = request_obs("a", "t", provider, view);
     assert!(!obs.title.chars().any(char::is_control), "{:?}", obs.title);
+    fuzzlib::assert_agent_fits(&obs);
     let req = as_request(&obs);
     let answerable = obs.answer_path != AnswerPath::None;
     assert_eq!(answerable, !matches!(target.answer, TargetAnswer::ReadOnly), "path and target disagree");

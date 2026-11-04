@@ -67,7 +67,8 @@ fuzz_target!(|data: &[u8]| {
         for prefix in ["Bearer ", "token=", "password: ", "{\"api_key\":\"", "sk-", "MY_VAR="] {
             let noise: String = s.chars().filter(|c| *c != '\n').take(40).collect();
             let line = format!("{noise}\n{prefix}{x}");
-            if noise.contains(x.as_str()) {
+            // The noise alone, as logged (format characters removed), must not hold it.
+            if redact_log(&noise).contains(x.as_str()) {
                 continue;
             }
             let out = redact_log(&line);
