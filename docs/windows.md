@@ -215,7 +215,7 @@ branch with Rust installed. Report any failure with the exact output.
 1. `cargo test -p acd-securefs --locked`. Everything passes, including the
    three `windows::tests` (`the_current_user_sid_is_a_valid_sid_string`,
    `a_created_dir_and_file_pass_and_a_loosened_one_fails`,
-   `a_junction_or_symlink_is_refused`). The last one returns early without
+   `a_file_symlink_is_refused`). The last one returns early without
    permission to create symlinks; enable Developer Mode and rerun so it runs.
 2. `cargo test -p acd-app-core --locked credman`. Confirm
    `credman::store::tests::round_trip` passes (it uses the real Credential

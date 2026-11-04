@@ -68,4 +68,16 @@ mod tests {
         assert!(platform_secrets().set("k", "v").is_err());
         assert!(platform_secrets().get("k").is_err());
     }
+
+    /// Windows only: `platform_secrets()` is the Credential Manager store.
+    #[cfg(windows)]
+    #[test]
+    fn the_platform_store_is_the_credential_manager_on_windows() {
+        let s = platform_secrets();
+        let key = format!("acd-platform-test-{}", std::process::id());
+        s.set(&key, "v").unwrap();
+        assert_eq!(s.get(&key).unwrap().as_deref(), Some("v"));
+        s.delete(&key).unwrap();
+        assert_eq!(s.get(&key).unwrap(), None);
+    }
 }

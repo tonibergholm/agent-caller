@@ -410,8 +410,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // Junctions are covered by the manual checklist (docs/windows.md, item 10).
     #[test]
-    fn a_junction_or_symlink_is_refused() {
+    fn a_file_symlink_is_refused() {
         let base = std::env::temp_dir().join(format!("acd-securefs-win-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         create_private_dir_all(&base).unwrap();
