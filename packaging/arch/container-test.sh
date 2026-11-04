@@ -41,7 +41,7 @@ epoch=1700000000
 usegit=0
 command -v git >/dev/null && usegit=1
 if [ "$usegit" = 1 ]; then
-	git config --global --add safe.directory '*'
+	git config --system --add safe.directory '*'
 	git -C src/agent-caller init -q -b main
 	git -C src/agent-caller add -A
 	GIT_AUTHOR_DATE="@$epoch +0000" GIT_COMMITTER_DATE="@$epoch +0000" \
@@ -49,8 +49,7 @@ if [ "$usegit" = 1 ]; then
 	git -C src/agent-caller tag "v$ver"
 	git clone -q --bare src/agent-caller /mirror.git
 	echo "mirror v$ver: $(git -C /mirror.git ls-tree -r --name-only "v$ver" | wc -l) files, $(git -C /mirror.git ls-tree -r --name-only "v$ver" | grep -c "^packaging/") under packaging/"
-	git config --global url."file:///mirror.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
-	cp /root/.gitconfig /home/builder/.gitconfig && chown builder /home/builder/.gitconfig
+	git config --system url."file:///mirror.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
 else
 	cp /in/src.tar /work/agent-caller-src.tar && chown builder /work/agent-caller-src.tar
 fi
@@ -178,13 +177,11 @@ if [ "$usegit" = 1 ]; then
 	git -C /work/old-src add -A && git -C /work/old-src -c user.name=t -c user.email=t@example.invalid commit -q -m "no packaging"
 	git -C /work/old-src tag -f "v$ver" >/dev/null
 	git clone -q --bare /work/old-src /mirror-old.git
-	git config --global --replace-all url."file:///mirror-old.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
-	cp /root/.gitconfig /home/builder/.gitconfig
+	git config --system --replace-all url."file:///mirror-old.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
 	if build agent-caller old-tag; then bad "release PKGBUILD built from a tag without packaging/"; else
 		grep -q "has no packaging/" /out/old-tag.log && ok "release PKGBUILD refuses a tag without packaging/ with a clear message" || bad "refusal message missing"
 	fi
-	git config --global --replace-all url."file:///mirror.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
-	cp /root/.gitconfig /home/builder/.gitconfig
+	git config --system --replace-all url."file:///mirror.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
 else
 	echo "SKIP  no git in the container: -git packages not built"
 fi
