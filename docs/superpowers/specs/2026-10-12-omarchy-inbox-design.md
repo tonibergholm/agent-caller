@@ -1,5 +1,7 @@
 # Omarchy inbox: design
 
+Implementation status (2026-11-04): implemented (#28, #29; later fixes #73, #80, #81). The 2026-10-12 live check passed. The manual check of the whole-card answer guard (#80) has not been run.
+
 Status: approved by the user 2026-10-12. Amended the same day after
 Sol's review (§13 lists the decisions).
 
