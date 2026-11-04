@@ -69,7 +69,8 @@ async fn idle_connections_beyond_the_cap_are_closed_after_the_deadline() {
     for c in closers {
         assert!(c.await.unwrap().iter().all(|b| *b != b'2'), "no 200 for a silent connection");
     }
-    assert!(start.elapsed() >= HEAD, "closed by the deadline, not early: {:?}", start.elapsed());
+    // Two rounds of slots at most; hyper's own default (30 s) would fail this.
+    assert!(start.elapsed() >= HEAD && start.elapsed() <= 3 * HEAD, "{:?}", start.elapsed());
     later_request_succeeds(&r).await;
 }
 
@@ -88,7 +89,7 @@ async fn incomplete_request_heads_are_closed_after_the_deadline() {
         let got = c.await.unwrap();
         assert!(!String::from_utf8_lossy(&got).contains("200 OK"), "no answer to half a head");
     }
-    assert!(start.elapsed() >= HEAD, "{:?}", start.elapsed());
+    assert!(start.elapsed() >= HEAD && start.elapsed() <= 3 * HEAD, "{:?}", start.elapsed());
     later_request_succeeds(&r).await;
 }
 
@@ -107,23 +108,29 @@ async fn a_keep_alive_connection_that_goes_idle_after_a_response_is_closed() {
     assert!(String::from_utf8_lossy(&got).starts_with("HTTP/1.1 200"));
     let idle_from = Instant::now();
     assert!(until_closed(c).await.is_empty());
-    assert!(idle_from.elapsed() >= HEAD, "{:?}", idle_from.elapsed());
+    assert!(idle_from.elapsed() >= HEAD && idle_from.elapsed() <= 2 * HEAD, "{:?}", idle_from.elapsed());
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_connection_over_the_cap_is_not_served_until_a_slot_frees() {
-    let r = relay().await;
+/// Real clock: the only wait is for the server's own head deadline. The
+/// check is an ordering, not a duration: a response to the extra connection
+/// can exist only after the server closed an idle one, so by then at least
+/// one idle socket must already read as closed.
+#[tokio::test]
+async fn a_connection_over_the_cap_is_served_only_after_a_slot_frees() {
+    let s = Arc::new(FakeSender::default());
+    let opts = ServeOptions { max_connections: CAP, head_timeout: Duration::from_millis(300), ..ServeOptions::default() };
+    let r = start_serving(Setup::default(), s, Arc::new(ManualClock::new(T0)), opts).await;
     let mut idle = vec![];
     for _ in 0..CAP {
         idle.push(TcpStream::connect(r.addr).await.unwrap());
     }
-    let start = Instant::now();
     let mut extra = TcpStream::connect(r.addr).await.unwrap();
     extra.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
     let got = until_closed(extra).await;
     assert!(String::from_utf8_lossy(&got).starts_with("HTTP/1.1 200"), "served once a slot freed");
-    assert!(start.elapsed() >= HEAD, "held back while the cap was full: {:?}", start.elapsed());
-    drop(idle);
+    let mut buf = [0u8; 8];
+    let closed = idle.iter().filter(|c| matches!(c.try_read(&mut buf), Ok(0))).count();
+    assert!(closed >= 1, "the extra connection was served while the cap was full");
 }
 
 /// Small helper: how many entries do the bounded maps hold?
