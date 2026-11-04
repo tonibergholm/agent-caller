@@ -460,6 +460,14 @@ impl Inbox {
             ack.changed().await.expect("the inbox is alive");
         }
     }
+    /// Test: the machine's state channel. It closes when the machine's
+    /// connection task has ended (all its senders are dropped), which is the
+    /// completion evidence for "cancelled, will not retry or reconnect".
+    #[cfg(feature = "testing")]
+    pub fn machine_state_for_test(&self, key: &str) -> Option<watch::Receiver<crate::conn::MachineState>> {
+        let inner = self.inner.lock().unwrap();
+        Some(inner.machines.iter().find(|m| m.entry.key == key)?.handle.as_ref()?.state())
+    }
     /// Test hook: callers blocked on the edit lock right now.
     #[cfg(feature = "testing")]
     pub fn edit_waiters_for_test(&self) -> usize {

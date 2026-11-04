@@ -95,6 +95,25 @@ async fn expire_expecting_no_send(ib: &Inbox) {
     ib.sync_for_test().await;
     assert_eq!(ib.fired_for_test(), before, "a countdown ended, so a send was attempted");
 }
+/// After a pick or reply: lets the inbox task run a full timer pass, then
+/// requires that no countdown ended. A `fires_at` that is already due would
+/// have been counted by that pass, so "nothing sent yet" is not a task that
+/// has not run.
+async fn nothing_fired_yet(ib: &Inbox) {
+    ib.sync_for_test().await;
+    assert_eq!(ib.fired_for_test(), 0, "the countdown ended before it was expired");
+}
+/// Waits until a machine's connection task has ended (its state channel
+/// closed). A cancelled machine that kept retrying or reconnecting would
+/// still hold a connection and never end, so the wait hangs and the guard
+/// fails the test. The deadline is only a hang guard, never a latency.
+async fn machine_task_ended(mut state: tokio::sync::watch::Receiver<acd_client::conn::MachineState>) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while state.changed().await.is_ok() {}
+    })
+    .await
+    .expect("the cancelled machine's connection task ended");
+}
 fn answers(f: &FakeServer) -> usize {
     f.received()
         .iter()
@@ -117,6 +136,7 @@ async fn pick_waits_for_the_undo_then_sends_once() {
     let (f, _, ib) = setup().await;
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     assert_eq!(answers(&f), 0, "nothing is sent while the countdown runs");
+    nothing_fired_yet(&ib).await;
     ib.expire_countdowns_for_test();
     received_at_least(&f, "request.answer", 1).await;
     assert_eq!(answers(&f), 1);
@@ -286,6 +306,7 @@ async fn reply_goes_through_the_undo() {
             .count(),
         0
     );
+    nothing_fired_yet(&ib).await;
     ib.expire_countdowns_for_test();
     received_at_least(&f, "agent.send", 1).await;
     let sent = f
@@ -924,6 +945,7 @@ async fn replacement_cancels_machine_with_pending_submit_clone() {
         f.pin(),
         common::TOKEN
     );
+    let old_machine = ib.machine_state_for_test("m1").unwrap();
     ib.import_pairing(&line).unwrap();
     old_conn.close(1001).await;
     let replacement = f.next_connection().await;
@@ -938,7 +960,7 @@ async fn replacement_cancels_machine_with_pending_submit_clone() {
             .any(|m| m.key == "m1" && m.status == acd_client::conn::MachineStatus::Online)
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    machine_task_ended(old_machine).await;
     assert_eq!(
         answers(&f),
         1,
@@ -959,9 +981,10 @@ async fn removal_cancels_machine_with_pending_submit_clone() {
     })
     .await
     .unwrap();
+    let old_machine = ib.machine_state_for_test("m1").unwrap();
     ib.remove_machine("m1").unwrap();
     old_conn.close(1001).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    machine_task_ended(old_machine).await;
     assert_eq!(
         answers(&f),
         1,
@@ -1906,7 +1929,7 @@ async fn cancel_owned_ends_every_countdown_of_that_owner_and_nothing_fires() {
     assert_eq!(ib.cancel_owned(ActionOwner(7)), 0);
     assert_eq!(next_outcome(&mut rx, &a).await, ActionOutcome::Cancelled);
     assert_eq!(next_outcome(&mut rx, &b).await, ActionOutcome::Cancelled);
-    ib.expire_countdowns_for_test();
+    expire_expecting_no_send(&ib).await;
     view_until(&ib, "no countdowns", |v| v.actions.is_empty()).await;
     assert_eq!(answers(&f), 0);
 }
@@ -1938,7 +1961,7 @@ async fn escape_owned_before_expiry_cancels_once_and_sends_nothing() {
     let owner = ActionOwner(3);
     let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     assert!(ib.escape_owned(owner));
-    ib.expire_countdowns_for_test();
+    expire_expecting_no_send(&ib).await;
     assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Cancelled);
     no_more_outcomes_for(&ib, &mut rx, &id).await;
     assert_eq!(answers(&f), 0);
@@ -1965,7 +1988,7 @@ async fn cancel_owned_before_expiry_cancels_once_and_sends_nothing() {
     let owner = ActionOwner(4);
     let id = ib.pick_owned(owner, "m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     assert_eq!(ib.cancel_owned(owner), 1);
-    ib.expire_countdowns_for_test();
+    expire_expecting_no_send(&ib).await;
     assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Cancelled);
     no_more_outcomes_for(&ib, &mut rx, &id).await;
     assert_eq!(answers(&f), 0);
