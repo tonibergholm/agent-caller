@@ -260,10 +260,10 @@ async fn retry_machine_retries_the_named_machine() {
     ib.start();
     wait_for_connections(&f1, 1).await;
     wait_for_connections(&f2, 1).await;
-    ib.retry_machine("nobody"); // unknown: ignored
     ib.retry_machine("m1");
     // A positive wait: with the wrong machine retried instead, m1 never gets its second attempt.
     wait_for_connections(&f1, 2).await;
+    ib.retry_machine("nobody"); // an unknown key is ignored
 }
 
 /// tls.rs:74 `is_pin_mismatch -> false`: a pin mismatch is recognised by its message.

@@ -13,9 +13,12 @@ nothing here was estimated.
 
 - `cargo-mutants 27.1.0` (`cargo install cargo-mutants --locked`), Rust 1.97.0.
 - Linux 6.18 sandbox, 4 cores, 15 GB, **running as root** (euid 0), `CARGO_INCREMENTAL=0`.
-- Every run used cargo-mutants' default of testing a **copy** of a clean `git worktree`
-  (`/tmp/cargo-mutants-*`), never `--in-place`. The repository itself was only edited between runs.
-- Per crate, from the repository root:
+- cargo-mutants copies the tree to `/tmp/cargo-mutants-*` at the start of every run and tests the copy;
+  `--in-place` was never used. The `acd-securefs`, `acd-protocol` and `acd-core` runs started from the
+  working tree (clean, with only committed test files). The `acd-client`, `acd-voice` and `acd-adapters`
+  runs started from `git worktree`s of a pushed commit, so edits made while they ran could not reach them.
+- Per crate, from the repository root (`--jobs 2` for most runs, 3 or 4 for some `acd-adapters` runs, 1 for
+  the short re-checks):
 
   ```sh
   cargo mutants -d crates/<crate> --jobs 2 --timeout-multiplier 4 \
@@ -29,8 +32,12 @@ nothing here was estimated.
   `acd-voice` "after" runs also excluded the test helpers `fake::`, `FakeIntentModel`,
   `FakeSpeaker` and `fixtures::`, which cannot be tested through themselves.
 - `acd-adapters` was run per file group with `-f crates/acd-adapters/src/<file>.rs` and only the
-  relevant test binaries (`--cargo-test-arg=--lib --cargo-test-arg=--test hooks_claude ...`), because
-  the whole adapter suite takes about a minute and the herdr suites are out of scope.
+  relevant test binaries, because the whole adapter suite takes about a minute and the herdr suites are
+  out of scope. So "missed" for those files is relative to that subset:
+  - hooks (`owner`, `paths`, `tickets`): `--lib`, `hooks_claude`, `hooks_codex`, `hooks_endpoint`
+    (not `hooks_bounds`, `hooks_e2e`, `external_api`); the re-run after the new tests added `mutants_adapters`.
+  - T3 (`map`, `outcome`, `targets`, `detail`): `--lib`, `t3_adapter`, `t3_conn`, `t3_sync`, `t3_wire`,
+    `t3_e2e`; the re-runs after the new tests added `mutants_adapters`.
 - The mutants are tested against **the package's own tests** (`cargo test -p <crate>`), not the whole
   workspace. A mutant that only the `acd` binary crate's tests would catch counts as missed here.
 
@@ -45,7 +52,9 @@ nothing here was estimated.
   new test that fails fast, each timeout was run once more with **only the new tests**
   (`--cargo-test-arg=--lib --cargo-test-arg=--test mutants_core -- -- mutants_ <test names>`).
   Those the new tests kill quickly are counted as caught and shown in the column "of which by new
-  tests only". No other mutant was reclassified.
+  tests only". The same kind of re-run was used for the few mutants that were still missed at the end
+  (`t3/detail.rs`: 5, `acd-client` `retry_machine`: 1); what it kills counts in that column too. No other
+  mutant was reclassified.
 - Time is wall clock on a machine that was often oversubscribed (load 10 to 16 on 4 cores, two
   to six jobs at once), so the times only compare orders of magnitude. Under that load some
   timeouts may be false; the ones that matter were checked as above.
@@ -57,11 +66,11 @@ nothing here was estimated.
 | `acd-securefs` | whole crate | 86 | 58 / 21 / 6 / 1 | 67 / 12 / 6 / 1 | 0 | 1 min 7 s | 1 min 9 s |
 | `acd-protocol` | whole crate | 86 | 65 / 8 / 13 / 0 | 71 / 2 / 13 / 0 | 0 | 2 min 3 s | 2 min 12 s |
 | `acd-core` | whole crate | 416 | 248 / 41 / 106 / 21 | 301 / 7 / 106 / 2 | 20 | 34 min 53 s | 20 min 25 s, then 6 min 22 s + 2 min 24 s checking timeouts |
-| `acd-client` | whole crate except `fake.rs` | 758 | 488 / 113 / 149 / 8 | 576 / 27 / 149 / 6 | 1 | 66 min 4 s + 24 min 45 s (the first run stopped on a full disk at 667 of 758) | 42 min + 54 min 13 s + 38 min 30 s, then 6 min 15 s checking timeouts |
+| `acd-client` | whole crate except `fake.rs` | 758 | 488 / 113 / 149 / 8 | 577 / 26 / 149 / 6 | 2 | 66 min 4 s + 24 min 45 s (the first run stopped on a full disk at 667 of 758) | 42 min + 54 min 13 s + 38 min 30 s, then 6 min 15 s + 2 min checking some of them with only the new tests |
 | `acd-voice` | whole crate | 590 | 418 / 76 / 96 / 0 | 462 / 32 / 96 / 0 | 0 | 38 min 33 s | 6 min 57 s + 3 min 41 s |
 | `acd-adapters hooks` | `hooks/owner.rs`, `paths.rs`, `tickets.rs` | 109 | 72 / 8 / 20 / 9 | 87 / 0 / 20 / 2 | 7 | 71 min 2 s | 37 min, then 24 min checking timeouts |
 | `acd-adapters t3` | `t3/map.rs`, `outcome.rs`, `targets.rs` | 89 | 71 / 9 / 9 / 0 | 80 / 0 / 9 / 0 | 0 | 63 min | 12 min 19 s |
-| `acd-adapters t3 detail` | `t3/detail.rs` | 57 | 20 / 10 / 1 / 2 | 54 / 0 / 3 / 0 | 0 | the first run stopped at 33 of 57 | 49 min 16 s, then the missed ones again (7 min + 6 min) |
+| `acd-adapters t3 detail` | `t3/detail.rs` | 57 | 20 / 10 / 1 / 2 | 54 / 0 / 3 / 0 | 5 | the first run stopped at 33 of 57 | 49 min 16 s, then 7 min + 6 min re-checking the missed ones with only the new tests |
 
 Columns: caught / missed / unviable / timeout. A mutant counts once, in its final state.
 `acd-client` was run in two stages because the first run stopped on a full disk at 667 of 758 mutants;
@@ -135,7 +144,7 @@ both versions on purpose.)
 Twenty of the timeouts are now killed quickly by the new tests; the two left are the helper mutants
 above. The old suite hangs on those twenty, which is why they showed as timeouts.
 
-### `acd-client` (27 missed, 6 timeouts)
+### `acd-client` (26 missed, 6 timeouts)
 
 Equivalent or redundant:
 
@@ -162,7 +171,6 @@ at fire time, which the existing and new tests kill):
 | `inbox.rs:1095`, `1096`, `1099` | `end_machine`: the "offline, nothing was sent" notice appears later, at fire time, instead of at once. |
 | `inbox.rs:919` | Which hidden idle cards the voice listing carries. |
 | `inbox.rs:1164` | The detail label of an undo countdown. |
-| `inbox.rs:654` `retry_machine` `==` -> `!=` | Killing it needs an assertion that something did **not** happen, which cannot be made without a wait. |
 | `inbox.rs:519`, `612` | Cancelling a machine's handle after a failed secret recovery; not observable from outside. |
 | `inbox.rs:1395` | The wake-up in `cancel_owned`; other wake-ups cover it. |
 
