@@ -6,7 +6,7 @@ const TOKEN: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 const PIN: &str = "sha256:ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8";
 
 /// `lib.rs`: `<<` -> `>>` and `*` -> `/` or `+` in the limits. The numbers are
-/// part of the wire contract (PROTOCOL.md section 1), so they are pinned.
+/// part of the wire contract (crates/acd-protocol/PROTOCOL.md, Limits), so they are pinned.
 #[test]
 fn the_limits_are_the_documented_numbers() {
     assert_eq!(MAX_FRAME_BYTES, 1_048_576);
