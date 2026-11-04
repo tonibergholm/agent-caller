@@ -154,7 +154,20 @@ Fail closed, all tested:
   file, a bad header, a Keystore that cannot be used, or a key that is gone is
   an `Err`; the machine shows "The saved pairing cannot be read here. Remove
   this machine and pair it again." and is never taken for "not paired" or
-  online. Re-pairing writes a new file (and a new Keystore key if needed).
+  online.
+- Recovery needs the shell's help. `Inbox::remove_machine` and a re-pairing
+  both read the old secret first and refuse when that read fails, so the
+  message above would be a dead end. `Bridge::remove_machine` therefore deletes
+  a secret whose status is `Unreadable` before removing the machine (the file is
+  unusable anyway; `delete` never calls the cipher). The test
+  `the_recovery_the_message_promises_works` failed ("Could not read machine
+  credentials") before that change, for a damaged file and for an unavailable
+  Keystore. `acd-client` itself is unchanged: the same dead end exists in the
+  other clients' flows for an unreadable secret, noted as a residual.
+  Pairing again creates a new Keystore key only if the alias is missing. If the
+  alias exists but the Keystore refuses to use the key, `wrap` returns `null`
+  and pairing keeps failing until the app's storage is cleared in Android
+  settings. Not seen, not handled.
 - A write that fails keeps the old file (temp file, `sync_all`, rename). A
   pairing whose secret cannot be stored commits no machine and writes no
   settings.
@@ -272,6 +285,15 @@ In the sandbox, 2026-11-04:
   answering a live request over the network are untested on this target (the
   same client code is covered by the workspace tests on the host).
 - The real-NDK path of `build-apk.sh` and the `d8` path.
+- Keystore calls on the UI thread. `Native.init` runs in `onCreate` and reads
+  each paired machine's secret through JNI on the main thread; `Native.view()`
+  runs every second on the main thread, and calls the Keystore again whenever a
+  machine's secret status is not a cached success (a failed read is not
+  cached). A slow Keystore can therefore cause an ANR. The feasibility study
+  says these calls belong off the UI thread. Not done.
+- `model.rs` re-checks `card.live` although the client's `answerable` already
+  includes it. Removing that check is not caught by a test; it is kept as an
+  intentional redundant guard.
 - Android 6 to 8 (`getrandom` weak import), screen sizes, dark mode, rotation
   (the activity handles `configChanges` itself and redraws from the model).
 - `Remove`, `Mark seen` and `Undo` buttons were never tapped; the answer path is

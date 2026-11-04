@@ -6,13 +6,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use acd_app_core::{commands as core, pairing, setup};
-use acd_client::{inbox::Inbox, settings::SecretStore};
+use acd_client::{
+    inbox::Inbox,
+    settings::{SecretStatus, SecretStore},
+};
 use serde::Serialize;
 
 use crate::model;
 
 pub struct Bridge {
     inbox: Arc<Inbox>,
+    secrets: Arc<dyn SecretStore>,
     // Held so the workers the inbox spawned keep running.
     runtime: tokio::runtime::Runtime,
 }
@@ -44,7 +48,7 @@ impl Bridge {
             .map_err(|e| format!("could not start the runtime ({:?})", e.kind()))?;
         let inbox = setup::open_inbox(
             &files_dir.join("settings.json"),
-            secrets,
+            secrets.clone(),
             runtime.handle(),
             setup::OpenOptions {
                 client_name: "agent-caller-android",
@@ -53,7 +57,7 @@ impl Bridge {
             },
         )
         .map_err(|e| e.to_string())?;
-        Ok(Bridge { inbox, runtime })
+        Ok(Bridge { inbox, secrets, runtime })
     }
 
     /// The screen as JSON (`model::ScreenModel`).
@@ -86,7 +90,21 @@ impl Bridge {
         core::mark_seen(&self.inbox, self.runtime.handle(), card_key)
     }
 
+    /// Removes a machine. `Inbox::remove_machine` and a re-pairing both read
+    /// the stored secret first and refuse if that fails, so a machine whose
+    /// secret cannot be opened (a damaged file, a Keystore key that is gone)
+    /// could be neither removed nor paired again. For that one case the
+    /// secret, which is unusable anyway, is deleted first, on the user's
+    /// explicit Remove. `delete` removes the file and never calls the cipher.
     pub fn remove_machine(&self, key: &str) -> Result<(), String> {
+        let unusable = self
+            .inbox
+            .machines()
+            .iter()
+            .any(|m| m.key == key && m.secret == SecretStatus::Unreadable);
+        if unusable {
+            self.secrets.delete(key).map_err(|e| e.to_string())?;
+        }
         core::remove_machine(&self.inbox, key)
     }
 }
@@ -188,6 +206,34 @@ mod tests {
         assert_eq!(machine["status"], "attention", "{view}");
         assert_eq!(machine["problem"], model::SECRET_UNUSABLE, "{view}");
         assert!(!view.to_string().contains("Pair this machine"));
+    }
+
+    /// The message for an unusable secret tells the user to remove the machine
+    /// and pair it again. This is that path, for a damaged file and for an
+    /// unavailable Keystore.
+    #[test]
+    fn the_recovery_the_message_promises_works() {
+        for damage in ["file", "keystore"] {
+            let dir = tempfile::tempdir().unwrap();
+            let fake = Fake::default();
+            let first = Bridge::open(dir.path(), secrets(dir.path(), &fake)).unwrap();
+            first.import_pairing(&line()).unwrap();
+            let key = view_with_machines(&first, 1)["machines"][0]["key"].as_str().unwrap().to_owned();
+            drop(first);
+            if damage == "file" {
+                let file = walk(&dir.path().join("secrets")).pop().unwrap();
+                std::fs::write(file, b"damaged").unwrap();
+            } else {
+                fake.0.store(true, Ordering::SeqCst);
+            }
+            let second = Bridge::open(dir.path(), secrets(dir.path(), &fake)).unwrap();
+            let view = view_with_machines(&second, 1);
+            assert_eq!(view["machines"][0]["problem"], model::SECRET_UNUSABLE, "{damage}: {view}");
+            let removed = second.remove_machine(&key);
+            assert!(removed.is_ok(), "{damage}: the user cannot remove the machine: {removed:?}");
+            fake.0.store(false, Ordering::SeqCst);
+            assert!(second.import_pairing(&line()).is_ok(), "{damage}: the user cannot pair it again");
+        }
     }
 
     #[test]

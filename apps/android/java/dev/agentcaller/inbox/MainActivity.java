@@ -47,8 +47,10 @@ public class MainActivity extends Activity {
     private EditText pairingText;
     private TextView pairingResult;
     private String lastView = "";
-    /** "cardKey|optionId" of an option waiting for its second tap. */
-    private String armed = null;
+    /** The option waiting for its second tap, bound to the request it was tapped on. */
+    private static final long CONFIRM_MS = 5000; // as app/src/lib/keys.ts
+    private String armedKey = null; // cardKey|optionId|requestId|revision
+    private long armedAt = 0;
     private String startError = null;
     private boolean resumed = false;
 
@@ -251,22 +253,32 @@ public class MainActivity extends Activity {
         for (int i = 0; i < options.length(); i++) {
             final JSONObject o = options.getJSONObject(i);
             final String optionId = o.getString("id");
-            final String armKey = key + "|" + optionId;
+            final String armKey = key + "|" + optionId + "|" + requestId + "|" + revision;
             String label = o.getString("label");
-            if (armKey.equals(armed)) label = "Tap again to " + label;
+            if (isArmed(armKey)) label = "Tap again to " + label;
             Button b = button(label, null);
             b.setEnabled(o.getBoolean("enabled") && requestId != null && !c.optBoolean("busy"));
             final boolean confirm = o.getBoolean("confirm");
             b.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    if (confirm && !armKey.equals(armed)) {
-                        armed = armKey;
+                    // The second tap counts only for the same request and revision,
+                    // within CONFIRM_MS: the same rule as the Mac panel.
+                    if (confirm && !isArmed(armKey)) {
+                        armedKey = armKey;
+                        armedAt = android.os.SystemClock.elapsedRealtime();
                         lastView = "";
                         refresh();
+                        ui.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                lastView = "";
+                                refresh();
+                            }
+                        }, CONFIRM_MS + 100);
                         return;
                     }
-                    armed = null;
+                    armedKey = null;
                     pick(key, requestId, optionId, revision);
                 }
             });
@@ -330,6 +342,11 @@ public class MainActivity extends Activity {
             }));
         }
         return box;
+    }
+
+    private boolean isArmed(String armKey) {
+        return armKey.equals(armedKey)
+                && android.os.SystemClock.elapsedRealtime() - armedAt <= CONFIRM_MS;
     }
 
     // ---- actions -------------------------------------------------------
