@@ -1,0 +1,74 @@
+# Maintainer: Toni Bergholm
+#
+# acd-inbox (the Omarchy inbox service) and the Omarchy shell plugin, built
+# from the main branch (a -git package). Release steps and testing: docs/packaging.md.
+#
+# The package cannot write into a home directory. It installs the binary, the
+# user unit and a reference copy of the plugin; each user then runs
+# `acd-inbox install`, which is the one installer (it writes the user unit,
+# the plugin directory and the keybinding offer). See the .install file.
+pkgname=agent-caller-omarchy-git
+pkgver=0.9.0.r0.g0000000 # placeholder: pkgver() sets the real value
+pkgrel=1
+pkgdesc='Omarchy inbox service (acd-inbox) and shell plugin for agent-caller (git)'
+arch=(x86_64 aarch64)
+url='https://github.com/tonibergholm/agent-caller'
+license=(MIT)
+depends=(glibc gcc-libs)
+makedepends=(cargo git)
+provides=(agent-caller-omarchy)
+conflicts=(agent-caller-omarchy)
+# makepkg's default LTO flags break linking the C and assembly objects that
+# ring builds (undefined ring_core_* symbols). Tested in a container.
+options=(!lto)
+optdepends=('gnome-keyring: Secret Service store for pairing secrets (any Secret Service provider works)'
+            'agent-caller: acd, the daemon for agents on this machine')
+install=agent-caller-omarchy.install
+source=("agent-caller::git+$url.git#branch=main")
+sha256sums=(SKIP)
+
+# Must list the files `acd-inbox install` embeds (PLUGIN_FILES in
+# crates/acd-inbox/src/install.rs). A test in crates/acd-inbox/tests/packaging.rs
+# fails when this line and the installer disagree.
+_plugin_files=(manifest.json BarWidget.qml Panel.qml Service.qml model.mjs)
+_plugin_id=tonibergholm.agentcaller
+
+pkgver() {
+  cd agent-caller || return 1
+  # 0.9.0.r12.gabc1234: the last v* tag, commits since it, the commit.
+  git describe --long --tags --match 'v[0-9]*' | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+prepare() {
+  cd agent-caller || return 1
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd agent-caller || return 1
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$PWD=/build/agent-caller --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+  cargo build --frozen --release -p acd-inbox
+}
+
+check() {
+  cd agent-caller || return 1
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$PWD=/build/agent-caller --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+  cargo test --frozen --release -p acd-inbox --test packaging
+}
+
+package() {
+  cd agent-caller || return 1
+  install -Dm755 target/release/acd-inbox "$pkgdir/usr/bin/acd-inbox"
+  install -Dm644 packaging/systemd/acd-inbox.service "$pkgdir/usr/lib/systemd/user/acd-inbox.service"
+  local f
+  for f in "${_plugin_files[@]}"; do
+    install -Dm644 "clients/omarchy/$f" "$pkgdir/usr/share/agent-caller/omarchy/$_plugin_id/$f"
+  done
+  install -Dm755 packaging/smoke-test.sh "$pkgdir/usr/share/agent-caller/smoke-test.sh"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -1,0 +1,13 @@
+# Written by acd-inbox install
+[Unit]
+Description=agent-caller inbox (acd-inbox)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart="/usr/bin/acd-inbox" serve
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
