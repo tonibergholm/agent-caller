@@ -119,3 +119,85 @@ fn the_session_map_reports_its_owner_through_the_trait() {
 fn a_path_resolver_debugs_as_its_name() {
     assert_eq!(format!("{:?}", PathResolver::fs()), "PathResolver");
 }
+
+// ---- t3 thread detail ----
+use acd_adapters::t3::detail::ThreadDetail;
+use acd_adapters::t3::wire::ThreadEvent;
+use serde_json::json;
+
+fn provider_thread(id: &str, native: Option<&str>) -> serde_json::Value {
+    json!({"id": id, "nativeThreadRef": native.map(|n| json!({"nativeId": n}))})
+}
+
+fn request(id: &str, status: &str) -> serde_json::Value {
+    json!({"id": id, "kind": "approval", "status": status})
+}
+
+fn event(kind: &str, payload: serde_json::Value) -> ThreadEvent {
+    serde_json::from_value(json!({"type": kind, "payload": payload})).unwrap()
+}
+
+/// detail.rs:52 `delete field active_provider_thread`, :62 / 70 / 76 `+=` -> `-=` / `*=`
+/// (`from_projection`): the active thread is read, and every entry that cannot be read is counted.
+#[test]
+fn a_projection_reports_its_active_thread_and_what_it_skipped() {
+    let projection = json!({
+        "thread": {"activeProviderThreadId": "p1"},
+        "providerThreads": [provider_thread("p1", Some("native-1")), {"id": 7}],
+        "runtimeRequests": [request("r1", "pending"), {"id": "r2"}],
+        "turnItems": [{"type": "turn-item", "id": 1}, {"nonsense": true}],
+    });
+    assert!(ThreadDetail::valid_projection(&projection));
+    let (detail, skipped) = ThreadDetail::from_projection(&projection);
+    assert_eq!(detail.active_provider_thread.as_deref(), Some("p1"));
+    assert_eq!(detail.native_session_id(), Some("native-1"));
+    assert_eq!(detail.request_status("r1"), Some("pending"));
+    assert_eq!(detail.request_status("r2"), None);
+    assert!(skipped >= 3, "one bad entry in each of the three lists: {skipped}");
+    let one_each = json!({
+        "thread": {"activeProviderThreadId": null},
+        "providerThreads": [{"id": 7}],
+        "runtimeRequests": [{"id": "r2"}],
+        "turnItems": [{"nonsense": true}],
+    });
+    let (detail, skipped) = ThreadDetail::from_projection(&one_each);
+    assert_eq!(detail.active_provider_thread, None);
+    assert_eq!(skipped, 3);
+    assert!(!ThreadDetail::valid_projection(&json!({"thread": {}, "providerThreads": [], "runtimeRequests": [], "turnItems": []})));
+    assert!(!ThreadDetail::valid_projection(&json!({"thread": {"activeProviderThreadId": 5}, "providerThreads": [], "runtimeRequests": [], "turnItems": []})));
+}
+
+/// detail.rs:103 `put_provider_thread -> ()` and :104 `!=` -> `==`: a provider
+/// thread's native session is remembered, and updating a thread again does not
+/// crowd the others out of the eight that are kept.
+#[test]
+fn provider_threads_are_remembered_once_each() {
+    let mut d = ThreadDetail::default();
+    d.apply(&event("provider-thread.updated", provider_thread("keep", Some("native-keep")))).unwrap();
+    for _ in 0..12 {
+        d.apply(&event("provider-thread.updated", provider_thread("other", Some("native-other")))).unwrap();
+    }
+    d.prune(&[]);
+    d.apply(&event("thread.metadata-updated", json!({"activeProviderThreadId": "keep"}))).unwrap();
+    assert_eq!(d.native_session_id(), Some("native-keep"));
+    d.apply(&event("thread.metadata-updated", json!({"activeProviderThreadId": "other"}))).unwrap();
+    assert_eq!(d.native_session_id(), Some("native-other"), "repeated updates are one entry, not twelve");
+    d.apply(&event("thread.metadata-updated", json!({"activeProviderThreadId": null}))).unwrap();
+    assert_eq!(d.native_session_id(), None);
+}
+
+/// detail.rs:112 `||` -> `&&` (`prune`): a request stays while it is pending or
+/// while the reconciler still names it.
+#[test]
+fn prune_keeps_pending_and_named_requests() {
+    let mut d = ThreadDetail::default();
+    for (id, status) in [("pending", "pending"), ("named", "completed"), ("done", "completed")] {
+        d.apply(&event("runtime-request.updated", request(id, status))).unwrap();
+    }
+    assert_eq!(d.retained().0, 3);
+    d.prune(&["named"]);
+    assert_eq!(d.request_status("pending"), Some("pending"));
+    assert_eq!(d.request_status("named"), Some("completed"));
+    assert_eq!(d.request_status("done"), None);
+    assert_eq!(d.retained().0, 2);
+}
