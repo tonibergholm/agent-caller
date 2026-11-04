@@ -275,7 +275,9 @@ code 4408.
   the same id may be retried or reused.
 - **`agent.mark_seen` is not recorded.** Running it twice has the same
   result and delivers nothing, so it takes no entry: a retry runs it again,
-  and reusing its id with a different payload is not `duplicate_mismatch`.
+  and reusing the id of an earlier `agent.mark_seen` with a different payload
+  is not `duplicate_mismatch`. It still gets `duplicate_mismatch` if the id
+  belongs to a live entry of another command.
 - **Pre-delivery errors are not cached.** If a command fails before
   anything is delivered (`request_not_ready`, `request_busy`,
   `source_unavailable`, or any error the adapter reports as not delivered,

@@ -155,6 +155,19 @@ impl IdemCache {
         Begin::Run
     }
 
+    /// Whether `(client, id)` is held by a command with a different payload and
+    /// has not expired. Reserves nothing: a command that takes no entry (it is
+    /// safe to run twice) still must not reuse the id of one that did.
+    pub fn conflicts(&self, client: &str, id: &str, hash: [u8; 32], now: Instant) -> bool {
+        self.entries.get(&(client.to_string(), id.to_string())).is_some_and(|e| {
+            e.hash != hash
+                && match &e.state {
+                    State::Done { at, .. } => now.duration_since(*at) < self.ttl,
+                    State::Pending(_) => true,
+                }
+        })
+    }
+
     /// Whether a new entry for `client` from `origin` fits under every bound.
     fn admits(&self, client: &str, origin: Origin) -> bool {
         let l = &self.limits;

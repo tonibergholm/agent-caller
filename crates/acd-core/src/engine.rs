@@ -201,17 +201,25 @@ impl Core {
         if let Err(why) = check_limits(&msg) {
             return CommandResult::err(&id, ErrorCode::BadRequest, why);
         }
-        // Re-running mark_seen gives the same result and delivers nothing, so
-        // it needs no exactly-once entry. Keeping it out of the table means a
-        // peer cannot fill the table with it.
-        if let ClientMessage::AgentMarkSeen { .. } = msg {
-            let phase = Mutex::new(Phase::Start);
-            return self.execute(&id, msg, &phase).await.0;
-        }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&Sha256::digest(
             serde_json::to_vec(&msg).expect("serializable"),
         ));
+        // Re-running mark_seen gives the same result and delivers nothing, so
+        // it needs no exactly-once entry. Keeping it out of the table means a
+        // peer cannot fill the table with it. It still may not reuse the id of
+        // a command that holds an entry.
+        if let ClientMessage::AgentMarkSeen { .. } = msg {
+            if self.inner.lock().unwrap().idem.conflicts(client_id, &id, hash, Instant::now()) {
+                return CommandResult::err(
+                    &id,
+                    ErrorCode::DuplicateMismatch,
+                    ErrorCode::DuplicateMismatch.describe(),
+                );
+            }
+            let phase = Mutex::new(Phase::Start);
+            return self.execute(&id, msg, &phase).await.0;
+        }
         let begin = self
             .inner
             .lock()
