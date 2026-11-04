@@ -62,8 +62,11 @@ marks a decision only the owner can make: those are not accepted residuals.
   decided: per-client share, or do not cache `RequestGone`. Details in
   [the red-team record](../../research/2026-11-04-red-team-acd.md).
 - **Core 3, 7 and 8 limits (as built).** The client limits frames to 1 MiB,
-  1000 agents and 64 KiB per agent; each breach, an oversized frame included,
-  ends as a resync without the resume cursor. The daemon registry is fed by
+  1000 agents and 64 KiB per agent; each breach ends as a resync without the
+  resume cursor. An oversized frame does so only after `welcome`; before the
+  next `welcome` (the first frames after a drop) it ends as `End::Offline` and
+  keeps the cursor (`crates/acd-client/src/conn.rs` `next_server`). PR #105
+  closes that gap; it is open, not on main. The daemon registry is fed by
   local adapters, not by peers, so it has no new cap. Pairing accepts ASCII
   hostnames only; IDNA names must be paired as punycode.
 - **Core 4 logging.** `hello` outcomes are logged at 10 lines per 10 s per
