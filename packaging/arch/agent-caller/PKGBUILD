@@ -15,6 +15,9 @@ url='https://github.com/tonibergholm/agent-caller'
 license=(MIT)
 depends=(glibc gcc-libs)
 makedepends=(cargo git)
+# makepkg's default LTO flags break linking the C and assembly objects that
+# ring builds (undefined ring_core_* symbols). Tested in a container.
+options=(!lto)
 source=("$pkgname::git+$url.git#tag=v$pkgver")
 sha256sums=(SKIP)
 

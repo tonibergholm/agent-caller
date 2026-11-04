@@ -16,6 +16,9 @@ url='https://github.com/tonibergholm/agent-caller'
 license=(MIT)
 depends=(glibc gcc-libs)
 makedepends=(cargo git)
+# makepkg's default LTO flags break linking the C and assembly objects that
+# ring builds (undefined ring_core_* symbols). Tested in a container.
+options=(!lto)
 optdepends=('gnome-keyring: Secret Service store for pairing secrets (any Secret Service provider works)'
             'agent-caller: acd, the daemon for agents on this machine')
 install=$pkgname.install
