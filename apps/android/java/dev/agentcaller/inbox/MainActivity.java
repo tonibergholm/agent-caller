@@ -24,8 +24,6 @@ import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.util.HashSet;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -302,16 +300,11 @@ public class MainActivity extends Activity {
         }
         cards.removeAllViews();
         JSONArray cardRows = view.getJSONArray("cards");
-        Set<String> pending = new HashSet<String>();
         for (int i = 0; i < cardRows.length(); i++) {
-            JSONObject c = cardRows.getJSONObject(i);
-            if (c.optBoolean("free_text") && !c.isNull("request_id")) {
-                pending.add(Drafts.key(c.getString("key"), c.getString("request_id")));
-            }
-            cards.addView(card(c));
+            cards.addView(card(cardRows.getJSONObject(i)));
         }
         // A question answered elsewhere, or an agent that is gone, leaves no draft.
-        drafts.prune(pending);
+        drafts.prune(Drafts.pendingKeys(cardRows));
     }
 
     private View card(final JSONObject c) throws Exception {

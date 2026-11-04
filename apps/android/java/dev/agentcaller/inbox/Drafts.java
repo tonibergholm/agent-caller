@@ -1,9 +1,13 @@
 package dev.agentcaller.inbox;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /**
  * Typed-but-unsent answers, one per pending request. Keyed by card key AND
@@ -34,6 +38,19 @@ final class Drafts {
 
     int size() {
         return byRequest.size();
+    }
+
+    /** The (card, request) keys {@link #prune} keeps, from the view's {@code cards} array. */
+    static Set<String> pendingKeys(JSONArray cards) throws org.json.JSONException {
+        Set<String> pending = new HashSet<String>();
+        for (int i = 0; i < cards.length(); i++) {
+            JSONObject c = cards.getJSONObject(i);
+            // Pending, not answerable: an offline card keeps the text typed for it.
+            if (!c.isNull("pending_request_id")) {
+                pending.add(key(c.getString("key"), c.getString("pending_request_id")));
+            }
+        }
+        return pending;
     }
 
     /** Drops every draft whose request is not in {@code pending} (made by {@link #key}). */

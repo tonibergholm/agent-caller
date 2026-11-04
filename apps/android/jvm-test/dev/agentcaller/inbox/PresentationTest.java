@@ -3,6 +3,8 @@ package dev.agentcaller.inbox;
 import java.util.HashSet;
 import java.util.Set;
 
+import org.json.JSONArray;
+
 /** NoticeTracker and Drafts, the classes MainActivity uses. No Android, no native library. */
 public class PresentationTest {
     static int failures = 0;
@@ -14,7 +16,18 @@ public class PresentationTest {
         }
     }
 
-    public static void main(String[] args) {
+    /** One view's cards array. {@code pendingId}/{@code answerableId} null means absent. */
+    static JSONArray view(String pendingId, String answerableId) throws Exception {
+        return new JSONArray("[{\"key\":\"m:a\",\"request_id\":" + q(answerableId)
+                + ",\"pending_request_id\":" + q(pendingId)
+                + ",\"free_text\":" + (answerableId != null) + "}]");
+    }
+
+    static String q(String s) {
+        return s == null ? "null" : "\"" + s + "\"";
+    }
+
+    public static void main(String[] args) throws Exception {
         // ---- notice: drawing is not showing ----
         NoticeTracker t = new NoticeTracker();
         t.onResume();
@@ -50,6 +63,24 @@ public class PresentationTest {
         check("mine".equals(d.get("m:a", "r2")), "a pending request keeps its draft");
         d.remove("m:a", "r2");
         check(d.size() == 0, "remove drops it");
+
+        // ---- drafts survive going offline: pending is not the same as answerable ----
+        Drafts o = new Drafts();
+        o.put("m:a", "r1", "typed");
+        o.prune(Drafts.pendingKeys(view("r1", "r1")));
+        check("typed".equals(o.get("m:a", "r1")), "online with r1: the draft stays");
+        o.prune(Drafts.pendingKeys(view("r1", null))); // offline: pending, not answerable
+        check("typed".equals(o.get("m:a", "r1")), "offline, r1 still pending: the draft stays");
+        o.prune(Drafts.pendingKeys(view("r1", "r1")));
+        check("typed".equals(o.get("m:a", "r1")), "back online, same r1: the draft is still there");
+        o.prune(Drafts.pendingKeys(view("r2", "r2")));
+        check(o.get("m:a", "r1") == null && o.size() == 0, "the card now holds r2: the r1 draft is dropped");
+        o.put("m:a", "r2", "second");
+        o.prune(Drafts.pendingKeys(new JSONArray("[]")));
+        check(o.size() == 0, "the card is gone: the draft is dropped");
+        o.put("m:a", "r3", "x");
+        o.prune(Drafts.pendingKeys(view(null, null))); // the request resolved, card stays
+        check(o.size() == 0, "the card has no pending request: the draft is dropped");
 
         System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
         System.exit(failures == 0 ? 0 : 1);

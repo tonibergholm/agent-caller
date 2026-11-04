@@ -47,6 +47,10 @@ pub struct CardRow {
     pub offline_note: Option<String>,
     /// Present when the card can be answered here. Empty otherwise.
     pub request_id: Option<String>,
+    /// The id of the request the agent has pending, whether or not it can be
+    /// answered here (offline, read-only, busy). Drafts are kept by this, not by
+    /// `request_id`, so a typed answer survives a dropped connection.
+    pub pending_request_id: Option<String>,
     pub revision: u64,
     pub options: Vec<OptionRow>,
     pub free_text: bool,
@@ -238,6 +242,7 @@ fn card_row(card: &CardView) -> CardRow {
             if card.offline_since_ms.is_some() { "offline" } else { "connecting…" }.to_owned()
         }),
         request_id: pending.filter(|_| can_answer_here).map(|p| p.id.clone()),
+        pending_request_id: pending.map(|p| p.id.clone()),
         revision: pending.map_or(0, |p| p.revision),
         options,
         free_text: can_answer_here && card.free_text_answerable,
@@ -422,6 +427,33 @@ mod tests {
         assert_eq!(card.read_only, None);
         assert_eq!(s.machines[0].status, "offline");
         assert_eq!(s.machines[0].problem.as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn the_pending_request_id_is_kept_while_the_card_cannot_be_answered() {
+        let mut req = request("r1", "question", "hook", "open", json!([{"id": "o1", "label": "A", "description": null, "effect": "choose"}]));
+        req["questions"] = json!([{"id": "q", "header": null, "text": "Which branch?", "multi_select": false,
+            "options": [{"id": "o1", "label": "A", "description": null, "effect": "choose"}]}]);
+        req["free_text"] = json!(true);
+        let at = |online: bool, req: &Value| screen_of(&["answer"], online, agent("a", "hooks", "needs_you", req.clone()));
+        let (on, off, back) = (at(true, &req), at(false, &req), at(true, &req));
+        assert_eq!(only_card(&on).request_id.as_deref(), Some("r1"));
+        assert!(only_card(&on).free_text);
+        assert_eq!(only_card(&on).pending_request_id.as_deref(), Some("r1"));
+        // Offline: not answerable, still the same pending request.
+        assert_eq!(only_card(&off).request_id, None);
+        assert!(!only_card(&off).free_text);
+        assert_eq!(only_card(&off).pending_request_id.as_deref(), Some("r1"));
+        assert_eq!(only_card(&back).pending_request_id.as_deref(), Some("r1"));
+        // A new request on the same card is a different id; no request, none.
+        let mut next = req.clone();
+        next["id"] = json!("r2");
+        assert_eq!(only_card(&at(true, &next)).pending_request_id.as_deref(), Some("r2"));
+        let none = screen_of(&["answer"], true, agent("a", "hooks", "working", Value::Null));
+        assert_eq!(only_card(&none).pending_request_id, None);
+        // Without the answer capability the card is read-only but still pending.
+        let ro = screen_of(&[], true, agent("a", "hooks", "needs_you", req));
+        assert_eq!(only_card(&ro).pending_request_id.as_deref(), Some("r1"));
     }
 
     #[test]

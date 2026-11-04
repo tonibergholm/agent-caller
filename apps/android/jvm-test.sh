@@ -37,4 +37,4 @@ javac -Xlint:-options -d "$real" java/dev/agentcaller/inbox/KeystoreCipher.java 
   jvm-test-keystore/android/security/keystore/*.java jvm-test-keystore/dev/agentcaller/inbox/*.java
 java -cp "$real" dev.agentcaller.inbox.KeystoreCipherTest
 echo "== run 7: NoticeTracker and Drafts (the presentation rules MainActivity uses)"
-java -cp "$work/classes" dev.agentcaller.inbox.PresentationTest
+java -cp "$work/classes:$ORG_JSON_JAR" dev.agentcaller.inbox.PresentationTest
