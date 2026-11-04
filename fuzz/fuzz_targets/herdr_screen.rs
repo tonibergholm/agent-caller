@@ -21,6 +21,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(info) = serde_json::from_str::<AgentInfo>(&text) {
         if let Some(o) = map::agent_obs("h", &info) {
             assert!(!o.title.chars().any(char::is_control), "{:?}", o.title);
+            fuzzlib::assert_agent_fits(Some(&o), None);
         }
     }
     let _ = screen::codex_cancel_tail(&text, &command);

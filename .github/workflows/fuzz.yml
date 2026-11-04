@@ -30,7 +30,8 @@ jobs:
         run: |
           for t in $(cargo +nightly fuzz list); do
             mkdir -p "target/run/$t"
-            cargo +nightly fuzz run "$t" "target/run/$t" "corpus/$t" -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=4096
+            extra=""; [ "$t" = herdr_screen ] && extra="../tests/fixtures/herdr"
+            cargo +nightly fuzz run "$t" "target/run/$t" "corpus/$t" $extra -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=4096
           done
       - name: Keep the crashing inputs
         if: failure()

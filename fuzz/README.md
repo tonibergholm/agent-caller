@@ -43,6 +43,10 @@ committed one second (libFuzzer reads every directory, writes to the first):
 cargo +nightly fuzz run hook_mapping /tmp/work/hook_mapping corpus/hook_mapping -- -max_total_time=1200
 ```
 
+`herdr_screen` also reads the recorded screens in `tests/fixtures/herdr`
+(not copied into its corpus): add `../tests/fixtures/herdr` as a further
+corpus directory, as the recipe and the workflow do.
+
 From the repository root, `just fuzz-smoke` runs every target for 30 seconds
 this way. A manual GitHub workflow (`Fuzz`, `workflow_dispatch`) runs them
 for a time you choose and keeps crashing inputs as an artifact.
@@ -55,12 +59,29 @@ make the fix.
 
 ## Corpus
 
-`fuzz/corpus/<target>` holds the seeds: the recorded herdr screens and
-API replies, the Claude hook payloads, the acd/1 examples and hand-written
-cases for the rest, merged down with `cargo fuzz cmin`. Keep it under
-2 MiB in total. To refresh a corpus from a long run:
+`fuzz/corpus/<target>` holds the seeds: the herdr API replies, the Claude
+hook payloads, the acd/1 examples, the regression inputs and the T3, pairing
+and text cases written for these targets, plus the 150 smallest inputs of a
+`cargo fuzz cmin` of the long runs. Keep it small (about 110 KB now; under
+2 MiB in any case: `du -sb fuzz/corpus`). To refresh one from a long run:
 
 ```sh
-cargo +nightly fuzz cmin hook_mapping /tmp/work/hook_mapping   # into the work dir
-rm -rf corpus/hook_mapping && cargo +nightly fuzz cmin hook_mapping /tmp/work/hook_mapping corpus/hook_mapping
+cargo +nightly fuzz run hook_mapping /tmp/work/hook_mapping corpus/hook_mapping -- -max_total_time=1800
+cargo +nightly fuzz cmin hook_mapping /tmp/work/hook_mapping   # minimises in place
+ls -S -r /tmp/work/hook_mapping | head -150 | while read f; do cp /tmp/work/hook_mapping/$f corpus/hook_mapping/; done
 ```
+
+## Regression tests
+
+A crash the fuzzers found becomes a named test next to the code, with the
+input in `tests/fixtures/fuzz/`; `fuzz/` is not needed to run it:
+
+- `a_bearer_keyword_does_not_swallow_the_next_lines_bearer_token` (acd-adapters, `text_rules`)
+- `a_sub_millisecond_timestamp_is_cut_on_the_way_in` (acd-protocol, `protocol_frames`)
+- `a_request_too_large_for_the_agent_limit_is_published_read_only`,
+  `an_agent_with_a_huge_cwd_is_published_within_the_agent_limit` (acd-core)
+  and `a_single_question_at_every_cap_is_published_read_only` (acd-adapters):
+  the agent-size check in `hook_mapping` and `t3_map`, which asserts that no
+  agent the registry publishes encodes to more than 64 KiB. The fuzzers have
+  not reached these two on their own in the runs so far; the inputs were
+  built by hand and the oracle is there to keep them closed.
