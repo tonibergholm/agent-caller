@@ -1561,3 +1561,7 @@ fn spawn_with(
         timing: opts.timing.clone(),
     })
 }
+
+#[cfg(test)]
+#[path = "mutants_inbox.rs"]
+mod mutants_inbox;
