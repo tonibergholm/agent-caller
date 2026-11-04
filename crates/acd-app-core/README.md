@@ -7,6 +7,11 @@ The part of the agent-caller apps that does not depend on a platform:
   The iOS shell passes `false`.
 - `pairing::import_text`: turns clipboard text into a remote machine.
 - `keychain` (Apple targets only): the Keychain secret store and `cached_secrets()`.
+- `credman` (Windows only): the Credential Manager secret store and `cached_secrets()`.
+- `nostore`: `platform_secrets()` picks the store for the target: Keychain on
+  Apple, Credential Manager on Windows, `UnsupportedSecrets` (refuses every
+  call) elsewhere, Android included. An Android Keystore store is PR #104, not
+  merged.
 - `commands`: the command functions and `AppState`. The shells wrap them in
   `#[tauri::command]` functions with the same IPC names.
 
