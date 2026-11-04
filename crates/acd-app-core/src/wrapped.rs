@@ -12,10 +12,19 @@
 //!   machine shows as unreadable and is never taken for "not paired".
 //! - A failed write leaves the old file in place (temp file, then rename).
 //! - Error text never holds a secret, a key name or a path.
+//! - A read that failed is remembered for `FAILURE_BACKOFF`, so a status poll
+//!   does not go back to a slow or broken provider every second. A write, a
+//!   delete or a reset clears it. Nothing is ever downgraded to plaintext.
+//! - A key that is permanently unusable (invalidated, unrecoverable) is
+//!   replaced by `reset_if_key_unusable`: the ciphertext it wrapped is deleted,
+//!   the key is regenerated, and the caller learns which keys were lost. A
+//!   transient failure never deletes anything.
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use acd_client::settings::{CachedSecrets, SecretError, SecretStore};
 
@@ -32,6 +41,9 @@ pub const SECRET_UNREADABLE: &str = "stored secret is unreadable";
 pub const SECRET_NOT_STORED: &str = "could not store the secret";
 pub const BAD_SECRET_KEY: &str = "secret key rejected";
 
+/// How long a failed read is remembered before the cipher is asked again.
+pub const FAILURE_BACKOFF: Duration = Duration::from_secs(5);
+
 /// Why a cipher call failed. No detail travels with it: the Java side's
 /// messages could name a key alias or a provider, and nothing may reach a log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,22 +54,68 @@ pub enum WrapError {
     Failed,
 }
 
+/// What the platform says about the wrapping key itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyState {
+    /// Usable, or not created yet (the first `wrap` creates it).
+    Usable,
+    /// Gone for good: invalidated, or unrecoverable. No retry will help.
+    PermanentlyUnusable,
+    /// Could not tell (provider busy or failing). Retry later; delete nothing.
+    Unknown,
+}
+
 /// Authenticated encryption under a platform-held key. `aad` is bound into the
 /// blob: `unwrap` must fail unless the same `aad` is given.
 pub trait KeyWrap: Send + Sync {
     fn wrap(&self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, WrapError>;
     fn unwrap(&self, aad: &[u8], blob: &[u8]) -> Result<Vec<u8>, WrapError>;
+    /// Whether the key can ever be used again. Unknown unless overridden.
+    fn key_state(&self) -> KeyState {
+        KeyState::Unknown
+    }
+    /// Deletes the key and creates a fresh one. Only called after
+    /// `key_state` said `PermanentlyUnusable`.
+    fn reset_key(&self) -> Result<(), WrapError> {
+        Err(WrapError::Unavailable)
+    }
+}
+
+/// What `reset_if_key_unusable` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResetOutcome {
+    /// The key is fine (or the provider could not say): nothing was touched.
+    NotNeeded,
+    /// The key was permanently unusable. It was replaced and these secret
+    /// keys (machine keys) had their unreadable ciphertext deleted.
+    Reset { lost: Vec<String> },
+}
+
+/// The explicit secure-store reset, as the bridge sees it.
+pub trait SecureStoreReset: Send + Sync {
+    fn reset_if_key_unusable(&self) -> Result<ResetOutcome, SecretError>;
 }
 
 pub struct WrappedFileSecrets<W> {
     dir: PathBuf,
     cipher: W,
+    now: Box<dyn Fn() -> Instant + Send + Sync>,
+    failed: Mutex<HashMap<String, (Instant, String)>>,
 }
 
 impl<W: KeyWrap> WrappedFileSecrets<W> {
     /// `dir` is app-private storage. It is created on the first write.
     pub fn new(dir: impl Into<PathBuf>, cipher: W) -> Self {
-        Self { dir: dir.into(), cipher }
+        Self::with_clock(dir, cipher, Instant::now)
+    }
+
+    /// As `new`, with the clock the failure backoff reads (tests control it).
+    pub fn with_clock(
+        dir: impl Into<PathBuf>,
+        cipher: W,
+        now: impl Fn() -> Instant + Send + Sync + 'static,
+    ) -> Self {
+        Self { dir: dir.into(), cipher, now: Box::new(now), failed: Mutex::new(HashMap::new()) }
     }
 
     fn path(&self, key: &str) -> Result<PathBuf, SecretError> {
@@ -86,7 +144,44 @@ fn io_error(what: &str, error: &std::io::Error) -> SecretError {
 impl<W: KeyWrap> SecretStore for WrappedFileSecrets<W> {
     fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
         let path = self.path(key)?;
-        let bytes = match fs::read(&path) {
+        let now = (self.now)();
+        {
+            let mut failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
+            match failed.get(key) {
+                Some((at, error)) if now.saturating_duration_since(*at) < FAILURE_BACKOFF => {
+                    return Err(SecretError(error.clone()));
+                }
+                Some(_) => {
+                    failed.remove(key);
+                }
+                None => {}
+            }
+        }
+        let result = self.read(key, &path);
+        if let Err(error) = &result {
+            self.failed.lock().unwrap_or_else(|e| e.into_inner()).insert(key.into(), (now, error.0.clone()));
+        }
+        result
+    }
+
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        self.forget_failure(key);
+        self.write(key, value)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        self.forget_failure(key);
+        self.remove(key)
+    }
+}
+
+impl<W: KeyWrap> WrappedFileSecrets<W> {
+    fn forget_failure(&self, key: &str) {
+        self.failed.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+
+    fn read(&self, key: &str, path: &Path) -> Result<Option<String>, SecretError> {
+        let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(io_error(SECRET_UNREADABLE, &error)),
@@ -103,7 +198,7 @@ impl<W: KeyWrap> SecretStore for WrappedFileSecrets<W> {
             .map_err(|_| SecretError(SECRET_UNREADABLE.into()))
     }
 
-    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+    fn write(&self, key: &str, value: &str) -> Result<(), SecretError> {
         let path = self.path(key)?;
         let blob = self.cipher.wrap(&aad(key), value.as_bytes()).map_err(|error| match error {
             WrapError::Unavailable => SecretError(KEYSTORE_UNAVAILABLE.into()),
@@ -115,13 +210,67 @@ impl<W: KeyWrap> SecretStore for WrappedFileSecrets<W> {
         write_atomic(&path, &content).map_err(|e| io_error(SECRET_NOT_STORED, &e))
     }
 
-    fn delete(&self, key: &str) -> Result<(), SecretError> {
+    fn remove(&self, key: &str) -> Result<(), SecretError> {
         match fs::remove_file(self.path(key)?) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(io_error(SECRET_NOT_STORED, &error)),
         }
     }
+}
+
+impl<W: KeyWrap> SecureStoreReset for WrappedFileSecrets<W> {
+    /// Only a key the platform reports as permanently unusable is replaced; a
+    /// transient or unknown state touches nothing. The ciphertext goes first,
+    /// so a failure to delete it leaves the old key in place and the error is
+    /// returned (nothing is left readable under a key the user was told is
+    /// gone). Then the key is replaced.
+    fn reset_if_key_unusable(&self) -> Result<ResetOutcome, SecretError> {
+        if self.cipher.key_state() != KeyState::PermanentlyUnusable {
+            return Ok(ResetOutcome::NotNeeded);
+        }
+        let mut lost = Vec::new();
+        let mut files = Vec::new();
+        match fs::read_dir(&self.dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|e| io_error(SECRET_NOT_STORED, &e))?;
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if let Some(hex) = name.strip_prefix("s-")
+                        && let Some(key) = unhex(hex)
+                    {
+                        lost.push(key);
+                    }
+                    files.push(entry.path());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(SECRET_NOT_STORED, &error)),
+        }
+        for file in files {
+            match fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(SECRET_NOT_STORED, &error)),
+            }
+        }
+        self.cipher.reset_key().map_err(|_| SecretError(KEYSTORE_UNAVAILABLE.into()))?;
+        self.failed.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        lost.sort();
+        Ok(ResetOutcome::Reset { lost })
+    }
+}
+
+fn unhex(hex: &str) -> Option<String> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect();
+    String::from_utf8(bytes?).ok()
 }
 
 /// Writes `content` to a sibling temp file, syncs it and renames it over
@@ -164,15 +313,40 @@ impl SecretStore for KeystoreNotInstalled {
     }
 }
 
+/// Lets the cached store and the reset share one file store.
+struct Shared<W>(Arc<WrappedFileSecrets<W>>);
+
+impl<W: KeyWrap> SecretStore for Shared<W> {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        self.0.get(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        self.0.set(key, value)
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        self.0.delete(key)
+    }
+}
+
 static INSTALLED: OnceLock<Arc<dyn SecretStore>> = OnceLock::new();
+static INSTALLED_RESET: OnceLock<Arc<dyn SecureStoreReset>> = OnceLock::new();
 
 /// Called once by the Android shell, with the app's private directory and the
 /// Keystore cipher. Reads are cached per process, as the Keychain store's are.
 /// Returns `false` if a store was already installed (the first one stays).
 pub fn install(dir: impl Into<PathBuf>, cipher: Arc<dyn KeyWrap>) -> bool {
-    let store: Arc<dyn SecretStore> =
-        Arc::new(CachedSecrets::new(WrappedFileSecrets::new(dir, cipher)));
-    INSTALLED.set(store).is_ok()
+    let files = Arc::new(WrappedFileSecrets::new(dir, cipher));
+    let store: Arc<dyn SecretStore> = Arc::new(CachedSecrets::new(Shared(files.clone())));
+    let first = INSTALLED.set(store).is_ok();
+    if first {
+        let _ = INSTALLED_RESET.set(files);
+    }
+    first
+}
+
+/// The reset for the installed store, if one is installed.
+pub fn installed_reset() -> Option<Arc<dyn SecureStoreReset>> {
+    INSTALLED_RESET.get().cloned()
 }
 
 /// The installed store, or the refusing one.
@@ -190,6 +364,12 @@ impl KeyWrap for Arc<dyn KeyWrap> {
     }
     fn unwrap(&self, aad: &[u8], blob: &[u8]) -> Result<Vec<u8>, WrapError> {
         (**self).unwrap(aad, blob)
+    }
+    fn key_state(&self) -> KeyState {
+        (**self).key_state()
+    }
+    fn reset_key(&self) -> Result<(), WrapError> {
+        (**self).reset_key()
     }
 }
 
@@ -209,6 +389,10 @@ mod tests {
     #[derive(Default)]
     struct FakeKeystore {
         unavailable: AtomicBool,
+        /// Simulates a key the platform has invalidated for good.
+        invalidated: AtomicBool,
+        unwraps: std::sync::atomic::AtomicUsize,
+        resets: std::sync::atomic::AtomicUsize,
     }
 
     fn tag(aad: &[u8]) -> [u8; 8] {
@@ -223,7 +407,7 @@ mod tests {
 
     impl KeyWrap for FakeKeystore {
         fn wrap(&self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, WrapError> {
-            if self.unavailable.load(Ordering::SeqCst) {
+            if self.unavailable.load(Ordering::SeqCst) || self.invalidated.load(Ordering::SeqCst) {
                 return Err(WrapError::Unavailable);
             }
             let mut blob = tag(aad).to_vec();
@@ -231,13 +415,28 @@ mod tests {
             Ok(blob)
         }
         fn unwrap(&self, aad: &[u8], blob: &[u8]) -> Result<Vec<u8>, WrapError> {
-            if self.unavailable.load(Ordering::SeqCst) {
+            self.unwraps.fetch_add(1, Ordering::SeqCst);
+            if self.unavailable.load(Ordering::SeqCst) || self.invalidated.load(Ordering::SeqCst) {
                 return Err(WrapError::Unavailable);
             }
             if blob.len() < 8 || blob[..8] != tag(aad) {
                 return Err(WrapError::Failed);
             }
             Ok(blob[8..].iter().map(|b| b ^ 0x5a).collect())
+        }
+        fn key_state(&self) -> KeyState {
+            if self.invalidated.load(Ordering::SeqCst) {
+                KeyState::PermanentlyUnusable
+            } else if self.unavailable.load(Ordering::SeqCst) {
+                KeyState::Unknown
+            } else {
+                KeyState::Usable
+            }
+        }
+        fn reset_key(&self) -> Result<(), WrapError> {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+            self.invalidated.store(false, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -415,5 +614,104 @@ mod tests {
         let s = installed_or_refusing();
         s.set(KEY_A, SECRET).unwrap();
         assert_eq!(s.get(KEY_A).unwrap().as_deref(), Some(SECRET));
+    }
+
+    /// A key the platform invalidated for good: every wrap and unwrap fails,
+    /// and without a reset removing the machine does not help, because the
+    /// next pairing wraps with the same dead key. The reset deletes all the
+    /// ciphertext, replaces the key, names what was lost, and pairing works.
+    #[test]
+    fn a_permanently_invalid_key_is_replaced_and_the_lost_secrets_are_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.set(KEY_A, SECRET).unwrap();
+        s.set(KEY_B, SECRET).unwrap();
+        s.cipher.invalidated.store(true, Ordering::SeqCst);
+        assert!(s.get(KEY_A).is_err());
+        s.delete(KEY_A).unwrap();
+        assert!(s.set(KEY_A, SECRET).is_err(), "the dead key must not wrap");
+        assert_eq!(
+            s.reset_if_key_unusable().unwrap(),
+            ResetOutcome::Reset { lost: vec![KEY_B.to_owned()] }
+        );
+        assert_eq!(s.cipher.resets.load(Ordering::SeqCst), 1);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0, "ciphertext left behind");
+        s.set(KEY_A, SECRET).unwrap();
+        assert_eq!(s.get(KEY_A).unwrap().as_deref(), Some(SECRET));
+        assert_eq!(s.get(KEY_B).unwrap(), None);
+        // Nothing to do the second time.
+        assert_eq!(s.reset_if_key_unusable().unwrap(), ResetOutcome::NotNeeded);
+        assert_eq!(s.cipher.resets.load(Ordering::SeqCst), 1);
+    }
+
+    /// A provider that is only failing now (state unknown) never costs the
+    /// user a pairing: nothing is deleted, the key is not reset.
+    #[test]
+    fn a_transient_failure_deletes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.set(KEY_A, SECRET).unwrap();
+        s.cipher.unavailable.store(true, Ordering::SeqCst);
+        assert_eq!(s.reset_if_key_unusable().unwrap(), ResetOutcome::NotNeeded);
+        assert_eq!(s.cipher.resets.load(Ordering::SeqCst), 0);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        s.cipher.unavailable.store(false, Ordering::SeqCst);
+        assert_eq!(s.get(KEY_A).unwrap().as_deref(), Some(SECRET));
+    }
+
+    /// The ciphertext is deleted before the key is replaced, and a file that
+    /// cannot be deleted stops the reset with the key untouched.
+    #[test]
+    fn a_reset_that_cannot_delete_the_ciphertext_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.set(KEY_A, SECRET).unwrap();
+        // A directory named like a secret file cannot be removed with remove_file.
+        fs::create_dir(dir.path().join("s-00")).unwrap();
+        s.cipher.invalidated.store(true, Ordering::SeqCst);
+        assert!(s.reset_if_key_unusable().is_err());
+        assert_eq!(s.cipher.resets.load(Ordering::SeqCst), 0);
+        assert!(s.cipher.invalidated.load(Ordering::SeqCst));
+    }
+
+    /// A failed read is remembered for FAILURE_BACKOFF so a poll does not go
+    /// back to the provider every second; after that it is asked again. The
+    /// clock is controlled: no sleep, no wall-clock bound.
+    #[test]
+    fn a_failed_read_is_not_retried_inside_the_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = Instant::now();
+        let offset = Arc::new(Mutex::new(Duration::ZERO));
+        let clock = offset.clone();
+        let s = WrappedFileSecrets::with_clock(dir.path(), FakeKeystore::default(), move || {
+            base + *clock.lock().unwrap()
+        });
+        s.set(KEY_A, SECRET).unwrap();
+        s.cipher.unavailable.store(true, Ordering::SeqCst);
+        for _ in 0..5 {
+            assert_eq!(s.get(KEY_A).unwrap_err().0, KEYSTORE_UNAVAILABLE);
+        }
+        assert_eq!(s.cipher.unwraps.load(Ordering::SeqCst), 1, "the provider was asked again inside the backoff");
+        *offset.lock().unwrap() = FAILURE_BACKOFF - Duration::from_millis(1);
+        assert!(s.get(KEY_A).is_err());
+        assert_eq!(s.cipher.unwraps.load(Ordering::SeqCst), 1);
+        // Recovered provider, but still inside the remembered failure: closed.
+        s.cipher.unavailable.store(false, Ordering::SeqCst);
+        assert!(s.get(KEY_A).is_err());
+        *offset.lock().unwrap() = FAILURE_BACKOFF;
+        assert_eq!(s.get(KEY_A).unwrap().as_deref(), Some(SECRET));
+        assert_eq!(s.cipher.unwraps.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_write_clears_a_remembered_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.set(KEY_A, SECRET).unwrap();
+        s.cipher.unavailable.store(true, Ordering::SeqCst);
+        assert!(s.get(KEY_A).is_err());
+        s.cipher.unavailable.store(false, Ordering::SeqCst);
+        s.set(KEY_A, "fresh").unwrap();
+        assert_eq!(s.get(KEY_A).unwrap().as_deref(), Some("fresh"));
     }
 }

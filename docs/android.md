@@ -164,10 +164,25 @@ Fail closed, all tested:
   credentials") before that change, for a damaged file and for an unavailable
   Keystore. `acd-client` itself is unchanged: the same dead end exists in the
   other clients' flows for an unreadable secret, noted as a residual.
-  Pairing again creates a new Keystore key only if the alias is missing. If the
-  alias exists but the Keystore refuses to use the key, `wrap` returns `null`
-  and pairing keeps failing until the app's storage is cleared in Android
-  settings. Not seen, not handled.
+- **Explicit secure-store reset.** A key the platform reports as permanently
+  unusable (`KeyPermanentlyInvalidatedException` or `UnrecoverableKeyException`,
+  anywhere in the cause chain; `KeystoreCipher.keyState()`) is replaced, because
+  removing a machine deletes ciphertext but not the dead alias and every
+  re-pairing would wrap with it again. `WrappedFileSecrets::reset_if_key_unusable`
+  deletes all ciphertext first (a file that cannot be deleted stops the reset
+  with the key untouched), then `KeystoreCipher.resetKey()` deletes the alias
+  and generates a fresh key. It runs at start, before any secret is read, and
+  once when a pairing fails (the pairing is then tried again). The screen shows
+  a notice naming the machines that must be paired again. Nothing falls back to
+  plaintext. Any other failure, a provider error included, is "unknown": nothing
+  is deleted, the read fails closed and is retried later. A persistent provider
+  error that is not one of the two exceptions is therefore not auto-reset; the
+  user's remaining recourse is clearing the app's storage in Android settings.
+  Tested with a fake `KeyWrap` that simulates invalidation (`bridge.rs`,
+  `wrapped.rs`) and through the JNI on a host JVM (`jvm-test.sh` run 5).
+- A failed read is remembered for 5 seconds (`FAILURE_BACKOFF`, tested with a
+  controlled clock) so the one-second refresh does not go back to a slow
+  provider. A write, a delete or a reset clears it.
 - A write that fails keeps the old file (temp file, `sync_all`, rename). A
   pairing whose secret cannot be stored commits no machine and writes no
   settings.
@@ -261,7 +276,7 @@ In the sandbox, 2026-11-04:
 - Both `.so` files: right ELF machine (AArch64, x86-64); `NEEDED` is only
   `libdl.so`, `libm.so`, `libc.so`; no `GLIBC` symbols; LOAD segments aligned
   to 16 KiB; the eight `Java_dev_agentcaller_inbox_Native_*` exports present.
-- `jvm-test.sh`: all four runs pass.
+- `jvm-test.sh`: all five runs pass.
 - `scripts/check-version.sh` and `scripts/tests/run.sh` pass with the new
   `apps/android` checks (the two new drift tests fail without the check).
 
@@ -277,20 +292,20 @@ In the sandbox, 2026-11-04:
 - The Keystore: `KeystoreCipher` compiles against the API 23 `android.jar` and
   the contract is tested through the JNI with a software double. The real
   `AndroidKeyStore` provider was never called. Key invalidation (for example a
-  lock-screen reset) is handled by design (unwrap refuses, the user re-pairs)
-  but never seen.
+  lock-screen reset) is handled by the reset above, tested with a fake and on a
+  host JVM, but never seen on a device. `keyState()` and `resetKey()` and the
+  exception classification have not run against a real `AndroidKeyStore`.
 - Tailscale: the phone must route `100.64.0.0/10` through the tailnet; the
   client's address check is the same as iOS. Not run. No connection to a
   daemon was made from Android code, so the TLS pin check, the handshake and
   answering a live request over the network are untested on this target (the
   same client code is covered by the workspace tests on the host).
 - The real-NDK path of `build-apk.sh` and the `d8` path.
-- Keystore calls on the UI thread. `Native.init` runs in `onCreate` and reads
-  each paired machine's secret through JNI on the main thread; `Native.view()`
-  runs every second on the main thread, and calls the Keystore again whenever a
-  machine's secret status is not a cached success (a failed read is not
-  cached). A slow Keystore can therefore cause an ANR. The feasibility study
-  says these calls belong off the UI thread. Not done.
+- Keystore calls are off the UI thread now (`MainActivity` runs `Native.init`
+  and `Native.view()` on one worker thread and draws the result on the UI
+  thread; a refresh already running is not started again). Not measured on a
+  device, and `MainActivity.java` was only checked for syntax in the sandbox
+  (no `android.jar`): it was not compiled against the Android API.
 - `model.rs` re-checks `card.live` although the client's `answerable` already
   includes it. Removing that check is not caught by a test; it is kept as an
   intentional redundant guard.
@@ -317,3 +332,12 @@ In the sandbox, 2026-11-04:
   current target SDK, Kotlin, AndroidX and proper resources/icon.
 - A QR scanner (CameraX or ML Kit) feeding the same `importPairing`.
 - FCM wake-up after the relay lands (feasibility doc, section D).
+
+## Answer buttons
+
+Each option is drawn from `OptionRow.text`: the label, then the description on
+the next line, so "Yes, always" shows its rule (`Bash(npm test:*)`). The button
+wraps and is never ellipsized. A card whose text cannot be drawn as sent (a
+control character or a bidirectional override in the title, detail, a question,
+an option label or description) is read-only with no options: whole or
+read-only, as on iOS and the desktop panel.

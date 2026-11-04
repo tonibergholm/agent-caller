@@ -8,14 +8,15 @@
 //! (see `java/dev/agentcaller/inbox/KeystoreCipher.java`): `wrap` and `unwrap`
 //! never throw; they return `null` when the Keystore cannot be used, an empty
 //! array when the cipher refuses (wrong key, wrong AAD, damaged blob), and the
-//! bytes otherwise.
+//! bytes otherwise. `keyState()` (0 usable, 1 permanently unusable, 2 unknown)
+//! and `resetKey()` (0 done) back the secure-store reset.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use acd_app_core::wrapped::{self, KeyWrap, WrapError};
+use acd_app_core::wrapped::{self, KeyState, KeyWrap, WrapError};
 use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
 use jni::sys::{jboolean, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
@@ -65,12 +66,41 @@ impl JniKeyWrap {
     }
 }
 
+impl JniKeyWrap {
+    /// Calls a no-argument `int` method. `None` if anything went wrong.
+    fn call_int(&self, method: &str) -> Option<i32> {
+        let mut env = self.vm.attach_current_thread().ok()?;
+        let out = env.call_method(&self.cipher, method, "()I", &[]).and_then(|v| v.i());
+        if env.exception_check().unwrap_or(true) {
+            let _ = env.exception_clear();
+            return None;
+        }
+        out.ok()
+    }
+}
+
 impl KeyWrap for JniKeyWrap {
     fn wrap(&self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, WrapError> {
         self.call("wrap", aad, plaintext)
     }
     fn unwrap(&self, aad: &[u8], blob: &[u8]) -> Result<Vec<u8>, WrapError> {
         self.call("unwrap", aad, blob)
+    }
+    /// `KeystoreCipher.keyState()`: 0 usable (or not created yet), 1 permanently
+    /// unusable, anything else (or any failure to ask) unknown.
+    fn key_state(&self) -> KeyState {
+        match self.call_int("keyState") {
+            Some(0) => KeyState::Usable,
+            Some(1) => KeyState::PermanentlyUnusable,
+            _ => KeyState::Unknown,
+        }
+    }
+    /// `KeystoreCipher.resetKey()`: deletes the alias, creates a fresh key.
+    fn reset_key(&self) -> Result<(), WrapError> {
+        match self.call_int("resetKey") {
+            Some(0) => Ok(()),
+            _ => Err(WrapError::Unavailable),
+        }
     }
 }
 
@@ -111,7 +141,7 @@ pub extern "system" fn Java_dev_agentcaller_inbox_Native_init<'l>(
         let vm = env.get_java_vm().map_err(|_| "no Java VM".to_owned())?;
         let cipher = env.new_global_ref(&cipher).map_err(|_| "no cipher".to_owned())?;
         wrapped::install(dir.join("secrets"), Arc::new(JniKeyWrap { vm, cipher }));
-        let bridge = Bridge::open(&dir, wrapped::installed_or_refusing())?;
+        let bridge = Bridge::open(&dir, wrapped::installed_or_refusing(), wrapped::installed_reset())?;
         let _ = BRIDGE.set(bridge);
         Ok(())
     }))

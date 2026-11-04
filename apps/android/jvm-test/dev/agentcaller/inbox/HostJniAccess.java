@@ -73,6 +73,7 @@ public class HostJniAccess {
         String token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
         if (mode.equals("unavailable")) KeystoreCipher.unavailable = true;
+        if (mode.equals("invalidated")) KeystoreCipher.invalidated = true;
         check(Native.view().contains("not started"), "view before init says the inbox is not started");
         String err = Native.init(files.toString(), new KeystoreCipher(keyBytes));
         check(err == null, "init returns null (" + err + ")");
@@ -127,6 +128,21 @@ public class HostJniAccess {
             check(!s.contains("\"online\"") && s.contains("cannot be read here") && !s.contains("Pair this machine"),
                     "an unopenable secret says so and never reads as online or as not paired: " + s);
             check(!Native.pick("x:y", "r", "allow", 1L).contains("\"ok\""), "nothing can be sent");
+        } else if (mode.equals("invalidated")) {
+            // The key was invalidated for good before this start: init replaced it,
+            // deleted what it wrapped, and the user is told plainly.
+            check(KeystoreCipher.resets == 1, "the key was reset once (" + KeystoreCipher.resets + ")");
+            check(!KeystoreCipher.invalidated, "the key is usable again");
+            JSONObject v = viewWithMachines(1);
+            check(!v.isNull("notice") && v.getString("notice").contains("paired again"),
+                    "the user is told which machines to pair again: " + v.opt("notice"));
+            int left = 0;
+            try (java.util.stream.Stream<Path> st = Files.walk(files.resolve("secrets"))) {
+                for (Path p : (Iterable<Path>) st::iterator) if (Files.isRegularFile(p)) left++;
+            }
+            check(left == 0, "no ciphertext from the dead key is left (" + left + ")");
+            String again = Native.importPairing(line("example.test"));
+            check(again.startsWith("{\"ok\":"), "pairing works again: " + again);
         } else if (mode.equals("tampered")) {
             // The blob was damaged on disk: the machine must show as not paired/unreadable, never as paired.
             JSONObject v = viewWithMachines(1);

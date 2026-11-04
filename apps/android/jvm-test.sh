@@ -25,3 +25,5 @@ echo "== run 4: damage the secret file, restart"
 f=$(find "$work/data/files/secrets" -type f | head -1)
 printf 'x' >> "$f"
 run tampered
+echo "== run 5: the Keystore key is permanently invalidated, restart"
+run invalidated

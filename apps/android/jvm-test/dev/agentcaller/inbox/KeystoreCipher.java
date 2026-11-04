@@ -16,6 +16,9 @@ import javax.crypto.spec.SecretKeySpec;
  */
 final class KeystoreCipher {
     static volatile boolean unavailable = false;
+    /** The key is permanently invalid (an invalidated Keystore key) until resetKey(). */
+    static volatile boolean invalidated = false;
+    static volatile int resets = 0;
     static volatile int calls = 0;
     static volatile String lastThread = "";
     private final SecretKeySpec key;
@@ -27,7 +30,7 @@ final class KeystoreCipher {
     byte[] wrap(byte[] aad, byte[] plaintext) {
         calls++;
         lastThread = Thread.currentThread().getName();
-        if (unavailable) return null;
+        if (unavailable || invalidated) return null;
         try {
             byte[] iv = new byte[12];
             new SecureRandom().nextBytes(iv);
@@ -47,7 +50,7 @@ final class KeystoreCipher {
     byte[] unwrap(byte[] aad, byte[] blob) {
         calls++;
         lastThread = Thread.currentThread().getName();
-        if (unavailable) return null;
+        if (unavailable || invalidated) return null;
         try {
             if (blob == null || blob.length <= 12) return new byte[0];
             Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
@@ -59,5 +62,15 @@ final class KeystoreCipher {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    int keyState() {
+        return invalidated ? 1 : (unavailable ? 2 : 0);
+    }
+
+    int resetKey() {
+        resets++;
+        invalidated = false;
+        return 0;
     }
 }

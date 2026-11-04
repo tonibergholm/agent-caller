@@ -26,12 +26,19 @@ import org.json.JSONObject;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * The foreground inbox. All decisions (which options exist, which are enabled,
  * whether a card is read-only) are made in Rust and arrive in the view JSON;
  * this class draws rows and sends back the ids it was given. It refreshes
  * once a second while it is on screen and does nothing in the background.
+ * Every call into the native library, the Keystore access behind it included,
+ * runs on one worker thread, never on the UI thread, so a slow provider cannot
+ * stall input or trigger an ANR; a refresh that is still running is not
+ * started twice. (Failed secret reads are remembered for a few seconds in
+ * Rust, so a broken provider is not asked again every tick.)
  *
  * Written without lambdas and newer language features: the sandbox build
  * converts to dex with dx, which does not desugar.
@@ -44,6 +51,7 @@ public class MainActivity extends Activity {
     private LinearLayout cards;
     private LinearLayout machines;
     private TextView status;
+    private TextView notice;
     private EditText pairingText;
     private TextView pairingResult;
     private String lastView = "";
@@ -53,6 +61,10 @@ public class MainActivity extends Activity {
     private long armedAt = 0;
     private String startError = null;
     private boolean resumed = false;
+    /** Serial: init runs first, then every view and action, in order. */
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private boolean refreshing = false; // UI thread only
+    private boolean refreshAgain = false; // UI thread only
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -69,12 +81,34 @@ public class MainActivity extends Activity {
         // Pairing lines and requests are not for screenshots or the recents screen.
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,
                 WindowManager.LayoutParams.FLAG_SECURE);
-        try {
-            startError = Native.init(getFilesDir().getAbsolutePath(), new KeystoreCipher());
-        } catch (Throwable t) {
-            startError = "The native library could not be loaded.";
-        }
         buildLayout();
+        final String filesDir = getFilesDir().getAbsolutePath();
+        worker.execute(new Runnable() {
+            @Override
+            public void run() {
+                String error;
+                try {
+                    error = Native.init(filesDir, new KeystoreCipher());
+                } catch (Throwable t) {
+                    error = "The native library could not be loaded.";
+                }
+                final String result = error;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        startError = result;
+                        lastView = "";
+                        refresh();
+                    }
+                });
+            }
+        });
+    }
+
+    @Override
+    protected void onDestroy() {
+        worker.shutdown();
+        super.onDestroy();
     }
 
     @Override
@@ -101,8 +135,12 @@ public class MainActivity extends Activity {
 
         TextView title = text("Agent Caller", 22, true);
         root.addView(title);
-        status = text("", 14, false);
+        status = text("Starting…", 14, false);
         root.addView(status);
+        notice = text("", 13, true);
+        notice.setTextColor(Color.rgb(200, 120, 0));
+        notice.setVisibility(View.GONE);
+        root.addView(notice);
 
         cards = column();
         root.addView(cards);
@@ -168,12 +206,41 @@ public class MainActivity extends Activity {
 
     // ---- refresh -------------------------------------------------------
 
+    /** UI thread. Asks the worker for the view and draws it when it arrives. */
     private void refresh() {
         if (startError != null) {
             status.setText("Cannot start: " + startError);
             return;
         }
-        String json = Native.view();
+        if (refreshing) {
+            refreshAgain = true;
+            return;
+        }
+        refreshing = true;
+        try {
+            worker.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final String json = Native.view();
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            refreshing = false;
+                            draw(json);
+                            if (refreshAgain) {
+                                refreshAgain = false;
+                                refresh();
+                            }
+                        }
+                    });
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            refreshing = false; // shut down: the activity is going away
+        }
+    }
+
+    private void draw(String json) {
         if (json == null || json.equals(lastView)) return;
         lastView = json;
         try {
@@ -188,6 +255,9 @@ public class MainActivity extends Activity {
             status.setText(view.getString("error"));
             return;
         }
+        String note = view.isNull("notice") ? null : view.optString("notice", null);
+        notice.setText(note == null ? "" : note);
+        notice.setVisibility(note == null ? View.GONE : View.VISIBLE);
         int needs = view.getInt("needs_you");
         JSONArray machineRows = view.getJSONArray("machines");
         status.setText(machineRows.length() == 0
@@ -254,9 +324,16 @@ public class MainActivity extends Activity {
             final JSONObject o = options.getJSONObject(i);
             final String optionId = o.getString("id");
             final String armKey = key + "|" + optionId + "|" + requestId + "|" + revision;
-            String label = o.getString("label");
+            // The model's text: the label, then the description on its own line
+            // (what tells "Yes" from "Yes, always"). Drawn whole: the button
+            // wraps and is never ellipsized or limited to one line.
+            String label = o.getString("text");
             if (isArmed(armKey)) label = "Tap again to " + label;
             Button b = button(label, null);
+            b.setSingleLine(false);
+            b.setMaxLines(Integer.MAX_VALUE);
+            b.setEllipsize(null);
+            b.setAllCaps(false);
             b.setEnabled(o.getBoolean("enabled") && requestId != null && !c.optBoolean("busy"));
             final boolean confirm = o.getBoolean("confirm");
             b.setOnClickListener(new View.OnClickListener() {
@@ -335,9 +412,14 @@ public class MainActivity extends Activity {
             box.addView(button("Undo", new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    Native.cancel(u.optString("id"));
-                    lastView = "";
-                    refresh();
+                    final String id = u.optString("id");
+                    runReply(new Job() {
+                        @Override
+                        public String run() {
+                            Native.cancel(id);
+                            return "{\"ok\":\"\"}";
+                        }
+                    });
                 }
             }));
         }

@@ -22,6 +22,9 @@ pub struct ScreenModel {
     pub machines: Vec<MachineRow>,
     pub cards: Vec<CardRow>,
     pub needs_you: u32,
+    /// Something the user must be told, for example after the secure store
+    /// was reset. Set by the bridge, not by the view.
+    pub notice: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -62,6 +65,11 @@ pub struct OptionRow {
     pub id: String,
     pub label: String,
     pub description: Option<String>,
+    /// What the button shows: the label, then the description on the next
+    /// line when there is one. An option whose description tells "allow once"
+    /// from a broader permission is never drawn without it. The activity sets
+    /// this text as it is and does not shorten it.
+    pub text: String,
     /// False when this client cannot send the option ("Not supported here").
     pub enabled: bool,
     /// Needs a second tap.
@@ -93,6 +101,27 @@ pub fn screen(view: &InboxView, secrets: &HashMap<String, SecretStatus>) -> Scre
             .collect(),
         cards: view.cards.iter().map(card_row).collect(),
         needs_you: view.tray.needs_you,
+        notice: None,
+    }
+}
+
+/// Text the activity can draw exactly as sent. A control character (other
+/// than a line break or tab) or a bidirectional override would be dropped or
+/// would reorder what the user reads, so the card would show something other
+/// than what the agent asked: such a card is read-only, never answerable.
+fn shows_whole(text: &str) -> bool {
+    text.chars().all(|c| match c {
+        '\n' | '\t' => true,
+        c if c.is_control() => false,
+        '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}' => false,
+        _ => true,
+    })
+}
+
+fn option_text(label: &str, description: Option<&str>) -> String {
+    match description.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(d) => format!("{label}\n{d}"),
+        None => label.to_owned(),
     }
 }
 
@@ -148,7 +177,17 @@ fn card_row(card: &CardView) -> CardRow {
         Source::External => format!("Answer in {}", agent.title),
         _ => "Answer in terminal".to_owned(),
     };
-    let can_answer_here = card.live && card.answerable && pending.is_some();
+    // Whole or read-only: if any text the user would decide on cannot be drawn
+    // as it is, no option is offered.
+    let whole = pending.is_none_or(|p| {
+        shows_whole(&p.title)
+            && shows_whole(&p.detail)
+            && p.questions.iter().flatten().all(|q| shows_whole(&q.text))
+            && p.options.iter().all(|o| {
+                shows_whole(&o.label) && o.description.as_deref().is_none_or(shows_whole)
+            })
+    });
+    let can_answer_here = card.live && card.answerable && pending.is_some() && whole;
     let options = match pending {
         Some(p) if can_answer_here => p
             .options
@@ -157,6 +196,7 @@ fn card_row(card: &CardView) -> CardRow {
                 id: o.id.clone(),
                 label: o.label.clone(),
                 description: o.description.clone(),
+                text: option_text(&o.label, o.description.as_deref()),
                 enabled: card.selectable_options.contains(&o.id) && o.effect != Effect::Unknown,
                 confirm: o.confirm,
                 deny: o.effect == Effect::Deny,
@@ -488,5 +528,52 @@ mod tests {
             let s = screen(&view, &HashMap::from([("k".to_owned(), fine)]));
             assert_eq!(s.machines[0].status, "online", "{fine:?}");
         }
+    }
+
+    /// "Yes" and "Yes, always" differ only in what the description says
+    /// ("Bash(npm test:*)" for every later run). The button text carries it.
+    #[test]
+    fn an_option_is_drawn_with_its_description() {
+        let opts = json!([
+            {"id": "allow", "label": "Yes", "description": null, "effect": "allow"},
+            {"id": "always", "label": "Yes, always", "description": "Bash(npm test:*)", "effect": "allow_always"},
+            {"id": "blank", "label": "Maybe", "description": "  ", "effect": "choose"}
+        ]);
+        let a = agent("a", "hooks", "needs_you", request("r1", "permission", "hook", "open", opts));
+        let s = screen_of(&["answer"], true, a);
+        let texts: Vec<_> = only_card(&s).options.iter().map(|o| o.text.as_str()).collect();
+        assert_eq!(texts, vec!["Yes", "Yes, always\nBash(npm test:*)", "Maybe"]);
+        assert!(serde_json::to_string(&s).unwrap().contains("\"text\":\"Yes, always\\nBash(npm test:*)\""));
+    }
+
+    /// Whole or read-only: text that would be dropped or reordered on screen
+    /// (a control character, a bidi override) makes the card read-only, in the
+    /// description, the label, the detail and the question alike.
+    #[test]
+    fn a_card_whose_text_cannot_be_drawn_as_sent_is_read_only() {
+        let opt = |label: &str, desc: &str| json!([
+            {"id": "allow", "label": label, "description": desc, "effect": "allow"}
+        ]);
+        let cases = [
+            ("description bidi", opt("Yes", "run \u{202e}tset"), None),
+            ("description control", opt("Yes", "a\u{0007}b"), None),
+            ("label bidi", opt("Y\u{2066}es", "x"), None),
+            ("detail control", opt("Yes", "x"), Some("rm\u{0000} -rf")),
+        ];
+        for (what, options, detail) in cases {
+            let mut req = request("r1", "permission", "hook", "open", options);
+            if let Some(d) = detail {
+                req["detail"] = json!(d);
+            }
+            let s = screen_of(&["answer"], true, agent("a", "hooks", "needs_you", req));
+            let card = only_card(&s);
+            assert!(card.options.is_empty() && card.request_id.is_none() && !card.free_text, "{what}");
+            assert_eq!(card.read_only.as_deref(), Some("Answer in terminal"), "{what}");
+        }
+        // Plain multi-line text with a tab is fine.
+        let mut ok = request("r1", "permission", "hook", "open", opt("Yes", "ok\tfine"));
+        ok["detail"] = json!("a\n\tb");
+        let s = screen_of(&["answer"], true, agent("a", "hooks", "needs_you", ok));
+        assert_eq!(only_card(&s).options.len(), 1);
     }
 }
