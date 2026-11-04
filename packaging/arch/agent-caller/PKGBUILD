@@ -22,14 +22,20 @@ source=("$pkgname::git+$url.git#tag=v$pkgver")
 sha256sums=(SKIP)
 
 prepare() {
-  cd "$pkgname"
+  cd "$pkgname" || return 1
+  # The tag must contain packaging/ (it was added after v0.9.0). Fail here,
+  # clearly, instead of in check() or package().
+  [ -f packaging/systemd/acd.service ] || {
+    echo "tag v$pkgver has no packaging/: use the -git package, or a tag cut after the packaging merge" >&2
+    return 1
+  }
   export RUSTUP_TOOLCHAIN=stable
   # --locked: Cargo.lock decides every version. Nothing is resolved here.
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-  cd "$pkgname"
+  cd "$pkgname" || return 1
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   # Keep the build directory and the cargo registry out of the binary, so the
@@ -39,7 +45,7 @@ build() {
 }
 
 check() {
-  cd "$pkgname"
+  cd "$pkgname" || return 1
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$PWD=/build/$pkgname --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
@@ -49,7 +55,7 @@ check() {
 }
 
 package() {
-  cd "$pkgname"
+  cd "$pkgname" || return 1
   install -Dm755 target/release/acd "$pkgdir/usr/bin/acd"
   # A copy in ~/.config/systemd/user (from `acd service install`) wins over
   # this one, so both can exist.

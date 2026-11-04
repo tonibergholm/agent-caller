@@ -6,9 +6,14 @@
 # Inputs (set by test-arch.sh):
 #   /in/src.tar            git archive of the repo, top directory agent-caller/
 #   ARCH_TEST_OFFLINE=1    pacman is unreachable: skip pacman, build with
-#                          `makepkg -d` and a tar source instead of git+https,
-#                          using the Rust toolchain in /opt/rust (CARGO_HOME,
-#                          RUSTUP_HOME). Everything else is the same.
+#                          `makepkg -d` (makedepends are not checked), using
+#                          the Rust toolchain in /opt/rust (CARGO_HOME,
+#                          RUSTUP_HOME). If a `git` is on PATH (the online
+#                          image has one; offline, test-arch.sh mounts the
+#                          host's) the PKGBUILDs' own git source lines are
+#                          used against a local mirror; without git the
+#                          source line is replaced by a tar, and the -git
+#                          packages (they need git for pkgver()) are skipped.
 set -euo pipefail
 
 offline=${ARCH_TEST_OFFLINE:-0}
@@ -27,12 +32,15 @@ as_builder() { runuser -u builder -- env "HOME=/home/builder" "PATH=$PATH" "$@";
 mkdir -p /work /out && chown builder /work /out
 cd /work
 
-# The source the PKGBUILDs build: the repository's HEAD, as a tar (offline)
-# or as a tagged git repo answering for the GitHub URL (online).
+# The source the PKGBUILDs build: the repository's HEAD as a git repo (tagged,
+# branch main) answering for the GitHub URL, or, with no git, as a tar.
 mkdir -p src && tar -xf /in/src.tar -C src
+# shellcheck disable=SC1091,SC2154 # pkgver is set by the sourced PKGBUILD
 ver=$(. /pkg/arch/agent-caller/PKGBUILD; echo "$pkgver")
 epoch=1700000000
-if [ "$offline" != 1 ]; then
+usegit=0
+command -v git >/dev/null && usegit=1
+if [ "$usegit" = 1 ]; then
 	git config --global --add safe.directory '*'
 	git -C src/agent-caller init -q -b main
 	git -C src/agent-caller add -A
@@ -50,8 +58,8 @@ build() { # build NAME DIR -> packages in /out/DIR
 	local name=$1 dir=$2
 	rm -rf "/work/$dir" "/out/$dir"
 	mkdir -p "/work/$dir" "/out/$dir"
-	cp /pkg/arch/"$name"/* "/work/$dir/"
-	if [ "$offline" = 1 ]; then
+	cp -L /pkg/arch/"$name"/* "/work/$dir/"
+	if [ "$usegit" != 1 ]; then
 		cp /work/agent-caller-src.tar "/work/$dir/"
 		sed -i 's|^source=.*|source=(agent-caller-src.tar)|' "/work/$dir/PKGBUILD"
 		# omarchy lists optdepends/source on separate lines; only source is replaced.
@@ -67,7 +75,8 @@ build() { # build NAME DIR -> packages in /out/DIR
 step "static checks"
 if command -v shellcheck >/dev/null; then
 	expect "shellcheck smoke-test.sh" shellcheck /pkg/smoke-test.sh
-	for f in agent-caller/PKGBUILD agent-caller-omarchy/PKGBUILD; do
+	expect "shellcheck smoke-test-selftest.sh" shellcheck /pkg/smoke-test-selftest.sh
+	for f in agent-caller/PKGBUILD agent-caller-omarchy/PKGBUILD agent-caller-git/PKGBUILD agent-caller-omarchy-git/PKGBUILD; do
 		expect "shellcheck $f" shellcheck -s bash -e SC2034,SC2154 /pkg/arch/$f
 	done
 else
@@ -109,6 +118,9 @@ step "smoke test as a normal user"
 mkdir -p /run/systemd && chmod 1777 /run/systemd
 if as_builder bash /usr/share/agent-caller/smoke-test.sh; then ok "smoke test"; else bad "smoke test"; fi
 
+step "smoke-test selftest (stub service: a stopped service must fail)"
+if bash /pkg/smoke-test-selftest.sh; then ok "smoke-test selftest"; else bad "smoke-test selftest"; fi
+
 step "smoke test fails on a stale per-user plugin copy, passes when it matches"
 id_=tonibergholm.agentcaller
 as_builder bash -c "mkdir -p ~/.config/omarchy/plugins/$id_ && cp /usr/share/agent-caller/omarchy/$id_/* ~/.config/omarchy/plugins/$id_/"
@@ -129,8 +141,8 @@ if echo "$before" | awk '{ m=$2; if (m !~ /00$/) bad=1 } END { exit bad }'; then
 # pkgrel 2 stands in for the next release.
 for p in agent-caller agent-caller-omarchy; do
 	rm -rf "/work/$p-2" "/out/$p-2"; mkdir -p "/work/$p-2" "/out/$p-2"
-	cp /pkg/arch/$p/* "/work/$p-2/"; sed -i 's/^pkgrel=1/pkgrel=2/' "/work/$p-2/PKGBUILD"
-	[ "$offline" = 1 ] && { cp /work/agent-caller-src.tar "/work/$p-2/"; sed -i 's|^source=.*|source=(agent-caller-src.tar)|' "/work/$p-2/PKGBUILD"; }
+	cp -L /pkg/arch/$p/* "/work/$p-2/"; sed -i 's/^pkgrel=1/pkgrel=2/' "/work/$p-2/PKGBUILD"
+	[ "$usegit" != 1 ] && { cp /work/agent-caller-src.tar "/work/$p-2/"; sed -i 's|^source=.*|source=(agent-caller-src.tar)|' "/work/$p-2/PKGBUILD"; }
 	chown -R builder "/work/$p-2" "/out/$p-2"
 	flags=(-f --noconfirm); [ "$offline" = 1 ] && flags+=(-d)
 	( cd "/work/$p-2" && as_builder env PKGDEST="/out/$p-2" SOURCE_DATE_EPOCH=$epoch \
@@ -145,6 +157,36 @@ after=$(cd "$cfg" && find . -type f -o -type d | sort | xargs stat -c '%n %a %U'
 pacman -R --noconfirm agent-caller agent-caller-omarchy >/dev/null 2>&1 && ok "pacman -R" || bad "pacman -R"
 [ ! -e /usr/bin/acd ] && [ ! -e /usr/bin/acd-inbox ] && [ ! -e /usr/lib/systemd/user/acd.service ] && ok "package files removed" || bad "package files remain"
 [ "$before" = "$(cd "$cfg" && find . -type f -o -type d | sort | xargs stat -c '%n %a %U')" ] && [ "$sums" = "$(cd "$cfg" && find . -type f | sort | xargs sha256sum)" ] && ok "config and tokens survive removal, modes unchanged" || bad "removal changed config"
+
+step "-git packages: declared git source (branch main), pkgver(), install, smoke, remove"
+if [ "$usegit" = 1 ]; then
+	for p in agent-caller-git agent-caller-omarchy-git; do
+		if build "$p" "$p-1"; then ok "makepkg $p"; else bad "makepkg $p (see /out/$p-1.log)"; tail -30 "/out/$p-1.log"; fi
+	done
+	gitpk() { ls /out/"$1"-1/"$1"-*.pkg.tar.zst 2>/dev/null | head -1; }
+	echo "-- pkgver: $(basename "$(gitpk agent-caller-git)")"
+	case "$(basename "$(gitpk agent-caller-git)")" in agent-caller-git-"$ver".r0.g*) ok "pkgver() is tag.rN.gSHA";; *) bad "unexpected -git package name";; esac
+	if pacman -U --noconfirm "$(gitpk agent-caller-git)" "$(gitpk agent-caller-omarchy-git)"; then ok "pacman -U -git packages"; else bad "pacman -U -git packages"; fi
+	[ "$(pacman -Qq --provides agent-caller-git | grep -c '^agent-caller$')" -ge 1 ] && ok "agent-caller-git provides agent-caller" || bad "provides"
+	if as_builder bash /usr/share/agent-caller/smoke-test.sh; then ok "smoke test on the -git packages"; else bad "smoke test on the -git packages"; fi
+	pacman -R --noconfirm agent-caller-git agent-caller-omarchy-git >/dev/null 2>&1 && ok "pacman -R -git packages" || bad "pacman -R -git packages"
+
+	# A release PKGBUILD pointed at a tag without packaging/ (like v0.9.0) must
+	# stop in prepare() with the explanation, not later in check()/package().
+	rm -rf /work/old-src /mirror-old.git && cp -a src/agent-caller /work/old-src && rm -rf /work/old-src/packaging
+	git -C /work/old-src add -A && git -C /work/old-src -c user.name=t -c user.email=t@example.invalid commit -q -m "no packaging"
+	git -C /work/old-src tag -f "v$ver" >/dev/null
+	git clone -q --bare /work/old-src /mirror-old.git
+	git config --global --replace-all url."file:///mirror-old.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
+	cp /root/.gitconfig /home/builder/.gitconfig
+	if build agent-caller old-tag; then bad "release PKGBUILD built from a tag without packaging/"; else
+		grep -q "has no packaging/" /out/old-tag.log && ok "release PKGBUILD refuses a tag without packaging/ with a clear message" || bad "refusal message missing"
+	fi
+	git config --global --replace-all url."file:///mirror.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
+	cp /root/.gitconfig /home/builder/.gitconfig
+else
+	echo "SKIP  no git in the container: -git packages not built"
+fi
 
 step "reproducibility: same tag, another directory, same bytes"
 for p in agent-caller agent-caller-omarchy; do

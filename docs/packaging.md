@@ -12,8 +12,22 @@ Everything here is unsigned. See [Signing, later](#signing-later).
 |---|---|---|
 | `agent-caller` | `packaging/arch/agent-caller` | `/usr/bin/acd`, `/usr/lib/systemd/user/acd.service`, the licence |
 | `agent-caller-omarchy` | `packaging/arch/agent-caller-omarchy` | `/usr/bin/acd-inbox`, `/usr/lib/systemd/user/acd-inbox.service`, a reference copy of the plugin in `/usr/share/agent-caller/omarchy/tonibergholm.agentcaller/`, `/usr/share/agent-caller/smoke-test.sh`, the licence |
+| `agent-caller-git` | `packaging/arch/agent-caller-git` | the same as `agent-caller`; `provides` and `conflicts` with it |
+| `agent-caller-omarchy-git` | `packaging/arch/agent-caller-omarchy-git` | the same as `agent-caller-omarchy`; `provides` and `conflicts` with it |
 
-Both build from the git tag `v<pkgver>` with `cargo --locked` (`--frozen`
+**Which one to build.** The `v0.9.0` tag predates `packaging/` and the
+integration-test targets `check()` runs, so a PKGBUILD that fetches it cannot
+build. Until a tag cut after the packaging merge exists, build the `-git`
+packages: their source is `git+https://github.com/tonibergholm/agent-caller.git#branch=main`
+(append `#commit=<sha>` instead to pin one commit) and `pkgver()` records the
+tag distance and commit (for example `0.9.0.r12.gabc1234`). The release
+packages (`agent-caller`, `agent-caller-omarchy`) fetch `#tag=v$pkgver` and are
+correct for a tag cut after the merge: at release, bump `pkgver` in both
+(and `Cargo.toml`), tag, and build them. Their `prepare()` stops with a clear
+message when the tag has no `packaging/`, which is what happens today with
+`pkgver=0.9.0`.
+
+Both build with `cargo --locked` (`--frozen`
 after `cargo fetch --locked`). Neither package writes into a home directory,
 `/etc` or the keyring, and neither has a `backup=()` entry.
 
@@ -45,18 +59,21 @@ A package cannot write `~/.config/omarchy/plugins/...`, and Omarchy's plugin
 search path beyond the user directory is not documented in
 [the plugin API note](research/2026-10-12-omarchy-plugin-api.md), so the
 package does not guess a system plugin directory. Each user runs
-`acd-inbox install` once. That command, not the package, writes the user unit,
+`/usr/bin/acd-inbox install` once. That command, not the package, writes the user unit,
 the plugin directory and the keybinding offer.
 
 One consequence: `acd-inbox install` copies the binary to `~/.local/bin/acd-inbox`
 and points its user unit there. After a package upgrade the user runs
-`acd-inbox install` again to refresh that copy and the plugin files. The smoke
-test reports a stale copy as a failure. A future `--use-installed-binary`
+`/usr/bin/acd-inbox install` again to refresh that copy and the plugin files.
+Use the full path: `~/.local/bin` is first in `PATH` on Omarchy, so a bare
+`acd-inbox install` runs the previous user copy, which reinstalls its own old
+embedded plugin files. The smoke test reports a stale copy, or a stale copy
+shadowing the package in `PATH`, as a failure. A future `--use-installed-binary`
 option would remove the copy; it is not part of this change.
 
 ## Build and install
 
-From a checkout of the tag:
+From a checkout (use the `-git` directories until a tag with `packaging/` exists, see above):
 
 ```sh
 cd packaging/arch/agent-caller
@@ -83,7 +100,7 @@ machine.
 ```sh
 acd init                         # creates tokens and config in ~/.config/acd
 acd service install              # or: systemctl --user enable --now acd.service
-acd-inbox install                # on Omarchy; see "Why acd-inbox install..." above
+/usr/bin/acd-inbox install       # on Omarchy; see "Why acd-inbox install..." above
 packaging/smoke-test.sh          # or /usr/share/agent-caller/smoke-test.sh
 ```
 
@@ -97,7 +114,7 @@ packaging/smoke-test.sh          # or /usr/share/agent-caller/smoke-test.sh
 git pull && git checkout vX.Y.Z   # or fetch the new tag
 cd packaging/arch/agent-caller && makepkg -si
 cd ../agent-caller-omarchy && makepkg -si
-acd-inbox install                 # per user: refreshes ~/.local/bin and the plugin
+/usr/bin/acd-inbox install        # per user: refreshes ~/.local/bin and the plugin
 omarchy-restart-shell
 systemctl --user restart acd.service
 ```
@@ -198,7 +215,7 @@ What the build does for byte-identical output:
 For a repeatable Arch package, set the epoch to the tag's commit time:
 
 ```sh
-SOURCE_DATE_EPOCH=$(git log -1 --format=%ct v0.9.0) makepkg
+SOURCE_DATE_EPOCH=$(git log -1 --format=%ct vX.Y.Z) makepkg
 ```
 
 The container test builds each package twice in different directories and
@@ -240,7 +257,11 @@ that `acd init` in a temporary `HOME` makes owner-only files and that
 `acd.service` equals `acd service install --print`. It compares
 `~/.local/bin/acd-inbox` and `~/.config/omarchy/plugins/tonibergholm.agentcaller`
 with the package copies, so a stale install after an upgrade fails. With
-`--live` it also runs `acd-inbox status` against the real session. Packages
+`--live` it also asserts health explicitly: `systemctl --user is-active
+acd-inbox.service` must succeed and `acd-inbox status` must report the service
+running and the socket answering (its exit status alone is not health: it is 0
+with the service stopped). `packaging/smoke-test-selftest.sh` runs the script
+against stub binaries, including a stopped service, which must fail. Packages
 that are not installed are reported as `SKIP`. It never reads or prints a token
 and never touches your real `~/.config/acd`.
 
@@ -251,13 +272,14 @@ Nothing publishes to the AUR. The owner would need:
 1. An AUR account, and an SSH public key added to it (AUR account page).
    The private key would be a repository secret, for example `AUR_SSH_KEY`,
    used by a job that holds no other secret.
-2. A decision on package names. `agent-caller` and `agent-caller-omarchy`
-   are used here; check that they are free on the AUR first.
+2. A decision on package names. `agent-caller`, `agent-caller-omarchy` and their
+   `-git` forms are used here; check that they are free on the AUR first.
 3. Per release: bump `pkgver` (reset `pkgrel=1`), run
    `makepkg --printsrcinfo > .SRCINFO` in each package directory, then push
    `PKGBUILD`, `.SRCINFO` and the `.install` file to
    `ssh://aur@aur.archlinux.org/<name>.git` on `master`.
-4. Optionally the `-git` variant that tracks `main`; not written.
+4. The `-git` variants exist in this repository; publishing them is the same
+   as above, with `pkgver()` instead of a manual bump.
 
 The PKGBUILDs here use `sha256sums=(SKIP)` because the source is a git tag:
 git checks the object ids. That is only as trustworthy as the tag. See below.

@@ -32,13 +32,19 @@ _plugin_files=(manifest.json BarWidget.qml Panel.qml Service.qml model.mjs)
 _plugin_id=tonibergholm.agentcaller
 
 prepare() {
-  cd agent-caller
+  cd agent-caller || return 1
+  # The tag must contain packaging/ (it was added after v0.9.0). Fail here,
+  # clearly, instead of in check() or package().
+  [ -f packaging/systemd/acd-inbox.service ] || {
+    echo "tag v$pkgver has no packaging/: use the -git package, or a tag cut after the packaging merge" >&2
+    return 1
+  }
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-  cd agent-caller
+  cd agent-caller || return 1
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$PWD=/build/agent-caller --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
@@ -46,7 +52,7 @@ build() {
 }
 
 check() {
-  cd agent-caller
+  cd agent-caller || return 1
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$PWD=/build/agent-caller --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
@@ -54,7 +60,7 @@ check() {
 }
 
 package() {
-  cd agent-caller
+  cd agent-caller || return 1
   install -Dm755 target/release/acd-inbox "$pkgdir/usr/bin/acd-inbox"
   install -Dm644 packaging/systemd/acd-inbox.service "$pkgdir/usr/lib/systemd/user/acd-inbox.service"
   local f
