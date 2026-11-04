@@ -197,6 +197,19 @@ fn write_definition(path: &Path, text: &str, force: bool, backup_dir: &Path) -> 
     Ok(had_definition)
 }
 
+/// A newline or other control character in a path would start a new line in
+/// the systemd unit (a new directive) and is invalid XML 1.0 in the plist.
+/// Refuse before either file is built or written.
+fn reject_control_chars(what: &str, path: &Path) -> Result<()> {
+    if path.to_string_lossy().chars().any(char::is_control) {
+        bail!(
+            "the {what} path {:?} contains a control character; refusing to write a service file",
+            path
+        );
+    }
+    Ok(())
+}
+
 fn xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -306,6 +319,9 @@ pub fn install_with(
     runner: &dyn Runner,
     timing: Timing,
 ) -> Result<String> {
+    for (what, path) in [("home", home), ("executable", exe), ("config dir", config_dir)] {
+        reject_control_chars(what, path)?;
+    }
     if cfg!(target_os = "macos") {
         let plist = home
             .join("Library/LaunchAgents")
@@ -648,6 +664,61 @@ mod tests {
             "{unit}"
         );
         assert!(!unit.contains("network-online"));
+    }
+
+    #[test]
+    fn awkward_but_printable_paths_stay_inside_their_values() {
+        let exe = Path::new("/opt/my apps/a\"b%h/<x>&y/acd");
+        let dir = Path::new("/home/u/c d\"e%f$g/<&>");
+        let unit = systemd_unit(exe, dir);
+        assert!(
+            unit.contains("ExecStart=\"/opt/my apps/a\\\"b%%h/<x>&y/acd\" run\n"),
+            "{unit}"
+        );
+        assert!(
+            unit.contains("Environment=\"ACD_CONFIG_DIR=/home/u/c d\\\"e%%f$g/<&>\"\n"),
+            "{unit}"
+        );
+        assert_eq!(unit.lines().count(), 13, "{unit}");
+        let plist = launchd_plist(exe, dir, Path::new("/l/a&b<c>.log"));
+        assert!(
+            plist.contains("<string>/opt/my apps/a\"b%h/&lt;x&gt;&amp;y/acd</string>"),
+            "{plist}"
+        );
+        assert!(
+            plist.contains("<string>/home/u/c d\"e%f$g/&lt;&amp;&gt;</string>"),
+            "{plist}"
+        );
+        assert!(plist.contains("<string>/l/a&amp;b&lt;c&gt;.log</string>"));
+    }
+
+    #[test]
+    fn install_refuses_control_characters_in_any_path_and_writes_nothing() {
+        for bad in ["a\nExecStartPre=/bin/touch /tmp/PWNED", "a\rb", "a\tb", "a\u{1}b"] {
+            for print in [true, false] {
+                let home = tempfile::tempdir().unwrap();
+                let cfg = tempfile::tempdir().unwrap();
+                let fake = Fake::default();
+                let ok_exe = Path::new("/x/acd");
+                let bad_exe = format!("/x/{bad}/acd");
+                let bad_cfg = cfg.path().join(bad);
+                let bad_home = home.path().join(bad);
+                for (h, e, c) in [
+                    (home.path(), Path::new(&bad_exe), cfg.path()),
+                    (home.path(), ok_exe, bad_cfg.as_path()),
+                    (bad_home.as_path(), ok_exe, cfg.path()),
+                ] {
+                    let error =
+                        install(h, e, c, print, false, &fake).expect_err("must refuse");
+                    assert!(
+                        format!("{error:#}").contains("control character"),
+                        "{error:#}"
+                    );
+                }
+                assert!(!definition_path(home.path()).exists());
+                assert!(fake.calls.borrow().is_empty());
+            }
+        }
     }
 
     #[test]

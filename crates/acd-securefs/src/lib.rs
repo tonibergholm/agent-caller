@@ -219,9 +219,167 @@ pub fn read_private(path: &Path, _max_mode: u32, _max_len: u64) -> Result<Vec<u8
     Err(unsupported(path))
 }
 
+/// One component of a path, as lstat reports it.
+#[cfg_attr(not(owner_checks), allow(dead_code))]
+#[derive(Clone, Copy, Debug)]
+struct Entry {
+    uid: u32,
+    mode: u32,
+    is_dir: bool,
+    is_socket: bool,
+}
+
+/// Judges a root-first chain of components (all of "/" down to the socket).
+/// Each directory must be owned by root or `euid` and not group/other-writable,
+/// unless it is sticky AND the next component is owned by `euid`: then others
+/// cannot rename or unlink it. Checked root-first, each verified directory
+/// protects the next component, so nothing above can be swapped after the
+/// check. The last component must be a socket owned by `euid`.
+#[cfg_attr(not(owner_checks), allow(dead_code))]
+fn socket_chain_ok(chain: &[Entry], euid: u32) -> bool {
+    let Some((last, dirs)) = chain.split_last() else {
+        return false;
+    };
+    if !last.is_socket || last.uid != euid {
+        return false;
+    }
+    dirs.iter().enumerate().all(|(i, d)| {
+        let next = chain[i + 1];
+        d.is_dir
+            && (d.uid == 0 || d.uid == euid)
+            && (d.mode & 0o022 == 0 || (d.mode & 0o1000 != 0 && next.uid == euid))
+    })
+}
+
+/// The canonical path of a socket we can trust to be ours: it is a socket
+/// owned by `euid` and every ancestor passes `socket_chain_ok`. A symlink on
+/// the way is resolved first, and the canonical path is what is checked and
+/// returned; connect to the returned path.
+#[cfg(owner_checks)]
+pub fn check_socket_path_as(path: &Path, euid: u32) -> Result<PathBuf, SecureFsError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let canon = std::fs::canonicalize(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => SecureFsError::Missing(path.into()),
+        _ => SecureFsError::Io(path.into(), e),
+    })?;
+    let mut paths: Vec<&Path> = canon.ancestors().collect();
+    paths.reverse();
+    let mut chain = Vec::with_capacity(paths.len());
+    for p in paths {
+        let m = std::fs::symlink_metadata(p).map_err(|e| SecureFsError::Io(p.into(), e))?;
+        chain.push(Entry {
+            uid: m.uid(),
+            mode: m.mode() & 0o7777,
+            is_dir: m.is_dir(),
+            is_socket: m.file_type().is_socket(),
+        });
+    }
+    if socket_chain_ok(&chain, euid) {
+        Ok(canon)
+    } else {
+        Err(SecureFsError::Owner(canon))
+    }
+}
+
+/// `check_socket_path_as` for the effective uid.
+#[cfg(owner_checks)]
+pub fn check_socket_path(path: &Path) -> Result<PathBuf, SecureFsError> {
+    check_socket_path_as(path, euid())
+}
+
+#[cfg(not(owner_checks))]
+pub fn check_socket_path_as(path: &Path, _euid: u32) -> Result<PathBuf, SecureFsError> {
+    Err(unsupported(path))
+}
+
+#[cfg(not(owner_checks))]
+pub fn check_socket_path(path: &Path) -> Result<PathBuf, SecureFsError> {
+    Err(unsupported(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dir(uid: u32, mode: u32) -> Entry {
+        Entry { uid, mode, is_dir: true, is_socket: false }
+    }
+    fn sock(uid: u32) -> Entry {
+        Entry { uid, mode: 0o600, is_dir: false, is_socket: true }
+    }
+
+    #[test]
+    fn socket_chain_rules() {
+        let me = 1000;
+        assert!(socket_chain_ok(&[dir(0, 0o755), dir(me, 0o700), sock(me)], me));
+        // sticky and world-writable, next component ours: like /tmp
+        assert!(socket_chain_ok(&[dir(0, 0o755), dir(0, 0o1777), sock(me)], me));
+        // world-writable, not sticky
+        assert!(!socket_chain_ok(&[dir(0, 0o755), dir(me, 0o777), sock(me)], me));
+        // group-writable, not sticky
+        assert!(!socket_chain_ok(&[dir(0, 0o755), dir(0, 0o775), sock(me)], me));
+        // sticky, but the next component is someone else's
+        assert!(!socket_chain_ok(&[dir(0, 0o1777), dir(2000, 0o700), sock(2000)], me));
+        assert!(!socket_chain_ok(&[dir(0, 0o755), dir(0, 0o1777), sock(2000)], me));
+        // foreign-owned ancestor, even if tight
+        assert!(!socket_chain_ok(&[dir(0, 0o755), dir(2000, 0o700), sock(me)], me));
+        // foreign socket, or not a socket, or empty
+        assert!(!socket_chain_ok(&[dir(0, 0o755), sock(2000)], me));
+        assert!(!socket_chain_ok(&[dir(0, 0o755), dir(me, 0o700)], me));
+        assert!(!socket_chain_ok(&[], me));
+        // a symlink or file among the ancestors
+        let mut file = dir(me, 0o700);
+        file.is_dir = false;
+        assert!(!socket_chain_ok(&[dir(0, 0o755), file, sock(me)], me));
+    }
+
+    #[cfg(owner_checks)]
+    fn bound(dir: &Path) -> (PathBuf, std::os::unix::net::UnixListener) {
+        let p = dir.join("h.sock");
+        let l = std::os::unix::net::UnixListener::bind(&p).unwrap();
+        (p, l)
+    }
+
+    #[cfg(owner_checks)]
+    #[test]
+    fn own_socket_under_sticky_tmp_is_accepted() {
+        // The tempdir is ours (0700) under /tmp (sticky, world-writable).
+        let t = tempfile::Builder::new().prefix("acd").tempdir_in("/tmp").unwrap();
+        let (p, _l) = bound(t.path());
+        let got = check_socket_path(&p).unwrap();
+        assert_eq!(got, p.canonicalize().unwrap());
+    }
+
+    #[cfg(owner_checks)]
+    #[test]
+    fn socket_under_world_writable_non_sticky_dir_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::Builder::new().prefix("acd").tempdir_in("/tmp").unwrap();
+        let d = t.path().join("w");
+        std::fs::create_dir(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let (p, _l) = bound(&d);
+        assert!(matches!(check_socket_path(&p), Err(SecureFsError::Owner(_))));
+        // group-writable is refused too
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(check_socket_path(&p).is_err());
+        // a tight dir is fine, and a sticky one holding our socket is too
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(check_socket_path(&p).is_ok());
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(check_socket_path(&p).is_ok());
+    }
+
+    #[cfg(owner_checks)]
+    #[test]
+    fn foreign_euid_is_refused_on_a_real_path() {
+        let t = tempfile::Builder::new().prefix("acd").tempdir_in("/tmp").unwrap();
+        let (p, _l) = bound(t.path());
+        let me = euid();
+        assert!(check_socket_path_as(&p, me).is_ok());
+        // Same files, judged as another user: the socket is foreign.
+        assert!(check_socket_path_as(&p, me.wrapping_add(1)).is_err());
+    }
 
     #[test]
     fn unsupported_is_an_unsupported_io_error() {

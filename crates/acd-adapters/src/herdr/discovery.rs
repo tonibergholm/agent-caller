@@ -1,10 +1,10 @@
 //! herdr socket discovery and supervision (spec §6.4): finds live sockets,
 //! runs one reconciler per socket, and reports the herdr source status.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -78,15 +78,72 @@ fn session_sockets(dir: &Path) -> Vec<PathBuf> {
     socks
 }
 
-/// The path is a socket and accepts a connection within `LIVE_TIMEOUT`.
+/// Our effective uid, or `None` where there are no owner checks (Android):
+/// discovery then refuses every socket, because it cannot prove who owns it.
+#[cfg(owner_checks)]
+fn current_euid() -> Option<u32> {
+    Some(acd_securefs::euid())
+}
+#[cfg(not(owner_checks))]
+fn current_euid() -> Option<u32> {
+    None
+}
+
+/// The path is a socket owned by the current user, under directories no other
+/// user can change, and accepts a connection
+/// within `LIVE_TIMEOUT`. A socket owned by anyone else is refused (fail
+/// closed): acd would show its screens and send it keys and typed text.
 /// The connect is async, so a hung herdr leaves no blocked thread behind.
 pub async fn is_live(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok()
-        && std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket())
-        && matches!(
-            timeout(LIVE_TIMEOUT, UnixStream::connect(path)).await,
-            Ok(Ok(_))
-        )
+    is_live_as(path, current_euid()).await
+}
+
+async fn is_live_as(path: &Path, euid: Option<u32>) -> bool {
+    if std::fs::symlink_metadata(path).is_err() {
+        return false;
+    }
+    let Ok(m) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !m.file_type().is_socket() {
+        return false;
+    }
+    // The socket and every ancestor directory must be ours or root's and not
+    // swappable by another user (see `check_socket_path_as`). Connect to the
+    // canonical path that was checked.
+    let Some(Ok(real)) = euid.map(|e| acd_securefs::check_socket_path_as(path, e)) else {
+        warn_refused(path);
+        return false;
+    };
+    matches!(
+        timeout(LIVE_TIMEOUT, UnixStream::connect(&real)).await,
+        Ok(Ok(_))
+    )
+}
+
+/// How many refused paths are remembered to keep the warning to one each.
+const SEEN_LIMIT: usize = 64;
+
+/// True the first time a path is offered; remembers at most `SEEN_LIMIT`,
+/// dropping the oldest.
+fn first_sighting(seen: &mut VecDeque<PathBuf>, path: &Path) -> bool {
+    if seen.iter().any(|p| p == path) {
+        return false;
+    }
+    if seen.len() >= SEEN_LIMIT {
+        seen.pop_front();
+    }
+    seen.push_back(path.to_path_buf());
+    true
+}
+
+/// One warning per path: discovery rescans on an interval.
+fn warn_refused(path: &Path) {
+    static SEEN: Mutex<VecDeque<PathBuf>> = Mutex::new(VecDeque::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if first_sighting(&mut seen, path) {
+        tracing::warn!(socket = %path.display(), "herdr socket or one of its directories is not owned by the current user or can be changed by others; refusing it");
+    }
 }
 
 pub fn aggregate(healths: &[(PathBuf, Health)]) -> SourceStatus {
@@ -215,6 +272,7 @@ fn report(core: &Core, known: &HashMap<PathBuf, Known>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn candidate_order_and_dedup() {
@@ -281,6 +339,62 @@ mod tests {
         std::fs::write(&file, "").unwrap();
         assert!(!is_live(&file).await);
         assert!(!is_live(&dir.path().join("missing")).await);
+    }
+
+    #[tokio::test]
+    async fn a_socket_owned_by_another_user_is_refused() {
+        let dir = tempfile::Builder::new()
+            .prefix("acd")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let sock = dir.path().join("herdr.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let owner = std::fs::metadata(&sock).unwrap().uid();
+        assert!(is_live_as(&sock, Some(owner)).await, "own socket");
+        assert!(!is_live_as(&sock, Some(owner + 1)).await, "foreign owner");
+        assert!(!is_live_as(&sock, None).await, "no owner checks");
+    }
+
+    #[tokio::test]
+    async fn a_socket_under_a_world_writable_non_sticky_dir_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::Builder::new().prefix("acd").tempdir_in("/tmp").unwrap();
+        let d = t.path().join("w");
+        std::fs::create_dir(&d).unwrap();
+        let sock = d.join("herdr.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let me = std::fs::metadata(&sock).unwrap().uid();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!is_live_as(&sock, Some(me)).await, "non-sticky 0777");
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(is_live_as(&sock, Some(me)).await, "sticky, own socket");
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(is_live_as(&sock, Some(me)).await, "private dir");
+    }
+
+    #[tokio::test]
+    async fn a_path_owned_by_someone_else_is_refused() {
+        // Judged as a user who owns nothing here, so the path belongs to
+        // someone else. This fakes the foreign owner by changing the euid
+        // we judge as (chown needs root); the per-ancestor rule itself is
+        // pinned by `socket_chain_rules` in acd-securefs.
+        let t = tempfile::Builder::new().prefix("acd").tempdir_in("/tmp").unwrap();
+        let sock = t.path().join("herdr.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let me = std::fs::metadata(&sock).unwrap().uid();
+        assert!(!is_live_as(&sock, Some(me.wrapping_add(7))).await);
+    }
+
+    #[test]
+    fn refused_path_warnings_are_bounded() {
+        let mut seen = VecDeque::new();
+        assert!(first_sighting(&mut seen, Path::new("/a")));
+        assert!(!first_sighting(&mut seen, Path::new("/a")));
+        for i in 0..SEEN_LIMIT * 2 {
+            first_sighting(&mut seen, Path::new(&format!("/p{i}")));
+        }
+        assert_eq!(seen.len(), SEEN_LIMIT);
+        assert!(first_sighting(&mut seen, Path::new("/a")), "oldest was dropped");
     }
 
     #[test]
