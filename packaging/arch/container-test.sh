@@ -52,6 +52,7 @@ if [ "$usegit" = 1 ]; then
 	# makepkg points git at /etc/makepkg.d/gitconfig only (GIT_CONFIG_GLOBAL and
 	# _SYSTEM are overridden in makepkg/source/git.sh), so the mirror goes there.
 	mkdir -p /etc/makepkg.d
+	git config --file /etc/makepkg.d/gitconfig --add safe.directory '*'
 	git config --file /etc/makepkg.d/gitconfig url."file:///mirror.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
 else
 	cp /in/src.tar /work/agent-caller-src.tar && chown builder /work/agent-caller-src.tar
