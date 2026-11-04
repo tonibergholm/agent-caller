@@ -69,7 +69,9 @@ with `libdbus-1-dev` and `pkg-config` installed (`apt-get`), then
 builds the release binary.
 
 CI runs the workspace tests and clippy on Ubuntu and macOS, and the app
-on macOS. A workspace change is ready when both workspace commands pass.
+on macOS. The CI `portability` job (`just portability-check`) type-checks the client
+crates for Windows and Android; a unix-only call on their paths fails it.
+A workspace change is ready when both workspace commands pass.
 A change under `app/` also needs `npm run verify`. On Linux, report that
 check as pending for CI.
 
