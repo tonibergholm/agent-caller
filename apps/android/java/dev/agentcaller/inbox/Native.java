@@ -31,9 +31,10 @@ final class Native {
     static native String removeMachine(String key);
 
     /**
-     * The activity has put {@code text} on screen. Clears the pending-recovery
-     * record when it is the current recovery notice. Blocks on file I/O: call
-     * it off the main thread.
+     * The user has dismissed {@code text} on a resumed screen. Clears the
+     * pending-recovery record, and the notice itself, when it is the current
+     * recovery notice. Never call it for a notice that was only drawn. Blocks
+     * on file I/O: call it off the main thread.
      */
     static native boolean noticeShown(String text);
 

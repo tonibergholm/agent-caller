@@ -24,8 +24,8 @@ import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -47,11 +47,12 @@ public class MainActivity extends Activity {
     private static final long REFRESH_MS = 1000;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private final Map<String, String> typed = new HashMap<String, String>();
+    private final Drafts drafts = new Drafts();
     private LinearLayout cards;
     private LinearLayout machines;
     private TextView status;
     private TextView notice;
+    private Button noticeDismiss;
     private EditText pairingText;
     private TextView pairingResult;
     private String lastView = "";
@@ -66,7 +67,7 @@ public class MainActivity extends Activity {
     private boolean refreshing = false; // UI thread only
     private boolean refreshAgain = false; // UI thread only
     private boolean pairing = false; // UI thread only: one pairing (and recovery) at a time
-    private String ackedNotice = null; // UI thread only: the notice text already reported as shown
+    private final NoticeTracker noticeTracker = new NoticeTracker(); // UI thread only
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -117,12 +118,14 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        noticeTracker.onResume();
         ui.post(tick);
     }
 
     @Override
     protected void onPause() {
         resumed = false;
+        noticeTracker.onPause();
         ui.removeCallbacks(tick);
         super.onPause();
     }
@@ -143,6 +146,14 @@ public class MainActivity extends Activity {
         notice.setTextColor(Color.rgb(200, 120, 0));
         notice.setVisibility(View.GONE);
         root.addView(notice);
+        noticeDismiss = button("Dismiss", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dismissNotice();
+            }
+        });
+        noticeDismiss.setVisibility(View.GONE);
+        root.addView(noticeDismiss);
 
         cards = column();
         root.addView(cards);
@@ -258,9 +269,13 @@ public class MainActivity extends Activity {
             return;
         }
         String note = view.isNull("notice") ? null : view.optString("notice", null);
+        // Drawing is not showing: a view that arrives after onPause() is drawn
+        // into a screen nobody sees. Nothing is acknowledged here; only a tap
+        // on Dismiss, while resumed, is (see NoticeTracker).
+        note = noticeTracker.update(note);
         notice.setText(note == null ? "" : note);
         notice.setVisibility(note == null ? View.GONE : View.VISIBLE);
-        acknowledgeNotice(note);
+        noticeDismiss.setVisibility(note == null ? View.GONE : View.VISIBLE);
         int needs = view.getInt("needs_you");
         JSONArray machineRows = view.getJSONArray("machines");
         status.setText(machineRows.length() == 0
@@ -287,9 +302,16 @@ public class MainActivity extends Activity {
         }
         cards.removeAllViews();
         JSONArray cardRows = view.getJSONArray("cards");
+        Set<String> pending = new HashSet<String>();
         for (int i = 0; i < cardRows.length(); i++) {
-            cards.addView(card(cardRows.getJSONObject(i)));
+            JSONObject c = cardRows.getJSONObject(i);
+            if (c.optBoolean("free_text") && !c.isNull("request_id")) {
+                pending.add(Drafts.key(c.getString("key"), c.getString("request_id")));
+            }
+            cards.addView(card(c));
         }
+        // A question answered elsewhere, or an agent that is gone, leaves no draft.
+        drafts.prune(pending);
     }
 
     private View card(final JSONObject c) throws Exception {
@@ -369,13 +391,13 @@ public class MainActivity extends Activity {
         if (c.optBoolean("free_text") && requestId != null) {
             final EditText answer = new EditText(this);
             answer.setHint("Type an answer");
-            String prior = typed.get(key);
+            String prior = drafts.get(key, requestId);
             if (prior != null) answer.setText(prior);
             answer.addTextChangedListener(new TextWatcher() {
                 @Override public void beforeTextChanged(CharSequence s, int a, int b, int n) {}
                 @Override public void onTextChanged(CharSequence s, int a, int b, int n) {}
                 @Override public void afterTextChanged(Editable e) {
-                    typed.put(key, e.toString());
+                    drafts.put(key, requestId, e.toString());
                 }
             });
             box.addView(answer);
@@ -491,7 +513,7 @@ public class MainActivity extends Activity {
         }, new Runnable() {
             @Override
             public void run() {
-                typed.remove(key); // `typed` is only touched on the main thread
+                drafts.remove(key, requestId); // only touched on the main thread
             }
         });
     }
@@ -516,17 +538,19 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Tells the native side the user has been shown a recovery notice, so the
-     * pending-recovery record can go. Once per distinct text, off the main
-     * thread (it deletes a file).
+     * The user tapped Dismiss. Only now does the native side delete the
+     * pending-recovery record, off the main thread (it deletes a file). A tap
+     * that does not count (not resumed) does nothing and keeps the record.
      */
-    private void acknowledgeNotice(final String note) {
-        if (note == null || note.equals(ackedNotice)) return;
-        ackedNotice = note;
+    private void dismissNotice() {
+        final String text = noticeTracker.dismiss();
+        if (text == null) return;
+        notice.setVisibility(View.GONE);
+        noticeDismiss.setVisibility(View.GONE);
         new Thread(new Runnable() {
             @Override
             public void run() {
-                Native.noticeShown(note);
+                Native.noticeShown(text);
             }
         }).start();
     }

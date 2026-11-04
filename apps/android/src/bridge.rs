@@ -131,25 +131,41 @@ impl Bridge {
     }
 
     fn lock_pairing(&self) -> MutexGuard<'_, ()> {
-        #[cfg(test)]
-        {
-            let hook = self.on_contend.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Some(hook) = hook {
-                hook();
+        // Try first. The hook runs only once the lock is known to be held by
+        // someone else, so "contended" means contended, not "about to ask".
+        match self.pairing.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                {
+                    let hook = self.on_contend.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
+                self.pairing.lock().unwrap_or_else(|e| e.into_inner())
             }
         }
-        self.pairing.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The activity calls this with the text it has put on screen. Only then
-    /// is the pending-recovery record cleared, and only if that text is the
-    /// notice for the current record (a second reset in between wrote a new
-    /// one the user has not seen). Returns whether the record was cleared.
+    /// The activity calls this with the text the user dismissed. Only then
+    /// is the pending-recovery record cleared (and the notice dropped), and
+    /// only if that text is the notice for the current record (a second reset
+    /// in between wrote a new one the user has not seen). Returns whether the
+    /// record was cleared.
     pub fn notice_shown(&self, shown: &str) -> bool {
         let _serial = self.lock_pairing();
         let current = self.notice.lock().unwrap_or_else(|e| e.into_inner());
         match (&*current, &self.reset) {
-            (Some(n), Some(reset)) if n.recovery && n.text == shown => reset.acknowledge_recovery().is_ok(),
+            (Some(n), Some(reset)) if n.recovery && n.text == shown => {
+                if reset.acknowledge_recovery().is_err() {
+                    return false;
+                }
+                drop(current);
+                *self.notice.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                true
+            }
             _ => false,
         }
     }
@@ -430,7 +446,7 @@ mod tests {
         Parked,
         /// Another thread saw the dead key while the first was parked.
         SawDeadKey,
-        /// A thread is about to wait for the pairing lock.
+        /// A thread found the pairing lock held by another thread and is about to wait for it.
         Contended,
     }
     impl Hooked {
@@ -539,6 +555,8 @@ mod tests {
         assert!(record_exists(dir.path()));
         assert!(second.notice_shown(&notice));
         assert!(!record_exists(dir.path()));
+        // The notice is gone from the view too, so a dismissed notice is not drawn again.
+        assert_eq!(view_with_machines(&second, 1)["notice"], serde_json::Value::Null);
         drop(second);
 
         let third = open_hooked(dir.path(), &hooked).ok().unwrap();
@@ -592,20 +610,20 @@ mod tests {
             let bridge = bridge.clone();
             std::thread::spawn(move || bridge.import_pairing(&line_for("one.test")))
         };
-        // The first thread's own trip through the lock is a Contended event too.
-        loop {
-            match events.recv().unwrap() {
-                Event::Parked => break,
-                Event::Contended => {}
-                other => panic!("{other:?}"),
-            }
+        match events.recv().unwrap() {
+            Event::Parked => {}
+            other => panic!("{other:?}"),
         }
         let second = {
             let bridge = bridge.clone();
             std::thread::spawn(move || bridge.import_pairing(&line_for("two.test")))
         };
+        // Contended is sent only after try_lock failed, i.e. while the first
+        // thread holds the lock inside its recovery. Reaching the key instead
+        // means there was no lock to wait for.
         match events.recv().unwrap() {
-            Event::Contended | Event::SawDeadKey => {}
+            Event::Contended => {}
+            Event::SawDeadKey => panic!("the second pairing reached the dead key while the first was recovering"),
             other => panic!("{other:?}"),
         }
         release_tx.send(()).unwrap();

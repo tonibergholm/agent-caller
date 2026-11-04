@@ -187,15 +187,19 @@ Fail closed, all tested:
     key). The activity also ignores a tap while a pairing runs (`pairing`
     flag, UI thread). Test: `two_pairings_that_both_hit_a_dead_key_do_not_undo_each_other`
     parks the first thread inside its recovery and releases it on an event
-    (the second thread reaching the dead key, or about to wait for the lock);
-    no sleep, no timeout. The Java flag has no host test (the activity needs
+    (the second thread reaching the dead key fails the test; the hook fires
+    only after `try_lock` found the lock held, so a missing lock is always
+    seen); no sleep, no timeout. The Java flag has no host test (the activity needs
     the Android runtime); the Rust lock does not depend on it.
   - *Restartable.* Before anything is deleted, `reset_if_key_unusable` writes
     `secrets/recovery-pending` (the lost machine keys, hex, one per line; no
     secret). Order: record, ciphertext, key. The record is cleared only by
     `Bridge::notice_shown(text)` (JNI `Native.noticeShown`), which the activity
-    calls off the main thread after it has put the notice on screen, and only
-    when `text` is the current recovery notice. A record with a usable key
+    calls off the main thread when the user taps Dismiss on the notice while
+    the activity is resumed (`NoticeTracker`; drawing a notice, also one drawn
+    after `onPause()`, acknowledges nothing), and only when `text` is the
+    current recovery notice. A successful acknowledgement drops the notice from
+    the view too. A record with a usable key
     (the alias was deleted and generating the new one failed, or the app was
     closed first) is reported as `Pending`: nothing is deleted again, since
     ciphertext present then belongs to the new key. A record with a key state
@@ -265,7 +269,7 @@ ORG_JSON_JAR=/usr/share/java/json-latest.jar just android-test   # also runs the
   another Java thread, unknown card/action refusals); restart and read the
   secret back; restart with the Keystore unavailable; restart after damaging
   the secret file; restart after the key is invalidated (reset, notice, record
-  cleared only once the notice was shown). Waits are on the view's change
+  cleared only after a Dismiss on a resumed screen). Waits are on the view's change
   notification (`Native.waitForMachines`), not on a clock. A sixth run
   compiles the real `KeystoreCipher.java` against a fake `AndroidKeyStore` JCA
   provider and `android.*` stubs (`jvm-test-keystore/`): the permanent versus

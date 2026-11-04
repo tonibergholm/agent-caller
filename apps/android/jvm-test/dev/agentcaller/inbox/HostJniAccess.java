@@ -142,8 +142,23 @@ public class HostJniAccess {
             check(Files.exists(record), "the pending-recovery record exists until the notice is shown");
             check(!Native.noticeShown("not the notice"), "text that is not the notice does not clear the record");
             check(Files.exists(record), "the record is still there");
-            check(Native.noticeShown(v.getString("notice")), "showing the notice clears the record");
-            check(!Files.exists(record), "the record is gone after the notice was shown");
+            // The activity was paused while the view was pending; the completion
+            // arrives afterwards and draws the notice into a hidden screen. The
+            // same NoticeTracker the activity uses must not acknowledge it.
+            NoticeTracker tracker = new NoticeTracker();
+            tracker.onResume();
+            tracker.onPause();
+            String drawn = tracker.update(v.getString("notice"));
+            check(drawn != null, "the notice is drawn (hidden) so it is there on resume");
+            check(tracker.dismiss() == null, "a tap while paused does not count");
+            check(Files.exists(record), "the record survives a notice that was drawn while paused");
+            tracker.onResume();
+            check(Files.exists(record), "resuming alone does not acknowledge");
+            String toAck = tracker.dismiss();
+            check(toAck != null, "an explicit Dismiss while resumed counts");
+            check(Native.noticeShown(toAck), "dismissing the notice clears the record");
+            check(!Files.exists(record), "the record is gone after the user dismissed the notice");
+            check(Native.view().contains("\"notice\":null"), "the dismissed notice is gone from the view: " + Native.view());
             String again = Native.importPairing(line("example.test"));
             check(again.startsWith("{\"ok\":"), "pairing works again: " + again);
         } else if (mode.equals("tampered")) {

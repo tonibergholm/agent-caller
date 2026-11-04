@@ -19,7 +19,7 @@ rm -rf "$work"; mkdir -p "$work/classes"
 cargo build --lib --locked
 lib=$here/target/debug
 javac -Xlint:-options -cp "$ORG_JSON_JAR" -d "$work/classes" \
-  java/dev/agentcaller/inbox/Native.java jvm-test/dev/agentcaller/inbox/*.java jvm-test/HostJniTest.java
+  java/dev/agentcaller/inbox/Native.java java/dev/agentcaller/inbox/NoticeTracker.java java/dev/agentcaller/inbox/Drafts.java jvm-test/dev/agentcaller/inbox/*.java jvm-test/HostJniTest.java
 run() { java -Djava.library.path="$lib" -cp "$work/classes:$ORG_JSON_JAR" HostJniTest "$work/data" "$@"; }
 echo "== run 1: pair"; run pair
 echo "== run 2: restart and read the secret back"; run verify
@@ -36,3 +36,5 @@ mkdir -p "$real"
 javac -Xlint:-options -d "$real" java/dev/agentcaller/inbox/KeystoreCipher.java \
   jvm-test-keystore/android/security/keystore/*.java jvm-test-keystore/dev/agentcaller/inbox/*.java
 java -cp "$real" dev.agentcaller.inbox.KeystoreCipherTest
+echo "== run 7: NoticeTracker and Drafts (the presentation rules MainActivity uses)"
+java -cp "$work/classes" dev.agentcaller.inbox.PresentationTest
