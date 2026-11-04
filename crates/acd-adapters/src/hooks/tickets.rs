@@ -264,3 +264,7 @@ mod tests {
         new_task.abort();
     }
 }
+
+#[cfg(test)]
+#[path = "mutants_tickets.rs"]
+mod mutants_tickets;

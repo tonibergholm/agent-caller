@@ -31,6 +31,8 @@ subtle.workspace = true
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
+# `tokio::time::advance` for the cache-freshness test (hooks/mutants_paths.rs).
+tokio = { workspace = true, features = ["test-util"] }
 acd-client.workspace = true
 acd-adapters = { path = ".", features = ["testing"] }
 acd-core = { workspace = true, features = ["testing"] }
