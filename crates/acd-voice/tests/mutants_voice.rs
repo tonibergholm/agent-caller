@@ -575,3 +575,42 @@ fn a_recorder_reports_the_limits_it_was_given() {
     assert_eq!(Recorder::new(limits).limits(), limits);
     assert_ne!(limits, Limits::default());
 }
+
+/// router/mod.rs:271/274 (`relative`): next and previous step through the
+/// visible order from the selection, and stop at the ends.
+#[tokio::test]
+async fn next_and_previous_stop_at_the_ends() {
+    let cards = || vec![pending("m", "a"), pending("m", "b"), pending("m", "c")];
+    let route_to = |sel: &'static str, said: &'static str| async move {
+        let s = select(snapshot(cards()), sel);
+        route(&s, &VoiceText::new(said), None, &RouteOptions::default()).await
+    };
+    let selects = |r: Routed| match r {
+        Routed::Proposal(Proposal { step: Step::Select { card }, .. }) => card,
+        other => panic!("expected a select, got {other:?}"),
+    };
+    assert_eq!(selects(route_to("m/b", "next").await), "m/c");
+    assert_eq!(selects(route_to("m/b", "previous").await), "m/a");
+    assert_eq!(selects(route_to("m/c", "next").await), "m/c", "stays on the last card");
+    assert_eq!(selects(route_to("m/a", "previous").await), "m/a", "stays on the first card");
+}
+
+/// speak.rs:153 `>` -> `>=` (`Alerts::observe`): the seen set is trimmed only
+/// when it grows past `SEEN_MAX` (1024), so a request seen long ago and
+/// not waiting now is still not news when it shows up again.
+#[test]
+fn a_set_of_exactly_the_limit_is_not_trimmed() {
+    use acd_voice::speak::{Alerts, Due};
+    let now = std::time::Instant::now();
+    let mut alerts = Alerts::default();
+    let many: Vec<_> = (0..1023).map(|i| pending("m", &format!("n{i}"))).collect();
+    let mut baseline = many.clone();
+    baseline.push(pending("m", "old"));
+    alerts.observe(&snapshot(baseline)); // baseline: 1024 seen, exactly the limit
+    alerts.observe(&snapshot(many.clone())); // `old` is no longer waiting
+    let mut back = many;
+    back.push(pending("m", "old"));
+    alerts.observe(&snapshot(back.clone()));
+    // Everything was seen before: nothing is announced, in particular not `old`.
+    assert_eq!(alerts.due(&snapshot(back), now, false), Due::Nothing);
+}
