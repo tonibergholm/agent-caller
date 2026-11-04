@@ -462,6 +462,17 @@ mod tests {
         let (detail, _) = ThreadDetail::from_projection(&projection);
         let (obs, _) = obs_for(Some("claudeAgent"), &detail.pending_view("request").unwrap());
         assert_eq!(obs.answer_path, AnswerPath::None, "label");
+        let item = projection["turnItems"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["type"] == "user_input_request")
+            .unwrap();
+        item["questions"][0]["options"][0]["label"] = json!("Yes");
+        item["questions"][0]["options"][0]["description"] = json!("D".repeat(300));
+        let (detail, _) = ThreadDetail::from_projection(&projection);
+        let (obs, _) = obs_for(Some("claudeAgent"), &detail.pending_view("request").unwrap());
+        assert_eq!(obs.answer_path, AnswerPath::None, "description");
     }
 
     #[test]

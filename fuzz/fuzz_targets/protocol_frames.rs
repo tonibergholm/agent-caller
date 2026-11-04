@@ -17,18 +17,24 @@ fn validator(cell: &'static OnceLock<jsonschema::Validator>, schema: fn() -> ser
     cell.get_or_init(|| jsonschema::validator_for(&schema()).unwrap())
 }
 
-fn secrets(m: &ClientMessage) -> Option<(&str, String)> {
-    match m {
-        ClientMessage::Hello { token, protocol, client, resume } => {
-            let others = format!("{protocol}{}{}{}{:?}", client.id, client.name, client.version, resume);
-            Some((token, others))
-        }
-        ClientMessage::RequestAnswer { text: Some(t), id, request_id, option_id, .. } => {
-            Some((t, format!("{id}{request_id}{option_id:?}")))
-        }
-        ClientMessage::AgentSend { text, id, agent_id } => Some((text, format!("{id}{agent_id}"))),
-        _ => None,
+/// The same message with its token or typed text replaced by a different text
+/// of the same byte length. `Debug` shows only that length, so the two must
+/// render identically; a leak of the secret would tell them apart. Comparing
+/// against this baseline needs no search for the secret in the output, which
+/// also prints public field names such as `text_bytes`.
+fn swapped(m: &ClientMessage) -> Option<ClientMessage> {
+    let other = |s: &str| {
+        let c = if s.starts_with('x') { 'y' } else { 'x' };
+        c.to_string().repeat(s.len())
+    };
+    let mut n = m.clone();
+    match &mut n {
+        ClientMessage::Hello { token, .. } => *token = other(token),
+        ClientMessage::RequestAnswer { text: Some(t), .. } => *t = other(t),
+        ClientMessage::AgentSend { text, .. } => *text = other(text),
+        _ => return None,
     }
+    Some(n)
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -63,11 +69,8 @@ fuzz_target!(|data: &[u8]| {
             assert!(errors.is_empty(), "{again:?} fails the client schema: {errors:?}");
         }
         let _ = m.command_id();
-        if let Some((secret, others)) = secrets(&m) {
-            let dbg = format!("{m:?}");
-            if secret.len() >= 8 && !others.contains(secret) && !dbg.is_empty() {
-                assert!(!dbg.contains(secret), "Debug shows a secret: {dbg}");
-            }
+        if let Some(n) = swapped(&m) {
+            assert_eq!(format!("{m:?}"), format!("{n:?}"), "Debug shows a secret: {m:?}");
         }
     }
 });

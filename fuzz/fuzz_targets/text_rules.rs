@@ -72,7 +72,11 @@ fuzz_target!(|data: &[u8]| {
                 continue;
             }
             let out = redact_log(&line);
-            assert!(!out.contains(x.as_str()), "{prefix:?} secret survived: {out:?}");
+            // Only the value region counts: the indicator itself is kept
+            // ("password" in "password: [REDACTED]" is not the secret).
+            let last = out.rsplit('\n').next().unwrap_or("");
+            let value = last.strip_prefix(prefix).unwrap_or(last);
+            assert!(!value.contains(x.as_str()), "{prefix:?} secret survived: {out:?}");
         }
     }
 });

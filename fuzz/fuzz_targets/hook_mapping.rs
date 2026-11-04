@@ -61,6 +61,10 @@ fn bash_command(p: &Payload) -> Option<&str> {
 /// `description` of a Bash command, which is never part of the detail.
 fn runs_as(p: &Payload) -> Value {
     let mut v = p.tool_input.clone();
+    // No input and an empty object render the same (empty) detail.
+    if v.as_object().is_some_and(|o| o.is_empty()) {
+        v = Value::Null;
+    }
     if bash_command(p).is_some()
         && let Some(o) = v.as_object_mut()
     {
