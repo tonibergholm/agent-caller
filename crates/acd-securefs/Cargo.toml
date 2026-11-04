@@ -7,5 +7,17 @@ license.workspace = true
 [target.'cfg(all(unix, not(target_os = "android")))'.dependencies]
 libc.workspace = true
 
+# Windows owner-only checks (DACL and owner SID). windows-sys is Microsoft's
+# raw-binding crate and is already in Cargo.lock (0.61.2, used by tokio,
+# socket2 and others), so this adds no new package; only features are enabled.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile.workspace = true
