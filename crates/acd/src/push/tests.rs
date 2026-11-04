@@ -322,10 +322,12 @@ async fn no_registered_device_means_no_wake() {
 async fn a_flood_of_requests_wakes_a_device_once_per_window() {
     let rig = Rig::new(Settings { min_interval: Duration::from_secs(3600), max_concurrent: MAX_CONCURRENT }).await;
     rig.enroll("phone").await;
+    // Each request is handled before the next opens, so the debounce, not the
+    // coalescing of a burst, is what holds the wakes back.
     for n in 0..50 {
         rig.open(n);
+        rig.push.handled(n as u64 + 1).await;
     }
-    rig.push.handled(50).await;
     // One immediate wake; the trailing one is owed for the window's end.
     assert_eq!(rig.relay.hits(), 1);
 }
@@ -564,7 +566,7 @@ async fn registrations_and_their_state_survive_a_restart() {
     let again = Rig::in_dir(dir, relay, NO_WINDOW, Duration::from_secs(5));
     let st = again.state("phone");
     assert_eq!((st.status, st.failures), (Status::RelayError, 1));
-    assert_eq!(again.status("phone").await.registered, true);
+    assert!(again.status("phone").await.registered);
 }
 
 // ---- registration over acd/1 ----
