@@ -43,7 +43,8 @@ fail() { printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 check() { # description, command...
 	local d=$1
 	shift
-	if "$@" >/dev/null 2>&1; then pass "$d"; else fail "$d"; fi
+	local out
+	if out=$("$@" 2>&1); then pass "$d"; else fail "$d"; printf '%s\n' "$out" | head -5 | sed 's/^/      /'; fi
 }
 
 if [ "$(id -u)" -eq 0 ]; then
