@@ -26,6 +26,10 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
 - The address range check is not authentication; the TLS certificate pin is.
   `acd pair` prints a pairing line containing the pin and client token. TCP
   clients must verify the configured pin; there is no plaintext fallback.
+  The pairing host is an ASCII hostname (at most 253 bytes; labels of 1 to 63
+  letters, digits and hyphens) or an IP literal, with IPv6 in brackets, then
+  `:port`. Anything else (whitespace, control or bidi characters, userinfo,
+  path, query, non-ASCII) is not a pairing line.
   `acd tls rotate` changes the certificate for new sessions, keeps existing
   sessions open, and keeps the client token unchanged. Pair every app again.
 
@@ -40,7 +44,13 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
 
 **Limits.**
 - `hello` must arrive within 5 s.
-- Frames are limited to 1 MiB.
+- Frames are limited to 1 MiB, in both directions. A client drops a
+  connection whose peer sends a larger frame or message, as the daemon does,
+  and reconnects without `resume` (a resync), like the state limits below.
+- **Client state limits.** A client holds at most 1000 agents per machine,
+  and no single agent may encode to more than 64 KiB of JSON. A snapshot or
+  `agent.updated` past either limit ends the connection as a resync: the
+  client reconnects without `resume` and keeps none of the offending state.
 - **Unauthenticated connections.** Counted from TCP accept until `hello`
   authenticates, the connection is cut, or it closes.
   - Per source IP: at most 2. A third connection from the same address is
@@ -57,7 +67,9 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
   blocks connections opened from web pages.
 - **Ids and text.** A command `id`, `request_id`, `agent_id` and
   `hello.client.id` are at most 128 bytes. Answer `text` and `agent.send`
-  `text` are at most 64 KiB. An oversized command gets a `bad_request`
+  `text` are at most 64 KiB. Both texts hold no control character other
+  than newline and tab, no bidi override and no line or paragraph separator;
+  otherwise the command gets `bad_request`. An oversized command gets a `bad_request`
   result and reserves nothing. A `hello` with an oversized `client.id` gets
   `error {code: "bad_request"}` and the connection is closed with 4401.
 - **Commands in flight.** At most 32 per session and 256 across the daemon,

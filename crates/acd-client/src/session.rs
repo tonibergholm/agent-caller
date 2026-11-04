@@ -1,7 +1,7 @@
 //! One connection's model of a daemon (spec §7.4). Pure: no I/O, no clock.
 use std::collections::BTreeMap;
 
-use acd_protocol::{Agent, Cursor, Machine, Request, ResolveReason, ResolvedBy, ServerMessage};
+use acd_protocol::{Agent, MAX_AGENT_BYTES, MAX_AGENTS_PER_MACHINE, Cursor, Machine, Request, ResolveReason, ResolvedBy, ServerMessage};
 
 #[derive(Clone, Debug, Default)]
 pub struct Session {
@@ -36,6 +36,10 @@ pub enum Applied {
         message: Option<String>,
     },
     Resync(&'static str),
+}
+
+fn agent_too_big(agent: &Agent) -> bool {
+    serde_json::to_vec(agent).map_or(true, |v| v.len() > MAX_AGENT_BYTES)
 }
 
 fn event_pos(msg: &ServerMessage) -> Option<(&str, u64)> {
@@ -112,6 +116,9 @@ impl Session {
             if self.welcome_epoch.as_deref() != Some(epoch.as_str()) {
                 return Applied::Resync("snapshot from another epoch");
             }
+            if agents.len() > MAX_AGENTS_PER_MACHINE || agents.iter().any(agent_too_big) {
+                return Applied::Resync("snapshot over the agent limits");
+            }
             self.agents = agents
                 .iter()
                 .map(|agent| (agent.id.clone(), agent.clone()))
@@ -146,6 +153,12 @@ impl Session {
 
         match msg {
             ServerMessage::AgentUpdated { agent, .. } => {
+                if agent_too_big(agent)
+                    || (!self.agents.contains_key(&agent.id)
+                        && self.agents.len() >= MAX_AGENTS_PER_MACHINE)
+                {
+                    return Applied::Resync("agent over the agent limits");
+                }
                 self.agents.insert(agent.id.clone(), agent.clone());
                 Applied::Changed
             }

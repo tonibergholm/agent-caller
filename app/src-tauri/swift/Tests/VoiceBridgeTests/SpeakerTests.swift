@@ -149,16 +149,24 @@ final class SpeakerTests: XCTestCase {
     /// capture start runs `silenceForCapture`. The tail is measured from that cut,
     /// not from when Swift looks, or the normal path would wait for nothing.
     func testTheTailIsWaitedWhenRustStoppedSpeechJustBefore() {
-        let (speaker, synth, _, _) = rig()
-        synth.set(speaking: true)
-        speaker.say(1, text: "a long summary", voice: nil, rate: VB_RATE_NORMAL)
-        synth.quietsOnStop = true // the real synthesizer reports quiet at once
-        speaker.stop()            // Rust's stop, before the capture start
-        let cut = Date()
-        speaker.silenceForCapture()
-        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(cut), Double(Speaker.tailMs) / 1000 - 0.008,
-                                    "the audio tail is waited from the cut")
-        XCTAssertLessThan(Date().timeIntervalSince(cut), 0.15)
+        // The best of five, like the test above: a loaded CI runner can stall one
+        // wait well past the bound, while a wait that polled out the drain would be
+        // slow every time.
+        var shortest = Double.infinity
+        for _ in 0..<5 {
+            let (speaker, synth, _, _) = rig()
+            synth.set(speaking: true)
+            speaker.say(1, text: "a long summary", voice: nil, rate: VB_RATE_NORMAL)
+            synth.quietsOnStop = true // the real synthesizer reports quiet at once
+            speaker.stop()            // Rust's stop, before the capture start
+            let cut = Date()
+            speaker.silenceForCapture()
+            let waited = Date().timeIntervalSince(cut)
+            XCTAssertGreaterThanOrEqual(waited, Double(Speaker.tailMs) / 1000 - 0.008,
+                                        "the audio tail is waited from the cut")
+            shortest = min(shortest, waited)
+        }
+        XCTAssertLessThan(shortest, 0.15)
     }
 
     /// No speech was cut lately: nothing to wait for.

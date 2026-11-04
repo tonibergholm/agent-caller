@@ -69,6 +69,18 @@ pub enum PairingError {
     Token,
 }
 
+/// An ASCII DNS name: at most 253 bytes, dot-separated labels of 1 to 63
+/// letters, digits and hyphens, none starting or ending with a hyphen.
+fn valid_hostname(host: &str) -> bool {
+    host.len() <= 253
+        && host.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
 impl Pairing {
     pub fn parse(s: &str) -> Result<Pairing, PairingError> {
         let s = s.trim();
@@ -84,17 +96,17 @@ impl Pairing {
         let (host, port) = if let Some(ipv6) = address.strip_prefix('[') {
             let (host, tail) = ipv6.split_once(']').ok_or(PairingError::Host)?;
             let port = tail.strip_prefix(':').ok_or(PairingError::Port)?;
+            if host.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err(PairingError::Host);
+            }
             (host, port)
         } else {
-            address.rsplit_once(':').ok_or(PairingError::Port)?
+            let (host, port) = address.rsplit_once(':').ok_or(PairingError::Port)?;
+            if host.parse::<std::net::Ipv4Addr>().is_err() && !valid_hostname(host) {
+                return Err(PairingError::Host);
+            }
+            (host, port)
         };
-        if host.is_empty()
-            || host
-                .chars()
-                .any(|c| c.is_whitespace() || matches!(c, '/' | '@' | '?' | '#' | '[' | ']'))
-        {
-            return Err(PairingError::Host);
-        }
         let port = port
             .parse::<u16>()
             .ok()

@@ -75,3 +75,68 @@ fn pin_is_sha256_of_spki() {
     );
     assert!(pins_equal(PIN, PIN) && !pins_equal(PIN, &spki_pin(b"x")));
 }
+
+fn line(address: &str) -> String {
+    format!("acd://{address}?pin={PIN}#{TOKEN}")
+}
+
+#[test]
+fn accepts_hostnames_and_ip_literals() {
+    for host in [
+        "h",
+        "devbox.tail1234.ts.net",
+        "Dev-Box.example.com",
+        "127.0.0.1",
+        "100.101.102.103",
+        "[fd7a:115c:a1e0::1]",
+        "[::1]",
+    ] {
+        assert!(Pairing::parse(&line(&format!("{host}:47800"))).is_ok(), "{host}");
+    }
+    let longest = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(61));
+    assert_eq!(longest.len(), 253);
+    assert!(Pairing::parse(&line(&format!("{longest}:1"))).is_ok());
+}
+
+#[test]
+fn rejects_anything_that_is_not_a_hostname_or_ip_literal() {
+    let too_long = format!("{}.com", "a".repeat(250));
+    let long_label = "a".repeat(64);
+    for host in [
+        "\u{202e}moc.live",
+        "ho\0st",
+        "host\x7f",
+        "ho st",
+        "host\t",
+        "127.0.0.1\u{200b}",
+        "ｈｏｓｔ",
+        "münchen.de",
+        "user@host",
+        "user:pw@host",
+        "host/path",
+        "host?x=1",
+        "-host",
+        "host-",
+        "a..b",
+        ".host",
+        "host.",
+        "ho_st",
+        "a:b",
+        "[1.2.3.4]",
+        "[host]",
+        "[fe80::1%eth0]",
+        "[fd7a::1\u{200b}]",
+        &too_long,
+        &long_label,
+    ] {
+        assert_eq!(
+            Pairing::parse(&line(&format!("{host}:47800"))),
+            Err(PairingError::Host),
+            "{host:?}"
+        );
+    }
+    assert_eq!(
+        Pairing::parse(&line(&format!("{}:47800", "a".repeat(100_000)))),
+        Err(PairingError::Host)
+    );
+}

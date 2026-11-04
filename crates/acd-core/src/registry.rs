@@ -706,12 +706,6 @@ impl Registry {
     }
 }
 
-/// Control characters other than newline and tab are never forwarded to an agent.
-pub fn has_forbidden_control(text: &str) -> bool {
-    text.chars()
-        .any(|c| c.is_control() && c != '\n' && c != '\t')
-}
-
 impl Registry {
     pub fn claim(
         &mut self,
@@ -781,7 +775,7 @@ impl Registry {
         if !a.can_send {
             return Err(ErrorCode::NotSupported);
         }
-        if text.trim().is_empty() || has_forbidden_control(text) {
+        if text.trim().is_empty() || acd_protocol::text::has_forbidden_chars(text) {
             return Err(ErrorCode::BadRequest);
         }
         if a.pending.is_some() || a.state == AgentState::NeedsYou {
