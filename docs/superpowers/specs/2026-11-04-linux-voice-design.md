@@ -60,7 +60,7 @@ behind **off-by-default features** (§3.2).
 One process first: `acd-inbox` already owns the secrets, the `Inbox` and the Quickshell
 socket. If the owner wants "audio code can never touch the network", a later split moves
 `acd-voice-linux` behind a second user unit with `RestrictAddressFamilies=AF_UNIX` and
-`IPAddressDeny=any`, talking to `acd-inbox` over a socket. The `BackendSink` seam (§3.3) is the
+`IPAddressDeny=any` (plus the audio and D-Bus sockets it needs), talking to `acd-inbox` over a socket. The `BackendSink` seam (§3.3) is the
 cut line. Not in the first slice.
 
 ## 3. Interface to implement
@@ -80,7 +80,7 @@ There is no single "port trait". The Swift bridge fills these seams; Linux fills
 | `VB_EV_PARTIAL / FINAL / ERROR` | `ListenEvent::{Partial, Final{audio, voiced}, Error}` → `Controller::speech_event` | `BackendSink::listen(ListenEvent)` |
 | `VB_EV_CAPTURE` | `Controller::capture(gen, on)` | `BackendSink::capture(gen, on)`; **must** be emitted from the real device start/stop, not from `start()` returning |
 | `VB_EV_OVERFLOW` | `Controller::overflow()` | `BackendSink::overflow()` |
-| `VB_EV_SYSTEM` (lock, sleep) | `Controller::system_stop()` / `system_resume()` | host listens to logind `Lock`/`Unlock`/`PrepareForSleep` (D-Bus `org.freedesktop.login1`, as `acd-inbox` already uses `zbus`) and calls the controller |
+| `VB_EV_SYSTEM` (lock, sleep) | `Controller::system_stop()` / `system_resume()` | host observes lock state as specified in §3.5 (the session's `LockedHint` property, not the `Lock`/`Unlock` signals) and `PrepareForSleep`, and calls `system_stop()` / `system_resume()` |
 | `vb_tap_start/stop`, `VB_EV_HOLD`, `VB_EV_OTHER_KEY`, `VB_EV_TAP_DISABLED` | `Controller::hold(down, panel_open)`, `other_key()`, `hold_lost()` | the socket verbs in §5; `other_key` is **never called** on Linux (research §6); `hold_lost()` is called on socket disconnect |
 | `vb_permission_*`, `VB_EV_PERMISSION` | `permissions.rs` | none: Linux has no per-app prompts (U on the machine). A device that cannot be opened is `ListenError::MicrophoneUnavailable` |
 | `vb_model_*`, `VB_EV_MODEL*` | `IntentModel` | out of slice 1 (O7); `Controller::start(.., model: None, ..)` |
@@ -117,8 +117,12 @@ pub trait Transcriber: Send {
     fn name(&self) -> &'static str;                         // log tag only
     fn languages(&self) -> &[Lang];
     /// 16 kHz mono f32. Blocking; runs on the transcription thread, never the audio thread.
-    fn transcribe(&mut self, audio: &[f32], hint: Lang) -> Result<Transcript, EngineError>;
+    /// Must poll `ctl.should_stop()` at least every engine step and return
+    /// `Err(EngineError::Cancelled)` or `Err(EngineError::Deadline)` promptly once it is true.
+    fn transcribe(&mut self, audio: &[f32], hint: Lang, ctl: &StopToken) -> Result<Transcript, EngineError>;
 }
+/// Shared with the session worker. True once the generation was cancelled/superseded or its deadline passed.
+pub struct StopToken { /* AtomicBool cancel + deadline Instant from an injected Clock */ }
 pub struct Transcript { pub text: VoiceText, pub no_speech: Option<f32> /* engine's own signal */ }
 
 pub trait AudioSource: Send {                // real: cpal/PipeWire. Test: WAV file.
@@ -155,8 +159,57 @@ macOS CI needs no CMake, no `libpipewire`, no models; research §9): `capture-pi
    have its own deadline shorter than that or return `Error(Failed)`.
 5. `max` is enforced by the backend as well as the controller (`MAX_RECORDING` 60 s): a
    lost release must not leave the microphone on.
-6. No text in `Debug`, errors, tracing or panics: all text is `VoiceText`; engine and library
+6. **Transcription is cancellable and has a deadline.** Each job carries a `StopToken` (cancel flag plus a deadline
+   shorter than `FINAL_TIMEOUT`, taken from an injected clock). `start(g2)`, `cancel(g1)`, lock and shutdown set the
+   token of the running job; the engine adapter must observe it. whisper.cpp: `whisper_full_params` has
+   `abort_callback` / `abort_callback_user_data` (checked in `include/whisper.h` v1.8.2; the version that
+   `whisper-rs` 0.16.0 pins is **not yet checked**, so step 2 verifies the header and the `whisper-rs` setter before relying on it).
+   The callback reads the token. An engine with no abort hook (a sherpa-onnx offline recognizer, unverified) runs the job
+   on a **disposable worker**: the transcription thread abandons the job at cancel, marks that engine instance
+   *busy-poisoned* (its result is dropped on arrival, the generation check discards it), and generation 2 uses a second
+   instance or reports `Error(Failed)` immediately if none is free. It never waits behind the cancelled job. With the
+   token set, the audio buffer of that job is zeroed and dropped by the transcription thread before the next job is taken;
+   an abandoned job's buffer is dropped when its engine call returns. A cancelled job never emits `Final`.
+   Test: an engine double that ignores the token for a fixed number of steps (stays busy after cancellation). Using a
+   controlled clock and a gate the test releases, generation 2 must produce its `Final` or `Error` without
+   generation 1 having finished, generation 1 produces nothing, and the deadline path returns `Error(Failed)` before
+   `FINAL_TIMEOUT` on the controlled clock.
+7. No text in `Debug`, errors, tracing or panics: all text is `VoiceText`; engine and library
    errors are mapped to `ListenError` codes at the boundary and the original is dropped.
+
+### 3.5 Lock and sleep observation (fail closed)
+
+`org.freedesktop.login1` documents `Lock` and `Unlock` (signals on the session and manager) as
+**requests** to the session's locker to lock or unlock; they are not reports that the screen is
+locked. A shell-initiated lock (a locker started directly, an idle daemon calling it) need not emit
+them at all, and `PrepareForSleep(false)` (resume) proves nothing about whether the screen is locked.
+So none of these signals is treated as state. Reference: logind D-Bus API,
+<https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.login1.html> (`LockedHint`,
+`SetLockedHint`, `Lock`, `Unlock`, `PrepareForSleep`). Not re-fetched in the authoring session
+(freedesktop.org was not reachable); the first implementation step re-reads it and `doctor` proves the behaviour on the machine.
+
+- **State source:** the `LockedHint` boolean property of this process's own session
+  (`Manager.GetSessionByPID`, then `org.freedesktop.DBus.Properties.Get` and `PropertiesChanged`).
+  It is only as truthful as the client that calls `SetLockedHint`, which is the locker or shell. It is
+  an observation, not an enforcement.
+- **Second source (optional, when the locker offers one):** the compositor or locker's own state signal
+  (for example an `ext-session-lock-v1` surface present, or a locker-specific signal). Which of these
+  Omarchy's locker provides is **unverified**; it is an open item for the hardware step. When two
+  sources exist, "locked" from either wins.
+- **Initial state:** read `LockedHint` synchronously before the backend accepts any `hold`. Until that read
+  succeeds the state is **locked**.
+- **Locked means:** no microphone is opened, any open capture is closed (`system_stop()`), no content is
+  spoken (`Speaker::stop()`, alerts suppressed), and every countdown is cancelled. Unlocking resumes
+  nothing by itself; a new press is required.
+- **Fail closed when observation is lost:** the D-Bus connection drops, the property read errors, the
+  session cannot be resolved, or `PropertiesChanged` stops arriving (the connection to the bus closes): the state becomes
+  **locked** and stays so until a fresh successful property read reports `false`. Reconnect attempts re-read first.
+- **`doctor` check:** locks the session through the configured locker, and confirms `LockedHint`
+  turns true and false again within the check. If no locker sets `LockedHint` and no second source exists, lock state is
+  unobservable and voice reports `Unavailable` rather than assuming unlocked.
+- **Tests:** a fake lock-state source (no D-Bus): initial unread = locked; `Lock` signal without a hint change leaves
+  state unchanged; hint true cancels capture, speech and countdowns; source error or close flips to locked; resume from
+  sleep with the hint unread stays locked. The loop waits on the fake's events, not on sleeps.
 
 ### 3.4 Changes to `acd-voice` (design decision, not yet made)
 
@@ -278,10 +331,28 @@ confirm plus the already-bound Esc binding.
 ## 6. Speech output
 
 `Speaker` for Linux spawns the engine as a **child process** per utterance (eSpeak NG first; Piper opt-in),
-piping PCM to PipeWire playback (`pw-cat`/`pw-play`, or cpal output; U on the machine). `say(g, text, voice, rate)`
-kills any previous child; `stop()` kills and reaps synchronously (the microphone may open next, plan V12);
-child exit with status 0 → `BackendSink::spoken(g)`; a killed child produces **no** event; a failure also
-produces `spoken(g)` so the controller does not wait for the speech cap. Text goes to the child on **stdin**,
+piping PCM to PipeWire playback (`pw-cat`/`pw-play`, or cpal output; U on the machine). The synthesizer exiting is **not**
+playback completion: PCM can still sit in the pipe, in the playback process, or in the audio server's buffer.
+
+- **Pipeline ownership:** one `PlaybackPipeline` per utterance owns the synthesizer child, the playback child (or the cpal
+  output stream) and the pipe between them, started in one process group (or one cpal stream plus one child). Nothing outlives it.
+- **Completion:** `spoken(g)` is emitted only after the playback end is done: the playback child has exited 0 after its stdin
+  closed (it drains before exit), or the cpal stream's drain callback reported the last frame played, **and** the
+  synthesizer exited. A synthesizer failure with nothing played also emits `spoken(g)` so the controller does not wait for the
+  speech cap. A failure of the playback process emits `spoken(g)` too (nothing more will be heard).
+- **`say(g, ..)`** stops the previous pipeline (below) before starting the next one.
+- **`stop()` silences the whole pipeline before returning:** kill the whole process group (synthesizer and playback), drop or
+  close the cpal stream, flush or discard queued PCM, and reap every child synchronously. It does not return while any
+  part can still emit sound, because a microphone may open next (plan V12) and would capture the app's own speech. A stopped
+  pipeline emits **no** event. If a child cannot be reaped, the speaker reports it as an overflow-class failure and the
+  host invalidates (fail closed) rather than opening the microphone.
+- **Test:** a fast synthesizer double (writes all PCM and exits at once) and a deliberately slow playback double (reads
+  slowly and exits only when its input is drained, released by the test). Asserts: no `spoken` while playback runs even
+  after the synthesizer exited; `spoken` once playback is released; `stop()` during that gap returns only after both doubles are
+  dead, produces no `spoken`, and a following capture request sees no playback process alive. Synchronised on the doubles'
+  events, not on sleeps.
+
+Playback is the part of "kill the child" still to prove on the machine (§13). Text goes to the child on **stdin**,
 never on the command line (visible in `ps`). Rate maps to the engine's speed argument. Voices list from the engine.
 Alerts keep the Mac rules (silent while recording, coalesced, off by default; `acd-voice` already does this).
 
@@ -303,8 +374,13 @@ Voice is **off by default**. A setting never contains a transcript.
   A hash mismatch deletes the file and reports `ModelCorrupt`; a missing file reports `ModelMissing`.
 - **Load-time check:** size and a stored "verified" marker bound to size+mtime; full hash on `fetch`, `verify`, `doctor`.
   A swapped file with the same size and mtime is out of the threat model (same-user attacker already owns the daemon).
-- **No silent network:** the voice process opens no sockets other than the `acd-inbox` Unix socket. A test greps the
-  crate for network types, and the optional split unit (O8) enforces it with the kernel.
+- **No silent network (policy, not isolation):** backend policy is that voice code makes no network connections and the
+  only network use is the explicit `fetch` command. That is a code-review and test-by-behaviour policy (the backend crate has no
+  HTTP client dependency outside the `fetch` feature, and its tests run with a fake sink). It is **not** process isolation:
+  in the first slice voice runs inside the network-connected `acd-inbox` (O8), which also needs audio and D-Bus access.
+  A grep for network types is not proof and is not used as one. Kernel enforcement exists only with the optional split unit
+  (`RestrictAddressFamilies=AF_UNIX`, which then also needs the audio and D-Bus sockets allowed, so it is `AF_UNIX` plus the
+  specific paths), not before.
 - **Packaging:** native Arch package first, PKGBUILD pins crate versions and the manifest; optional features
   built into a separate package so the default package needs no GPU stack. The release workflow is out of scope here.
 - **Privacy:** audio only in a bounded in-memory buffer between press and the engine's return; nothing on disk, in logs,
@@ -326,8 +402,8 @@ every mutation Confirm-level), and the lesson from the Mac model work (a case pe
 1. **Pure unit tests (default CI, every OS):** resampler (known sine in/out, exact length and RMS within 1 %),
    gate (synthetic speech-like bursts vs noise at set SNRs), the session state machine with `FakeTranscriber` and
    `WavSource` (generation drop, cancel, stop-without-final timeout, cap, overflow → `overflow()`), manifest and
-   hash verification with a temp file, the speaker child lifecycle with a fake `sleep`/`true` binary (kill-on-stop,
-   synchronous reap, `spoken` only on exit 0 or failure, none on kill).
+   hash verification with a temp file, the speaker child lifecycle with a fake `sleep`/`true` binary (kill-on-stop of the whole pipeline,
+   synchronous reap, `spoken` only after playback drains or on failure, none on kill; fast synthesizer plus slow playback).
 2. **Contract tests against `acd-voice-client`:** the real `Controller` with `AcdPort` over the existing fake
    daemon helpers, with `LinuxBackend` + `WavSource` + `FakeTranscriber`: a WAV "approve" → countdown HUD; silence WAV →
    `Ignored`; a second `start` cancels the first; a 70 s WAV is cut at 60 s and discarded; a late `Final` for an old
@@ -357,7 +433,7 @@ every mutation Confirm-level), and the lesson from the Mac model work (a case pe
   - Intent level, **zero tolerance:** for every clip, `fast::parse(normalize(text))` equals the sidecar `intent`
     (`None` for non-speech and for minimal pairs that must *not* match). A single wrong fast-path intent fails the suite,
     whatever the WER.
-  - Non-speech: no `Final` text at all, or an empty one; ≥ 0 hallucinated words are a failure.
+  - Non-speech: no `Final` text at all, or an empty one; > 0 hallucinated words is a failure.
   - Free text (phrases outside the fast table): normalised word error rate ≤ 10 % per clip and ≤ 5 % on average over the
     set (thresholds are placeholders to be set from the first measured run, as the Mac doc did; they will not be loosened to pass).
   - Timing: not asserted in CI; recorded by `doctor` and the hand run.

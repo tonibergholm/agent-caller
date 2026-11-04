@@ -136,7 +136,7 @@ naturalness is a comfort feature, not a requirement.
 
 | Engine | Licence | Quality / languages | Integration | Notes |
 |---|---|---|---|---|
-| **eSpeak NG 1.52** (12 Dec 2024, V) | GPLv3 (C; the releases page names no licence) | robotic, tiny, English and Finnish (C) | subprocess (`espeak-ng`), kill to stop | Always installable, instant start. As a child process the GPL does not reach our MIT code (U: owner's licence reading). |
+| **eSpeak NG 1.52** (12 Dec 2024, V) | GPLv3 (C; the releases page names no licence) | robotic, tiny, English and Finnish (C) | subprocess (`espeak-ng`), kill to stop | Small, but availability per distribution and start latency are not verified or measured. As a child process the GPL does not reach our MIT code (U: owner's licence reading). |
 | **Piper** (`OHF-Voice/piper1-gpl` v1.8.0, 04 Sep, V) | **GPLv3** (V, release notes: "Change license to GPLv3" at v1.3.0) | natural neural voices; Finnish "Harri medium" ~63 MB (C, HF card, not re-fetched) | subprocess; or `piper-rs` 0.2.0 (MIT crate, 2026-05-21, V: does it embed GPL code? U) | Voice models carry their own licences (C). |
 | **Kokoro-82M** | Apache-2.0 (V, repo README) | 82M parameters; languages: en-US, en-GB, es, fr, hi, it, ja, pt-BR, zh (V). **No Finnish.** | Python package needs espeak-ng for out-of-dictionary English and some languages (V); sherpa-onnx has Kokoro English scripts (V) | Good English, not Finnish. |
 | Speech Dispatcher 0.12.1 (C) | daemon GPL, client LGPL (C) | whatever module is configured; some modules are cloud | SSIP socket | Adds a daemon and a module-choice privacy question. Not needed. |
