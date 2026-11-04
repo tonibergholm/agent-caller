@@ -34,3 +34,21 @@ fn the_rate_window_ends_exactly_at_its_length() {
     }
     assert!(!g.admit("m", "id".into(), "early".into(), at(1), t0 + NOTIFY_RATE_WINDOW - Duration::from_nanos(1)));
 }
+
+/// inbox.rs:157 `>` -> `>=` / `==` / `<` (`NotifyGate::admit`): the history keeps
+/// exactly `NOTIFIED_HISTORY_MAX` keys, so the oldest is forgotten only on the
+/// one after that.
+#[test]
+fn the_history_holds_exactly_its_maximum() {
+    let mut g = NotifyGate::default();
+    let now = Instant::now();
+    // A distinct machine per key keeps the rate limit out of the way.
+    let admit = |g: &mut NotifyGate, i: usize| g.admit(&format!("machine-{i}"), "id".into(), format!("r{i}"), at(1), now);
+    for i in 0..NOTIFIED_HISTORY_MAX {
+        assert!(admit(&mut g, i));
+    }
+    assert!(!g.admit("again", "id".into(), "r0".into(), at(1), now), "still remembered at the limit");
+    assert!(admit(&mut g, NOTIFIED_HISTORY_MAX));
+    assert!(g.admit("again", "id".into(), "r0".into(), at(1), now), "the oldest is forgotten one past the limit");
+    assert!(!g.admit("again", "id".into(), format!("r{NOTIFIED_HISTORY_MAX}"), at(1), now));
+}

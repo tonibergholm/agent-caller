@@ -75,7 +75,8 @@ fn secrets_for(f: &FakeServer) -> Arc<MemorySecrets> {
 
 fn options() -> InboxOptions {
     InboxOptions {
-        timing: common::fast(),
+        // A long undo period, so a countdown never fires while a test looks at it.
+        timing: acd_client::Timing { undo: Duration::from_secs(60), ..common::fast() },
         settings_path: None,
         client_name: "t".into(),
         client_version: "0".into(),
@@ -272,4 +273,139 @@ fn only_fired_is_not_terminal() {
     ] {
         assert!(o.is_terminal(), "{o:?}");
     }
+}
+
+// ---- typed answers and replies ----
+use acd_client::actions::ActionOwner;
+use acd_client::voice::Guard;
+
+const ALL: [&str; 4] = ["answer", "send", "mark_seen", "answer.revision"];
+const UNDO_MS: f64 = 60_000.; // `options()`: undo is 60 s
+
+fn free_text_agent() -> Value {
+    agent(|p| p["free_text"] = json!(true))
+}
+
+/// A working agent that takes a reply and has no request.
+fn quiet_agent() -> Value {
+    let mut a = agent(|_| {});
+    a["pending"] = Value::Null;
+    a["state"] = json!("working");
+    a
+}
+
+async fn only_action(ib: &Inbox) -> ActionView {
+    view_until(ib, "a countdown", |v| !v.actions.is_empty()).await;
+    let v = ib.view().borrow().clone();
+    assert_eq!(v.actions.len(), 1, "{:?}", v.actions);
+    v.actions[0].clone()
+}
+
+/// inbox.rs:1184 / 1250 / 1308 (`fires_at_ms = now_ms() + undo * 1000`): the
+/// countdown the user sees ends one undo period from now, for a pick, a typed
+/// answer and a reply.
+#[tokio::test]
+async fn the_countdown_shown_ends_one_undo_period_from_now() {
+    use acd_client::conn::now_ms;
+    let (_f, ib) = inbox_with(&ALL, agent(|_| {})).await;
+    let before = now_ms();
+    ib.pick("m1/a1", REQ, "allow", 1).unwrap();
+    let after = now_ms();
+    let shown = only_action(&ib).await.fires_at_ms;
+    assert!(before + UNDO_MS <= shown && shown <= after + UNDO_MS, "pick: {before} {shown} {after}");
+
+    let (_f, ib) = inbox_with(&ALL, free_text_agent()).await;
+    let before = now_ms();
+    ib.answer_text("m1/a1", REQ, 1, "go on".into()).unwrap();
+    let after = now_ms();
+    let shown = only_action(&ib).await.fires_at_ms;
+    assert!(before + UNDO_MS <= shown && shown <= after + UNDO_MS, "answer_text: {before} {shown} {after}");
+
+    let (_f, ib) = inbox_with(&ALL, quiet_agent()).await;
+    let before = now_ms();
+    ib.reply("m1/a1", "hello".into()).unwrap();
+    let after = now_ms();
+    let shown = only_action(&ib).await.fires_at_ms;
+    assert!(before + UNDO_MS <= shown && shown <= after + UNDO_MS, "reply: {before} {shown} {after}");
+}
+
+/// inbox.rs:1203 `>` -> `>=` (`answer_text_with`): a typed answer of exactly 16 KiB is
+/// accepted, one byte more is not.
+#[tokio::test]
+async fn a_typed_answer_may_be_exactly_16_kib() {
+    assert_eq!(ANSWER_TEXT_MAX_BYTES, 16 * 1024);
+    let (_f, ib) = inbox_with(&ALL, free_text_agent()).await;
+    assert_eq!(
+        ib.answer_text("m1/a1", REQ, 1, "x".repeat(ANSWER_TEXT_MAX_BYTES + 1)),
+        Err(PickError::BadAnswerText)
+    );
+    assert!(ib.answer_text("m1/a1", REQ, 1, "x".repeat(ANSWER_TEXT_MAX_BYTES)).is_ok());
+}
+
+/// inbox.rs:1212 `||` -> `&&` (`answer_text_with`): no answering without the capability.
+#[tokio::test]
+async fn a_typed_answer_needs_the_answer_capability() {
+    let (_f, ib) = inbox_with(&["send", "mark_seen"], free_text_agent()).await;
+    assert_eq!(ib.answer_text("m1/a1", REQ, 1, "go".into()), Err(PickError::NotAnswerable));
+}
+
+/// inbox.rs:1339 `answer_text_owned -> Ok(String::new() / "xyzzy")`: it returns
+/// the id of the action it started, owned by the caller.
+#[tokio::test]
+async fn an_owned_typed_answer_returns_its_action_id() {
+    let (_f, ib) = inbox_with(&ALL, free_text_agent()).await;
+    let id = ib.answer_text_owned(ActionOwner(7), "m1/a1", REQ, 1, "go".into()).unwrap();
+    assert_eq!(only_action(&ib).await.id, id);
+    assert_eq!(ib.answer_text_owned(ActionOwner(8), "m1/a1", REQ, 1, "again".into()), Err(PickError::AlreadyCounting));
+}
+
+/// inbox.rs:1258 `>` -> `==` / `>=`, `*` -> `+` (`reply_with`): a reply of exactly
+/// 64 KiB is accepted, one byte more or a blank one is not.
+#[tokio::test]
+async fn a_reply_may_be_exactly_64_kib() {
+    let (_f, ib) = inbox_with(&ALL, quiet_agent()).await;
+    assert_eq!(ib.reply("m1/a1", "x".repeat(64 * 1024 + 1)), Err(PickError::BadText));
+    assert_eq!(ib.reply("m1/a1", "x".repeat(64 * 1024 + 2000)), Err(PickError::BadText));
+    assert_eq!(ib.reply("m1/a1", "  \n ".into()), Err(PickError::BadText));
+    assert!(ib.reply("m1/a1", "x".repeat(64 * 1024)).is_ok());
+}
+
+fn voice_guard(ib: &Inbox) -> Guard {
+    Guard { conn: ib.conn_stamp("m1").unwrap(), agent_id: "a1".into(), request: None, named_send_only: false }
+}
+
+/// inbox.rs:1269 / 1270 `&&` -> `||` (`reply_with`, voice path): the live state
+/// must be online, with the send capability, and an agent that can take a reply.
+#[tokio::test]
+async fn a_voice_reply_needs_the_send_capability_and_an_agent_that_takes_one() {
+    let (_f, ib) = inbox_with(&ALL, quiet_agent()).await;
+    assert!(ib.reply_guarded("m1/a1", "hi".into(), &voice_guard(&ib)).is_ok());
+
+    let (_f, ib) = inbox_with(&["answer", "mark_seen", "answer.revision"], quiet_agent()).await;
+    assert_eq!(ib.reply_guarded("m1/a1", "hi".into(), &voice_guard(&ib)), Err(PickError::CannotReply));
+
+    let mut mute = quiet_agent();
+    mute["can_send"] = json!(false);
+    let (_f, ib) = inbox_with(&ALL, mute).await;
+    assert_eq!(ib.reply_guarded("m1/a1", "hi".into(), &voice_guard(&ib)), Err(PickError::CannotReply));
+}
+
+/// inbox.rs:577 / 631 (`rename_machine`, `remove_machine_checked`): the running
+/// machine list follows a rename and a removal, not only the saved settings.
+#[tokio::test]
+async fn the_live_machine_list_follows_rename_and_remove() {
+    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let g = FakeServer::start(common::TOKEN, Identity::Paired).await;
+    let ib = Inbox::new(settings_for(&f), secrets_for(&f), options());
+    ib.start();
+    let second = ib.pair_machine(&line(&g)).unwrap();
+    view_until(&ib, "both machines", |v| v.machines.len() == 2).await;
+    ib.rename_machine(&second.key, "Other").unwrap();
+    view_until(&ib, "the new name", |v| {
+        v.machines.iter().any(|m| m.key == second.key && m.name == "Other")
+            && v.machines.iter().any(|m| m.key == "m1" && m.name == "Box")
+    })
+    .await;
+    ib.remove_machine_checked(&second.key).unwrap();
+    view_until(&ib, "one machine", |v| v.machines.len() == 1 && v.machines[0].key == "m1").await;
 }

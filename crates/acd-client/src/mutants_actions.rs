@@ -103,3 +103,20 @@ fn debug_output_never_shows_request_or_typed_text() {
     assert!(format!("{:?}", ActionKind::AnswerText(text)).starts_with("AnswerText("));
     assert!(format!("{:?}", ActionKind::Reply { text: "x".into() }).contains("text_bytes"));
 }
+
+/// `check_reason` `||` -> `&&` on the typed-answer branch (line 282): another
+/// request, one already claimed, or none at all means it was answered elsewhere.
+#[test]
+fn a_typed_answer_to_another_or_a_claimed_request_was_answered_elsewhere() {
+    let r = req();
+    let a = action(ActionKind::AnswerText(TextSemantics::of(&r, "go")));
+    let mut other = r.clone();
+    other.id = "r-other".into();
+    assert_eq!(check_reason(&a, &state_with(other, true)), Err(NotSentReason::AnsweredElsewhere));
+    let mut claimed = r.clone();
+    claimed.status = RequestStatus::Answering;
+    assert_eq!(check_reason(&a, &state_with(claimed, true)), Err(NotSentReason::AnsweredElsewhere));
+    let mut gone = state_with(r, true);
+    gone.session.agents.get_mut("a").unwrap().pending = None;
+    assert_eq!(check_reason(&a, &gone), Err(NotSentReason::AnsweredElsewhere));
+}
