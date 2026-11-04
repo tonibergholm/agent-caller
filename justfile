@@ -57,3 +57,8 @@ check-version:
 # Runs the release script tests (scripts/tests; also run in CI on ubuntu).
 test-scripts:
     scripts/tests/run.sh
+
+# Type-check the portable client crates for Windows and Android, as the CI
+# portability job does (scripts/portability-check.sh). Needs rustup; no NDK.
+portability-check:
+    scripts/portability-check.sh
