@@ -201,3 +201,166 @@ fn prune_keeps_pending_and_named_requests() {
     assert_eq!(d.request_status("done"), None);
     assert_eq!(d.retained().0, 2);
 }
+
+// ---- t3 mapping, outcome, targets ----
+use acd_adapters::t3::conn::CallError;
+use acd_adapters::t3::detail::PendingView;
+use acd_adapters::t3::map::{self, Target, TargetAnswer};
+use acd_adapters::t3::outcome::{Outcome, classify};
+use acd_adapters::t3::targets::Targets;
+use acd_adapters::t3::wire::{Failure, RuntimeRequest, TurnItem};
+
+/// map.rs:41 match guard `starts_with("codex")` (`kind`): only a codex provider instance is Codex.
+#[test]
+fn provider_instances_map_to_their_agent_kind() {
+    assert_eq!(map::kind(Some("claude-main")), AgentKind::Claude);
+    assert_eq!(map::kind(Some("codex")), AgentKind::Codex);
+    assert_eq!(map::kind(Some("codex-2")), AgentKind::Codex);
+    assert_eq!(map::kind(Some("gemini")), AgentKind::Other);
+    assert_eq!(map::kind(None), AgentKind::Other);
+}
+
+/// map.rs:239 match guard `!questions.is_empty()` (`request_obs`): a question
+/// request with no questions is shown read-only; it must not be indexed.
+#[test]
+fn a_question_request_without_questions_is_read_only() {
+    let view = PendingView {
+        request: RuntimeRequest { id: "rq".into(), kind: "user-input".into(), status: "pending".into() },
+        item: Some(TurnItem::UserInputRequest { id: "i".into(), request_id: "rq".into(), questions: vec![] }),
+        command: None,
+    };
+    let (obs, target) = map::request_obs("t3:a", "thread", Some("codex"), &view);
+    assert_eq!(obs.answer_path, acd_protocol::AnswerPath::None);
+    assert!(obs.options.is_empty() && obs.questions.is_none() && !obs.free_text);
+    assert_eq!(target.answer, TargetAnswer::ReadOnly);
+}
+
+/// outcome.rs:58 match guard `tag == DISPATCH_ERROR` (`classify`): only T3's dispatch
+/// error can be read as "this request is already over"; the same words under any
+/// other tag are an unknown refusal (fail closed: uncertain, never "not delivered").
+#[test]
+fn only_a_dispatch_error_can_say_the_request_is_over() {
+    let fail = |tag: &str, message: &str| -> Result<serde_json::Value, CallError> {
+        Err(CallError::Failed(Failure::Fail { tag: tag.into(), message: message.into() }))
+    };
+    let dispatch = "OrchestrationV2DispatchCommandError";
+    assert!(matches!(
+        classify(&fail(dispatch, "Runtime request rq is resolved."), Some("rq")),
+        Outcome::NotDelivered { code: acd_protocol::ErrorCode::RequestGone, .. }
+    ));
+    for message in ["Runtime request rq is resolved.", "Runtime request rq was not found."] {
+        assert!(matches!(classify(&fail("SomethingElse", message), Some("rq")), Outcome::Uncertain(_)), "{message}");
+    }
+    assert!(matches!(classify(&fail(dispatch, "Runtime request rq is resolved."), None), Outcome::Uncertain(_)));
+    assert!(matches!(classify(&fail(dispatch, "Runtime request other is resolved."), Some("rq")), Outcome::Uncertain(_)));
+    assert!(matches!(classify(&Ok(json!({})), Some("rq")), Outcome::Delivered));
+}
+
+fn target(agent: &str, thread: &str, request: &str) -> Target {
+    Target { agent_id: agent.into(), thread_id: thread.into(), t3_request_id: request.into(), answer: TargetAnswer::Decision }
+}
+
+/// targets.rs:26 / 29 / 33 / 37 (`retain_thread`, `len`, `is_empty`): a thread's targets
+/// are dropped except the one named; other threads are left alone.
+#[test]
+fn retain_thread_keeps_the_named_target_and_other_threads() {
+    let targets = Targets::default();
+    assert!(targets.is_empty());
+    assert_eq!(targets.len(), 0);
+    targets.insert(target("t3:a", "ta", "r1"));
+    targets.insert(target("t3:a", "ta", "r2"));
+    targets.insert(target("t3:a", "ta", "r3"));
+    targets.insert(target("t3:b", "tb", "r4"));
+    assert!(!targets.is_empty());
+    assert_eq!(targets.len(), 4);
+    targets.retain_thread("ta", Some("r2"));
+    assert_eq!(targets.len(), 2, "r2 and the other thread's r4 remain");
+    targets.retain_thread("ta", None);
+    assert_eq!(targets.len(), 1, "only the other thread's target remains");
+    targets.remove("r4");
+    assert!(targets.is_empty());
+}
+
+/// detail.rs:45 `&&` -> `||` (`valid_projection`): both the thread identity and all three lists must be there.
+#[test]
+fn a_projection_needs_its_thread_and_all_three_lists() {
+    let thread = json!({"activeProviderThreadId": "p1"});
+    let lists = |extra: serde_json::Value| {
+        let mut v = json!({"providerThreads": [], "runtimeRequests": [], "turnItems": []});
+        if let Some(o) = extra.as_object() {
+            for (k, val) in o {
+                v[k] = val.clone();
+            }
+        }
+        v
+    };
+    let mut ok = lists(json!({}));
+    ok["thread"] = thread.clone();
+    assert!(ThreadDetail::valid_projection(&ok));
+    for missing in ["providerThreads", "runtimeRequests", "turnItems"] {
+        let mut p = ok.clone();
+        p.as_object_mut().unwrap().remove(missing);
+        assert!(!ThreadDetail::valid_projection(&p), "no {missing}");
+        let mut p = ok.clone();
+        p[missing] = json!({});
+        assert!(!ThreadDetail::valid_projection(&p), "{missing} is not a list");
+    }
+    let mut no_thread = lists(json!({}));
+    no_thread["thread"] = json!("not an object");
+    assert!(!ThreadDetail::valid_projection(&no_thread));
+}
+
+/// detail.rs:128 `delete match arm UserInputRequest` (`prune`): a question whose request is
+/// gone is dropped with it; one whose request is pending stays.
+#[test]
+fn prune_drops_questions_of_requests_that_are_gone() {
+    let mut d = ThreadDetail::default();
+    d.apply(&event("runtime-request.updated", request("rq-live", "pending"))).unwrap();
+    for (item, request_id) in [("i-live", "rq-live"), ("i-gone", "rq-gone")] {
+        d.apply(&event(
+            "turn-item.updated",
+            json!({"type": "user_input_request", "id": item, "requestId": request_id, "questions": []}),
+        ))
+        .unwrap();
+    }
+    assert_eq!(d.retained(), (1, 2));
+    d.prune(&[]);
+    assert_eq!(d.retained(), (1, 1), "only the pending request's question stays");
+}
+
+fn native_of(d: &mut ThreadDetail, thread: &str) -> Option<String> {
+    d.apply(&event("thread.metadata-updated", json!({"activeProviderThreadId": thread}))).unwrap();
+    d.native_session_id().map(str::to_owned)
+}
+
+/// detail.rs:168 `>` -> `==` / `>=` and :172 `!=` -> `==` (`prune`): eight provider threads
+/// are kept, the ninth pushes out the oldest one that is not the active thread.
+#[test]
+fn prune_keeps_eight_provider_threads_and_never_the_active_one_out() {
+    let fill = |n: usize| {
+        let mut d = ThreadDetail::default();
+        for i in 0..n {
+            d.apply(&event("provider-thread.updated", provider_thread(&format!("p{i}"), Some(&format!("n{i}"))))).unwrap();
+        }
+        d
+    };
+    // Exactly eight: nothing is dropped.
+    let mut d = fill(8);
+    d.prune(&[]);
+    for i in 0..8 {
+        assert_eq!(native_of(&mut d, &format!("p{i}")).as_deref(), Some(format!("n{i}").as_str()), "p{i}");
+    }
+    // Nine: the oldest goes, the rest stay.
+    let mut d = fill(9);
+    d.prune(&[]);
+    assert_eq!(native_of(&mut d, "p0"), None);
+    for i in 1..9 {
+        assert_eq!(native_of(&mut d, &format!("p{i}")).as_deref(), Some(format!("n{i}").as_str()), "p{i}");
+    }
+    // The oldest is the active one: it stays, and the next oldest goes instead.
+    let mut d = fill(9);
+    d.apply(&event("thread.metadata-updated", json!({"activeProviderThreadId": "p0"}))).unwrap();
+    d.prune(&[]);
+    assert_eq!(d.native_session_id(), Some("n0"));
+    assert_eq!(native_of(&mut d, "p1"), None);
+}

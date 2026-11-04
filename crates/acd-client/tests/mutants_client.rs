@@ -222,20 +222,36 @@ async fn removing_a_machine_removes_exactly_that_machine() {
     assert_eq!(ib.settings().machines.len(), 1);
 }
 
-/// inbox.rs:648/654 `retry_machine -> ()` / `==` -> `!=`: it retries the named machine.
+/// inbox.rs:648/654 `retry_machine -> ()` / `==` -> `!=`: it retries the named machine, and only that one.
 #[tokio::test]
 async fn retry_machine_retries_the_named_machine() {
-    let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
-    f.set_handshake_error(
-        Some(json!({"type":"error","code":"unsupported_protocol","message":"m","supported":["acd/2"]})),
-        Some(4400),
-    );
-    let ib = Inbox::new(settings_for(&f), secrets_for(&f), options());
+    let incompatible = || async {
+        let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
+        f.set_handshake_error(
+            Some(json!({"type":"error","code":"unsupported_protocol","message":"m","supported":["acd/2"]})),
+            Some(4400),
+        );
+        f
+    };
+    let (f1, f2) = (incompatible().await, incompatible().await);
+    let mut settings = settings_for(&f1);
+    settings.machines.push(MachineEntry {
+        key: "m2".into(),
+        name: "Other".into(),
+        endpoint: EndpointConfig::Tcp { host: "127.0.0.1".into(), port: f2.port() },
+    });
+    let secrets = secrets_for(&f1);
+    secrets
+        .set("m2", &MachineSecret { token: common::TOKEN.into(), pin: f2.pin() }.to_json())
+        .unwrap();
+    let ib = Inbox::new(settings, secrets, options());
     ib.start();
-    wait_for_connections(&f, 1).await;
-    ib.retry_machine("nobody");
+    wait_for_connections(&f1, 1).await;
+    wait_for_connections(&f2, 1).await;
     ib.retry_machine("m1");
-    wait_for_connections(&f, 2).await;
+    // A positive wait: with the wrong machine retried instead, m1 never gets its second attempt.
+    wait_for_connections(&f1, 2).await;
+    ib.retry_machine("nobody"); // an unknown key is ignored
 }
 
 /// tls.rs:74 `is_pin_mismatch -> false`: a pin mismatch is recognised by its message.
@@ -475,7 +491,8 @@ fn a_session_is_synced_only_with_a_cursor_and_a_snapshot() {
 fn a_machine_secret_prints_without_its_token() {
     let s = MachineSecret { token: common::TOKEN.into(), pin: "sha256:PIN".into() };
     let shown = format!("{s:?}");
-    assert!(!shown.contains(common::TOKEN), "{shown}");
+    // No message: a failing assert must not print the token.
+    assert!(!shown.contains(common::TOKEN));
     assert!(shown.starts_with("MachineSecret") && shown.contains("sha256:PIN") && shown.contains("redacted"), "{shown}");
 }
 
