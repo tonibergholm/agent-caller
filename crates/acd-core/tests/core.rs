@@ -458,6 +458,33 @@ async fn oversized_ids_and_texts_are_bad_requests() {
 }
 
 #[tokio::test]
+async fn agent_send_refuses_the_typed_answer_character_rule() {
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    core.observe(Observation::AgentUpsert(AgentObs {
+        state: AgentState::Done,
+        ..agent_obs("a1")
+    }));
+    for (n, text) in ["ls\u{202e}gnihtemos", "a\u{2028}b", "a\u{2066}b", "a\u{1b}b"]
+        .into_iter()
+        .enumerate()
+    {
+        let res = core
+            .handle(
+                "cl",
+                ClientMessage::AgentSend {
+                    id: format!("s{n}"),
+                    agent_id: "a1".into(),
+                    text: text.into(),
+                },
+            )
+            .await;
+        assert_eq!(res.error_code(), Some(ErrorCode::BadRequest), "{text:?}");
+    }
+    assert!(fake.sent().is_empty());
+}
+
+#[tokio::test]
 async fn rejected_oversized_command_does_not_reserve_its_id() {
     let fake = FakeAdapter::new();
     let core = Core::new(test_machine(), vec![fake.clone()]);

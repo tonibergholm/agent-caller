@@ -147,6 +147,13 @@ enum End {
     Stopped,
 }
 
+/// The server's 1 MiB limit (PROTOCOL.md §1), applied to what a peer sends us.
+fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(acd_protocol::MAX_FRAME_BYTES))
+        .max_frame_size(Some(acd_protocol::MAX_FRAME_BYTES))
+}
+
 async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), End> {
     timeout_at(deadline, async {
         // Refused before any token is read. See `refuse_local`.
@@ -165,9 +172,10 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
                 let stream = tokio::net::UnixStream::connect(local::socket_path(config_dir))
                     .await
                     .map_err(|e| End::Offline(local_reason(&e)))?;
-                let (ws, _) = tokio_tungstenite::client_async(
+                let (ws, _) = tokio_tungstenite::client_async_with_config(
                     "ws://localhost/",
                     Box::new(stream) as Box<dyn Io>,
+                    Some(ws_config()),
                 )
                 .await
                 .map_err(|e| End::Offline(e.to_string()))?;
@@ -223,8 +231,12 @@ async fn open(cfg: &MachineConfig, deadline: Instant) -> Result<(Ws, String), En
                         Err(_) => host.trim_matches(['[', ']']).to_string(),
                     };
                     let url = format!("wss://{authority_host}:{port}/");
-                    match tokio_tungstenite::client_async(url, Box::new(stream) as Box<dyn Io>)
-                        .await
+                    match tokio_tungstenite::client_async_with_config(
+                        url,
+                        Box::new(stream) as Box<dyn Io>,
+                        Some(ws_config()),
+                    )
+                    .await
                     {
                         Ok((ws, _)) => return Ok((ws, token)),
                         Err(e) => {
@@ -430,7 +442,7 @@ async fn serve(
             }
             incoming = ws.next() => {
                 let Some(incoming) = incoming else { return End::Offline("closed".into()); };
-                let msg = match incoming { Ok(m) => m, Err(e) => return End::Offline(e.to_string()) };
+                let msg = match incoming { Ok(m) => m, Err(tokio_tungstenite::tungstenite::Error::Capacity(_)) => return End::Resync("frame over the size limit"), Err(e) => return End::Offline(e.to_string()) };
                 if let Some(code) = close_code(&msg) { return end_for_close(code); }
                 last_frame = tokio::time::Instant::now(); ping_deadline = None;
                 let text = match msg { Message::Text(t) => t.to_string(), Message::Ping(v) => { let send = tokio::select! { biased; _ = cancel.changed() => return End::Stopped, r = tokio::time::timeout(timing.write_timeout, ws.send(Message::Pong(v))) => r }; match send { Ok(Ok(())) => {}, Ok(Err(e)) => return End::Offline(e.to_string()), Err(_) => return End::Offline("write timed out".into()) } continue; }, Message::Pong(_) => continue, Message::Close(_) => return End::Offline("closed".into()), _ => continue };
