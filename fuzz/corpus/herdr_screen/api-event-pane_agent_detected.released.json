@@ -1,0 +1,11 @@
+{
+ "data": {
+  "agent": "codex",
+  "final_status": "idle",
+  "pane_id": "w1:p1",
+  "released": true,
+  "type": "pane_agent_detected",
+  "workspace_id": "w1"
+ },
+ "event": "pane_agent_detected"
+}
