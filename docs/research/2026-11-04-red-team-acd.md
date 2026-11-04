@@ -295,15 +295,62 @@ hook-endpoint idle/malformed-POST abuse) against a dedicated daemon for
 3700s (~61.7 min), sampling `/proc/<pid>/status` (`VmRSS`, `Threads`) and
 `/proc/<pid>/fd` every 10s with `tests/redteam/soak_sample.py`.
 
-<!-- RSS/FD table and curve summary filled in once the run completes. -->
+**Result (full 3,700s / 61.7 min run, 374 samples; the CSV itself is a
+disposable run artifact, not checked in — reproduce it with the two
+scripts above).**
 
-- Starting RSS: 12,228 KB.
-- No panics, no crash, in the daemon log across the whole run (`grep -ci
+| | start (0s) | 1–10 min avg | last ~10 min avg (≥3100s) | end (3730s, 30s after the attack stopped) | min | max |
+|---|---|---|---|---|---|---|
+| RSS (KB) | 12,228 | 17,264 | 17,636 | 17,764 | 12,228 | 17,996 |
+| fds | 14 | — | — | **14** | 14 | 101 (transient, during a separate manual pre-auth-pool test against this same daemon, recovered within the next sample) |
+| threads | 5 | — | — | 5–6 | 5 | 6 |
+
+- RSS grows from a cold 12.2 MB to ~17.3 MB in the first 1–10 minutes (initial
+  connections, TLS session state, and ~11 agents this session's own earlier
+  manual hook-endpoint tests against this daemon left open with
+  `permission_hold = 3600`), then stays flat: the last-10-minutes average is
+  **2.1% above** the first-10-minutes average after 50 more minutes of
+  continuous hostile load (pre-auth churn from many sources, an
+  authenticated flooding client, and hook-endpoint idle/malformed-POST
+  abuse) — consistent with allocator fragmentation noise, not a leak.
+- File descriptors return to exactly the starting count (14) once the
+  attack stops; the one spike to 101 happened during a separate,
+  deliberate, short-lived pre-auth-pool test run against this same daemon
+  mid-soak (`preauth_distributed.py` with `--n-sources 20`) and recovered
+  on the very next 10s sample — not a leak either.
+- Threads stayed at 5–6 for the entire run (tokio's worker pool; no task
+  growth).
+- **Zero panics** across the daemon's full log (4,575 lines, `grep -ci
   panic` → 0).
-- A full run's numbers, the curve, and the fd/thread min/max are appended
-  below once the soak (started at the point this doc was committed) reaches
-  its full duration; this document is updated in place rather than
-  superseded.
+- After the attack stopped, a fresh, legitimate client immediately got a
+  normal `welcome`/`snapshot` — the daemon needed no restart or recovery
+  time.
+
+## Verification
+
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean.
+- `cargo test --workspace --locked --no-fail-fast`, run twice — once on a
+  clean `origin/main` checkout (`3404287`, via a disposable `git worktree`)
+  and once on this branch, back to back on this same machine so both see
+  the same sandbox limits — produced **exactly the same 33 failing test
+  names** both times (only the timing numbers inside summary lines
+  differ). Every one of them fails for the same reason: `start_daemon`'s
+  default (`crates/acd/tests/common/mod.rs`), `listen = ["loopback"]`,
+  resolves to both `127.0.0.1` and `::1`
+  (`crates/acd/src/bind.rs`), and this sandbox has no IPv6 (`cannot bind
+  [::1]:...: Address family not supported by protocol`) — a pre-existing
+  environment limitation, not something this session's changes affect.
+  This session's own two new test files account for none of the 33: the
+  8 `acd-inbox` tests all pass, and `acd-core`'s single new test is
+  `#[ignore]`d (it fails on purpose with `--ignored`, documenting Finding
+  2, and does not run in a normal `cargo test`).
+- This session also ran as root (`id -u` = 0), so the mode-bit/`ps`-sandbox
+  tests named in `CLAUDE.md` (`repair_mode_clears_special_bits_and_reports_them`,
+  `init_repairs_a_setuid_secret_and_a_loose_t3_token`,
+  `the_system_check_recognises_this_process`) are not meaningful here
+  either way; they are not in the 33-name failure set above (they pass as
+  root, per `CLAUDE.md`'s own note that permission-error tests can
+  misbehave under root rather than fail).
 
 ## Not tried / not run
 
