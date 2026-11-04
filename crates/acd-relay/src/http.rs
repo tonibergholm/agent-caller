@@ -47,7 +47,12 @@ pub struct HttpClient {
     allow_plain: bool,
     timeout: Duration,
     max_body: usize,
+    /// Tests only: where a connection comes from instead of TCP.
+    connector: Option<Connector>,
 }
+
+/// Makes the client end of an in-memory connection (tests).
+pub type Connector = Arc<dyn Fn() -> tokio::io::DuplexStream + Send + Sync>;
 
 impl HttpClient {
     /// HTTPS only, trusting exactly the certificates in `ca_pem`.
@@ -68,13 +73,19 @@ impl HttpClient {
             .map_err(|_| HttpError::Tls)?
             .with_root_certificates(roots)
             .with_no_client_auth();
-        Ok(HttpClient { tls: Some(Arc::new(cfg)), allow_plain: false, timeout, max_body })
+        Ok(HttpClient { tls: Some(Arc::new(cfg)), allow_plain: false, timeout, max_body, connector: None })
     }
 
     /// Plain `http://` only. For tests against local fakes; production code
     /// uses [`HttpClient::https`].
     pub fn plain_for_tests(timeout: Duration, max_body: usize) -> HttpClient {
-        HttpClient { tls: None, allow_plain: true, timeout, max_body }
+        HttpClient { tls: None, allow_plain: true, timeout, max_body, connector: None }
+    }
+
+    /// Plain `http://` over connections `connect` makes in memory, so a test
+    /// needs no sockets and no real I/O wake-ups under paused time. Tests only.
+    pub fn in_memory_for_tests(timeout: Duration, max_body: usize, connect: Connector) -> HttpClient {
+        HttpClient { tls: None, allow_plain: true, timeout, max_body, connector: Some(connect) }
     }
 
     pub async fn post(
@@ -107,19 +118,19 @@ impl HttpClient {
             return Err(HttpError::BadUrl);
         }
         let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
+        if let Some(connect) = &self.connector {
+            if https || !self.allow_plain {
+                return Err(HttpError::PlainNotAllowed);
+            }
+            let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+            let req = Self::request(&uri, &host, path, content_type, headers, body)?;
+            return self.exchange(TokioIo::new(connect()), req).await;
+        }
         let tcp = TcpStream::connect((host.as_str(), port))
             .await
             .map_err(|_| HttpError::Connect)?;
         let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-        let mut req = Request::post(path)
-            .header("host", uri.authority().map(|a| a.as_str()).unwrap_or(&host))
-            .header("content-type", content_type)
-            .header("content-length", body.len())
-            .header("connection", "close");
-        for (k, v) in headers {
-            req = req.header(*k, *v);
-        }
-        let req = req.body(Full::new(Bytes::from(body))).map_err(|_| HttpError::BadUrl)?;
+        let req = Self::request(&uri, &host, path, content_type, headers, body)?;
         if https {
             let cfg = self.tls.clone().ok_or(HttpError::Tls)?;
             let name = ServerName::try_from(host.clone()).map_err(|_| HttpError::BadUrl)?;
@@ -134,6 +145,25 @@ impl HttpClient {
             }
             self.exchange(TokioIo::new(tcp), req).await
         }
+    }
+
+    fn request(
+        uri: &Uri,
+        host: &str,
+        path: &str,
+        content_type: &str,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> Result<Request<Full<Bytes>>, HttpError> {
+        let mut req = Request::post(path)
+            .header("host", uri.authority().map(|a| a.as_str()).unwrap_or(host))
+            .header("content-type", content_type)
+            .header("content-length", body.len())
+            .header("connection", "close");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        req.body(Full::new(Bytes::from(body))).map_err(|_| HttpError::BadUrl)
     }
 
     async fn exchange<T>(&self, io: T, req: Request<Full<Bytes>>) -> Result<HttpResponse, HttpError>
