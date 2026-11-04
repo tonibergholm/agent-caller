@@ -46,6 +46,10 @@ impl IdemCache {
         Self { ttl, capacity, entries: HashMap::new() }
     }
 
+    /// Reservations plus cached results (leak checks).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn entry_count(&self) -> usize { self.entries.len() }
+
     pub fn begin(&mut self, client: &str, id: &str, hash: [u8; 32], now: Instant) -> Begin {
         let ttl = self.ttl;
         self.entries.retain(|_, e| match &e.state {

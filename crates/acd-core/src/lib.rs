@@ -9,6 +9,8 @@ pub mod testing;
 
 pub use adapter::{Adapter, DeliverError};
 pub use engine::{Core, IDEM_TTL, MAX_ID_BYTES, MAX_TEXT_BYTES, RING_CAPACITY, Txn};
+#[cfg(any(test, feature = "testing"))]
+pub use engine::Sizes;
 pub use idem::{Begin, IDEM_CAPACITY, IdemCache};
 pub use log::EventLog;
 pub use registry::*;

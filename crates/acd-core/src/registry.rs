@@ -180,6 +180,11 @@ impl Registry {
     pub fn request(&self, id: &str) -> Option<&Request> {
         self.requests.get(id).map(|e| &e.req)
     }
+    /// Entry counts of every map, for leak checks (`Core::sizes`).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn sizes(&self) -> (usize, usize, usize, usize) {
+        (self.agents.len(), self.requests.len(), self.keys.len(), self.seen.len())
+    }
     pub fn is_ready(&self, id: &str) -> bool {
         self.requests.get(id).is_some_and(|e| e.ready)
     }
