@@ -85,6 +85,16 @@ async fn view_until(ib: &Inbox, what: &str, pred: impl Fn(&InboxView) -> bool) {
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
 }
+/// Ends every countdown and waits until the inbox task has processed that.
+/// A countdown that ended would have been counted (it is counted before
+/// anything is sent), so `answers(..) == 0` afterwards cannot pass on a
+/// slow task.
+async fn expire_expecting_no_send(ib: &Inbox) {
+    let before = ib.fired_for_test();
+    ib.expire_countdowns_for_test();
+    ib.sync_for_test().await;
+    assert_eq!(ib.fired_for_test(), before, "a countdown ended, so a send was attempted");
+}
 fn answers(f: &FakeServer) -> usize {
     f.received()
         .iter()
@@ -117,8 +127,7 @@ async fn escape_right_after_pick_cancels_and_sends_nothing() {
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     assert!(ib.escape());
     assert!(!ib.escape());
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    expire_expecting_no_send(&ib).await;
     assert_eq!(answers(&f), 0);
 }
 #[tokio::test]
@@ -143,8 +152,7 @@ async fn countdown_cancels_when_request_resolves() {
                 })
     })
     .await;
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    expire_expecting_no_send(&ib).await;
     assert_eq!(answers(&f), 0);
 }
 #[tokio::test]
@@ -163,8 +171,7 @@ async fn countdown_cancels_when_option_semantics_change() {
                 .is_some_and(|n| n.text == "The request changed. Nothing was sent.")
     })
     .await;
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    expire_expecting_no_send(&ib).await;
     assert_eq!(answers(&f), 0);
 }
 
@@ -203,8 +210,7 @@ async fn stale_view_revision_is_rejected_without_action_or_frame() {
         Err(PickError::StaleRequest)
     );
     assert!(ib.view().borrow().actions.is_empty());
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    expire_expecting_no_send(&ib).await;
     assert_eq!(answers(&f), 0, "stale revision must not send a frame");
 }
 #[tokio::test]
@@ -230,8 +236,7 @@ async fn reconnect_within_undo_window_cancels() {
                     .is_some_and(|n| n.text == "Offline. Nothing was sent.")
         })
         .await;
-        ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(250)).await;
+        expire_expecting_no_send(&ib).await;
         assert_eq!(answers(&f), 0, "{how}");
     }
 }
@@ -391,7 +396,7 @@ async fn start_after_import_keeps_the_imported_connection_handle() {
             .any(|m| m.key == entry.key && m.status == acd_client::conn::MachineStatus::Online)
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    ib.sync_for_test().await;
     assert_eq!(
         f.connections(),
         1,
@@ -399,6 +404,12 @@ async fn start_after_import_keeps_the_imported_connection_handle() {
     );
 }
 
+/// The request id of the next `RequestOpened` event.
+async fn next_opened_id(events: &mut tokio::sync::broadcast::Receiver<InboxEvent>) -> String {
+    let InboxEvent::RequestOpened { request_id, .. } =
+        tokio::time::timeout(Duration::from_secs(15), events.recv()).await.expect("an event").unwrap();
+    request_id
+}
 #[tokio::test]
 async fn notifications_only_for_opened_events_and_deduped() {
     let (f, c, ib) = setup().await;
@@ -407,11 +418,6 @@ async fn notifications_only_for_opened_events_and_deduped() {
     pending["title"] = Value::String("Bash".into());
     c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]}))
         .await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(matches!(
-        events.try_recv(),
-        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-    ));
     c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":2,"request":pending}))
         .await;
     let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
@@ -433,11 +439,12 @@ async fn notifications_only_for_opened_events_and_deduped() {
     c2.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":1,"agents":[pending_agent()]}))
         .await;
     c2.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":2,"request":pending_agent()["pending"]})).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(matches!(
-        events.try_recv(),
-        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-    ));
+    // Events are delivered in order: if the snapshot or the repeated opened
+    // frame had notified, that event would precede the sentinel's.
+    let mut sentinel = pending_agent()["pending"].clone();
+    sentinel["id"] = "r9".into();
+    c2.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":3,"request":sentinel})).await;
+    assert_eq!(next_opened_id(&mut events).await, "r9", "no notification before the sentinel");
     assert_eq!(f.connections(), 2);
 }
 
@@ -550,8 +557,7 @@ async fn repairing_inside_the_undo_window_sends_nothing() {
             .any(|m| m.key == "m1" && m.status == acd_client::conn::MachineStatus::Online)
     })
     .await;
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    expire_expecting_no_send(&ib).await;
     assert_eq!(answers(&f), 0);
     let view = ib.view();
     assert!(view.borrow().actions.is_empty());
@@ -574,8 +580,7 @@ async fn removing_a_machine_cancels_its_countdowns() {
     let (f, _, ib) = setup().await;
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     ib.remove_machine("m1").unwrap();
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    expire_expecting_no_send(&ib).await;
     assert_eq!(answers(&f), 0);
     assert!(ib.view().borrow().actions.is_empty());
 }
@@ -1033,8 +1038,7 @@ async fn typed_answer_countdown_cancels_when_free_text_is_withdrawn() {
     )
     .await;
     view_until(&ib, "free text withdrawn", |v| v.cards.iter().any(|c| !c.free_text_answerable)).await;
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    expire_expecting_no_send(&ib).await;
     assert_eq!(answers(&f), 0);
 }
 #[tokio::test]
@@ -1054,8 +1058,7 @@ async fn typed_answer_countdown_cancels_when_the_revision_bumps() {
     c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":agent}))
         .await;
     view_until(&ib, "revision 2", |v| v.cards.iter().any(|c| c.agent.pending.as_ref().is_some_and(|p| p.revision == 2))).await;
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    expire_expecting_no_send(&ib).await;
     assert_eq!(answers(&f), 0, "a changed revision must not send");
 }
 
@@ -1074,9 +1077,12 @@ fn subagent_agent() -> Value {
 async fn subagents_are_hidden_and_silent_until_shown() {
     let (_f, c, ib) = setup().await;
     let mut events = ib.events();
-    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), subagent_agent()]}))
+    // The renamed visible agent proves the view was rebuilt from this snapshot.
+    let mut visible = pending_agent();
+    visible["title"] = "after-snapshot".into();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[visible, subagent_agent()]}))
         .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    view_until(&ib, "snapshot applied", |v| v.cards.iter().any(|c| c.agent.title == "after-snapshot")).await;
     let v = ib.view().borrow().clone();
     assert_eq!(v.cards.len(), 1, "the subagent is not a card");
     assert_eq!(v.tray.needs_you, 1, "nor is it counted");
@@ -1084,11 +1090,10 @@ async fn subagents_are_hidden_and_silent_until_shown() {
     // Its request does not notify while hidden.
     c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":3,"request":subagent_agent()["pending"]}))
         .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(matches!(
-        events.try_recv(),
-        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-    ));
+    let mut sentinel = pending_agent()["pending"].clone();
+    sentinel["id"] = "r9".into();
+    c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":4,"request":sentinel})).await;
+    assert_eq!(next_opened_id(&mut events).await, "r9", "the hidden subagent's request sent no event first");
     ib.set_show_subagents(true).unwrap();
     view_until(&ib, "subagent shown", |v| {
         v.show_subagents
@@ -1128,8 +1133,7 @@ async fn hiding_subagents_cancels_their_countdown_so_nothing_fires_unseen() {
     // Esc has nothing invisible to cancel, and nothing is left to fire.
     assert!(!ib.escape(), "no hidden action is left for Esc");
     view_until(&ib, "no actions", |v| v.actions.is_empty() && v.cards.len() == 1).await;
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    expire_expecting_no_send(&ib).await;
     assert_eq!(answers(&f), 0, "the hidden countdown never fired");
     // Showing them again does not bring the action back.
     ib.set_show_subagents(true).unwrap();
@@ -1172,7 +1176,7 @@ async fn a_reply_countdown_survives_the_agent_turning_idle_with_idle_hidden() {
 /// Countdowns that never end on their own; tests end them with
 /// `expire_countdowns_for_test`, so ordering is decided by the test.
 fn held() -> acd_client::Timing {
-    acd_client::Timing { undo: Duration::from_secs(3600), ..common::fast() }
+    acd_client::Timing { undo: Duration::from_secs(3600), notice_ttl: Duration::from_secs(3600), ..common::fast() }
 }
 
 fn working_agent(id: &str) -> Value {
@@ -1535,8 +1539,7 @@ async fn a_guarded_step_on_a_subagent_hidden_since_the_freeze_is_refused() {
     let named = Guard { named_send_only: true, ..frozen.clone() };
     assert_eq!(ib.reply_guarded("m1/a2", "go on".into(), &named), Err(PickError::Hidden), "D7 does not reach a hidden subagent");
     ib.hold_rebuild_for_test(false);
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    expire_expecting_no_send(&ib).await;
     let ops = f.received().iter().filter(|v| v["type"] == "request.answer" || v["type"] == "agent.send").count();
     assert_eq!(ops, 0, "no daemon operation");
 }
@@ -1556,8 +1559,7 @@ async fn a_guarded_send_to_a_hook_only_agent_hidden_since_the_freeze_is_refused(
     let named = Guard { named_send_only: true, ..frozen };
     assert_eq!(ib.reply_guarded("m1/a3", "go on".into(), &named), Err(PickError::Hidden), "D7 covers idle agents only");
     ib.hold_rebuild_for_test(false);
-    ib.expire_countdowns_for_test();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    expire_expecting_no_send(&ib).await;
     assert!(!f.received().iter().any(|v| v["type"] == "agent.send"), "no daemon operation");
 }
 
@@ -1743,7 +1745,7 @@ async fn turning_hook_only_off_cancels_countdowns_on_quiet_hook_only_cards() {
     ib.set_show_hook_only(false).unwrap();
     assert!(!ib.escape(), "no hidden action is left for Esc");
     view_until(&ib, "no actions", |v| v.actions.is_empty() && v.cards.len() == 1).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    expire_expecting_no_send(&ib).await;
     assert_eq!(
         f.received().iter().filter(|v| v["type"] == "agent.send").count(),
         0,
@@ -1776,18 +1778,22 @@ async fn a_hook_only_subagent_request_stays_hidden_and_silent() {
     let mut events = ib.events();
     let mut sub = hook_only_agent();
     sub["role"] = "subagent".into();
-    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[pending_agent(), sub.clone()]}))
+    let mut visible = pending_agent();
+    visible["title"] = "after-snapshot".into();
+    c.send(serde_json::json!({"type":"snapshot","epoch":"e1","seq":2,"agents":[visible, sub.clone()]}))
         .await;
     c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":3,"request":sub["pending"]}))
         .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut sentinel = pending_agent()["pending"].clone();
+    sentinel["id"] = "r9".into();
+    c.send(serde_json::json!({"type":"request.opened","epoch":"e1","seq":4,"request":sentinel})).await;
+    // Both frames are processed once the sentinel's event arrives; the
+    // hidden subagent's request sent none before it.
+    assert_eq!(next_opened_id(&mut events).await, "r9");
+    view_until(&ib, "snapshot applied", |v| v.cards.iter().any(|c| c.agent.title == "after-snapshot")).await;
     let v = ib.view().borrow().clone();
     assert_eq!(v.cards.len(), 1);
     assert_eq!(v.tray.needs_you, 1);
-    assert!(matches!(
-        events.try_recv(),
-        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-    ));
 }
 
 /// Merge check: the hook-only drop path ends a countdown with exactly one
@@ -1824,8 +1830,12 @@ async fn hiding_hook_only_agents_reports_hidden_for_their_countdowns() {
 async fn the_stamped_view_applies_the_hook_only_filter_like_the_published_view() {
     let (_f, c, ib) = setup().await;
     c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":quiet_hook_only_agent()})).await;
+    let mut visible = pending_agent();
+    visible["title"] = "after-quiet".into();
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":visible})).await;
+    view_until(&ib, "both updates applied", |v| v.cards.iter().any(|c| c.agent.title == "after-quiet")).await;
     ib.set_show_hook_only(false).unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    ib.sync_for_test().await;
     let stamped = ib.stamped_view();
     assert!(!stamped.view.cards.iter().any(|c| c.key == "m1/a3"));
     assert!(!stamped.hidden_idle_cards.iter().any(|c| c.key == "m1/a3"));
