@@ -3,7 +3,7 @@
 //! the JNI layer stays thin and this file is tested on the host.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use acd_app_core::wrapped::{ResetOutcome, SecureStoreReset};
 use acd_app_core::{commands as core, pairing, setup};
@@ -23,9 +23,24 @@ pub struct Bridge {
     secrets: Arc<dyn SecretStore>,
     reset: Option<Arc<dyn SecureStoreReset>>,
     /// What the user must be told after the secure store was reset.
-    notice: Mutex<Option<String>>,
+    notice: Mutex<Option<Notice>>,
+    /// Serialises everything that can replace the wrapping key or write a
+    /// pairing: the key-state check, the reset, the cache invalidation and the
+    /// pairing import run under it as one step. Without it two taps on Pair
+    /// can both see a dead key, one resets and re-pairs, and the other then
+    /// deletes the fresh ciphertext and replaces the good key.
+    pairing: Mutex<()>,
+    /// Tests: called just before a thread waits for `pairing`.
+    #[cfg(test)]
+    on_contend: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     // Held so the workers the inbox spawned keep running.
     runtime: tokio::runtime::Runtime,
+}
+
+struct Notice {
+    text: String,
+    /// The text reports a reset whose record is cleared once it was shown.
+    recovery: bool,
 }
 
 /// The answer to every call that can fail: `{"ok": "..."}` or `{"error": "..."}`.
@@ -57,7 +72,7 @@ impl Bridge {
     ) -> Result<Bridge, String> {
         let lost = match &reset {
             Some(reset) => match reset.reset_if_key_unusable() {
-                Ok(ResetOutcome::Reset { lost }) => Some(lost),
+                Ok(ResetOutcome::Reset { lost } | ResetOutcome::Pending { lost }) => Some(lost),
                 Ok(ResetOutcome::NotNeeded) => None,
                 Err(_) => return Err(RESET_FAILED.to_owned()),
             },
@@ -79,7 +94,16 @@ impl Bridge {
             },
         )
         .map_err(|e| e.to_string())?;
-        let bridge = Bridge { inbox, secrets, reset, notice: Mutex::new(None), runtime };
+        let bridge = Bridge {
+            inbox,
+            secrets,
+            reset,
+            notice: Mutex::new(None),
+            pairing: Mutex::new(()),
+            #[cfg(test)]
+            on_contend: Mutex::new(None),
+            runtime,
+        };
         if let Some(lost) = lost {
             bridge.announce_reset(&lost);
         }
@@ -103,11 +127,45 @@ impl Bridge {
                 names.join(", ")
             )
         };
-        *self.notice.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
+        *self.notice.lock().unwrap_or_else(|e| e.into_inner()) = Some(Notice { text, recovery: true });
+    }
+
+    fn lock_pairing(&self) -> MutexGuard<'_, ()> {
+        #[cfg(test)]
+        {
+            let hook = self.on_contend.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        self.pairing.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The activity calls this with the text it has put on screen. Only then
+    /// is the pending-recovery record cleared, and only if that text is the
+    /// notice for the current record (a second reset in between wrote a new
+    /// one the user has not seen). Returns whether the record was cleared.
+    pub fn notice_shown(&self, shown: &str) -> bool {
+        let _serial = self.lock_pairing();
+        let current = self.notice.lock().unwrap_or_else(|e| e.into_inner());
+        match (&*current, &self.reset) {
+            (Some(n), Some(reset)) if n.recovery && n.text == shown => reset.acknowledge_recovery().is_ok(),
+            _ => false,
+        }
+    }
+
+    /// Blocks until the inbox view lists `n` machines. The view is rebuilt on
+    /// the runtime's workers, so right after a start or a pairing it can lag
+    /// the settings; this waits on the view's own change notification, with no
+    /// polling and no deadline. The host JVM test uses it.
+    pub fn wait_for_machines(&self, n: usize) {
+        let mut view = self.inbox.view();
+        let _ = self.runtime.block_on(view.wait_for(|v| v.machines.len() == n));
     }
 
     /// Replaces a permanently unusable key. Returns true only if it did; a
-    /// transient failure (or no reset installed) deletes nothing.
+    /// transient failure (or no reset installed) deletes nothing. The caller
+    /// holds `pairing`.
     fn recover(&self) -> bool {
         let Some(reset) = &self.reset else { return false };
         match reset.reset_if_key_unusable() {
@@ -119,9 +177,20 @@ impl Bridge {
                 self.announce_reset(&lost);
                 true
             }
+            // An earlier reset finished without the user being told. Nothing
+            // is deleted now (what is on disk belongs to the new key), so the
+            // cache is left alone too.
+            Ok(ResetOutcome::Pending { lost }) => {
+                self.announce_reset(&lost);
+                true
+            }
             Ok(ResetOutcome::NotNeeded) => false,
             Err(_) => {
-                *self.notice.lock().unwrap_or_else(|e| e.into_inner()) = Some(RESET_FAILED.to_owned());
+                let mut notice = self.notice.lock().unwrap_or_else(|e| e.into_inner());
+                // Never hide a recovery notice the user has not acknowledged.
+                if !notice.as_ref().is_some_and(|n| n.recovery) {
+                    *notice = Some(Notice { text: RESET_FAILED.to_owned(), recovery: false });
+                }
                 false
             }
         }
@@ -131,13 +200,14 @@ impl Bridge {
     pub fn view_json(&self) -> String {
         let secrets = self.inbox.machines().into_iter().map(|m| (m.key, m.secret)).collect();
         let mut screen = model::screen(&core::get_view(&self.inbox), &secrets);
-        screen.notice = self.notice.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        screen.notice = self.notice.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|n| n.text.clone());
         serde_json::to_string(&screen).unwrap_or_else(|_| "{}".into())
     }
 
     /// Pairs from the text of an `acd pair` line, pasted or decoded from a QR
     /// code. Returns the machine's name. The error never echoes the text.
     pub fn import_pairing(&self, text: &str) -> Result<String, String> {
+        let _serial = self.lock_pairing();
         let import = || {
             pairing::import_text(&self.inbox, self.runtime.handle(), Some(text.trim().to_owned()))
                 .map(|machine| machine.name)
@@ -268,7 +338,9 @@ mod tests {
 
     fn secret_files(dir: &Path) -> usize {
         let d = dir.join("secrets");
-        if d.exists() { walk(&d).len() } else { 0 }
+        // The pending-recovery record is not a secret file.
+        let is_secret = |p: &std::path::PathBuf| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("s-"));
+        if d.exists() { walk(&d).iter().filter(|p| is_secret(p)).count() } else { 0 }
     }
 
     /// The key is invalidated while the app is closed. Without the reset the
@@ -330,6 +402,220 @@ mod tests {
         let third = open_with_reset(dir.path(), &fake);
         let view = view_with_machines(&third, 1);
         assert_eq!(view["notice"], serde_json::Value::Null, "{view}");
+    }
+
+    fn line_for(host: &str) -> String {
+        let pin = acd_protocol::pairing::spki_pin(b"test certificate");
+        format!("acd://{host}:47800?pin={pin}#{TOKEN}")
+    }
+
+    /// `Fake` plus the two things the recovery tests need: a reset that loses
+    /// the alias and then fails, and a gate on the first look at a dead key.
+    #[derive(Clone)]
+    struct Hooked {
+        fake: Fake,
+        loses_alias: Arc<AtomicBool>,
+        resets: Arc<std::sync::atomic::AtomicUsize>,
+        gate: Arc<Gate>,
+    }
+    struct Gate {
+        armed: AtomicBool,
+        parked: AtomicBool,
+        events: Mutex<Option<std::sync::mpsc::Sender<Event>>>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+    #[derive(Debug)]
+    enum Event {
+        /// The first thread to see a dead key is parked, inside its recovery.
+        Parked,
+        /// Another thread saw the dead key while the first was parked.
+        SawDeadKey,
+        /// A thread is about to wait for the pairing lock.
+        Contended,
+    }
+    impl Hooked {
+        fn new(fake: &Fake) -> Hooked {
+            Hooked {
+                fake: fake.clone(),
+                loses_alias: Arc::default(),
+                resets: Arc::default(),
+                gate: Arc::new(Gate {
+                    armed: AtomicBool::new(false),
+                    parked: AtomicBool::new(false),
+                    events: Mutex::new(None),
+                    release: Mutex::new(None),
+                }),
+            }
+        }
+        fn send(&self, event: Event) {
+            if let Some(tx) = &*self.gate.events.lock().unwrap() {
+                let _ = tx.send(event);
+            }
+        }
+    }
+    impl KeyWrap for Hooked {
+        fn wrap(&self, aad: &[u8], p: &[u8]) -> Result<Vec<u8>, WrapError> {
+            self.fake.wrap(aad, p)
+        }
+        fn unwrap(&self, aad: &[u8], blob: &[u8]) -> Result<Vec<u8>, WrapError> {
+            self.fake.unwrap(aad, blob)
+        }
+        fn key_state(&self) -> KeyState {
+            let state = self.fake.key_state();
+            if state == KeyState::PermanentlyUnusable && self.gate.armed.load(Ordering::SeqCst) {
+                if !self.gate.parked.swap(true, Ordering::SeqCst) {
+                    self.send(Event::Parked);
+                    let _ = self.gate.release.lock().unwrap().as_ref().unwrap().recv();
+                } else {
+                    self.send(Event::SawDeadKey);
+                }
+            }
+            state
+        }
+        fn reset_key(&self) -> Result<(), WrapError> {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+            self.fake.1.store(false, Ordering::SeqCst);
+            if self.loses_alias.load(Ordering::SeqCst) {
+                // The alias is gone and no new key was made: reads as usable.
+                return Err(WrapError::Unavailable);
+            }
+            Ok(())
+        }
+    }
+
+    fn open_hooked(dir: &Path, cipher: &Hooked) -> Result<Bridge, String> {
+        let files = Arc::new(WrappedFileSecrets::new(dir.join("secrets"), cipher.clone()));
+        struct Shared(Arc<WrappedFileSecrets<Hooked>>);
+        impl SecretStore for Shared {
+            fn get(&self, k: &str) -> Result<Option<String>, acd_client::settings::SecretError> {
+                self.0.get(k)
+            }
+            fn set(&self, k: &str, v: &str) -> Result<(), acd_client::settings::SecretError> {
+                self.0.set(k, v)
+            }
+            fn delete(&self, k: &str) -> Result<(), acd_client::settings::SecretError> {
+                self.0.delete(k)
+            }
+        }
+        Bridge::open(dir, Arc::new(Shared(files.clone())), Some(files))
+    }
+
+    fn record_exists(dir: &Path) -> bool {
+        dir.join("secrets").join("recovery-pending").exists()
+    }
+
+    /// The alias is deleted and creating the replacement fails at start. That
+    /// launch reports the failure. Without the pending record the next launch
+    /// sees "no key yet", which reads as usable, and never says which machines
+    /// must be paired again. With it, that launch tells the user, and the
+    /// record goes only once the user has been shown the notice.
+    #[test]
+    fn a_reset_that_fails_after_the_alias_was_deleted_is_reported_on_the_next_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::default();
+        let hooked = Hooked::new(&fake);
+        let first = open_hooked(dir.path(), &hooked).ok().unwrap();
+        let name = first.import_pairing(&line()).unwrap();
+        drop(first);
+        fake.1.store(true, Ordering::SeqCst);
+        hooked.loses_alias.store(true, Ordering::SeqCst);
+
+        match open_hooked(dir.path(), &hooked) {
+            Err(text) => assert_eq!(text, RESET_FAILED),
+            Ok(_) => panic!("a failed reset must not open the inbox"),
+        }
+        assert!(record_exists(dir.path()), "the lost list was not kept");
+        assert!(!fake.1.load(Ordering::SeqCst), "the fake must model a deleted alias");
+        hooked.loses_alias.store(false, Ordering::SeqCst);
+
+        let second = open_hooked(dir.path(), &hooked).ok().unwrap();
+        let view = view_with_machines(&second, 1);
+        let notice = view["notice"].as_str().expect("the user is not told").to_owned();
+        assert!(notice.contains(&name) && notice.contains("paired again"), "{notice}");
+        assert!(record_exists(dir.path()), "cleared before the user was told");
+        assert_eq!(hooked.resets.load(Ordering::SeqCst), 1, "reset again");
+        // Text that is not the notice does not count as shown.
+        assert!(!second.notice_shown("something else"));
+        assert!(record_exists(dir.path()));
+        assert!(second.notice_shown(&notice));
+        assert!(!record_exists(dir.path()));
+        drop(second);
+
+        let third = open_hooked(dir.path(), &hooked).ok().unwrap();
+        let view = view_with_machines(&third, 1);
+        assert_eq!(view["notice"], serde_json::Value::Null, "{view}");
+    }
+
+    /// The app is closed before the user saw the notice: the next launch shows
+    /// it again, because only `notice_shown` clears the record.
+    #[test]
+    fn a_notice_that_was_never_shown_is_shown_again_on_the_next_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::default();
+        let first = open_with_reset(dir.path(), &fake);
+        let name = first.import_pairing(&line()).unwrap();
+        drop(first);
+        fake.1.store(true, Ordering::SeqCst);
+        drop(open_with_reset(dir.path(), &fake)); // reset, notice built, never shown
+        let next = open_with_reset(dir.path(), &fake);
+        let view = view_with_machines(&next, 1);
+        let notice = view["notice"].as_str().expect("the user is not told");
+        assert!(notice.contains(&name), "{notice}");
+    }
+
+    /// Two taps on Pair while the key is dead. The first thread to look at the
+    /// key is held inside its recovery; the second must not get to look until
+    /// the first has finished. Without the lock the second sees the same dead
+    /// key, resets it and re-pairs; the first then resumes, deletes the second
+    /// pairing's fresh ciphertext and replaces the good key (two resets, one
+    /// secret file). Every wait is on an event: the park, the second thread
+    /// either reaching the key (no lock) or about to wait for the lock.
+    #[test]
+    fn two_pairings_that_both_hit_a_dead_key_do_not_undo_each_other() {
+        use std::sync::mpsc::channel;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::default();
+        let hooked = Hooked::new(&fake);
+        let bridge = Arc::new(open_hooked(dir.path(), &hooked).ok().unwrap());
+        fake.1.store(true, Ordering::SeqCst); // the key dies while the app runs
+
+        let (tx, events) = channel();
+        let (release_tx, release_rx) = channel();
+        *hooked.gate.events.lock().unwrap() = Some(tx.clone());
+        *hooked.gate.release.lock().unwrap() = Some(release_rx);
+        hooked.gate.armed.store(true, Ordering::SeqCst);
+        *bridge.on_contend.lock().unwrap() = Some(Arc::new(move || {
+            let _ = tx.send(Event::Contended);
+        }));
+
+        let first = {
+            let bridge = bridge.clone();
+            std::thread::spawn(move || bridge.import_pairing(&line_for("one.test")))
+        };
+        // The first thread's own trip through the lock is a Contended event too.
+        loop {
+            match events.recv().unwrap() {
+                Event::Parked => break,
+                Event::Contended => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        let second = {
+            let bridge = bridge.clone();
+            std::thread::spawn(move || bridge.import_pairing(&line_for("two.test")))
+        };
+        match events.recv().unwrap() {
+            Event::Contended | Event::SawDeadKey => {}
+            other => panic!("{other:?}"),
+        }
+        release_tx.send(()).unwrap();
+        first.join().unwrap().expect("first pairing");
+        second.join().unwrap().expect("second pairing");
+
+        assert_eq!(hooked.resets.load(Ordering::SeqCst), 1, "the good key was replaced again");
+        assert_eq!(secret_files(dir.path()), 2, "a fresh pairing's ciphertext was deleted");
+        let view = view_with_machines(&bridge, 2);
+        assert!(view["machines"].as_array().unwrap().iter().all(|m| m["status"] != "attention"), "{view}");
     }
 
     #[test]
@@ -449,16 +735,11 @@ mod tests {
         assert_eq!(reply(Err("b \"q\"".into())), r#"{"error":"b \"q\""}"#);
     }
 
-    /// The view fills in once the workers have run: poll, as the activity does.
+    /// The view fills in once the workers have run: wait on the view's change
+    /// notification (no polling, no deadline).
     fn view_with_machines(bridge: &Bridge, n: usize) -> serde_json::Value {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let view: serde_json::Value = serde_json::from_str(&bridge.view_json()).unwrap();
-            if view["machines"].as_array().unwrap().len() == n || std::time::Instant::now() > deadline {
-                return view;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        bridge.wait_for_machines(n);
+        serde_json::from_str(&bridge.view_json()).unwrap()
     }
 
     fn walk(dir: &Path) -> Vec<std::path::PathBuf> {

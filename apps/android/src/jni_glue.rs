@@ -253,3 +253,38 @@ pub extern "system" fn Java_dev_agentcaller_inbox_Native_removeMachine<'l>(
         Err(e) => reply(Err(e)),
     })
 }
+
+/// The activity has put `text` on screen. Clears the pending-recovery record
+/// if `text` is the current recovery notice. True if it did.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_agentcaller_inbox_Native_noticeShown<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    text: JString<'l>,
+) -> jboolean {
+    let done = catch_unwind(AssertUnwindSafe(|| match (arg(&mut env, &text), BRIDGE.get()) {
+        (Ok(text), Some(bridge)) => bridge.notice_shown(&text),
+        _ => false,
+    }))
+    .unwrap_or(false);
+    jboolean::from(done)
+}
+
+/// Blocks until the view lists `n` machines. For the host JVM test: the
+/// activity polls and never calls it.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_agentcaller_inbox_Native_waitForMachines<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    n: jlong,
+) -> jboolean {
+    let done = catch_unwind(AssertUnwindSafe(|| match BRIDGE.get() {
+        Some(bridge) => {
+            bridge.wait_for_machines(n.max(0) as usize);
+            true
+        }
+        None => false,
+    }))
+    .unwrap_or(false);
+    jboolean::from(done)
+}

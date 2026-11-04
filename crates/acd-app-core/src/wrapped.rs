@@ -19,6 +19,12 @@
 //!   replaced by `reset_if_key_unusable`: the ciphertext it wrapped is deleted,
 //!   the key is regenerated, and the caller learns which keys were lost. A
 //!   transient failure never deletes anything.
+//! - The reset is restartable. Before it deletes anything it writes a
+//!   pending-recovery record (the lost machine keys, no secrets) next to the
+//!   ciphertext. The record is cleared only by `acknowledge_recovery`, which
+//!   the shell calls after the user has been shown the notice. A crash or a
+//!   failure at any step leaves the record, and the next start finishes the
+//!   job and tells the user.
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -89,11 +95,18 @@ pub enum ResetOutcome {
     /// The key was permanently unusable. It was replaced and these secret
     /// keys (machine keys) had their unreadable ciphertext deleted.
     Reset { lost: Vec<String> },
+    /// An earlier reset got as far as replacing the key but the user was never
+    /// told (the app was closed or failed first). This call deleted nothing;
+    /// the caller shows the notice and then calls `acknowledge_recovery`.
+    Pending { lost: Vec<String> },
 }
 
 /// The explicit secure-store reset, as the bridge sees it.
 pub trait SecureStoreReset: Send + Sync {
     fn reset_if_key_unusable(&self) -> Result<ResetOutcome, SecretError>;
+    /// Clears the pending-recovery record. Call it only after the user has
+    /// been shown which machines were lost.
+    fn acknowledge_recovery(&self) -> Result<(), SecretError>;
 }
 
 pub struct WrappedFileSecrets<W> {
@@ -219,17 +232,66 @@ impl<W: KeyWrap> WrappedFileSecrets<W> {
     }
 }
 
+/// The pending-recovery record: one hex-encoded machine key per line. It sits
+/// in the secrets directory, outside the `s-` namespace, so the sweep that
+/// deletes ciphertext never touches it. It holds no secret, only the keys.
+const RECOVERY_RECORD: &str = "recovery-pending";
+
+impl<W: KeyWrap> WrappedFileSecrets<W> {
+    fn record_path(&self) -> PathBuf {
+        self.dir.join(RECOVERY_RECORD)
+    }
+
+    /// `None`: no recovery is pending. An unreadable record is an error
+    /// (fail closed), never "nothing pending".
+    fn read_record(&self) -> Result<Option<Vec<String>>, SecretError> {
+        match fs::read(self.record_path()) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                Ok(Some(text.lines().filter_map(unhex).collect()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(io_error(SECRET_UNREADABLE, &error)),
+        }
+    }
+
+    fn write_record(&self, lost: &[String]) -> Result<(), SecretError> {
+        let mut text = String::new();
+        for key in lost {
+            for byte in key.as_bytes() {
+                text.push_str(&format!("{byte:02x}"));
+            }
+            text.push('\n');
+        }
+        fs::create_dir_all(&self.dir).map_err(|e| io_error(SECRET_NOT_STORED, &e))?;
+        write_atomic(&self.record_path(), text.as_bytes()).map_err(|e| io_error(SECRET_NOT_STORED, &e))?;
+        sync_dir(&self.dir);
+        Ok(())
+    }
+}
+
 impl<W: KeyWrap> SecureStoreReset for WrappedFileSecrets<W> {
     /// Only a key the platform reports as permanently unusable is replaced; a
-    /// transient or unknown state touches nothing. The ciphertext goes first,
-    /// so a failure to delete it leaves the old key in place and the error is
-    /// returned (nothing is left readable under a key the user was told is
-    /// gone). Then the key is replaced.
+    /// transient or unknown state touches nothing. Order, each step safe to
+    /// repeat after a crash:
+    /// 1. write the pending-recovery record (every key whose ciphertext is
+    ///    about to go, plus any already in the record);
+    /// 2. delete the ciphertext, so a failure leaves the old key in place;
+    /// 3. replace the key.
+    /// The record outlives all three. A record with a usable key means an
+    /// earlier run finished steps 2 and 3 (or lost the alias after step 2 and
+    /// the next write creates one): nothing is deleted again, since the
+    /// ciphertext now present belongs to the new key, and the caller is told.
     fn reset_if_key_unusable(&self) -> Result<ResetOutcome, SecretError> {
-        if self.cipher.key_state() != KeyState::PermanentlyUnusable {
-            return Ok(ResetOutcome::NotNeeded);
+        let pending = self.read_record()?;
+        match (&pending, self.cipher.key_state()) {
+            (None, state) if state != KeyState::PermanentlyUnusable => return Ok(ResetOutcome::NotNeeded),
+            (Some(lost), KeyState::Usable) => return Ok(ResetOutcome::Pending { lost: lost.clone() }),
+            // Cannot tell whether the old ciphertext is still there: touch nothing.
+            (Some(_), KeyState::Unknown) => return Err(SecretError(KEYSTORE_UNAVAILABLE.into())),
+            _ => {}
         }
-        let mut lost = Vec::new();
+        let mut lost = pending.unwrap_or_default();
         let mut files = Vec::new();
         match fs::read_dir(&self.dir) {
             Ok(entries) => {
@@ -237,8 +299,12 @@ impl<W: KeyWrap> SecureStoreReset for WrappedFileSecrets<W> {
                     let entry = entry.map_err(|e| io_error(SECRET_NOT_STORED, &e))?;
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
+                    if name.starts_with(RECOVERY_RECORD) {
+                        continue;
+                    }
                     if let Some(hex) = name.strip_prefix("s-")
                         && let Some(key) = unhex(hex)
+                        && !lost.contains(&key)
                     {
                         lost.push(key);
                     }
@@ -248,6 +314,8 @@ impl<W: KeyWrap> SecureStoreReset for WrappedFileSecrets<W> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(io_error(SECRET_NOT_STORED, &error)),
         }
+        lost.sort();
+        self.write_record(&lost)?;
         for file in files {
             match fs::remove_file(&file) {
                 Ok(()) => {}
@@ -257,8 +325,26 @@ impl<W: KeyWrap> SecureStoreReset for WrappedFileSecrets<W> {
         }
         self.cipher.reset_key().map_err(|_| SecretError(KEYSTORE_UNAVAILABLE.into()))?;
         self.failed.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        lost.sort();
         Ok(ResetOutcome::Reset { lost })
+    }
+
+    fn acknowledge_recovery(&self) -> Result<(), SecretError> {
+        match fs::remove_file(self.record_path()) {
+            Ok(()) => {
+                sync_dir(&self.dir);
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error(SECRET_NOT_STORED, &error)),
+        }
+    }
+}
+
+/// Makes a rename or a delete in `dir` durable. Best effort: not every
+/// platform can open a directory.
+fn sync_dir(dir: &Path) {
+    if let Ok(handle) = fs::File::open(dir) {
+        let _ = handle.sync_all();
     }
 }
 
@@ -393,6 +479,11 @@ mod tests {
         invalidated: AtomicBool,
         unwraps: std::sync::atomic::AtomicUsize,
         resets: std::sync::atomic::AtomicUsize,
+        /// `reset_key` fails and leaves the dead key as it was.
+        reset_fails: AtomicBool,
+        /// `reset_key` deletes the alias, then fails to generate a new key:
+        /// the platform reports "no key yet", which reads as usable.
+        reset_loses_alias: AtomicBool,
     }
 
     fn tag(aad: &[u8]) -> [u8; 8] {
@@ -435,7 +526,13 @@ mod tests {
         }
         fn reset_key(&self) -> Result<(), WrapError> {
             self.resets.fetch_add(1, Ordering::SeqCst);
+            if self.reset_fails.load(Ordering::SeqCst) {
+                return Err(WrapError::Unavailable);
+            }
             self.invalidated.store(false, Ordering::SeqCst);
+            if self.reset_loses_alias.load(Ordering::SeqCst) {
+                return Err(WrapError::Unavailable);
+            }
             Ok(())
         }
     }
@@ -635,7 +732,9 @@ mod tests {
             ResetOutcome::Reset { lost: vec![KEY_B.to_owned()] }
         );
         assert_eq!(s.cipher.resets.load(Ordering::SeqCst), 1);
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0, "ciphertext left behind");
+        assert_eq!(secret_files(dir.path()), 0, "ciphertext left behind");
+        s.acknowledge_recovery().unwrap();
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0, "the record outlived the acknowledgement");
         s.set(KEY_A, SECRET).unwrap();
         assert_eq!(s.get(KEY_A).unwrap().as_deref(), Some(SECRET));
         assert_eq!(s.get(KEY_B).unwrap(), None);
@@ -672,6 +771,150 @@ mod tests {
         assert!(s.reset_if_key_unusable().is_err());
         assert_eq!(s.cipher.resets.load(Ordering::SeqCst), 0);
         assert!(s.cipher.invalidated.load(Ordering::SeqCst));
+    }
+
+    fn secret_files(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("s-"))
+            .count()
+    }
+
+    fn record_text(dir: &Path) -> Option<String> {
+        fs::read_to_string(dir.join(RECOVERY_RECORD)).ok()
+    }
+
+    /// The record is on disk before the first ciphertext file goes. A file that
+    /// cannot be deleted stops the sweep with the record already written, so a
+    /// crash at that point still tells the user what was lost. Without the
+    /// write-first order the record would not exist here.
+    #[test]
+    fn the_record_is_written_before_anything_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.set(KEY_A, SECRET).unwrap();
+        s.set(KEY_B, SECRET).unwrap();
+        fs::create_dir(dir.path().join("s-00")).unwrap(); // cannot be removed as a file
+        s.cipher.invalidated.store(true, Ordering::SeqCst);
+        assert!(s.reset_if_key_unusable().is_err());
+        assert_eq!(s.cipher.resets.load(Ordering::SeqCst), 0, "the key must not be replaced");
+        let record = record_text(dir.path()).expect("no record before the deletes");
+        for key in [KEY_A, KEY_B] {
+            let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
+            assert!(record.lines().any(|l| l == hex), "{key} missing from the record");
+        }
+        assert!(!record.contains("TOKEN-VALUE") && !record.contains(SECRET));
+        // The fault clears; the next run finishes and still names both.
+        fs::remove_dir(dir.path().join("s-00")).unwrap();
+        let mut lost = match s.reset_if_key_unusable().unwrap() {
+            ResetOutcome::Reset { lost } => lost,
+            other => panic!("{other:?}"),
+        };
+        lost.sort();
+        // The decoy directory `s-00` decodes to the key "\0".
+        let mut want = vec!["\0".to_owned(), KEY_A.to_owned(), KEY_B.to_owned()];
+        want.sort();
+        assert_eq!(lost, want);
+        assert_eq!(secret_files(dir.path()), 0);
+    }
+
+    /// The alias is deleted and generating the replacement fails. The platform
+    /// now reports "no key" (usable), so without the record the next start
+    /// sees nothing wrong and never says which machines need pairing again.
+    /// With it, the next start (a new store over the same directory) is told.
+    #[test]
+    fn a_failure_after_the_alias_was_deleted_is_reported_on_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = store(dir.path());
+        first.set(KEY_A, SECRET).unwrap();
+        first.cipher.invalidated.store(true, Ordering::SeqCst);
+        first.cipher.reset_loses_alias.store(true, Ordering::SeqCst);
+        assert!(first.reset_if_key_unusable().is_err());
+        assert_eq!(first.cipher.key_state(), KeyState::Usable, "the fake must model a missing alias");
+        assert_eq!(secret_files(dir.path()), 0);
+        drop(first);
+
+        let second = store(dir.path());
+        assert_eq!(
+            second.reset_if_key_unusable().unwrap(),
+            ResetOutcome::Pending { lost: vec![KEY_A.to_owned()] }
+        );
+        assert_eq!(second.cipher.resets.load(Ordering::SeqCst), 0, "nothing is reset a second time");
+        // Told again until it is acknowledged, then never.
+        assert_eq!(
+            second.reset_if_key_unusable().unwrap(),
+            ResetOutcome::Pending { lost: vec![KEY_A.to_owned()] }
+        );
+        second.acknowledge_recovery().unwrap();
+        assert_eq!(second.reset_if_key_unusable().unwrap(), ResetOutcome::NotNeeded);
+        assert!(record_text(dir.path()).is_none());
+    }
+
+    /// A crash after the ciphertext went but before the key was replaced: the
+    /// key is still dead, the files are gone, and the names come from the
+    /// record alone.
+    #[test]
+    fn a_crash_between_the_delete_and_the_key_replacement_is_finished_on_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = store(dir.path());
+        first.set(KEY_A, SECRET).unwrap();
+        first.cipher.invalidated.store(true, Ordering::SeqCst);
+        first.cipher.reset_fails.store(true, Ordering::SeqCst);
+        assert!(first.reset_if_key_unusable().is_err());
+        assert_eq!(secret_files(dir.path()), 0);
+        assert!(first.cipher.invalidated.load(Ordering::SeqCst));
+        drop(first);
+
+        let second = store(dir.path());
+        second.cipher.invalidated.store(true, Ordering::SeqCst);
+        assert_eq!(
+            second.reset_if_key_unusable().unwrap(),
+            ResetOutcome::Reset { lost: vec![KEY_A.to_owned()] }
+        );
+        assert!(!second.cipher.invalidated.load(Ordering::SeqCst));
+    }
+
+    /// Fresh ciphertext written under the new key after the reset must survive
+    /// a restart that finds the record still pending: it is told, not swept.
+    #[test]
+    fn a_pending_record_never_deletes_ciphertext_written_under_the_new_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.set(KEY_A, SECRET).unwrap();
+        s.cipher.invalidated.store(true, Ordering::SeqCst);
+        assert!(matches!(s.reset_if_key_unusable().unwrap(), ResetOutcome::Reset { .. }));
+        s.set(KEY_B, SECRET).unwrap(); // paired again, record not yet acknowledged
+        let restarted = store(dir.path());
+        assert!(matches!(restarted.reset_if_key_unusable().unwrap(), ResetOutcome::Pending { .. }));
+        assert_eq!(secret_files(dir.path()), 1, "the fresh secret was swept");
+        assert_eq!(s.get(KEY_B).unwrap().as_deref(), Some(SECRET));
+    }
+
+    /// A pending record and a provider that cannot answer: unknown means
+    /// retry later. Nothing is deleted and the record stays.
+    #[test]
+    fn a_pending_record_with_an_unknown_key_state_touches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.set(KEY_A, SECRET).unwrap();
+        s.cipher.invalidated.store(true, Ordering::SeqCst);
+        s.cipher.reset_fails.store(true, Ordering::SeqCst);
+        assert!(s.reset_if_key_unusable().is_err());
+        s.cipher.invalidated.store(false, Ordering::SeqCst);
+        s.cipher.unavailable.store(true, Ordering::SeqCst);
+        assert!(s.reset_if_key_unusable().is_err());
+        assert!(record_text(dir.path()).is_some());
+        assert_eq!(s.cipher.resets.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn nothing_is_recorded_when_no_reset_is_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.set(KEY_A, SECRET).unwrap();
+        assert_eq!(s.reset_if_key_unusable().unwrap(), ResetOutcome::NotNeeded);
+        assert!(record_text(dir.path()).is_none());
+        s.acknowledge_recovery().unwrap(); // nothing to clear is fine
     }
 
     /// A failed read is remembered for FAILURE_BACKOFF so a poll does not go

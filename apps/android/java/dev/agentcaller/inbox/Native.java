@@ -29,4 +29,14 @@ final class Native {
     static native String markSeen(String cardKey);
 
     static native String removeMachine(String key);
+
+    /**
+     * The activity has put {@code text} on screen. Clears the pending-recovery
+     * record when it is the current recovery notice. Blocks on file I/O: call
+     * it off the main thread.
+     */
+    static native boolean noticeShown(String text);
+
+    /** Blocks until the view lists n machines. For the host JVM test only. */
+    static native boolean waitForMachines(long n);
 }

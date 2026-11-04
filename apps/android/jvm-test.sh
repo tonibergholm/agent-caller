@@ -5,6 +5,9 @@
 # wrapped-file store and the bridge together. It is NOT an Android run: bionic,
 # the Keystore and the Dalvik/ART runtime are not involved.
 #
+# Run 6 compiles the REAL KeystoreCipher.java against a fake AndroidKeyStore
+# provider and android.* stubs (jvm-test-keystore/); it needs no org.json.
+#
 # Needs: a JDK, org.json on the classpath (set ORG_JSON_JAR; the test fetches
 # nothing), cargo.
 set -eu
@@ -27,3 +30,9 @@ printf 'x' >> "$f"
 run tampered
 echo "== run 5: the Keystore key is permanently invalidated, restart"
 run invalidated
+echo "== run 6: the real KeystoreCipher.java against a fake AndroidKeyStore provider"
+real=$work/classes-real
+mkdir -p "$real"
+javac -Xlint:-options -d "$real" java/dev/agentcaller/inbox/KeystoreCipher.java \
+  jvm-test-keystore/android/security/keystore/*.java jvm-test-keystore/dev/agentcaller/inbox/*.java
+java -cp "$real" dev.agentcaller.inbox.KeystoreCipherTest

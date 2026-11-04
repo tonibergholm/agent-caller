@@ -65,6 +65,8 @@ public class MainActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private boolean refreshing = false; // UI thread only
     private boolean refreshAgain = false; // UI thread only
+    private boolean pairing = false; // UI thread only: one pairing (and recovery) at a time
+    private String ackedNotice = null; // UI thread only: the notice text already reported as shown
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -258,6 +260,7 @@ public class MainActivity extends Activity {
         String note = view.isNull("notice") ? null : view.optString("notice", null);
         notice.setText(note == null ? "" : note);
         notice.setVisibility(note == null ? View.GONE : View.VISIBLE);
+        acknowledgeNotice(note);
         int needs = view.getInt("needs_you");
         JSONArray machineRows = view.getJSONArray("machines");
         status.setText(machineRows.length() == 0
@@ -439,6 +442,11 @@ public class MainActivity extends Activity {
     }
 
     private void runReply(final Job job) {
+        runReply(job, null);
+    }
+
+    /** As above; {@code onOk} runs on the main thread after an "ok" reply. */
+    private void runReply(final Job job, final Runnable onOk) {
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -447,6 +455,7 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         showReply(reply);
+                        if (onOk != null && reply.contains("\"ok\"")) onOk.run();
                         lastView = "";
                         refresh();
                     }
@@ -477,9 +486,12 @@ public class MainActivity extends Activity {
         runReply(new Job() {
             @Override
             public String run() {
-                String reply = Native.answerText(key, requestId, revision, text);
-                if (reply.contains("\"ok\"")) typed.remove(key);
-                return reply;
+                return Native.answerText(key, requestId, revision, text);
+            }
+        }, new Runnable() {
+            @Override
+            public void run() {
+                typed.remove(key); // `typed` is only touched on the main thread
             }
         });
     }
@@ -503,7 +515,28 @@ public class MainActivity extends Activity {
         pairingText.setText(t == null ? "" : t.toString());
     }
 
+    /**
+     * Tells the native side the user has been shown a recovery notice, so the
+     * pending-recovery record can go. Once per distinct text, off the main
+     * thread (it deletes a file).
+     */
+    private void acknowledgeNotice(final String note) {
+        if (note == null || note.equals(ackedNotice)) return;
+        ackedNotice = note;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                Native.noticeShown(note);
+            }
+        }).start();
+    }
+
     private void pair() {
+        // A second tap while one pairing runs would start a second recovery of
+        // the Keystore key. The native side serialises them as well; this
+        // keeps the second tap from queueing a thread at all.
+        if (pairing) return;
+        pairing = true;
         final String line = pairingText.getText().toString();
         pairingResult.setText("Pairing…");
         new Thread(new Runnable() {
@@ -513,6 +546,7 @@ public class MainActivity extends Activity {
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
+                        pairing = false;
                         try {
                             JSONObject r = new JSONObject(reply);
                             if (r.has("ok")) {

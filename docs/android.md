@@ -180,6 +180,37 @@ Fail closed, all tested:
   user's remaining recourse is clearing the app's storage in Android settings.
   Tested with a fake `KeyWrap` that simulates invalidation (`bridge.rs`,
   `wrapped.rs`) and through the JNI on a host JVM (`jvm-test.sh` run 5).
+  - *Serialised.* `Bridge::import_pairing` holds one lock (`pairing`) across
+    the first import, the key-state check, the reset, the cache invalidation
+    and the retry, so two taps on Pair cannot both see the dead key (one would
+    re-pair, the other then delete its fresh ciphertext and replace the good
+    key). The activity also ignores a tap while a pairing runs (`pairing`
+    flag, UI thread). Test: `two_pairings_that_both_hit_a_dead_key_do_not_undo_each_other`
+    parks the first thread inside its recovery and releases it on an event
+    (the second thread reaching the dead key, or about to wait for the lock);
+    no sleep, no timeout. The Java flag has no host test (the activity needs
+    the Android runtime); the Rust lock does not depend on it.
+  - *Restartable.* Before anything is deleted, `reset_if_key_unusable` writes
+    `secrets/recovery-pending` (the lost machine keys, hex, one per line; no
+    secret). Order: record, ciphertext, key. The record is cleared only by
+    `Bridge::notice_shown(text)` (JNI `Native.noticeShown`), which the activity
+    calls off the main thread after it has put the notice on screen, and only
+    when `text` is the current recovery notice. A record with a usable key
+    (the alias was deleted and generating the new one failed, or the app was
+    closed first) is reported as `Pending`: nothing is deleted again, since
+    ciphertext present then belongs to the new key. A record with a key state
+    of "unknown" touches nothing and fails. Tests: `wrapped.rs`
+    `the_record_is_written_before_anything_is_deleted`,
+    `a_failure_after_the_alias_was_deleted_is_reported_on_the_next_start`,
+    `a_crash_between_the_delete_and_the_key_replacement_is_finished_on_restart`,
+    `a_pending_record_never_deletes_ciphertext_written_under_the_new_key`,
+    `a_pending_record_with_an_unknown_key_state_touches_nothing`; `bridge.rs`
+    `a_reset_that_fails_after_the_alias_was_deleted_is_reported_on_the_next_launch`,
+    `a_notice_that_was_never_shown_is_shown_again_on_the_next_launch`; and
+    `jvm-test.sh` run 5 through the JNI. Residual: if a reset fails in a
+    running app after deleting the files, the in-memory cache can still hold
+    the lost secrets until the process ends (the cache cannot be dropped
+    without also deleting a file a fresh pairing may have just written).
 - A failed read is remembered for 5 seconds (`FAILURE_BACKOFF`, tested with a
   controlled clock) so the one-second refresh does not go back to a slow
   provider. A write, a delete or a reset clears it.
@@ -229,11 +260,22 @@ ORG_JSON_JAR=/usr/share/java/json-latest.jar just android-test   # also runs the
   commits nothing; a machine whose secret cannot be opened says so.
 - `jvm-test.sh`: the real library, built for the host, loaded by a JVM through
   the real `Java_dev_agentcaller_inbox_Native_*` exports, with a software
-  AES-GCM double of `KeystoreCipher` (same contract). Four runs against one
+  AES-GCM double of `KeystoreCipher` (same contract). Five runs against one
   data directory: pair (bad line, LAN line, good line, Keystore unavailable,
   another Java thread, unknown card/action refusals); restart and read the
   secret back; restart with the Keystore unavailable; restart after damaging
-  the secret file. This exercises the JNI argument handling, `JniKeyWrap`
+  the secret file; restart after the key is invalidated (reset, notice, record
+  cleared only once the notice was shown). Waits are on the view's change
+  notification (`Native.waitForMachines`), not on a clock. A sixth run
+  compiles the real `KeystoreCipher.java` against a fake `AndroidKeyStore` JCA
+  provider and `android.*` stubs (`jvm-test-keystore/`): the permanent versus
+  unknown classification (direct, in the cause chain, `KeyPermanentlyInvalidatedException`
+  on use), the real alias deletion in `resetKey`, a failed regeneration after
+  deletion, and the null/empty contract of `wrap` and `unwrap`. Changing the
+  classification, the cause-chain walk, the alias deletion or the unwrap error
+  mapping makes it fail (each tried by hand). It is still not the real
+  provider: that the platform throws these exceptions in these places is the
+  assumption. This exercises the JNI argument handling, `JniKeyWrap`
   (global ref, byte-array round trips, null/empty contract) and the store
   together. It does not exercise a native worker thread attaching to the VM:
   the client reads secrets only on the calling thread today, so that path
@@ -276,7 +318,7 @@ In the sandbox, 2026-11-04:
 - Both `.so` files: right ELF machine (AArch64, x86-64); `NEEDED` is only
   `libdl.so`, `libm.so`, `libc.so`; no `GLIBC` symbols; LOAD segments aligned
   to 16 KiB; the eight `Java_dev_agentcaller_inbox_Native_*` exports present.
-- `jvm-test.sh`: all five runs pass.
+- `jvm-test.sh`: all six runs pass.
 - `scripts/check-version.sh` and `scripts/tests/run.sh` pass with the new
   `apps/android` checks (the two new drift tests fail without the check).
 
@@ -294,7 +336,8 @@ In the sandbox, 2026-11-04:
   `AndroidKeyStore` provider was never called. Key invalidation (for example a
   lock-screen reset) is handled by the reset above, tested with a fake and on a
   host JVM, but never seen on a device. `keyState()` and `resetKey()` and the
-  exception classification have not run against a real `AndroidKeyStore`.
+  exception classification run against a fake `AndroidKeyStore` provider
+  (`jvm-test.sh` run 6), not a real one.
 - Tailscale: the phone must route `100.64.0.0/10` through the tailnet; the
   client's address check is the same as iOS. Not run. No connection to a
   daemon was made from Android code, so the TLS pin check, the handshake and

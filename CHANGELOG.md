@@ -14,7 +14,8 @@ config and the `acd/1` protocol may change without a major version bump.
   whole-or-read-only rules as the other clients. Machine secrets are kept in
   files wrapped by an Android Keystore AES-GCM key (`acd-app-core::wrapped`);
   the store fails closed; a permanently invalidated key is replaced and the
-  user is told which machines to pair again. A debug APK builds with `just android-apk`. It has
+  user is told which machines to pair again (a pending-recovery record keeps
+  the list until the notice was shown, so a crash cannot lose it). A debug APK builds with `just android-apk`. It has
   not been run on a device or an emulator, and there is no push yet.
 - Voice, free-form commands on macOS: anything that is not a fixed phrase goes
   to Apple's on-device model, which proposes one step. The app validates it

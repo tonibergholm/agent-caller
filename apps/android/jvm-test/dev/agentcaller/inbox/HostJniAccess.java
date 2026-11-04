@@ -44,14 +44,10 @@ public class HostJniAccess {
         return new JSONObject(Native.view());
     }
 
+    /** Waits on the view's change notification (no polling, no deadline). */
     static JSONObject viewWithMachines(int n) throws Exception {
-        long end = System.currentTimeMillis() + 10000;
-        while (true) {
-            JSONObject v = view();
-            if (v.has("machines") && v.getJSONArray("machines").length() == n) return v;
-            if (System.currentTimeMillis() > end) return v;
-            Thread.sleep(20);
-        }
+        check(Native.waitForMachines(n), "the inbox is running while waiting for " + n + " machine(s)");
+        return view();
     }
 
     public static int run(String[] args) throws Exception {
@@ -138,9 +134,16 @@ public class HostJniAccess {
                     "the user is told which machines to pair again: " + v.opt("notice"));
             int left = 0;
             try (java.util.stream.Stream<Path> st = Files.walk(files.resolve("secrets"))) {
-                for (Path p : (Iterable<Path>) st::iterator) if (Files.isRegularFile(p)) left++;
+                for (Path p : (Iterable<Path>) st::iterator) if (Files.isRegularFile(p) && p.getFileName().toString().startsWith("s-")) left++;
             }
             check(left == 0, "no ciphertext from the dead key is left (" + left + ")");
+            // The record stays until the notice was shown, then goes.
+            Path record = files.resolve("secrets").resolve("recovery-pending");
+            check(Files.exists(record), "the pending-recovery record exists until the notice is shown");
+            check(!Native.noticeShown("not the notice"), "text that is not the notice does not clear the record");
+            check(Files.exists(record), "the record is still there");
+            check(Native.noticeShown(v.getString("notice")), "showing the notice clears the record");
+            check(!Files.exists(record), "the record is gone after the notice was shown");
             String again = Native.importPairing(line("example.test"));
             check(again.startsWith("{\"ok\":"), "pairing works again: " + again);
         } else if (mode.equals("tampered")) {
