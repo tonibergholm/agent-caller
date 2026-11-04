@@ -21,13 +21,14 @@ machines connected by Tailscale.
   8 per pool). Browser origins are refused by default.
 - **Known limits:** Claude's HTTP hooks cannot authenticate the daemon (spec
   §9, R7). The T3 token goes to whoever holds the T3 port. A same-user process
-  can fill the local pre-auth slots, and four source IPs the network pool. The
-  last two are open [owner decisions](docs/superpowers/plans/2026-10-07-p1-followups.md).
+  can fill the local pre-auth slots, four source IPs the network pool, and one
+  paired client the idempotency table. These are open [owner decisions](docs/superpowers/plans/2026-10-07-p1-followups.md).
 - **Out of scope:** a compromised machine, account or tailnet. Windows and
   Android are type-checked only. There is no relay or push yet.
 
 Reviews: [core](docs/research/2026-11-03-security-review-core.md),
-[local](docs/research/2026-11-03-security-review-local.md).
+[local](docs/research/2026-11-03-security-review-local.md),
+[red team](docs/research/2026-11-04-red-team-acd.md).
 
 ## Report a problem
 

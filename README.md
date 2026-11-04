@@ -386,7 +386,7 @@ Other commands:
 | `app/` | Svelte frontend and Tauri backend (`app/src-tauri`), including the Swift speech bridge |
 | `apps/ios/` | iOS shell (foreground inbox), its own Cargo workspace |
 | `clients/omarchy/` | Omarchy shell plugin (Quickshell QML) |
-| `tests/` | Recorded fixtures and the live end-to-end harness |
+| `tests/` | Recorded fixtures, the live end-to-end harness and the red-team reproducers |
 | `scripts/` | Install, version check, release notes and the Windows/Android type-check |
 | `docs/` | Design spec, plans, research and live check records: start at [docs/README.md](docs/README.md) |
 

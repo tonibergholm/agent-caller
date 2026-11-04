@@ -1,6 +1,6 @@
 # Known gaps and deferred work
 
-Reviewed against `main` on 2026-11-04 (head `28e4664`, the merge of #98). Items are
+Reviewed against `main` on 2026-11-04 (head `d91be2e`, the merge of #94). Items are
 grouped by area. Completed task history is in
 [the archived review ledger](../../archive/p1-followups-2026-10.md); phase
 plans and live-run records keep the original evidence.
@@ -18,7 +18,10 @@ marks a decision only the owner can make: those are not accepted residuals.
   running as the user can already read the token and answer requests. Decide
   whether a per-peer-credential cap is wanted. (PR #82.)
 - **Four-source pre-auth.** Four or more distinct source IPs (four addresses
-  at 2 slots each) can still fill all 8 network pre-auth slots. No status yet.
+  at 2 slots each) can still fill all 8 network pre-auth slots. Reproduced
+  live by the red team (#94, finding 1, `tests/redteam/preauth_distributed.py`):
+  4 sources lock out new TLS clients with HTTP 503; the local socket is
+  unaffected. No fix decided.
   A hostile process sharing a source IP with a paired client can take that
   client's 2 slots.
 - **Relay lock-screen content and handle revocation.** The relay spec's
@@ -49,6 +52,15 @@ marks a decision only the owner can make: those are not accepted residuals.
   the old resume cursor. Memory stays bounded; only the documented resync does
   not happen on that path. An oversized frame after `welcome` is already a
   resync (`serve`, `conn.rs`).
+- **Idempotency table exhaustion (open; red team #94, finding 2, Medium).** One
+  paired client that sends `request.answer` for 16,500 distinct nonexistent
+  `request_id`s fills the daemon-wide 16,384-entry table: `RequestGone` is
+  cached for the 15-minute `IDEM_TTL` (`crates/acd-core/src/engine.rs`
+  `cacheable`; `idem.rs`). Every other client's new command then gets
+  `bad_request: too many recent commands; retry later`. A `#[ignore]`d test
+  documents it (`crates/acd-core/tests/redteam_idem_exhaustion.rs`). Not
+  decided: per-client share, or do not cache `RequestGone`. Details in
+  [the red-team record](../../research/2026-11-04-red-team-acd.md).
 - **Core 3, 7 and 8 limits (as built).** The client limits frames to 1 MiB,
   1000 agents and 64 KiB per agent; each breach, an oversized frame included,
   ends as a resync without the resume cursor. The daemon registry is fed by
@@ -478,6 +490,7 @@ before 1.0.
   replacement, a release build on a device and the Online state right after a
   relaunch: live checks on a device, in the signed-release step.
 - The oversized pre-`welcome` frame resync (PR #105).
+- The idempotency table exhaustion by one paired client (red team finding 2).
 - The test items above that wait on fixed sleeps (PR #105).
 
 **Verify on the 1.0 acceptance run** (implemented, not yet seen live):

@@ -59,6 +59,7 @@ Reviews and feasibility:
 - [Security review: protocol, core, client](research/2026-11-03-security-review-core.md)
 - [Security review: local attack surface](research/2026-11-03-security-review-local.md)
 - [Windows and Android feasibility](research/2026-11-03-windows-android-feasibility.md)
+- [Red team against a running acd](research/2026-11-04-red-team-acd.md): attack table, two findings, hour-long soak.
 
 ## Release and platforms
 
