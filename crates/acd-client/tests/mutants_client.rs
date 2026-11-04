@@ -7,14 +7,9 @@ use acd_client::{conn::*, fake::*};
 use std::time::Duration;
 
 async fn wait_for_connections(f: &FakeServer, expected: usize) {
-    // The timeout only matters on failure; success returns as soon as the connection arrives.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while f.connections() < expected {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {expected} fake connections"));
+    while f.connections() < expected {
+        tokio::task::yield_now().await;
+    }
 }
 
 /// conn.rs:678 `delete !` and `wait_retry -> true`: a rejected pasted token is
@@ -85,16 +80,9 @@ fn options() -> InboxOptions {
 
 async fn view_until(ib: &Inbox, what: &str, pred: impl Fn(&InboxView) -> bool) {
     let mut rx = ib.view();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if pred(&rx.borrow()) {
-                break;
-            }
-            rx.changed().await.unwrap()
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    while !pred(&rx.borrow()) {
+        rx.changed().await.unwrap_or_else(|_| panic!("the view closed while waiting for {what}"));
+    }
 }
 
 /// An inbox on a fake daemon that advertises `caps`, showing `agent`.
@@ -554,13 +542,9 @@ async fn mark_seen_sends_for_a_known_card_only() {
     let (f, ib) = inbox_with(&ALL, done.clone()).await;
     assert_eq!(ib.mark_seen("m1/nobody"), Err(PickError::UnknownCard));
     ib.mark_seen("m1/a1").unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !f.received().iter().any(|v| v["type"] == "agent.mark_seen" && v["agent_id"] == "a1") {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the mark_seen frame reached the daemon");
+    while !f.received().iter().any(|v| v["type"] == "agent.mark_seen" && v["agent_id"] == "a1") {
+        tokio::task::yield_now().await;
+    }
 
     let (_f, ib) = inbox_with(&["answer", "send"], done).await;
     assert_eq!(ib.mark_seen("m1/a1"), Err(PickError::CannotReply));

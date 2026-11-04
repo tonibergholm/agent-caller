@@ -94,11 +94,7 @@ async fn shutdown_sends_close_notify() {
     let (mut io, mut client) = pair(true, Instant::now() + Duration::from_secs(3600)).await;
     io.shutdown().await.unwrap();
     let mut buf = [0u8; 1];
-    // The generous timeout only matters on failure; success returns at once.
-    let n = tokio::time::timeout(Duration::from_secs(30), client.read(&mut buf))
-        .await
-        .expect("the client saw no close_notify")
-        .unwrap();
+    let n = client.read(&mut buf).await.unwrap();
     assert_eq!(n, 0);
 }
 
@@ -114,9 +110,6 @@ async fn abort_on_drop_aborts_the_task() {
     // Let the task start so it owns `held`.
     tokio::task::yield_now().await;
     drop(AbortOnDrop(task));
-    // The generous timeout only matters on failure; success returns at once.
-    let seen = tokio::time::timeout(Duration::from_secs(30), watcher)
-        .await
-        .expect("the task was not aborted");
-    assert!(seen.is_err(), "the task was dropped");
+    // No deadline: a task that was not aborted keeps `held` alive and this hangs.
+    assert!(watcher.await.is_err(), "the task was dropped");
 }

@@ -15,8 +15,8 @@ fn parked() -> (AbortHandle, oneshot::Receiver<()>) {
 }
 
 async fn aborted(watcher: oneshot::Receiver<()>) -> bool {
-    // The timeout only matters on failure; an aborted task answers at once.
-    tokio::time::timeout(std::time::Duration::from_secs(30), watcher).await.is_ok_and(|r| r.is_err())
+    // No deadline: a task that was not aborted keeps its sender alive and this hangs.
+    watcher.await.is_err()
 }
 
 /// tickets.rs:28/29 `admit`: a refused read is remembered as wanted and gets no
