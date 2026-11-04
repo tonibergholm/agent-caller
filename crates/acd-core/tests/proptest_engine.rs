@@ -10,7 +10,11 @@
 //! - a request is delivered at most once, and resolved at most once;
 //! - an answer to a stale revision or a resolved request is refused;
 //! - request ids are unique within an epoch, and a reused id after a restart
-//!   has a different `opened_at` (at the wire's millisecond precision);
+//!   has a different `opened_at`, compared at the wire's whole
+//!   milliseconds. The engine reads `Utc::now()` and has no injectable
+//!   clock, so a restart waits until the clock has passed the last timestamp
+//!   by a millisecond; two daemons started within one millisecond (which the
+//!   wire could not tell apart) are therefore not covered;
 //! - the same command id with the same payload replays the same result, and
 //!   with a different payload is refused (`duplicate_mismatch`);
 //! - the event stream is gap-free.
@@ -18,7 +22,6 @@ mod proptest_support;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 use acd_core::testing::*;
 use acd_core::*;
@@ -410,6 +413,19 @@ fn boot() -> Env {
     Env { core, fake, rx, last_seq }
 }
 
+/// The timestamp as a client reads it: the wire format
+/// (`to_rfc3339_opts(Millis)`) keeps whole milliseconds and drops the rest.
+fn wire(t: &Timestamp) -> i64 {
+    t.timestamp_millis()
+}
+
+/// Returns once the clock is in a later millisecond than `ms` (no fixed sleep).
+fn wait_past_millisecond(ms: i64) {
+    while chrono::Utc::now().timestamp_millis() <= ms {
+        std::thread::yield_now();
+    }
+}
+
 async fn run_ops(ops: Vec<Op>) -> Result<(), TestCaseError> {
     let mut env = boot();
     let mut model = Model::default();
@@ -423,9 +439,13 @@ async fn run_ops(ops: Vec<Op>) -> Result<(), TestCaseError> {
         let ctx = format!("step {step}: {op:?}");
         let expected: Vec<Ev> = match op {
             Op::Restart => {
-                // A new daemon: new epoch, ids start again at r1. Wait out
-                // the wire's millisecond precision so opened_at can differ.
-                std::thread::sleep(Duration::from_millis(2));
+                // A new daemon: new epoch, ids start again at r1. The wire
+                // timestamp has millisecond precision and the engine has no
+                // injectable clock: wait (no fixed sleep) for a later
+                // millisecond than any opened_at so far.
+                if let Some(latest) = opened_at.values().map(|t| t.timestamp_millis()).max() {
+                    wait_past_millisecond(latest);
+                }
                 env = boot();
                 model = Model::default();
                 live_opened.clear();
@@ -579,10 +599,11 @@ async fn run_ops(ops: Vec<Op>) -> Result<(), TestCaseError> {
                 let ts = live_opened[rid];
                 let key = (epoch_ix, rid.clone());
                 prop_assert!(!opened_at.contains_key(&key), "id {rid} opened twice in one epoch");
-                // The same id in an earlier epoch has a different opened_at.
+                // The same id in an earlier epoch has a different opened_at
+                // on the wire.
                 for ((ep, id), prev) in &opened_at {
                     if id == rid && *ep != epoch_ix {
-                        prop_assert!(prev != &ts, "id {rid} reused with the same opened_at");
+                        prop_assert!(wire(prev) != wire(&ts), "id {rid} reused with the same opened_at on the wire");
                     }
                 }
                 opened_at.insert(key, ts);
@@ -664,9 +685,9 @@ fn ids_are_unique_per_epoch_and_reused_ids_carry_a_new_opened_at() {
                 prop_assert_eq!(opened.len(), n);
                 prop_assert_eq!(&opened[0].0, "r1");
                 firsts.push(opened[0].1);
-                std::thread::sleep(Duration::from_millis(2));
+                wait_past_millisecond(opened.iter().map(|(_, t)| t.timestamp_millis()).max().unwrap());
             }
-            prop_assert!(firsts[0] != firsts[1], "r1 of two epochs has the same opened_at");
+            prop_assert!(wire(&firsts[0]) != wire(&firsts[1]), "r1 of two epochs has the same opened_at on the wire");
             Ok(())
         })
     });

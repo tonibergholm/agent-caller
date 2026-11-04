@@ -416,3 +416,70 @@ fn reconnect_after_any_number_of_missed_events_ends_in_the_same_state() {
         Ok(())
     });
 }
+
+/// A snapshot with an answerable `r1`, then a valid `request.resolved(r1)`.
+/// Returns the world and the published cards right after the resolution.
+fn answerable_then_resolved() -> (World, acd_protocol::Request, Vec<acd_client::view::CardView>) {
+    let mut w = World::new();
+    w.connect(0).unwrap();
+    w.core.observe(Observation::AgentUpsert(agent_obs("a0")));
+    w.core.observe(Observation::RequestSeen(permission_obs("a0", "k0")));
+    w.connect(0).unwrap();
+    let request = w.core.agent("a0").and_then(|a| a.pending).expect("an open request");
+    assert!(w.view_cards().iter().any(|c| c.answerable), "setup: the card must be answerable first");
+    let cursor = w.session.cursor().cloned().unwrap();
+    let resolved = ServerMessage::RequestResolved {
+        epoch: cursor.epoch,
+        seq: cursor.seq + 1,
+        request_id: request.id.clone(),
+        agent_id: "a0".into(),
+        by: ResolvedBy::Terminal,
+        option_id: None,
+        reason: None,
+        message: None,
+    };
+    assert!(matches!(w.session.apply(&resolved), Applied::Resolved { .. }));
+    let cards = w.view_cards();
+    (w, request, cards)
+}
+
+/// FINDING, not a fix (production code is untouched): `Session::apply` leaves
+/// `agent.pending` as it was on `request.resolved`, and `build_view` marks it
+/// answerable until the daemon's following `agent.updated` replaces the agent.
+/// Shrunk input: [snapshot with answerable r1, request.resolved(r1)], no
+/// follow-up. Un-ignore this when the client clears the request itself.
+#[test]
+#[ignore = "finding: a resolved request stays answerable until the following agent.updated"]
+fn a_resolved_request_is_not_answerable_before_the_following_agent_update() {
+    let (_w, request, cards) = answerable_then_resolved();
+    for card in cards {
+        assert!(
+            !(card.answerable && card.agent.pending.as_ref().is_some_and(|p| p.id == request.id)),
+            "answerable card for the just-resolved request {}",
+            request.id
+        );
+    }
+}
+
+/// The contract that does hold: once the daemon's `agent.updated` after the
+/// resolution is read, the resolved request is no longer answerable. Also with
+/// unrelated traffic in between (a delayed follow-up).
+#[test]
+fn the_following_agent_update_clears_a_resolved_request_even_when_delayed() {
+    let (mut w, request, _) = answerable_then_resolved();
+    // The daemon's own stream: its resolved is already in the history, so
+    // read what it published after the first connect, with the unrelated
+    // event in front of the follow-up.
+    w.core.observe(Observation::RequestEnded {
+        agent_id: "a0".into(),
+        key: CorrelationKey("k0".into()),
+        by: ResolvedBy::Terminal,
+    });
+    w.connect(0).unwrap();
+    for card in w.view_cards() {
+        assert!(
+            !(card.answerable && card.agent.pending.as_ref().is_some_and(|p| p.id == request.id)),
+            "still answerable after the agent update"
+        );
+    }
+}

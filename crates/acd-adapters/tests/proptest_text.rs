@@ -6,6 +6,8 @@
 //! - an answerable card's detail decodes back to the exact command (nothing
 //!   cut, dropped or altered), holds no raw control or bidi character, and is
 //!   within the cap;
+//! - an answerable card of any other tool input decodes back to the complete
+//!   input, keys and values (a Bash `description` is the one documented skip);
 //! - a card whose text was cut is read-only: no answer path, no options, not
 //!   ready, so `Request::is_answerable` is false whatever a client does.
 mod proptest_support;
@@ -165,35 +167,116 @@ fn the_cut_boundary_is_exact_for_plain_text() {
     });
 }
 
+/// The inverse of the display escape for one non-command line, whose text is
+/// already JSON: the escape adds `\u{hex}` for hidden characters and leaves
+/// every other backslash alone. A backslash pair from the JSON is kept as a
+/// pair, so a typed `\\u{41}` is not read as an escape.
+fn unescape_json_line(s: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next()? {
+            'u' if it.peek() == Some(&'{') => {
+                it.next();
+                let mut hex = String::new();
+                loop {
+                    match it.next()? {
+                        '}' => break,
+                        h => hex.push(h),
+                    }
+                }
+                out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+            }
+            other => {
+                out.push('\\');
+                out.push(other);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The `"key": value` lines of a card decoded back to the input object.
+fn shown_pairs(lines: &[&str]) -> Option<serde_json::Map<String, Value>> {
+    let mut map = serde_json::Map::new();
+    for line in lines {
+        let json = unescape_json_line(line)?;
+        let mut stream = serde_json::Deserializer::from_str(&json).into_iter::<Value>();
+        let Value::String(key) = stream.next()?.ok()? else { return None };
+        let value: Value = serde_json::from_str(json[stream.byte_offset()..].strip_prefix(": ")?).ok()?;
+        if map.insert(key, value).is_some() {
+            return None;
+        }
+    }
+    Some(map)
+}
+
+/// Splits a card into the Bash command (lines marked `$ ` and `> `, which a
+/// key line never starts with) and the remaining lines.
+fn split_card(detail: &str) -> (Option<String>, Vec<&str>) {
+    let lines: Vec<&str> = if detail.is_empty() { vec![] } else { detail.split('\n').collect() };
+    let n = lines.iter().take_while(|l| l.starts_with("$ ") || l.starts_with("> ")).count();
+    let command = (n > 0).then(|| shown_command(&lines[..n].join("\n"))).flatten();
+    (command, lines[n..].to_vec())
+}
+
 #[test]
 fn any_tool_input_is_shown_whole_or_read_only() {
-    let value = prop_oneof![
+    let scalar = prop_oneof![
         text_of(0..40).prop_map(Value::from),
         any::<i64>().prop_map(Value::from),
         any::<bool>().prop_map(Value::from),
+        Just(Value::Null),
+    ];
+    let value = prop_oneof![
+        scalar.clone(),
         prop::collection::vec(text_of(0..10).prop_map(Value::from), 0..4).prop_map(Value::Array),
+        prop::collection::vec((text_of(1..4), scalar.clone()), 0..3).prop_map(|kv| Value::Object(kv.into_iter().collect())),
     ];
     let key = prop_oneof![
         Just("file_path".to_string()),
         Just("command".to_string()),
         Just("description".to_string()),
+        Just("new_string".to_string()),
         text_of(1..8),
     ];
-    let input = prop::collection::vec((key, value), 0..6).prop_map(|kv| Value::Object(kv.into_iter().collect()));
+    let object = prop::collection::vec((key, value.clone()), 0..6).prop_map(|kv| Value::Object(kv.into_iter().collect()));
+    // Mostly objects, as the tools send them; sometimes a bare value.
+    let input = prop_oneof![8 => object, 1 => value];
     let tool = prop_oneof![Just("Bash".to_string()), Just("Edit".to_string()), Just("Write".to_string()), text_of(0..10)];
     check("tool_input_whole_or_read_only", 400, (tool, input), |(tool, input)| {
         let o = permission(&tool, input.clone());
         if as_request(&o).is_answerable() {
             prop_assert!(o.detail.chars().count() <= DETAIL_CHARS);
             prop_assert!(no_raw_hazards(&o.detail));
-            // Every key of the input is on the card, none is hidden
-            // (`description` of a Bash command is the one documented skip).
-            if let Some(obj) = input.as_object() {
-                for k in obj.keys().filter(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
-                    let hidden_ok = tool == "Bash" && (k == "command" || k == "description") && obj.get("command").is_some_and(Value::is_string);
-                    let name = serde_json::to_string(k).unwrap();
-                    prop_assert!(hidden_ok || o.detail.contains(&name) || o.detail.contains(&name.replace('\\', "\\\\")),
-                        "key {k:?} is not on the card");
+            let (command, lines) = split_card(&o.detail);
+            match input.as_object() {
+                Some(obj) => {
+                    // The whole input comes back, keys and values. A Bash
+                    // command shows as the command and its `description` is
+                    // the one documented skip.
+                    let bash = if tool == "Bash" { obj.get("command").and_then(Value::as_str) } else { None };
+                    let mut want = obj.clone();
+                    if bash.is_some() {
+                        want.remove("command");
+                        want.remove("description");
+                    }
+                    prop_assert_eq!(command.as_deref(), bash, "the command on the card");
+                    prop_assert_eq!(shown_pairs(&lines), Some(want), "the card differs from the input: {:?}", o.detail);
+                }
+                // A bare value is shown as its own JSON; nothing at all for null.
+                None => {
+                    prop_assert!(command.is_none());
+                    let shown = match lines.as_slice() {
+                        [] => Some(Value::Null),
+                        [line] => unescape_json_line(line).and_then(|j| serde_json::from_str(&j).ok()),
+                        _ => None,
+                    };
+                    prop_assert_eq!(shown, Some(input.clone()), "the card differs from the input: {:?}", o.detail);
                 }
             }
         } else {

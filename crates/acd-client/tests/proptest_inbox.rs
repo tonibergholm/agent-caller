@@ -6,9 +6,15 @@
 //! from the client's cursor, as the daemon does.
 //!
 //! The inbox must never stop following the daemon, never show an answerable
-//! card for a request that is no longer open, and never notify twice for the
-//! same request (at most four requests open per case and one may be
-//! replayed, so the per-machine rate limit is not what makes this pass).
+//! card for a request that is no longer open, and notify exactly once for each
+//! `request.opened` event it was sent (at most four requests open per case,
+//! plus a sentinel, so the per-machine rate limit of five is never reached).
+//! The notification check waits for the sentinel's notification: the inbox
+//! handles a machine's events in order, so everything before the sentinel has
+//! been handled, and a suppressed or duplicated notification shows.
+//!
+//! `the_notified_history_evicts_the_oldest_and_keeps_the_rest` crosses the
+//! 256-entry history bound through a second machine.
 //!
 //! Each case starts a TLS server and takes real time (reconnect backoff), so
 //! the default case count is small. The pure session properties live in
@@ -94,6 +100,10 @@ struct Harness {
     last_frame: Option<serde_json::Value>,
     /// Every request id the daemon ever showed this client.
     shown: HashSet<String>,
+    /// Every request the daemon sent as a `request.opened` event (live or
+    /// replayed): the inbox must notify each of them once. A request seen only
+    /// in a snapshot is not announced.
+    opened: HashSet<String>,
     last_opened: Option<Request>,
 }
 
@@ -115,6 +125,7 @@ impl Harness {
         match msg {
             ServerMessage::RequestOpened { request, .. } => {
                 self.shown.insert(request.id.clone());
+                self.opened.insert(request.id.clone());
                 self.last_opened = Some(request.clone());
             }
             ServerMessage::Snapshot { agents, .. } => {
@@ -226,9 +237,9 @@ fn daemon_view(core: &Core) -> HashMap<String, Option<String>> {
 }
 
 async fn run_case(ops: Vec<Op>) -> Result<(), TestCaseError> {
-    // At most four requests open, so one replayed `request.opened` is still
-    // inside the notification rate limit (5 per window) and the dedupe is what
-    // stops it.
+    // At most four requests open; with the sentinel that is five, the
+    // notification rate limit (5 per window), so every first announcement is
+    // delivered and only the dedupe stops a replayed one.
     let opens = ops.iter().filter(|o| matches!(o, Op::Seen { .. })).count();
     prop_assume!(opens <= 4);
 
@@ -263,7 +274,7 @@ async fn run_case(ops: Vec<Op>) -> Result<(), TestCaseError> {
         .await
         .map_err(|_| TestCaseError::fail("the inbox never connected"))?;
     let (_, rx) = core.attach(None);
-    let mut h = Harness { f, core: core.clone(), conn, rx, last_seq: 0, last_frame: None, shown: HashSet::new(), last_opened: None };
+    let mut h = Harness { f, core: core.clone(), conn, rx, last_seq: 0, last_frame: None, shown: HashSet::new(), opened: HashSet::new(), last_opened: None };
     h.serve_connection().await;
 
     for op in ops {
@@ -285,6 +296,39 @@ async fn run_case(ops: Vec<Op>) -> Result<(), TestCaseError> {
         h.forward().await;
     }
     h.forward().await;
+
+    // The sentinel: a last request on its own agent, opened over a healthy
+    // connection. Its notification proves every earlier event was handled.
+    core.observe(Observation::AgentUpsert(agent_obs("sentinel")));
+    core.observe(Observation::RequestSeen(permission_obs("sentinel", "ks")));
+    let sentinel = core.agent("sentinel").and_then(|a| a.pending).expect("the sentinel request").id;
+    h.forward().await;
+    prop_assert!(h.opened.contains(&sentinel), "the sentinel open was not sent as an event");
+    let mut notified = Vec::new();
+    let waited = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match events.recv().await {
+                Ok(InboxEvent::RequestOpened { request_id, machine_key, .. }) => {
+                    let last = request_id == sentinel;
+                    notified.push((machine_key, request_id));
+                    if last {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => return,
+            }
+        }
+    })
+    .await;
+    prop_assert!(waited.is_ok(), "no notification for the sentinel; got {notified:?}, expected {:?}", h.opened);
+    let mut once = HashSet::new();
+    for (machine_key, request_id) in &notified {
+        prop_assert_eq!(machine_key, "m1");
+        prop_assert!(h.shown.contains(request_id), "notified for unknown request {request_id}");
+        prop_assert!(once.insert(request_id.clone()), "notified twice for {request_id}");
+    }
+    prop_assert_eq!(&once, &h.opened, "the notified requests differ from the request.opened events sent");
 
     // The inbox converges on the daemon's state: the same agents with the same
     // pending request ids, and online.
@@ -326,13 +370,6 @@ async fn run_case(ops: Vec<Op>) -> Result<(), TestCaseError> {
             p.id
         );
     }
-    // One notification per request, and only for requests the daemon showed.
-    let mut notified = HashSet::new();
-    while let Ok(InboxEvent::RequestOpened { request_id, machine_key, .. }) = events.try_recv() {
-        prop_assert_eq!(machine_key, "m1");
-        prop_assert!(h.shown.contains(&request_id), "notified for unknown request {request_id}");
-        prop_assert!(notified.insert(request_id.clone()), "notified twice for {request_id}");
-    }
     ib.remove_machine("m1").ok();
     Ok(())
 }
@@ -358,4 +395,144 @@ fn a_replayed_open_is_notified_once() {
     ];
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(run_case(ops)).unwrap();
+}
+
+/// The notified history holds the last `NOTIFIED_HISTORY_MAX` announced
+/// requests and evicts the oldest. History insertion and eviction happen
+/// before the rate limit, so machine `m1` can push more than 256 requests
+/// through it even though only five notify. To see the history from outside,
+/// a second machine `m2` (same machine id `fake`, so the same history keys)
+/// replays requests of `m1`: a retained key is not notified again, an evicted
+/// key is, and `m2` has its own rate budget.
+async fn history_case(n: usize) -> Result<(), TestCaseError> {
+    let (fa, fb) = (FakeServer::start(TOKEN, Identity::Paired).await, FakeServer::start(TOKEN, Identity::Paired).await);
+    let core = Core::new(test_machine(), vec![FakeAdapter::new()]);
+    fa.set_epoch(&core.epoch());
+    fb.set_epoch(&core.epoch());
+    let secrets = Arc::new(MemorySecrets::default());
+    for (key, f) in [("m1", &fa), ("m2", &fb)] {
+        secrets.set(key, &MachineSecret { token: TOKEN.into(), pin: f.pin() }.to_json()).unwrap();
+    }
+    let entry = |key: &str, name: &str, f: &FakeServer| MachineEntry {
+        key: key.into(),
+        name: name.into(),
+        endpoint: EndpointConfig::Tcp { host: "127.0.0.1".into(), port: f.port() },
+    };
+    let settings = Settings {
+        client_id: "00000000-0000-4000-8000-000000000002".into(),
+        hotkey: DEFAULT_HOTKEY.into(),
+        hotkey_migrated: true,
+        show_idle: true,
+        show_subagents: true,
+        show_hook_only: true,
+        machines: vec![entry("m1", "A", &fa), entry("m2", "B", &fb)],
+    };
+    let ib = Inbox::new(
+        settings,
+        secrets,
+        InboxOptions { timing: timing(), settings_path: None, client_name: "proptest".into(), client_version: "0".into() },
+    );
+    let mut events = ib.events();
+    ib.start();
+    let wait = |what: &'static str| TestCaseError::fail(format!("the inbox never connected to {what}"));
+    let conn_a = tokio::time::timeout(Duration::from_secs(5), fa.next_connection()).await.map_err(|_| wait("m1"))?;
+    let conn_b = tokio::time::timeout(Duration::from_secs(5), fb.next_connection()).await.map_err(|_| wait("m2"))?;
+    core.observe(Observation::AgentUpsert(agent_obs("a0")));
+    core.observe(Observation::AgentUpsert(agent_obs("s")));
+    let (initial_a, mut rx) = core.attach(None);
+    for msg in &initial_a {
+        conn_a.send(serde_json::to_value(msg).unwrap()).await;
+    }
+    let (initial_b, _) = core.attach(None);
+    let mut seq_b = initial_b[0].seq().expect("a snapshot has a seq");
+    conn_b.send(serde_json::to_value(&initial_b[0]).unwrap()).await;
+
+    // `m1`: n requests on one agent (each supersedes the last), then one on
+    // another agent; every one is a `request.opened` event, in this order.
+    let mut order: Vec<Request> = Vec::new();
+    for i in 0..=n {
+        let (agent, key) = if i < n { ("a0", format!("k{i}")) } else { ("s", "ks".to_owned()) };
+        core.observe(Observation::RequestSeen(permission_obs(agent, &key)));
+        order.push(core.agent(agent).and_then(|a| a.pending).expect("an open request"));
+        while let Ok(msg) = rx.try_recv() {
+            conn_a.send(serde_json::to_value(&msg).unwrap()).await;
+        }
+    }
+    prop_assert_eq!(order.iter().map(|r| &r.id).collect::<HashSet<_>>().len(), order.len(), "request ids repeat");
+    // Wait until `m1` handled all of them: the sentinel agent's request ends
+    // after its open, and the notice it leaves is handled after that open.
+    core.observe(Observation::RequestEnded { agent_id: "s".into(), key: CorrelationKey("ks".into()), by: ResolvedBy::Terminal });
+    while let Ok(msg) = rx.try_recv() {
+        conn_a.send(serde_json::to_value(&msg).unwrap()).await;
+    }
+    let mut view = ib.view();
+    let handled = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if view.borrow().cards.iter().any(|c| c.key == "m1/s" && c.notice.is_some()) {
+                return;
+            }
+            if view.changed().await.is_err() {
+                return;
+            }
+        }
+    })
+    .await;
+    prop_assert!(handled.is_ok(), "m1 did not handle its {} requests", order.len());
+
+    // The model: the history is the last `NOTIFIED_HISTORY_MAX` opens.
+    let cut = order.len().saturating_sub(NOTIFIED_HISTORY_MAX);
+    let (evicted, retained) = order.split_at(cut);
+    let mut replays: Vec<Request> = vec![retained[0].clone(), retained[retained.len() / 2].clone()];
+    let mut expect: Vec<String> = Vec::new();
+    if let (Some(first), Some(last)) = (evicted.first(), evicted.last()) {
+        replays.push(first.clone());
+        expect.push(first.id.clone());
+        if last.id != first.id {
+            replays.push(last.clone());
+            expect.push(last.id.clone());
+        }
+    }
+    let mut fresh = order[0].clone();
+    fresh.id = "fresh".into();
+    replays.push(fresh);
+    expect.push("fresh".into());
+    for request in replays {
+        seq_b += 1;
+        let frame = ServerMessage::RequestOpened { epoch: core.epoch(), seq: seq_b, request };
+        conn_b.send(serde_json::to_value(&frame).unwrap()).await;
+    }
+    // Everything `m2` handles comes before "fresh": the retained replays make
+    // no event, the evicted ones do.
+    let mut got = Vec::new();
+    let waited = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match events.recv().await {
+                Ok(InboxEvent::RequestOpened { request_id, machine_key, .. }) if machine_key == "m2" => {
+                    let last = request_id == "fresh";
+                    got.push(request_id);
+                    if last {
+                        return;
+                    }
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => return,
+            }
+        }
+    })
+    .await;
+    prop_assert!(waited.is_ok(), "m2 never notified the fresh request; got {got:?}");
+    prop_assert_eq!(&got, &expect, "m2 notification order for {} opens, history {}", order.len(), NOTIFIED_HISTORY_MAX);
+    ib.remove_machine("m1").ok();
+    ib.remove_machine("m2").ok();
+    Ok(())
+}
+
+#[test]
+fn the_notified_history_evicts_the_oldest_and_keeps_the_rest() {
+    // Around the bound: 251..=263 distinct opens with the 256 limit, so both
+    // sides of it (nothing evicted, one evicted, several evicted) are drawn.
+    check("inbox_notified_history", 6, 250usize..=262, |n| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(history_case(n))
+    });
 }

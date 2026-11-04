@@ -515,6 +515,35 @@ fn text_rules_are_per_character_and_disjoint() {
     });
 }
 
+/// The forbidden sets written out, not derived from the classifiers: C0
+/// controls, DEL and C1 controls except `\n` and `\t`; and the bidi marks,
+/// embeddings/overrides, isolates and line/paragraph separators.
+fn expected_control(c: char) -> bool {
+    matches!(c as u32, 0x00..=0x08 | 0x0B..=0x1F | 0x7F..=0x9F)
+}
+
+fn expected_format(c: char) -> bool {
+    matches!(c as u32, 0x061C | 0x200E | 0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0x2028 | 0x2029)
+}
+
+#[test]
+fn the_character_classes_match_independent_expected_sets() {
+    // Every code point up to the last one the sets name, then sampled ones.
+    for c in (0u32..=0x2100).filter_map(char::from_u32) {
+        assert_eq!(is_forbidden_control(c), expected_control(c), "control class of U+{:04X}", c as u32);
+        assert_eq!(is_forbidden_format(c), expected_format(c), "format class of U+{:04X}", c as u32);
+        assert_eq!(has_forbidden_chars(&c.to_string()), expected_control(c) || expected_format(c), "U+{:04X}", c as u32);
+    }
+    for c in ['\n', '\t', ' ', 'a', '\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}', '👩', 'é'] {
+        assert!(!has_forbidden_chars(&c.to_string()), "{c:?} must pass");
+    }
+    check("text_rules_expected_sets", 300, any_char(), |c| {
+        prop_assert_eq!(is_forbidden_control(c), expected_control(c), "control class of {:?}", c);
+        prop_assert_eq!(is_forbidden_format(c), expected_format(c), "format class of {:?}", c);
+        Ok(())
+    });
+}
+
 #[test]
 fn forbidden_text_is_closed_under_concatenation_and_insertion() {
     check("text_rules_concat", 300, (text(), text(), any_char(), any::<prop::sample::Index>()), |(a, b, c, at)| {
