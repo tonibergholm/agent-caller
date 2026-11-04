@@ -1,5 +1,6 @@
 //! Authenticated, bounded hook endpoint shared by loopback TCP and Unix sockets.
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -14,6 +15,9 @@ use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::serve::Listener;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -532,11 +536,29 @@ async fn hold(
 
 /// A listener that keeps at most `max` connections open; `accept` waits
 /// for a slot. The slot lives in the connection's IO and is returned when
-/// hyper drops it. One policy for TCP and Unix: the inner listener's own
-/// `accept` (axum's) retries transient errors.
+/// the connection is dropped. One policy for TCP and Unix: the inner
+/// listener's own `accept` (axum's) retries transient errors.
+///
+/// It is served only by [`serve_capped`], never by `axum::serve`, which
+/// cannot set the head deadline (F3). So it does not implement `Listener`.
 pub struct Capped<L> {
     inner: L,
     slots: Arc<Semaphore>,
+    head_timeout: Duration,
+}
+
+/// How long a connection may take to send a complete request head, counted
+/// from accept and again from the end of each response, before hyper closes
+/// it and its slot is freed (F3). hyper ends the wait when it has parsed a
+/// head, so a request that is held for the user's answer is never cut.
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl<L> Capped<L> {
+    /// Overrides [`HEAD_TIMEOUT`]; tests use their own.
+    pub fn with_head_timeout(mut self, head_timeout: Duration) -> Self {
+        self.head_timeout = head_timeout;
+        self
+    }
 }
 
 /// The loopback TCP hook listener.
@@ -548,6 +570,7 @@ fn capped_with<L>(inner: L, max: usize) -> Capped<L> {
     Capped {
         inner,
         slots: Arc::new(Semaphore::new(max)),
+        head_timeout: HEAD_TIMEOUT,
     }
 }
 
@@ -559,6 +582,7 @@ pub fn capped_unix(listener: UnixListener, max: usize) -> CappedUnixListener {
     capped_with(listener, max)
 }
 
+/// Carries the connection's slot; dropping the IO returns it.
 pub struct CappedIo<S> {
     io: S,
     _slot: OwnedSemaphorePermit,
@@ -590,24 +614,69 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for CappedIo<S> {
     }
 }
 
-impl<L: Listener> Listener for Capped<L> {
-    type Io = CappedIo<L::Io>;
-    type Addr = L::Addr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+impl<L: Listener> Capped<L> {
+    async fn accept(&mut self) -> CappedIo<L::Io> {
         let slot = self
             .slots
             .clone()
             .acquire_owned()
             .await
             .expect("semaphore is never closed");
-        let (io, addr) = self.inner.accept().await;
-        (CappedIo { io, _slot: slot }, addr)
+        let (io, _addr) = self.inner.accept().await;
+        CappedIo { io, _slot: slot }
     }
+}
 
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.inner.local_addr()
+/// Serves `app` on a capped listener, one HTTP/1 connection per accept.
+/// The head deadline is hyper's own `header_read_timeout`: it starts when
+/// the connection is served, covers a head that never completes (including
+/// one that is only blank lines), is cleared by hyper once it has parsed a
+/// head, and starts again after the response. No byte of the request is
+/// scanned here, so it cannot disagree with hyper about where a head ends.
+///
+/// When `shutdown` completes it stops accepting, lets each connection
+/// finish its in-flight request (hyper graceful shutdown), and returns once
+/// they are all done.
+pub async fn serve_capped<L>(
+    mut listener: Capped<L>,
+    app: Router,
+    shutdown: impl Future<Output = ()>,
+) -> io::Result<()>
+where
+    L: Listener,
+    L::Io: Unpin,
+{
+    let (stop, stopped) = watch::channel(false);
+    let mut connections = tokio::task::JoinSet::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        let io = tokio::select! {
+            io = listener.accept() => io,
+            () = &mut shutdown => break,
+        };
+        // Reap finished connections so the set does not grow.
+        while connections.try_join_next().is_some() {}
+        let service = TowerToHyperService::new(app.clone());
+        let mut builder = http1::Builder::new();
+        builder
+            .timer(TokioTimer::new())
+            .header_read_timeout(listener.head_timeout);
+        let mut stopped = stopped.clone();
+        connections.spawn(async move {
+            // The connection (and its slot) ends with this task.
+            let mut conn = std::pin::pin!(builder.serve_connection(TokioIo::new(io), service));
+            tokio::select! {
+                _ = conn.as_mut() => {}
+                () = async { let _ = stopped.wait_for(|stop| *stop).await; } => {
+                    conn.as_mut().graceful_shutdown();
+                    let _ = conn.as_mut().await;
+                }
+            }
+        });
     }
+    stop.send_replace(true);
+    while connections.join_next().await.is_some() {}
+    Ok(())
 }
 
 /// Serve the shared endpoint on a Unix listener, applying the configured
@@ -617,7 +686,7 @@ pub async fn serve_unix(
     app: Router,
     max_connections: usize,
 ) -> io::Result<()> {
-    axum::serve(capped_unix(listener, max_connections), app).await
+    serve_capped(capped_unix(listener, max_connections), app, std::future::pending()).await
 }
 
 #[cfg(test)]

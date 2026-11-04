@@ -586,10 +586,7 @@ pub async fn run(dir: &Path) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(1000)).await;
         } else {
             let listener = endpoint::capped(hook_listener, max_connections);
-            if let Err(e) = axum::serve(listener, app_tcp)
-                .with_graceful_shutdown(released(stopped))
-                .await
-            {
+            if let Err(e) = endpoint::serve_capped(listener, app_tcp, released(stopped)).await {
                 tracing::error!(error = %e, "hook endpoint stopped");
             }
         }
@@ -602,9 +599,8 @@ pub async fn run(dir: &Path) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(1000)).await;
         } else {
             let listener = endpoint::capped_unix(hook_unix, max_connections);
-            if let Err(e) = axum::serve(listener, hook_unix_app)
-                .with_graceful_shutdown(released(hooks_stopped))
-                .await
+            if let Err(e) =
+                endpoint::serve_capped(listener, hook_unix_app, released(hooks_stopped)).await
             {
                 tracing::error!(error = %e, "hook socket stopped");
             }

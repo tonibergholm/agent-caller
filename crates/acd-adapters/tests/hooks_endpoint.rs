@@ -5,7 +5,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use acd_adapters::hooks::endpoint::*;
-use acd_adapters::hooks::testing::{post, read_response, send};
+use acd_adapters::hooks::testing::{post, read_one_response, read_response, send, send_keep_alive};
 use acd_adapters::hooks::wire::HookName;
 use tokio::time::{Instant, timeout};
 
@@ -26,7 +26,7 @@ async fn serve(opts: EndpointOptions) -> (u16, Arc<HookAuth>, Mailbox) {
     let auth = Arc::new(HookAuth::new(cred(TOKEN, 1)));
     let app = router(auth.clone(), tx, opts.clone());
     tokio::spawn(async move {
-        axum::serve(capped(listener, opts.max_connections), app)
+        serve_capped(capped(listener, opts.max_connections), app, std::future::pending())
             .await
             .unwrap()
     });
@@ -335,7 +335,7 @@ async fn release_answers_open_and_later_holds_empty_and_reports_them_closed() {
     let release = Release::default();
     let app = router_with_release(auth, tx, opts.clone(), release.clone());
     tokio::spawn(async move {
-        axum::serve(capped(listener, opts.max_connections), app)
+        serve_capped(capped(listener, opts.max_connections), app, std::future::pending())
             .await
             .unwrap()
     });
@@ -781,4 +781,160 @@ async fn unix_listener_serves_the_same_authenticated_endpoint_and_bounds() {
         next_event(&mut mailbox).await,
         Inbound::Event { .. }
     ));
+}
+
+/// Like `serve`, with the head deadline `head` (F3). Tests that are not about
+/// expiry pass `SLOW`, so a stalled runner cannot fire it early; the expiry
+/// tests wait for the server's close instead of sleeping.
+async fn serve_with_head_timeout(head: Duration) -> (u16, Mailbox) {
+    let opts = EndpointOptions::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, mailbox) = mailbox(&opts);
+    let app = router(Arc::new(HookAuth::new(cred(TOKEN, 1))), tx, opts.clone());
+    tokio::spawn(async move {
+        serve_capped(
+            capped(listener, opts.max_connections).with_head_timeout(head),
+            app,
+            std::future::pending(),
+        )
+        .await
+        .unwrap()
+    });
+    (port, mailbox)
+}
+
+const FAST: Duration = Duration::from_millis(300);
+const SLOW: Duration = Duration::from_secs(2);
+
+/// Reads until the server closes the connection; panics if it never does.
+async fn closed_by_server(stream: &mut tokio::net::TcpStream) {
+    use tokio::io::AsyncReadExt;
+    let mut sink = Vec::new();
+    let _ = timeout(Duration::from_secs(30), stream.read_to_end(&mut sink))
+        .await
+        .expect("the server closed the connection");
+}
+
+/// After every connection in `conns` was closed by the server (which frees
+/// its slot), a hook call must still get through.
+async fn later_call_succeeds(
+    port: u16,
+    mailbox: &mut Mailbox,
+    mut conns: Vec<tokio::net::TcpStream>,
+) {
+    for stream in &mut conns {
+        closed_by_server(stream).await;
+    }
+    let body = fx("claude/payload-UserPromptSubmit.json");
+    let reply = timeout(
+        Duration::from_secs(30),
+        post(port, "/hook/claude/UserPromptSubmit", TOKEN, &[], &body),
+    )
+    .await
+    .expect("a slot was free for the later call");
+    assert_eq!(reply.0, 200);
+    assert!(matches!(next_event(mailbox).await, Inbound::Event { .. }));
+}
+
+async fn connect_all(port: u16, bytes: &[u8]) -> Vec<tokio::net::TcpStream> {
+    use tokio::io::AsyncWriteExt;
+    let mut conns = Vec::new();
+    for _ in 0..EndpointOptions::default().max_connections {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream.write_all(bytes).await.unwrap();
+        conns.push(stream);
+    }
+    conns
+}
+
+/// F3 (2): connections that send nothing.
+#[tokio::test]
+async fn silent_connections_do_not_starve_a_later_hook_call() {
+    let (port, mut mailbox) = serve_with_head_timeout(FAST).await;
+    let conns = connect_all(port, b"").await;
+    later_call_succeeds(port, &mut mailbox, conns).await;
+}
+
+/// F3 (1), review blocker: a peer that sends only a blank line per
+/// connection. hyper skips leading empty lines and keeps waiting for a
+/// request, so only hyper's own head deadline can end these.
+#[tokio::test]
+async fn blank_line_connections_do_not_starve_a_later_hook_call() {
+    let (port, mut mailbox) = serve_with_head_timeout(FAST).await;
+    let conns = connect_all(port, b"\r\n\r\n").await;
+    later_call_succeeds(port, &mut mailbox, conns).await;
+}
+
+/// F3 (3): connections that complete one unauthenticated HTTP/1.1
+/// keep-alive request and then idle. Each is answered (401) first, then
+/// closed by the deadline that starts again after the response.
+#[tokio::test]
+async fn idle_keep_alive_connections_do_not_starve_a_later_hook_call() {
+    use tokio::io::AsyncWriteExt;
+    let (port, mut mailbox) = serve_with_head_timeout(SLOW).await;
+    let mut conns = Vec::new();
+    for _ in 0..EndpointOptions::default().max_connections {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        assert_eq!(read_one_response(&mut stream).await.0, 401);
+        conns.push(stream);
+    }
+    later_call_succeeds(port, &mut mailbox, conns).await;
+}
+
+/// F3 (4): an authenticated keep-alive permission request, with LF-only
+/// headers (which a `\r\n\r\n` scan never saw end), is held past the
+/// deadline and is not cut. The silent connection opened after it is closed
+/// by that deadline, which is how the test knows the deadline has passed.
+#[tokio::test]
+async fn a_held_lf_only_keep_alive_request_survives_the_deadline_and_is_answered() {
+    let (port, mut mailbox) = serve_with_head_timeout(SLOW).await;
+    let body = fx("claude/payload-PermissionRequest-Bash.json");
+    let mut stream = send_keep_alive(port, PR, TOKEN, &body, true).await;
+    let Inbound::Held { reply, .. } = next_control(&mut mailbox).await else {
+        panic!("not held")
+    };
+    let mut silent = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    closed_by_server(&mut silent).await;
+    assert!(
+        mailbox.control.try_recv().is_err(),
+        "the hold was not closed or expired"
+    );
+    reply
+        .send(acd_adapters::hooks::wire::reply_allow())
+        .unwrap();
+    assert_eq!(
+        read_one_response(&mut stream).await,
+        (200, acd_adapters::hooks::wire::reply_allow())
+    );
+    // The deadline starts again after the response and closes the idle
+    // keep-alive connection.
+    closed_by_server(&mut stream).await;
+}
+
+/// F3 (5): a keep-alive hold whose client disconnects after the deadline
+/// has passed is still noticed; a plain `Connection: close` hold is too.
+#[tokio::test]
+async fn a_held_keep_alive_close_is_noticed_after_the_deadline() {
+    let (port, mut mailbox) = serve_with_head_timeout(SLOW).await;
+    let body = fx("claude/payload-PermissionRequest-Bash.json");
+    let stream = send_keep_alive(port, PR, TOKEN, &body, false).await;
+    settle(&mailbox, 1).await;
+    let mut silent = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    closed_by_server(&mut silent).await;
+    assert_eq!(mailbox.control.len(), 1, "only Held so far: still held");
+    drop(stream);
+    settle(&mailbox, 2).await;
+    let Inbound::Held { hold, .. } = next_control(&mut mailbox).await else {
+        panic!("not held")
+    };
+    match next_control(&mut mailbox).await {
+        Inbound::HoldClosed { hold: closed } => assert_eq!(closed, hold),
+        other => panic!("{other:?}"),
+    }
+    hold_and_close(port, &mailbox, &body, 1).await;
 }

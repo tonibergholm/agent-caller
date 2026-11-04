@@ -45,6 +45,8 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "regex",
  "serde",
