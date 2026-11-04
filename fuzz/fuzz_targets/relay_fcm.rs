@@ -65,7 +65,7 @@ fuzz_target!(|i: Input| {
     };
     let to = Address { kind, value: i.value.clone() };
     let dbg = format!("{to:?}");
-    assert!(i.value.len() < 6 || !dbg.contains(&i.value), "Debug shows the address");
+    assert_eq!(dbg, format!("Address({kind:?}, len {})", i.value.len()), "Debug shows the address");
     let w = wake_body(&to);
     let c = challenge_body(&to, &i.code);
     for (b, expect_data) in [(&w, vec!["v"]), (&c, vec!["c", "t", "v"])] {

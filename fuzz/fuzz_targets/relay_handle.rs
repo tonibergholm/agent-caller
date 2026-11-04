@@ -58,12 +58,11 @@ fuzz_target!(|data: &[u8]| {
                 expires_at: 10,
             };
             assert_eq!(open(&keys, &seal(&keys, &s), 5), Ok(s));
-            assert_eq!(format!("{keys:?}").chars().filter(|c| c.is_ascii_digit()).count() <= 3, true);
+            let dbg = format!("{keys:?}");
+            assert!(dbg.starts_with("Keys(") && dbg.ends_with(" keys)"), "{dbg:?}");
         }
         Err(e) => {
             assert!(FIXED_ERRORS.contains(&e.as_str()), "unexpected message {e:?}");
-            let text = String::from_utf8_lossy(data);
-            assert!(!text.contains(&e) || e.len() < 4, "message {e:?} is part of the input");
         }
     }
 

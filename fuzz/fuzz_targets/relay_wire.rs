@@ -12,10 +12,17 @@ use serde_json::Value;
 
 fn keys_are(data: &[u8], allowed: &[&str]) {
     let v: Value = serde_json::from_slice(data).expect("accepted by serde, so valid json");
-    let obj = v.as_object().expect("a struct is only built from an object");
-    assert_eq!(obj.len(), allowed.len(), "every field present, none extra");
-    for k in obj.keys() {
-        assert!(allowed.contains(&k.as_str()), "unknown field {k:?} accepted");
+    match &v {
+        Value::Object(obj) => {
+            assert_eq!(obj.len(), allowed.len(), "every field present, none extra");
+            for k in obj.keys() {
+                assert!(allowed.contains(&k.as_str()), "unknown field {k:?} accepted");
+            }
+        }
+        // serde also reads a struct from a JSON array, in field order: still
+        // exactly the documented fields and nothing else.
+        Value::Array(a) => assert_eq!(a.len(), allowed.len()),
+        other => panic!("a struct was built from {other:?}"),
     }
 }
 

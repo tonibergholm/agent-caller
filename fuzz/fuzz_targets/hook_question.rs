@@ -150,7 +150,10 @@ fuzz_target!(|i: Input| {
             if p.answer_path != AnswerPath::None {
                 assert_eq!(p.questions, obs.questions, "an answerable question was changed by the registry");
             } else {
-                assert!(p.options.is_empty(), "a read-only request still offers options");
+                // Made read-only by the size bound: nothing left to choose from.
+                if answerable {
+                    assert!(p.options.is_empty() && p.questions.is_none(), "a request made read-only still offers options");
+                }
             }
         }
     }

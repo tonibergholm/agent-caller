@@ -74,7 +74,7 @@ fuzz_target!(|i: Input| {
                 let t = times.entry(k).or_default();
                 let want = model_allows(t, limit, now);
                 let live = in_window(t, 60, now) > 0 || in_window(t, 3600, now) > 0;
-                if first_sight && first.len() < cap {
+                if first_sight && seen.len() <= cap {
                     first.push(k); // the map has room, so this key is resident
                 } else if !live && !first_sight {
                     first.retain(|x| *x != k); // its window ended: a sweep may have dropped it

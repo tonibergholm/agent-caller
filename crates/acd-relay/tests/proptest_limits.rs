@@ -118,7 +118,7 @@ fn the_map_never_exceeds_its_cap_and_never_forgets_a_key_with_a_live_window() {
                         let t = times.entry(k).or_default();
                         let want = allows(t, limit, now);
                         let live = in_window(t, 60, now) > 0 || in_window(t, 3600, now) > 0;
-                        if first_sight && resident.len() < cap {
+                        if first_sight && seen.len() <= cap {
                             resident.push(k);
                         } else if !live && !first_sight {
                             resident.retain(|x| *x != k); // its window ended: a sweep may have dropped it

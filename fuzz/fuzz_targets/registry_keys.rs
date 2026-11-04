@@ -79,6 +79,8 @@ fuzz_target!(|ops: Vec<Op>| {
     // confirmed gone (`unconfirmed`).
     let mut permanent: HashSet<(String, String)> = HashSet::new();
     let mut unconfirmed: HashSet<(String, String)> = HashSet::new();
+    // Keys marked gone while their request was still open (a reopening clears the mark).
+    let mut gone_marks: HashSet<(String, String)> = HashSet::new();
     let mut all_ids: Vec<String> = vec![];
     for op in ops.iter().take(300) {
         let mut seen_req: Option<(String, String)> = None;
@@ -123,7 +125,9 @@ fuzz_target!(|ops: Vec<Op>| {
                     assert_eq!(open.remove(agent_id).as_deref(), Some(request_id.as_str()), "resolved a request that was not the agent's open one");
                     let (ag, key, reusable) = opened_by[request_id].clone();
                     if reusable {
-                        unconfirmed.insert((ag, key));
+                        if !gone_marks.contains(&(ag.clone(), key.clone())) {
+                            unconfirmed.insert((ag, key));
+                        }
                     } else {
                         permanent.insert((ag, key));
                     }
@@ -135,6 +139,9 @@ fuzz_target!(|ops: Vec<Op>| {
                     assert!(open.insert(q.agent_id.clone(), q.id.clone()).is_none(), "two open requests on {}", q.agent_id);
                     all_ids.push(q.id.clone());
                     if let Some((ag, key)) = &seen_req {
+                        gone_marks.remove(&(ag.clone(), key.clone()));
+                    }
+                    if let Some((ag, key)) = &seen_req {
                         let reusable = matches!(op, Op::Seen { reusable: true, .. });
                         let pair = (ag.clone(), key.clone());
                         assert!(!permanent.contains(&pair), "a resolved one-shot key {key} was reopened by a replay");
@@ -144,6 +151,10 @@ fuzz_target!(|ops: Vec<Op>| {
                 }
                 Change::AgentRemoved(id) => {
                     live.remove(id);
+                    // Its keys go with it, after its request resolved.
+                    permanent.retain(|(ag, _)| ag != id);
+                    unconfirmed.retain(|(ag, _)| ag != id);
+                    gone_marks.retain(|(ag, _)| ag != id);
                     assert!(!open.contains_key(id), "agent removed with an open request");
                 }
                 _ => {}
@@ -153,9 +164,11 @@ fuzz_target!(|ops: Vec<Op>| {
         // Confirmations unblock a reusable key (after the resolution they came with).
         match op {
             Op::EndedBy { agent: x, key, by: b } if matches!(by(*b), ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent) => {
+                gone_marks.insert((a(*x), k(*key)));
                 unconfirmed.remove(&(a(*x), k(*key)));
             }
             Op::DialogGone { agent: x, key } => {
+                gone_marks.insert((a(*x), k(*key)));
                 unconfirmed.remove(&(a(*x), k(*key)));
             }
             Op::EndById { pick, by: b } if matches!(by(*b), ResolvedBy::Inbox | ResolvedBy::Terminal | ResolvedBy::Agent) => {
@@ -168,6 +181,7 @@ fuzz_target!(|ops: Vec<Op>| {
             Op::DialogGoneById { pick } => {
                 if let Some(id) = all_ids.get(*pick as usize % all_ids.len().max(1)) {
                     if let Some((ag, key, _)) = opened_by.get(id) {
+                        gone_marks.insert((ag.clone(), key.clone()));
                         unconfirmed.remove(&(ag.clone(), key.clone()));
                     }
                 }
