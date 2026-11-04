@@ -358,10 +358,29 @@ process, or in the audio server's buffer.
   controller does not wait for the speech cap. A failure of the playback process emits `spoken(g)` too (nothing more will be heard).
 - **`say(g, ..)`** stops the previous pipeline (below) before starting the next one.
 - **`stop()` silences the whole pipeline and says so synchronously.** It kills the whole process group (synthesizer and
-  playback), discards queued PCM, and reaps every child before it returns. It returns `Ok(())` only when the whole pipeline is
-  confirmed silent (every child reaped); otherwise `Err(SilenceFailed)`. A stopped pipeline emits **no** event.
+  playback), discards queued PCM, and reaps every child. **Process death is not silence:** PCM the playback child already
+  submitted can still be queued in the audio server or the device and stay audible after the child is reaped. `stop()`
+  returns `Ok(())` only when both hold: (1) every child is reaped, **and** (2) the audio server reports the pipeline's output
+  **left the running state** (*downstream silence*, defined below), observed within `DOWNSTREAM_DRAIN_BOUND` (injected, default
+  500 ms, to be tuned on the machine, §13). Otherwise `Err(SilenceFailed)`. A stopped pipeline emits **no** event.
   A callback or overflow latch cannot carry this result: callbacks are asynchronous, the controller calls the speaker under
   its core lock, and `start_listening` would already have opened capture before the callback could be handled.
+- **Downstream silence (what the Linux adapter observes).** The playback child is started with a known, unique
+  `node.name`/`media.name` (e.g. `acd-voice-<pid>-<g>`), so its sink input can be found by name and not confused with other
+  applications. After the reap the adapter watches that node through the PipeWire registry (an in-process `pipewire-rs`
+  listener, or `pw-dump --monitor` as a child; which is U on the machine) and accepts silence on the first of:
+  (a) the node is gone from the registry (the server removes a client's stream when the client exits), or (b) its
+  `info.state` is `idle`, `suspended` or `error`, i.e. not `running`. It also requires that no other node with that name is
+  `running`. If the node is still `running` at `DOWNSTREAM_DRAIN_BOUND`, or the registry cannot be queried, `stop()` returns
+  `Err(SilenceFailed)`: unknown is not silence. The adapter reports what it saw (`gone`/`idle`/`running`/`unobservable`) in
+  a tag-only log, never text. Reference semantics (C: from the PipeWire API documentation, `pw_stream_flush` and
+  `pw_stream_events.drained`, and `pw_node_state` / `pw_stream_state` in the PipeWire headers; not re-fetched in this
+  session, verify against the installed version, §13): `pw_stream_flush(stream, drain=true)` makes the `drained` event fire
+  "when all data is played", which is the in-process equivalent of (b) for a stream the adapter owns; a stream state of
+  `paused` (not `streaming`) and a node state of `idle` mean no data is flowing. A `pw-cat` child cannot be asked to flush,
+  so the adapter observes the node from outside instead. Where the adapter can observe neither the node nor a drain
+  callback, the Linux backend does not offer speech output (`capabilities` reports speech `Unavailable`), rather than guess.
+  A capture-open request waits for this result; it is never opened on process death alone.
 - **Required change to the port trait (`acd-voice/src/speak.rs`):** `fn stop(&self)` becomes
   `fn stop(&self) -> Result<(), SilenceFailed>` (a unit-like error carrying no text). The doc comment keeps "before it returns".
   Every existing implementor changes with it: the Swift-bridge adapter in `app/src-tauri/src/voice/speaker.rs`
@@ -378,8 +397,8 @@ process, or in the audio server's buffer.
     `Speaker.silenceForCapture`, which today waits up to `drainMs` and then returns to open the microphone regardless; that
     "bounded, then proceed" behaviour is intentionally replaced by "bounded, then fail closed". The Mac change cannot be
     verified on Linux (CLAUDE.md platform limits) and is reported as pending for macOS CI.
-  - **Linux.** Same rule: `Ok` only when every child was reaped and the playback process is confirmed gone (§ above); an
-    unreapable child returns `Err`, never `Ok` on a timeout.
+  - **Linux.** Same rule: `Ok` only when every child was reaped **and** downstream silence was observed (above). An
+    unreapable child, a node still `running` at the bound, or an unobservable node returns `Err`, never `Ok` on a timeout.
 - **Required change to the controller (`acd-voice-client`):** `Controller::silence` and `stop_speech` return that result.
   `start_listening` calls `silence` and, on `Err`, **refuses to start capture**: it does not call `input.start`, it
   invalidates voice exactly as `overflow()` does (epoch bump, recorder cancelled, HUD error), and reports a refusal through
@@ -390,9 +409,18 @@ process, or in the audio server's buffer.
   1. Speaker (pipeline doubles): a fast synthesizer double (writes all PCM and exits at once) and a deliberately slow playback
      double (reads slowly and exits only when its input is drained, released by the test). Asserts: no `spoken` while playback
      runs even after the synthesizer exited; `spoken` once playback is released; `stop()` during that gap returns `Ok` only after
-     both doubles are dead, produces no `spoken`, and a following capture request sees no playback process alive.
+     both doubles are dead **and the fake sink is idle**, produces no `spoken`, and a following capture request sees no playback
+     process alive and no running sink.
   2. Speaker, unkillable playback: a playback double that refuses to die (ignores the kill, never exits) with a fast
      synthesizer. `stop()` returns `Err(SilenceFailed)` and does not report success while the child lives.
+  2b. Speaker, downstream audio outlives the child: a fake sink (a `PlaybackSink` double the adapter observes in place of
+     the PipeWire registry) that has accepted PCM and **stays `running` after the playback child exits** until the test
+     releases it (a gate, representing N ms of buffered audio). With the controlled clock: `stop()` kills and reaps both
+     children, yet while the sink is `running` it does not return `Ok`; it waits, and once the clock passes
+     `DOWNSTREAM_DRAIN_BOUND` with the sink still `running` it returns `Err(SilenceFailed)`. A second case releases the sink
+     before the bound: `stop()` returns `Ok` and only then. A third: the sink is unobservable (query fails) → `Err`. Through
+     the controller double chain, `input.start` records zero calls until `stop()` has returned `Ok`, and the capture request
+     is refused after `Err`. This fails against an implementation that returns `Ok` on process death alone.
   3. Controller (`acd-voice-client`): a `Speaker` double whose `stop` returns `Err`, speech in progress, then a hold press:
      `input.start` is **never** called (the `SpeechInput` double records zero starts), the HUD shows the error, and a later
      press after `stop` returns `Ok` starts capture normally. This test fails without the change (today `stop` returns `()` and
@@ -540,7 +568,7 @@ Optional slices after: Piper upgrade, partials (Moonshine), Finnish tables (`Loc
 Everything marked "yes" in §11, concretely: microphone capture through PipeWire and the actual device;
 engine latency, memory and accuracy on the real CPU/iGPU (and Vulkan or OpenVINO if the iGPU is Intel);
 the real-voice fixture recordings (consent); the Hyprland key (`GlobalShortcut` and the Lua bind) including
-release order, reload and lock/sleep; the Quickshell HUD focus behaviour; `pw-cat`/playback and the TTS voices;
+release order, reload and lock/sleep; the Quickshell HUD focus behaviour; `pw-cat`/playback (including how long a stopped stream stays `running`, which sets `DOWNSTREAM_DRAIN_BOUND`, and the node name used to find it) and the TTS voices;
 lock/sleep via logind; a long-run idle check (no microphone activity outside the gesture); and the no-transcript
 log audit with journald.
 

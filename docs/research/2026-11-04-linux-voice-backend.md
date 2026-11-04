@@ -145,6 +145,12 @@ naturalness is a comfort feature, not a requirement.
 Latency (first audio) is **not measured** for any engine; that is a hardware step.
 Playback is a subprocess or a library writing to PipeWire; `pw-cat`/`pw-play`
 availability on Omarchy is U.
+Silence after a stop is **not** the same as the playback process being dead: PCM already handed to the audio
+server or device can stay audible after the child is reaped. The design therefore requires the pipeline's
+PipeWire node to leave the `running` state (gone, `idle`, `suspended` or `error`) within a bound before a stop
+counts as silent; for an in-process stream, `pw_stream_flush(stream, true)` plus the `drained` event
+(C: PipeWire API docs, not re-fetched this session). Whether `pw-dump --monitor` or a `pipewire-rs` registry
+listener is the observer, the drain bound, and the node names `pw-cat` creates are U until measured on the machine.
 
 ## 5. Audio capture, VAD
 
@@ -240,6 +246,7 @@ is the owner's call (design §1).
 - sherpa-onnx Rust API coverage and build-time behaviour; its TTS dependency on espeak-ng.
 - Whisper no-speech threshold name, initial-prompt biasing, shorter audio context on the pinned version.
 - Whether PipeWire gives a mic permission prompt on Omarchy; `pw-cat` availability.
+- How long a stopped `pw-cat` stream stays `running` in the PipeWire registry (sets the drain bound), and the node name it gets.
 - Years inferred from asset timestamps: whisper.cpp 1.9.5, Moonshine 0.1.5 (stated in asset
   timestamps), XDPH 1.5.0, voxtype 1.1.1, sherpa-onnx 2.0.1, Hyprland 0.57.1/0.57.0.
 
