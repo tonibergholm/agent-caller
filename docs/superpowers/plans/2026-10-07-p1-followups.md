@@ -271,8 +271,11 @@ needs a decision or a small follow-up.
 - **Test hardening, fixed (branch `claude/test-hardening-1103-faqnrl`).**
   `status_change_before_resubscribe_is_caught` now accepts the new pane's own
   `agent.get` or the full list after the last subscribe. The pre-auth recovery
-  test (#82) redoes its setup on a fresh server when a slow runner overruns the
-  hello timeout, and checks only a setup that fit. The Omarchy plugin test (#80)
+  test (#82) no longer races the hello timeout: a hidden `ServerOptions::hello_gate`
+  seam (default `None`, no behaviour change) keeps the timeout from starting
+  until the test has held two upgrades and seen the third refused, then opens
+  the gate. The remaining wall-clock bounds are hang guards only (5 s per
+  network step, 15 s to wait for the close, 60 s TCP deadline). The Omarchy plugin test (#80)
   checks the shared `Label` component's own properties and every handler body
   (block handlers too), so an inherited `maximumLineCount` and an aliased or
   bracket-called pick in a multi-line handler now fail it. T3 and hooks have

@@ -56,6 +56,19 @@ async fn serve() -> Served {
 }
 
 async fn serve_with(hello: Duration, handshake: Duration, preauth: Duration) -> Served {
+    serve_opts(hello, handshake, preauth, None).await
+}
+
+async fn serve_gated(hello: Duration, gate: watch::Receiver<bool>) -> Served {
+    serve_opts(hello, HOLD, HOLD, Some(gate)).await
+}
+
+async fn serve_opts(
+    hello: Duration,
+    handshake: Duration,
+    preauth: Duration,
+    hello_gate: Option<watch::Receiver<bool>>,
+) -> Served {
     let f = tls::generate("t");
     let (tx, rx) = watch::channel(tls::server_config(&f).unwrap());
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -72,6 +85,7 @@ async fn serve_with(hello: Duration, handshake: Duration, preauth: Duration) -> 
         Arc::new(Auth::new("secret".into())),
         ServerOptions {
             hello_timeout: hello,
+            hello_gate,
             ..Default::default()
         },
     );
@@ -351,34 +365,22 @@ async fn idle_raw_tcp_from_one_source_does_not_block_another_tls_handshake() {
 /// The slots come back when the server cuts the idle connections at the
 /// hello timeout. The two deadlines are kept apart: the hello timeout (3 s)
 /// is far shorter than the TCP pre-auth deadline (60 s, longer than any
-/// wait here), so only the hello timeout can release the slots. The test
-/// waits for the server to close the held connections, then checks at once.
+/// wait here), so only the hello timeout can release the slots. The hello
+/// timeout is gated (`ServerOptions::hello_gate`) and starts only after the
+/// setup is done, so setup speed cannot affect the result. The test waits
+/// for the server to close the held connections, then checks at once.
 #[tokio::test]
 async fn the_saturating_source_is_released_after_the_hello_timeout() {
-    // The setup (two upgrades and a refused third) must finish before the
-    // hello timeout fires, or the slots are freed mid-setup and correct code
-    // looks broken. The clock is the server's, so it cannot be paused: when
-    // a slow runner overruns the budget, discard that server and redo the
-    // setup on a fresh one. The checks below run only on a setup that fit.
-    let (s, started, mut held, capped) = {
-        let mut tries = 0;
-        loop {
-            tries += 1;
-            let s = serve_with(HELLO_SHORT, HOLD, HOLD).await;
-            let started = tokio::time::Instant::now();
-            let held = idle_tls(s.tcp, "127.0.0.1", 2).await;
-            let capped = open_tls_result(s.tcp, "127.0.0.1").await;
-            // Measured after the third attempt, so it bounds the server's
-            // own clock from above: under budget means nothing had expired.
-            if started.elapsed() < HELLO_SHORT {
-                break (s, started, held, capped);
-            }
-            assert!(
-                tries < 10,
-                "runner too slow: setup never fit inside the hello timeout"
-            );
-        }
-    };
+    // The hello timeout is gated: it does not start until the test opens
+    // the gate, after the two upgrades are held and the third is refused.
+    // Setup speed therefore cannot matter; no retry and no budget.
+    let (open, gate) = watch::channel(false);
+    let s = serve_gated(HELLO_SHORT, gate).await;
+    let held = idle_tls(s.tcp, "127.0.0.1", 2).await;
+    let capped = open_tls_result(s.tcp, "127.0.0.1").await;
+    let mut held = held;
+    open.send(true).unwrap();
+    let started = tokio::time::Instant::now();
     assert_eq!(held.len(), 2, "slots were held before the deadline");
     assert!(
         matches!(capped, Err(Refused::Connection(_))),

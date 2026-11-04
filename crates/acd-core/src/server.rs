@@ -64,6 +64,11 @@ pub struct ServerOptions {
     pub max_inflight: usize,
     /// Commands in flight across all sessions, including detached ones.
     pub max_inflight_total: usize,
+    /// Test seam. When set, the hello timeout of each connection starts
+    /// only once the watched value is `true`. `None` (the default) starts
+    /// it at upgrade, as always.
+    #[doc(hidden)]
+    pub hello_gate: Option<watch::Receiver<bool>>,
 }
 
 impl Default for ServerOptions {
@@ -75,6 +80,7 @@ impl Default for ServerOptions {
             max_preauth: 8,
             max_inflight: 32,
             max_inflight_total: 256,
+            hello_gate: None,
         }
     }
 }
@@ -187,6 +193,9 @@ async fn session(
     permit: OwnedSemaphorePermit,
     admit: Option<crate::tls::Admit>,
 ) {
+    if let Some(mut gate) = st.opts.hello_gate.clone() {
+        let _ = gate.wait_for(|open| *open).await;
+    }
     let hello = match tokio::time::timeout(st.opts.hello_timeout, socket.recv()).await {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<ClientMessage>(t.as_str()).ok(),
         _ => None,
