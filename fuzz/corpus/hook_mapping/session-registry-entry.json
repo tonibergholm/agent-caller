@@ -1,0 +1,24 @@
+{
+ "pid": 14517,
+ "sessionId": "00000000-0000-0000-0000-000000000000",
+ "cwd": "/private/tmp/acp3/claude/s4",
+ "startedAt": 1791530976898,
+ "procStart": "Fri Oct  9 07:29:36 2026",
+ "version": "2.1.295",
+ "peerProtocol": 1,
+ "peerFeatures": [
+  "notify_idle",
+  "reply_across_default_dirs",
+  "artifact_yield"
+ ],
+ "kind": "interactive",
+ "entrypoint": "sdk-ts",
+ "pidDomain": "darwin",
+ "messagingSocketPath": "/tmp/cc-socks/14517.sock",
+ "name": "s4-de",
+ "nameSource": "derived",
+ "nameSince": 1791530976898,
+ "status": "idle",
+ "updatedAt": 1791530977018,
+ "statusUpdatedAt": 1791530977018
+}
