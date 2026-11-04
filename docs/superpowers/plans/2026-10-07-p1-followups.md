@@ -1,6 +1,6 @@
 # Known gaps and deferred work
 
-Reviewed against `main` on 2026-11-04 (head `d91be2e`, the merge of #94). Items are
+Reviewed against `main` on 2026-11-04 (head `c44d3a3`, the merge of #100). Items are
 grouped by area. Completed task history is in
 [the archived review ledger](../../archive/p1-followups-2026-10.md); phase
 plans and live-run records keep the original evidence.
@@ -21,9 +21,12 @@ marks a decision only the owner can make: those are not accepted residuals.
   at 2 slots each) can still fill all 8 network pre-auth slots. Reproduced
   live by the red team (#94, finding 1, `tests/redteam/preauth_distributed.py`):
   4 sources lock out new TLS clients with HTTP 503; the local socket is
-  unaffected. No fix decided.
-  A hostile process sharing a source IP with a paired client can take that
-  client's 2 slots.
+  unaffected. After #106 the post-upgrade pool reserves slots for sources
+  holding none (a source already holding one connection can be refused its
+  second when only a few slots are free), so four sources no longer suffice,
+  but five can (2+2+2+1+1): distributed exhaustion remains. No further fix
+  decided. A hostile process sharing a source IP with a paired client can take
+  that client's 2 slots.
 - **Relay lock-screen content and handle revocation.** The relay spec's
   lock-screen content rule and stolen push address and handle revocation are
   open (see the spec's review status).
@@ -52,15 +55,6 @@ marks a decision only the owner can make: those are not accepted residuals.
   the old resume cursor. Memory stays bounded; only the documented resync does
   not happen on that path. An oversized frame after `welcome` is already a
   resync (`serve`, `conn.rs`).
-- **Idempotency table exhaustion (open; red team #94, finding 2, Medium).** One
-  paired client that sends `request.answer` for 16,500 distinct nonexistent
-  `request_id`s fills the daemon-wide 16,384-entry table: `RequestGone` is
-  cached for the 15-minute `IDEM_TTL` (`crates/acd-core/src/engine.rs`
-  `cacheable`; `idem.rs`). Every other client's new command then gets
-  `bad_request: too many recent commands; retry later`. A `#[ignore]`d test
-  documents it (`crates/acd-core/tests/redteam_idem_exhaustion.rs`). Not
-  decided: per-client share, or do not cache `RequestGone`. Details in
-  [the red-team record](../../research/2026-11-04-red-team-acd.md).
 - **Core 3, 7 and 8 limits (as built).** The client limits frames to 1 MiB,
   1000 agents and 64 KiB per agent; each breach ends as a resync without the
   resume cursor. An oversized frame does so only after `welcome`; before the
@@ -112,6 +106,13 @@ Findings still open or partly open (`docs/research/2026-11-03-security-review-co
 and `-local.md`). Core 1 to 8 and local F1, F3, F4 and F5 are fixed; local F2
 is open (see owner decisions).
 
+- **Apps and voice review (#100).** The findings of
+  `docs/research/2026-11-04-security-review-apps-voice.md` (F1 to F11: voice
+  path, Mac app, app-core, iOS shell, frontend) are open; none is fixed. They
+  include a hostile paired peer showing a label that contradicts its effect
+  (F11) and bidi text in peer-supplied cards (F10). The report's proposed fixes
+  are not implemented; six `#[ignore]`d tests in `crates/acd-voice/tests/findings.rs`
+  demonstrate them.
 - **F3 residual (hook listeners, #87).** A slow body after the token check is
   bounded only by the 5 s `body_timeout`. There is no per-peer connection cap,
   so a peer can still fill the 128 slots for up to 10 s at a time by sending
@@ -138,9 +139,6 @@ is open (see owner decisions).
   `characters_outside_the_escaped_classes_pass_unchanged` (hooks) and
   `a_combining_grapheme_joiner_in_a_command_passes_unchanged` (T3); a change
   to the escaper must update them on purpose.
-- **Whole-or-read-only (#83), accepted.** Question text and option labels
-  that the adapters cut earlier (T3 in `t3/map.rs`, hooks in `hooks/mapping.rs`)
-  stay answerable. Only permission commands follow the rule at the adapter.
 - **Whole-or-read-only (#83), accepted.** Read-only for an oversized inbox
   view is a presentation guarantee. `Inbox::pick` in `acd-client` checks the
   original request, so a direct socket caller can still answer a card the view
@@ -465,6 +463,14 @@ Checked in code on 2026-11-04.
   reconnects with the same request and asserts no second event.
 - Core 1 (#82), 2 and 6 (#81), 3, 7, 8 (#88), 4 and 5 (#90); local F1 (#80,
   #83), F3 (#87), F4 and F5 (#86).
+- Idempotency table exhaustion by one paired client (red team finding 2,
+  #106): refused commands release their reservation, `agent.mark_seen` takes no
+  entry, entries are charged per source address and per client id with the
+  global cap as backstop, and entries for delivered commands are not evicted
+  before their TTL.
+- Question text, headers, option labels and descriptions that the adapters cut
+  or altered are read-only (hooks and T3, #102; `a_cut_question_is_read_only`).
+  More than 9 options was already rejected whole by `question_specs`.
 - Test hardening (#89): `status_change_before_resubscribe_is_caught` accepts
   the new pane's own `agent.get` or the full list; the pre-auth recovery test
   uses a `ServerOptions::hello_gate` seam (default `None`); the Omarchy plugin
@@ -493,7 +499,6 @@ before 1.0.
   replacement, a release build on a device and the Online state right after a
   relaunch: live checks on a device, in the signed-release step.
 - The oversized pre-`welcome` frame resync (PR #105).
-- The idempotency table exhaustion by one paired client (red team finding 2).
 - The test items above that wait on fixed sleeps (PR #105).
 
 **Verify on the 1.0 acceptance run** (implemented, not yet seen live):

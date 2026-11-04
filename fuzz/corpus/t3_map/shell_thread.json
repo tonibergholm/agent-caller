@@ -1,0 +1,1 @@
+{"id": "t1", "projectId": "p", "title": "Hi\u202e", "providerInstanceId": "claudeAgent", "status": "running", "pendingRuntimeRequest": {"id": "r1", "kind": "command"}, "latestVisibleMessage": {"text": "done"}, "project": {"id": "p", "title": "P", "workspaceRoot": "/w"}}

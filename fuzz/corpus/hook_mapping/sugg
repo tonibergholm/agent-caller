@@ -1,0 +1,1 @@
+{"session_id": "s1", "prompt_id": "p1", "turn_id": "t1", "cwd": "/w", "tool_name": "Write", "tool_input": {"file_path": "/a"}, "permission_suggestions": [{"type": "addRules", "rules": [{"toolName": "Write", "ruleContent": "/a"}]}]}
