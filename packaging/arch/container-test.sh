@@ -151,7 +151,7 @@ for p in agent-caller agent-caller-omarchy; do
 	flags=(-f --noconfirm); [ "$offline" = 1 ] && flags+=(-d)
 	( cd "/work/$p-2" && as_builder env PKGDEST="/out/$p-2" SOURCE_DATE_EPOCH=$epoch \
 		${CARGO_HOME:+CARGO_HOME=$CARGO_HOME} ${RUSTUP_HOME:+RUSTUP_HOME=$RUSTUP_HOME} makepkg "${flags[@]}" ) >"/out/$p-2.log" 2>&1 \
-		&& ok "built $p pkgrel=2" || bad "build $p pkgrel=2"
+		&& ok "built $p pkgrel=2" || { bad "build $p pkgrel=2"; tail -20 "/out/$p-2.log"; }
 done
 pacman -U --noconfirm /out/agent-caller-2/*.pkg.tar.zst /out/agent-caller-omarchy-2/*.pkg.tar.zst 2>&1 | grep -v '^$' | tail -12
 [ "$(pacman -Q agent-caller)" = "agent-caller $ver-2" ] && ok "upgraded to $ver-2" || bad "upgrade did not apply"
