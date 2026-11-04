@@ -243,3 +243,17 @@ fn a_symlinked_directory_reports_a_symlink() {
     std::os::unix::fs::symlink(&real, &link).unwrap();
     assert!(matches!(check_private_dir(&link, 0o700), Err(SecureFsError::Symlink(_))));
 }
+
+/// `paths.rs:29` `p.len() < 3` -> `<=` (`is_absolute_windows`): a drive root is the
+/// shortest absolute path, and anything shorter is not one.
+#[test]
+fn a_windows_drive_root_is_absolute() {
+    use acd_securefs::paths::is_absolute_windows;
+    assert!(is_absolute_windows(r"C:\"));
+    assert!(is_absolute_windows("D:/"));
+    assert!(is_absolute_windows(r"\\server\share"));
+    assert!(!is_absolute_windows("C:"));
+    assert!(!is_absolute_windows(r"\\"));
+    assert!(!is_absolute_windows(r"C:foo"));
+    assert!(!is_absolute_windows(""));
+}
