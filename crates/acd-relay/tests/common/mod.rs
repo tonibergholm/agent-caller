@@ -10,7 +10,7 @@ use std::time::Duration;
 use acd_relay::fcm::{Address, FcmClient, PushSender, SendError, ServiceAccount};
 use acd_relay::handle::Keys;
 use acd_relay::http::HttpClient;
-use acd_relay::server::{AppState, Options, Rates, serve};
+use acd_relay::server::{AppState, Options, Rates, ServeOptions, serve_with};
 use acd_relay::wire::Platform;
 use acd_relay::{Clock, ManualClock};
 use async_trait::async_trait;
@@ -91,6 +91,15 @@ pub async fn start(setup: Setup, sender: Arc<dyn PushSender>) -> Relay {
 }
 
 pub async fn start_clock(setup: Setup, sender: Arc<dyn PushSender>, clock: Arc<ManualClock>) -> Relay {
+    start_serving(setup, sender, clock, ServeOptions::default()).await
+}
+
+pub async fn start_serving(
+    setup: Setup,
+    sender: Arc<dyn PushSender>,
+    clock: Arc<ManualClock>,
+    opts: ServeOptions,
+) -> Relay {
     let state = AppState::new(
         Options {
             keys: keys(),
@@ -103,7 +112,7 @@ pub async fn start_clock(setup: Setup, sender: Arc<dyn PushSender>, clock: Arc<M
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(serve(listener, state.clone()));
+    tokio::spawn(serve_with(listener, state.clone(), opts, std::future::pending()));
     Relay {
         addr,
         state,
@@ -229,7 +238,7 @@ pub fn credentials_json(fake: &FakeFcm) -> String {
 }
 
 pub fn fcm_client(fake: &FakeFcm, clock: Arc<dyn Clock>) -> Arc<FcmClient> {
-    let account = ServiceAccount::from_json(credentials_json(fake).as_bytes()).unwrap();
+    let account = ServiceAccount::from_json_for_tests(credentials_json(fake).as_bytes()).unwrap();
     Arc::new(FcmClient::new(
         HttpClient::plain_for_tests(Duration::from_secs(10), 64 * 1024),
         account,
@@ -237,4 +246,32 @@ pub fn fcm_client(fake: &FakeFcm, clock: Arc<dyn Clock>) -> Arc<FcmClient> {
         "p-1".into(),
         clock,
     ))
+}
+
+/// Like [`fcm_client`] with the per-exchange HTTP timeout chosen by the test.
+pub fn fcm_client_with_http_timeout(fake: &FakeFcm, clock: Arc<dyn Clock>, http: Duration) -> Arc<FcmClient> {
+    let account = ServiceAccount::from_json_for_tests(credentials_json(fake).as_bytes()).unwrap();
+    Arc::new(FcmClient::new(
+        HttpClient::plain_for_tests(http, 64 * 1024),
+        account,
+        format!("http://{}", fake.addr),
+        "p-1".into(),
+        clock,
+    ))
+}
+
+/// An OAuth endpoint that accepts connections and never answers.
+pub async fn stalled_oauth() -> (FakeFcm, tokio::task::JoinHandle<()>) {
+    let fake = fake_fcm().await;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let held = tokio::spawn(async move {
+        let mut open = vec![];
+        loop {
+            if let Ok((s, _)) = l.accept().await {
+                open.push(s);
+            }
+        }
+    });
+    (FakeFcm { addr, st: fake.st.clone() }, held)
 }

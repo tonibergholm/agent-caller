@@ -274,18 +274,24 @@ async fn concurrent_sends_are_capped() {
     let h = r.make_handle(&s, "tok:cc").await;
     *s.gate.lock().unwrap() = Some(gate.clone());
     let r = Arc::new(r);
-    let tasks: Vec<_> = (0..5)
-        .map(|_| {
-            let (r, h) = (r.clone(), h.clone());
-            tokio::spawn(async move { r.wake(&h).await })
-        })
-        .collect();
-    // Three are refused while two hold the gate.
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    gate.add_permits(10);
+    // Each task reports its status as it finishes.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    for _ in 0..5 {
+        let (r, h, tx) = (r.clone(), h.clone(), tx.clone());
+        tokio::spawn(async move {
+            let _ = tx.send(r.wake(&h).await);
+        });
+    }
+    // Two requests hold the gate until it opens, so the first three to
+    // finish are the refusals. Waiting for them needs no clock.
     let mut codes = vec![];
-    for t in tasks {
-        codes.push(t.await.unwrap());
+    for _ in 0..3 {
+        codes.push(rx.recv().await.unwrap());
+    }
+    assert_eq!(codes, [503, 503, 503]);
+    gate.add_permits(10);
+    for _ in 0..2 {
+        codes.push(rx.recv().await.unwrap());
     }
     codes.sort();
     assert_eq!(codes, [204, 204, 503, 503, 503]);

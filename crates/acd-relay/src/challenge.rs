@@ -121,6 +121,11 @@ impl Challenges {
         Confirm::Failed
     }
 
+    /// Drop expired challenges (the periodic sweep).
+    pub fn sweep(&self, now: u64) {
+        self.inner.lock().unwrap().retain(|_, e| e.expires_at > now);
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
     }

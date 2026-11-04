@@ -98,6 +98,19 @@ pub fn map_fcm_error(_status: u16, body: &[u8]) -> SendError {
     if unregistered { SendError::Gone } else { SendError::Unavailable }
 }
 
+/// `token_uri` must be usable: non-empty, `https`, a host, no userinfo
+/// (spec §5.7). The error never echoes it. `allow_plain` is for tests.
+fn check_token_uri(uri: &str, allow_plain: bool) -> Result<(), String> {
+    let bad = || "credentials file: invalid token_uri".to_string();
+    let u: hyper::Uri = uri.parse().map_err(|_| bad())?;
+    let scheme_ok = u.scheme_str() == Some("https") || (allow_plain && u.scheme_str() == Some("http"));
+    let authority_ok = u.authority().is_some_and(|a| !a.as_str().contains('@'));
+    if uri.is_empty() || !scheme_ok || !authority_ok || u.host().is_none_or(str::is_empty) {
+        return Err(bad());
+    }
+    Ok(())
+}
+
 pub struct ServiceAccount {
     client_email: String,
     private_key: Vec<u8>,
@@ -127,8 +140,27 @@ impl ServiceAccount {
             token_uri: String,
         }
         let f: F = serde_json::from_slice(raw).map_err(|_| "credentials file: invalid json".to_string())?;
+        check_token_uri(&f.token_uri, false)?;
+        Self::build(f.client_email, f.private_key, f.token_uri)
+    }
+
+    /// Like [`ServiceAccount::from_json`] but lets `token_uri` be plain
+    /// `http://`, for tests against local fakes. Production uses `from_json`.
+    pub fn from_json_for_tests(raw: &[u8]) -> Result<ServiceAccount, String> {
+        #[derive(serde::Deserialize)]
+        struct F {
+            client_email: String,
+            private_key: String,
+            token_uri: String,
+        }
+        let f: F = serde_json::from_slice(raw).map_err(|_| "credentials file: invalid json".to_string())?;
+        check_token_uri(&f.token_uri, true)?;
+        Self::build(f.client_email, f.private_key, f.token_uri)
+    }
+
+    fn build(client_email: String, private_key: String, token_uri: String) -> Result<ServiceAccount, String> {
         let mut der_b64 = String::new();
-        for l in f.private_key.lines() {
+        for l in private_key.lines() {
             if !l.starts_with("-----") {
                 der_b64.push_str(l.trim());
             }
@@ -137,7 +169,7 @@ impl ServiceAccount {
             .decode(der_b64)
             .map_err(|_| "credentials file: invalid private key".to_string())?;
         RsaKeyPair::from_pkcs8(&der).map_err(|_| "credentials file: invalid private key".to_string())?;
-        Ok(ServiceAccount { client_email: f.client_email, private_key: der, token_uri: f.token_uri })
+        Ok(ServiceAccount { client_email, private_key: der, token_uri })
     }
 
     fn assertion(&self, now: u64) -> Result<String, ()> {
@@ -163,6 +195,36 @@ struct Token {
     expires_at: u64,
 }
 
+/// What the token mutex guards.
+#[derive(Default)]
+struct TokenState {
+    token: Option<Token>,
+    /// Refreshes are refused until this time (seconds on the clock) after a
+    /// failed or abandoned one, so a stalled or refusing OAuth endpoint is
+    /// asked once, not once per send.
+    retry_after: u64,
+}
+
+/// Seconds a failed token refresh is remembered.
+pub const REFRESH_BACKOFF_SECS: u64 = 5;
+
+/// Records a failed refresh unless disarmed. It also fires when the future
+/// is dropped mid-request (the overall deadline), which an error path would
+/// miss.
+struct RefreshGuard<'a> {
+    state: &'a mut TokenState,
+    until: u64,
+    done: bool,
+}
+
+impl Drop for RefreshGuard<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.state.retry_after = self.until;
+        }
+    }
+}
+
 /// The real FCM HTTP v1 sender.
 pub struct FcmClient {
     http: HttpClient,
@@ -171,7 +233,7 @@ pub struct FcmClient {
     endpoint: String,
     project_id: String,
     clock: Arc<dyn Clock>,
-    token: tokio::sync::Mutex<Option<Token>>,
+    token: tokio::sync::Mutex<TokenState>,
 }
 
 impl FcmClient {
@@ -182,19 +244,24 @@ impl FcmClient {
         project_id: String,
         clock: Arc<dyn Clock>,
     ) -> FcmClient {
-        FcmClient { http, account, endpoint, project_id, clock, token: tokio::sync::Mutex::new(None) }
+        FcmClient { http, account, endpoint, project_id, clock, token: tokio::sync::Mutex::new(TokenState::default()) }
     }
 
     /// A cached token, refreshed under the lock (single flight) when it is
-    /// within 60 s of expiry.
+    /// within 60 s of expiry. After a failed or abandoned refresh, later
+    /// calls fail at once for [`REFRESH_BACKOFF_SECS`].
     async fn access_token(&self) -> Result<String, SendError> {
         let mut g = self.token.lock().await;
         let now = self.clock.now_secs();
-        if let Some(t) = g.as_ref()
+        if let Some(t) = g.token.as_ref()
             && t.expires_at > now + 60
         {
             return Ok(t.value.clone());
         }
+        if now < g.retry_after {
+            return Err(SendError::Unavailable);
+        }
+        let mut guard = RefreshGuard { until: now + REFRESH_BACKOFF_SECS, state: &mut g, done: false };
         let jwt = self.account.assertion(now).map_err(|_| {
             tracing::error!(class = "oauth", "cannot sign the assertion");
             SendError::Unavailable
@@ -218,11 +285,24 @@ impl FcmClient {
             tracing::warn!(class = "oauth", status = res.status, "token request refused");
             return Err(SendError::Unavailable);
         };
-        *g = Some(Token { value: value.clone(), expires_at: now + ttl });
+        guard.done = true;
+        guard.state.token = Some(Token { value: value.clone(), expires_at: now + ttl });
         Ok(value)
     }
 
+    /// One send under one overall deadline: the token mutex wait, a token
+    /// refresh and the push exchange together (spec §4.6).
     async fn send(&self, body: Value) -> Result<(), SendError> {
+        match tokio::time::timeout(SEND_DEADLINE, self.send_inner(body)).await {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::warn!(class = "fcm", "send deadline passed");
+                Err(SendError::Unavailable)
+            }
+        }
+    }
+
+    async fn send_inner(&self, body: Value) -> Result<(), SendError> {
         let token = self.access_token().await?;
         let url = format!("{}/v1/projects/{}/messages:send", self.endpoint, self.project_id);
         let auth = format!("Bearer {token}");
@@ -238,7 +318,7 @@ impl FcmClient {
             return Ok(());
         }
         if res.status == 401 {
-            *self.token.lock().await = None;
+            self.token.lock().await.token = None;
         }
         let mapped = map_fcm_error(res.status, &res.body);
         tracing::warn!(class = "fcm", status = res.status, gone = (mapped == SendError::Gone), "push refused");
@@ -259,8 +339,12 @@ impl PushSender for FcmClient {
     }
 }
 
-/// Default deadline for one push-service exchange.
+/// Default deadline for one HTTP exchange with Google.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Deadline for a whole send: waiting for the token lock, refreshing the
+/// token and the push exchange, together.
+pub const SEND_DEADLINE: Duration = Duration::from_secs(10);
 
 #[cfg(test)]
 mod tests {

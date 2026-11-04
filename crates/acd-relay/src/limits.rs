@@ -102,6 +102,12 @@ impl Limiter {
         g.overflow.hit(self.limit, now)
     }
 
+    /// Drop counters whose windows have ended. A counter with a live window
+    /// is never removed (removing it would reset a caller's budget).
+    pub fn sweep(&self, now: u64) {
+        self.inner.lock().unwrap().map.retain(|_, c| c.live(now));
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().map.len()
     }

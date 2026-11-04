@@ -5,6 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use axum::serve::Listener;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 use axum::body::{Body, to_bytes};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -25,6 +29,14 @@ use crate::Clock;
 pub const MAX_BODY: usize = 2048;
 pub const READ_DEADLINE: Duration = Duration::from_secs(5);
 pub const MAX_IN_FLIGHT: usize = 64;
+/// Open connections the relay serves at once; `accept` waits for a slot.
+pub const MAX_CONNECTIONS: usize = 1024;
+/// How long a connection may take to send a complete request head, counted
+/// from accept and again from the end of each response (so it also bounds
+/// an idle keep-alive connection).
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often expired counters and challenges are dropped.
+pub const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Rate limits and map caps (spec §4.6). Starting values, not measured.
 #[derive(Debug, Clone)]
@@ -110,6 +122,35 @@ impl AppState {
         })
     }
 
+    /// Drop every expired counter and challenge (spec §8).
+    pub fn sweep(&self) {
+        let now = self.clock.now_secs();
+        for l in [
+            &self.wake_handle,
+            &self.wake_address,
+            &self.wake_ip,
+            &self.wake_global,
+            &self.issue_ip,
+            &self.issue_address,
+            &self.issue_global,
+            &self.confirm_ip,
+        ] {
+            l.sweep(now);
+        }
+        self.challenges.sweep(now);
+    }
+
+    /// Sweep every `every` until dropped.
+    pub async fn sweep_loop(self: Arc<AppState>, every: Duration) {
+        let mut tick = tokio::time::interval(every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await; // the first tick is immediate
+        loop {
+            tick.tick().await;
+            self.sweep();
+        }
+    }
+
     /// Sizes of the bounded maps, for tests.
     pub fn map_sizes(&self) -> Vec<usize> {
         vec![
@@ -167,9 +208,94 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// Connection limits for [`serve_with`].
+#[derive(Debug, Clone, Copy)]
+pub struct ServeOptions {
+    pub max_connections: usize,
+    pub head_timeout: Duration,
+    pub sweep_interval: Duration,
+}
+
+impl Default for ServeOptions {
+    fn default() -> ServeOptions {
+        ServeOptions { max_connections: MAX_CONNECTIONS, head_timeout: HEAD_TIMEOUT, sweep_interval: SWEEP_INTERVAL }
+    }
+}
+
 /// Serve on `listener` until the future is dropped.
 pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> std::io::Result<()> {
-    axum::serve(listener, router(state).into_make_service_with_connect_info::<SocketAddr>()).await
+    serve_with(listener, state, ServeOptions::default(), std::future::pending()).await
+}
+
+/// Aborts the sweeper if the serve future is dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl AbortOnDrop {
+    /// Abort and wait, so the task's references are gone on return.
+    async fn stop(mut self) {
+        self.0.abort();
+        let _ = (&mut self.0).await;
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Serve one HTTP/1 connection per accept, at most `max_connections` at a
+/// time (`accept` waits for a slot, which lives in the connection's task).
+/// The head deadline is hyper's own `header_read_timeout`: it covers a head
+/// that never completes and restarts after each response, so an idle
+/// keep-alive connection is closed too. A background task sweeps expired
+/// counters and challenges; it ends with this function.
+///
+/// When `shutdown` completes it stops accepting, lets each connection finish
+/// its in-flight request and returns once they are done.
+pub async fn serve_with(
+    mut listener: tokio::net::TcpListener,
+    state: Arc<AppState>,
+    opts: ServeOptions,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
+    let sweeper = AbortOnDrop(tokio::spawn(state.clone().sweep_loop(opts.sweep_interval)));
+    let app = router(state);
+    let slots = Arc::new(Semaphore::new(opts.max_connections));
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let mut connections = tokio::task::JoinSet::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        let slot = tokio::select! {
+            s = slots.clone().acquire_owned() => s.expect("semaphore is never closed"),
+            () = &mut shutdown => break,
+        };
+        let (io, peer) = tokio::select! {
+            r = Listener::accept(&mut listener) => r,
+            () = &mut shutdown => break,
+        };
+        // Reap finished connections so the set does not grow.
+        while connections.try_join_next().is_some() {}
+        let service = TowerToHyperService::new(app.clone().layer(axum::Extension(ConnectInfo(peer))));
+        let mut builder = http1::Builder::new();
+        builder.timer(TokioTimer::new()).header_read_timeout(opts.head_timeout);
+        let mut stopped = stopped.clone();
+        connections.spawn(async move {
+            let _slot = slot;
+            let mut conn = std::pin::pin!(builder.serve_connection(TokioIo::new(io), service));
+            tokio::select! {
+                _ = conn.as_mut() => {}
+                () = async { let _ = stopped.wait_for(|stop| *stop).await; } => {
+                    conn.as_mut().graceful_shutdown();
+                    let _ = conn.as_mut().await;
+                }
+            }
+        });
+    }
+    stop.send_replace(true);
+    while connections.join_next().await.is_some() {}
+    sweeper.stop().await;
+    Ok(())
 }
 
 /// A refusal: status and error code. Small, so `Result` stays cheap.

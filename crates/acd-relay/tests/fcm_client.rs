@@ -80,7 +80,7 @@ async fn fcm_client_maps_unregistered_to_gone() {
         "token_uri":format!("http://{dead}/token")}).to_string();
     let c2 = acd_relay::fcm::FcmClient::new(
         HttpClient::plain_for_tests(std::time::Duration::from_secs(2), 1024),
-        ServiceAccount::from_json(creds.as_bytes()).unwrap(),
+        ServiceAccount::from_json_for_tests(creds.as_bytes()).unwrap(),
         format!("http://{dead}"),
         "p-1".into(),
         Arc::new(ManualClock::new(T0)),
@@ -92,10 +92,10 @@ async fn fcm_client_maps_unregistered_to_gone() {
 async fn fcm_client_errors_never_contain_credentials() {
     // Bad private keys: the error names the file problem, never the key text.
     let pem = TEST_KEY_PEM.replace("MII", "XXX");
-    let bad = serde_json::json!({"client_email":"a@b","private_key":pem,"token_uri":"http://x/"}).to_string();
+    let bad = serde_json::json!({"client_email":"a@b","private_key":pem,"token_uri":"https://oauth2.example/token"}).to_string();
     let e = ServiceAccount::from_json(bad.as_bytes()).unwrap_err();
     assert!(!e.contains("XXX") && !e.contains("PRIVATE"), "{e}");
-    let account = ServiceAccount::from_json(credentials_json(&fake_fcm().await).as_bytes()).unwrap();
+    let account = ServiceAccount::from_json_for_tests(credentials_json(&fake_fcm().await).as_bytes()).unwrap();
     let dbg = format!("{account:?}");
     assert!(!dbg.contains("p-1.iam") && !dbg.contains("MII"), "{dbg}");
     // HTTP errors never echo the URL (which may carry a secret).
@@ -126,4 +126,77 @@ fn fcm_credentials_file_must_be_private() {
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(ServiceAccount::from_file(&p).is_ok());
     assert!(ServiceAccount::from_file(&dir.path().join("missing.json")).is_err());
+}
+
+#[test]
+fn token_uri_must_be_a_usable_https_uri() {
+    let mk = |uri: &str| {
+        serde_json::json!({"client_email":"a@b","private_key":TEST_KEY_PEM,"token_uri":uri}).to_string()
+    };
+    for bad in [
+        "",
+        "http://oauth2.example/token",
+        "ftp://oauth2.example/token",
+        "oauth2.example/token",
+        "https://",
+        "https://user:SECRETPW@oauth2.example/token",
+        "/token",
+    ] {
+        let e = ServiceAccount::from_json(mk(bad).as_bytes()).unwrap_err();
+        assert!(!e.contains("SECRETPW") && !e.contains("oauth2.example"), "{e}");
+        assert!(e.contains("token_uri"), "{bad}: {e}");
+    }
+    assert!(ServiceAccount::from_json(mk("https://oauth2.example/token").as_bytes()).is_ok());
+}
+
+use acd_relay::fcm::{REFRESH_BACKOFF_SECS, SEND_DEADLINE};
+
+/// A refusing OAuth endpoint is asked once, not once per send, until the
+/// backoff ends.
+#[tokio::test]
+async fn failed_token_refresh_is_not_retried_until_the_backoff_ends() {
+    let fake = fake_fcm().await;
+    *fake.st.token_reply.lock().unwrap() = (500, "{}".into());
+    let clock = Arc::new(ManualClock::new(T0));
+    let c = fcm_client(&fake, clock.clone());
+    for _ in 0..10 {
+        assert_eq!(c.wake(&addr()).await, Err(SendError::Unavailable));
+    }
+    assert_eq!(fake.st.token_requests.load(Ordering::SeqCst), 1);
+    assert!(fake.st.sends.lock().unwrap().is_empty());
+    clock.advance(REFRESH_BACKOFF_SECS);
+    assert_eq!(c.wake(&addr()).await, Err(SendError::Unavailable));
+    assert_eq!(fake.st.token_requests.load(Ordering::SeqCst), 2);
+    // Recovery: a good reply after the backoff gets a token and sends.
+    *fake.st.token_reply.lock().unwrap() =
+        (200, format!(r#"{{"access_token":"{ACCESS_TOKEN}","expires_in":3600}}"#));
+    clock.advance(REFRESH_BACKOFF_SECS);
+    c.wake(&addr()).await.unwrap();
+}
+
+/// One deadline covers the lock wait, the refresh and the exchange. The
+/// per-exchange timeout is set far above it, so only the overall deadline
+/// can end these sends. Time is virtual.
+#[tokio::test(start_paused = true)]
+async fn concurrent_sends_against_a_stalled_oauth_endpoint_all_end_by_the_deadline() {
+    let (fake, _held) = stalled_oauth().await;
+    let clock = Arc::new(ManualClock::new(T0));
+    let c = fcm_client_with_http_timeout(&fake, clock.clone(), std::time::Duration::from_secs(120));
+    let start = tokio::time::Instant::now();
+    let tasks: Vec<_> = (0..64)
+        .map(|_| {
+            let c = c.clone();
+            tokio::spawn(async move { c.wake(&addr()).await })
+        })
+        .collect();
+    for t in tasks {
+        assert_eq!(t.await.unwrap(), Err(SendError::Unavailable));
+    }
+    let took = start.elapsed();
+    assert!(took <= SEND_DEADLINE, "{took:?}");
+    assert!(took >= SEND_DEADLINE, "the deadline, not an early failure: {took:?}");
+    // The abandoned refresh is remembered: the next send fails at once.
+    let again = tokio::time::Instant::now();
+    assert_eq!(c.wake(&addr()).await, Err(SendError::Unavailable));
+    assert_eq!(again.elapsed(), std::time::Duration::ZERO);
 }
