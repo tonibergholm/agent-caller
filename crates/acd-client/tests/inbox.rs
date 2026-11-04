@@ -66,8 +66,11 @@ async fn setup_with(timing: acd_client::Timing) -> (FakeServer, FakeConn, Arc<In
 fn settings_client_id() -> &'static str {
     "00000000-0000-4000-8000-000000000001"
 }
+/// Countdowns never end on their own here (the undo is an hour), so no
+/// assertion races the clock. A test that wants a send calls
+/// `ib.expire_countdowns_for_test()` and waits for the frame.
 async fn setup() -> (FakeServer, FakeConn, Arc<Inbox>) {
-    setup_with(common::fast()).await
+    setup_with(held()).await
 }
 async fn view_until(ib: &Inbox, what: &str, pred: impl Fn(&InboxView) -> bool) {
     let mut rx = ib.view();
@@ -103,8 +106,8 @@ async fn received_at_least(f: &FakeServer, ty: &str, n: usize) {
 async fn pick_waits_for_the_undo_then_sends_once() {
     let (f, _, ib) = setup().await;
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(answers(&f), 0);
+    assert_eq!(answers(&f), 0, "nothing is sent while the countdown runs");
+    ib.expire_countdowns_for_test();
     received_at_least(&f, "request.answer", 1).await;
     assert_eq!(answers(&f), 1);
 }
@@ -114,6 +117,7 @@ async fn escape_right_after_pick_cancels_and_sends_nothing() {
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     assert!(ib.escape());
     assert!(!ib.escape());
+    ib.expire_countdowns_for_test();
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(answers(&f), 0);
 }
@@ -139,6 +143,7 @@ async fn countdown_cancels_when_request_resolves() {
                 })
     })
     .await;
+    ib.expire_countdowns_for_test();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(answers(&f), 0);
 }
@@ -158,6 +163,7 @@ async fn countdown_cancels_when_option_semantics_change() {
                 .is_some_and(|n| n.text == "The request changed. Nothing was sent.")
     })
     .await;
+    ib.expire_countdowns_for_test();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(answers(&f), 0);
 }
@@ -197,6 +203,7 @@ async fn stale_view_revision_is_rejected_without_action_or_frame() {
         Err(PickError::StaleRequest)
     );
     assert!(ib.view().borrow().actions.is_empty());
+    ib.expire_countdowns_for_test();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(answers(&f), 0, "stale revision must not send a frame");
 }
@@ -223,7 +230,8 @@ async fn reconnect_within_undo_window_cancels() {
                     .is_some_and(|n| n.text == "Offline. Nothing was sent.")
         })
         .await;
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        ib.expire_countdowns_for_test();
+    tokio::time::sleep(Duration::from_millis(250)).await;
         assert_eq!(answers(&f), 0, "{how}");
     }
 }
@@ -266,7 +274,6 @@ async fn reply_goes_through_the_undo() {
     view_until(&ib, "reply card", |v| v.cards.iter().any(|c| c.can_reply)).await;
     assert_eq!(ib.reply("m1/a1", "   ".into()), Err(PickError::BadText));
     ib.reply("m1/a1", "next step".into()).unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         f.received()
             .iter()
@@ -274,6 +281,7 @@ async fn reply_goes_through_the_undo() {
             .count(),
         0
     );
+    ib.expire_countdowns_for_test();
     received_at_least(&f, "agent.send", 1).await;
     let sent = f
         .received()
@@ -542,6 +550,7 @@ async fn repairing_inside_the_undo_window_sends_nothing() {
             .any(|m| m.key == "m1" && m.status == acd_client::conn::MachineStatus::Online)
     })
     .await;
+    ib.expire_countdowns_for_test();
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(answers(&f), 0);
     let view = ib.view();
@@ -555,6 +564,7 @@ async fn repairing_inside_the_undo_window_sends_nothing() {
             .is_some_and(|n| n.text == "Offline. Nothing was sent.")
     );
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
     received_at_least(&f, "request.answer", 1).await;
     assert_eq!(answers(&f), 1);
 }
@@ -564,6 +574,7 @@ async fn removing_a_machine_cancels_its_countdowns() {
     let (f, _, ib) = setup().await;
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
     ib.remove_machine("m1").unwrap();
+    ib.expire_countdowns_for_test();
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(answers(&f), 0);
     assert!(ib.view().borrow().actions.is_empty());
@@ -894,6 +905,7 @@ async fn a_producer_message_on_a_rejected_resolution_becomes_the_notice() {
 async fn replacement_cancels_machine_with_pending_submit_clone() {
     let (f, old_conn, ib) = setup().await;
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
     tokio::time::timeout(Duration::from_secs(3), async {
         while answers(&f) == 0 {
             tokio::task::yield_now().await;
@@ -934,6 +946,7 @@ async fn replacement_cancels_machine_with_pending_submit_clone() {
 async fn removal_cancels_machine_with_pending_submit_clone() {
     let (f, old_conn, ib) = setup().await;
     ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
     tokio::time::timeout(Duration::from_secs(3), async {
         while answers(&f) == 0 {
             tokio::task::yield_now().await;
@@ -989,8 +1002,8 @@ async fn typed_answer_needs_a_free_text_request_and_goes_through_the_undo() {
     view_until(&ib, "countdown", |v| !v.actions.is_empty()).await;
     let action = ib.view().borrow().actions[0].clone();
     assert_eq!(action.detail.as_deref(), Some("purple\nplease"));
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(answers(&f), 0);
+    ib.expire_countdowns_for_test();
     received_at_least(&f, "request.answer", 1).await;
     let sent: Vec<_> = f
         .received()
@@ -1019,6 +1032,8 @@ async fn typed_answer_countdown_cancels_when_free_text_is_withdrawn() {
         serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":pending_agent()}),
     )
     .await;
+    view_until(&ib, "free text withdrawn", |v| v.cards.iter().any(|c| !c.free_text_answerable)).await;
+    ib.expire_countdowns_for_test();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(answers(&f), 0);
 }
@@ -1038,6 +1053,8 @@ async fn typed_answer_countdown_cancels_when_the_revision_bumps() {
     agent["pending"]["revision"] = serde_json::json!(2);
     c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":agent}))
         .await;
+    view_until(&ib, "revision 2", |v| v.cards.iter().any(|c| c.agent.pending.as_ref().is_some_and(|p| p.revision == 2))).await;
+    ib.expire_countdowns_for_test();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(answers(&f), 0, "a changed revision must not send");
 }
@@ -1111,6 +1128,7 @@ async fn hiding_subagents_cancels_their_countdown_so_nothing_fires_unseen() {
     // Esc has nothing invisible to cancel, and nothing is left to fire.
     assert!(!ib.escape(), "no hidden action is left for Esc");
     view_until(&ib, "no actions", |v| v.actions.is_empty() && v.cards.len() == 1).await;
+    ib.expire_countdowns_for_test();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(answers(&f), 0, "the hidden countdown never fired");
     // Showing them again does not bring the action back.
@@ -1140,6 +1158,7 @@ async fn a_reply_countdown_survives_the_agent_turning_idle_with_idle_hidden() {
     })
     .await;
     assert_eq!(ib.view().borrow().hidden_idle, 0);
+    ib.expire_countdowns_for_test();
     received_at_least(&f, "agent.send", 1).await;
     let sent = f
         .received()
@@ -1212,6 +1231,7 @@ async fn a_delivered_answer_reports_fired_then_delivered() {
     let (f, c, ib) = setup().await;
     let mut rx = ib.action_outcomes();
     let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
     assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
     let frame = answer_frame(&f).await;
     c.send(serde_json::json!({"type":"result","id":frame["id"],"ok":true,"outcome":"delivered"})).await;
@@ -1223,6 +1243,7 @@ async fn a_rejected_answer_reports_its_code() {
     let (f, c, ib) = setup().await;
     let mut rx = ib.action_outcomes();
     let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
     assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
     let frame = answer_frame(&f).await;
     c.send(serde_json::json!({"type":"result","id":frame["id"],"ok":false,"error":{"code":"request_gone","message":"gone"}})).await;
@@ -1234,6 +1255,7 @@ async fn an_answer_lost_across_a_daemon_restart_is_uncertain() {
     let (f, c, ib) = setup().await;
     let mut rx = ib.action_outcomes();
     let id = ib.pick("m1/a1", ANSWER_REQ, "allow", 1).unwrap();
+    ib.expire_countdowns_for_test();
     assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
     answer_frame(&f).await;
     // A new epoch revokes every in-flight command (commands.rs on_welcome).
@@ -1487,6 +1509,7 @@ async fn a_guarded_send_reaches_a_hidden_idle_agent() {
     assert_eq!(ib.reply_guarded("m1/a3", "rebase".into(), &unnamed), Err(PickError::Hidden));
     let guard = Guard { named_send_only: true, ..unnamed };
     ib.reply_guarded("m1/a3", "rebase".into(), &guard).unwrap();
+    ib.expire_countdowns_for_test();
     let sent = frame_of_type(&f, "agent.send").await;
     assert_eq!((sent["agent_id"].as_str(), sent["text"].as_str()), (Some("a3"), Some("rebase")));
 }
@@ -1583,6 +1606,7 @@ async fn daemon_error_messages_never_reach_the_logs() {
     c.send(serde_json::json!({"type":"error","code":"bad_request","message":"SECRET-DAEMON echo of run the tests"})).await;
     let mut rx = ib.action_outcomes();
     let id = ib.reply("m1/a1", "SECRET-REPLY".into()).unwrap();
+    ib.expire_countdowns_for_test();
     assert_eq!(next_outcome(&mut rx, &id).await, ActionOutcome::Fired);
     let sent = frame_of_type(&f, "agent.send").await;
     c.send(serde_json::json!({"type":"result","id":sent["id"],"ok":false,"error":{"code":"agent_busy","message":"SECRET-RESULT"}})).await;
@@ -1696,7 +1720,7 @@ async fn a_countdown_keeps_a_hook_only_card_visible_after_its_request_resolves()
     quiet["can_send"] = true.into();
     c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":quiet}))
         .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    view_until(&ib, "quiet agent applied", |v| v.cards.iter().any(|c| c.key == "m1/a3" && c.agent.pending.is_none())).await;
     let v = ib.view().borrow().clone();
     assert_eq!(v.actions.len(), 1, "the countdown is still running");
     assert!(
@@ -1741,6 +1765,7 @@ async fn a_pending_hook_only_countdown_survives_turning_the_setting_off() {
         v.actions.len() == 1 && v.cards.iter().any(|c| c.key == "m1/a3")
     })
     .await;
+    ib.expire_countdowns_for_test();
     received_at_least(&f, "request.answer", 1).await;
     assert_eq!(answers(&f), 1, "the countdown still fired");
 }
