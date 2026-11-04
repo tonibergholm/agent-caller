@@ -19,7 +19,6 @@ pub struct Metrics {
     pub answers_ok: AtomicU64,
     pub resolved_seen: AtomicU64,
     pub withdrawn: AtomicU64,
-    pub unanswered_timeouts: AtomicU64,
     pub drops_injected: AtomicU64,
     pub welcomed_same: AtomicU64,
     pub welcomed_new: AtomicU64,
@@ -28,7 +27,6 @@ pub struct Metrics {
     pub restarts: AtomicU64,
     pub producer_errors: AtomicU64,
     pub producer_puts: AtomicU64,
-    pub clients_online: AtomicU64,
     pub errors: Mutex<BTreeMap<String, u64>>,
     pub resolved_by: Mutex<BTreeMap<String, u64>>,
 }

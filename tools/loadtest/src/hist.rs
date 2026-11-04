@@ -55,9 +55,6 @@ impl Hist {
     pub fn max(&self) -> u64 {
         self.max
     }
-    pub fn mean(&self) -> u64 {
-        if self.n == 0 { 0 } else { (self.sum / self.n as u128) as u64 }
-    }
     /// The value at quantile `q` in `[0, 1]`, as the bucket's lower bound.
     pub fn quantile(&self, q: f64) -> u64 {
         if self.n == 0 {

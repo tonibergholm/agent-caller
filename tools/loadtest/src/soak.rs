@@ -130,7 +130,7 @@ pub async fn run(a: Args) -> Result<(), String> {
             next_restart += restart_every;
             restarts += 1;
             Metrics::inc(&m.restarts);
-            proc.stop(restarts % 2 == 0);
+            proc.stop(restarts.is_multiple_of(2));
             tokio::time::sleep(Duration::from_millis(500)).await;
             proc.start().await?;
             prev_cpu = 0;

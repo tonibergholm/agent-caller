@@ -133,7 +133,7 @@ async fn hook_cap(p: &Proc) {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let mut b = [0u8; 1];
         if let Some(s) = idle.first_mut()
-            && matches!(tokio::time::timeout(Duration::from_millis(10), s.read(&mut b)).await, Ok(_))
+            && tokio::time::timeout(Duration::from_millis(10), s.read(&mut b)).await.is_ok()
         {
             closed_after = Some(t.elapsed().as_secs_f64());
             break;

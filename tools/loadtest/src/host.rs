@@ -168,7 +168,7 @@ async fn agent_loop(
     burst: Arc<Notify>,
     counter: Arc<AtomicU64>,
 ) {
-    let mut rng = Rng::new(seed_from_clock() ^ (i as u64 + 1) * 7919);
+    let mut rng = Rng::new(seed_from_clock() ^ ((i as u64 + 1) * 7919));
     let mut incarnation = 0u32;
     let mut id = format!("agent-{i}-{incarnation}");
     core.observe(Observation::AgentUpsert(agent_obs(&id)));

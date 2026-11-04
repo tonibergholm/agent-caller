@@ -47,8 +47,7 @@ fn fnv(s: &str) -> u64 {
 }
 
 pub fn spawn_clients(cfg: &ClientCfg, m: Arc<Metrics>, stop: watch::Receiver<bool>) -> Vec<MachineHandle> {
-    let mut timing = acd_client::Timing::default();
-    timing.backoff_max = Duration::from_secs(3);
+    let timing = acd_client::Timing { backoff_max: Duration::from_secs(3), ..Default::default() };
     let mut handles = Vec::new();
     for idx in 0..cfg.count {
         let h = spawn_machine(MachineConfig {
@@ -95,7 +94,7 @@ async fn client_loop(
     mut stop: watch::Receiver<bool>,
 ) {
     let pending: Arc<Mutex<HashMap<String, Instant>>> = Arc::default();
-    let mut rng = Rng::new(seed_from_clock() ^ (idx as u64 + 1) * 0x9E37);
+    let mut rng = Rng::new(seed_from_clock() ^ ((idx as u64 + 1) * 0x9E37));
     let mut last_prune = Instant::now();
     loop {
         let ev = tokio::select! {
