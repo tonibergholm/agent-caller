@@ -209,3 +209,20 @@ fn root_owned_files_are_refused_to_an_unprivileged_user() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// KNOWN BUG, not fixed here (docs/research/2026-11-04-mutation-testing.md): a symlinked
+/// directory is refused, but as `NotRegular`, not `Symlink`. On Linux
+/// `open(O_NOFOLLOW | O_DIRECTORY)` on a symlink fails with ENOTDIR, which `open_path`
+/// maps to `NotRegular` before ELOOP could say `Symlink`. The refusal is correct
+/// (fail closed); only the reported reason, and so the message the user reads, is wrong.
+#[test]
+#[ignore = "known bug: reports NotRegular for a symlinked directory"]
+fn a_symlinked_directory_reports_a_symlink() {
+    let d = private_dir();
+    let real = d.path().join("real");
+    fs::create_dir(&real).unwrap();
+    mode(&real, 0o700);
+    let link = d.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(matches!(check_private_dir(&link, 0o700), Err(SecureFsError::Symlink(_))));
+}
