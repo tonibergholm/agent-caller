@@ -1,9 +1,9 @@
 # Security review: voice, Mac app, app-core, iOS shell, Svelte frontend (findings only)
 
-Date: 2026-11-04. Base: `main` at `3404287`. Read-only review: no source file changed.
+Date: 2026-11-04. Base: `main` at `28e4664` (rebased; every file and line below re-checked on it). Read-only review: no source file changed.
 Code added: only `#[ignore]`d Rust demonstrations that fail today:
-`crates/acd-voice/tests/findings.rs` (four) and one in `crates/acd-client/src/session.rs`
-(F10). The one frontend demonstration (F3) is kept as a recipe in this document, not as a file.
+`crates/acd-voice/tests/findings.rs` (five: F2, F4, F5, F6, F11) and one in
+`crates/acd-client/src/session.rs` (F10). The one frontend demonstration (F3) is kept as a recipe in this document, not as a file.
 
 This review covers what `2026-11-03-security-review-core.md` and `-local.md` did not:
 the voice crates and Swift bridge, `app/src-tauri`, `crates/acd-app-core`, `apps/ios`
@@ -18,12 +18,13 @@ it says so.
 | F2 | Low (hardening) | A model plan's payload text and target are never compared with what the user said; the plan always lands on a Confirm step, as spec §5.5 intends | c, b | router level yes; the model itself no |
 | F3 | Low–Medium | The HUD takes key focus, and Enter or a digit acts at once, with no repeat guard and no grace period | none (race); chains with F2 | component level yes; focus theft no |
 | F4 | Low–Medium | A bare "yes" is not tied to the request that was read aloud | c | yes (executor level) |
-| F5 | Low | "Read it" cuts the command at 400 characters and the cut is silent | c | yes |
+| F5 | Low | "Read it" cuts the command at 400 characters; the cut is only a trailing `…` in the string handed to the synthesiser | c | yes (string level) |
 | F6 | Low (hardening) | A model `select` of a card the user did not name is `Level::None` (as the safety table says), and it later picks the card a bare "yes" acts on | c | router level yes |
 | F7 | Low | Every Tauri command is open to all three windows; the HUD webview can call `pick_option`; two voice commands skip the window and `debug_input` checks | none today (needs XSS) | by reading only |
 | F8 | Low | OS notification text is the peer's text, not cleaned or capped | b | by reading only |
 | F9 | Low | "Add from clipboard" pairs at once and shows neither host nor pin first | d | by reading only |
 | F10 | Low–Medium | Peer-supplied agent text (title, command, detail, labels) reaches the cards with bidi controls intact; the client never cleans inbound text | b | yes (Rust, no macOS) |
+| F11 | Low–Medium | A paired peer can send an option whose label contradicts its effect (label "Deny", effect `allow`); the HUD, cards and Omarchy panel draw the label only, so "option 1" counts down as "Deny" and sends an allow | b (not c: no adapter can produce it) | yes (router level, Rust) |
 
 No XSS, HTML injection, remote content, deep-link or URL-scheme handler, updater,
 auto-launch, notification action, key logging, audio persistence, network call from the
@@ -241,11 +242,11 @@ alert. A bare "yes" or "no" for a different request on that card is `Level::Conf
 
 ---
 
-## F5. A cut read-back does not say it was cut (Low)
+## F5. A cut read-back ends in `…` and nothing more (Low)
 
 **Where.** `crates/acd-voice/src/speech.rs:9, 81-96`: `read` speaks
 `clean(body, READ_MAX)` with `READ_MAX = 400`; `text.rs:51-57` (`truncate`) ends a
-cut string with `…`; whether the synthesiser voices that character was not verified. `clean` also folds every
+cut string with `…`. Whether the synthesiser voices, pauses at or drops that character was not verified. `clean` also folds every
 newline into a space.
 
 **Attacker.** (c): a command whose first 400 characters are harmless.
@@ -253,13 +254,13 @@ newline into a space.
 **Steps.** The agent asks for a 4,000-character command. "Read it" speaks the first 400
 and stops. The user says "yes".
 
-**Impact.** The spoken command sounds complete. Together with F1 the user has heard and
-seen only the start of it.
+**Impact.** What reaches the synthesiser is the first 400 characters and a trailing `…`, with no
+words that say more follows; whether a listener can tell it was cut is not verified. Together
+with F1 the user has been given only the start of the command in both channels.
 
 **Reproduced: yes.** `tests/findings.rs::a_cut_read_back_says_that_more_follows`
 (ignored): a 676-character command is read back as 415 characters ending in `…`.
-Whether the macOS voice pronounces `…` was not verified and nothing here depends on it;
-the test pins what Rust hands the synthesiser.
+The test pins only that string. It does not show how it sounds.
 
 **Minimal fix.** When `clean` cut anything, append spoken words ("and more") or refuse
 to read, and tell the user to check the panel. Test: the ignored test.
@@ -392,7 +393,7 @@ the confirm call.
 - `crates/acd-client/src/session.rs:119-125`: a `Snapshot` is checked for count and size
   only (`agent_too_big`), then every agent is stored with `agent.clone()`; `AgentUpdated`
   does the same (`session.rs:156-164`). `RequestOpened` is passed on as `Applied::Opened(request.clone())`
-  (`session.rs:179`) and reaches the notification path (`inbox.rs:1066`) uncleaned.
+  (`session.rs:173`) and reaches the notification path (`inbox.rs:1066`) uncleaned.
 - `crates/acd-client/src/view.rs:~432`: `CardView { agent: agent.clone(), … }`.
 - `app/src/components/Card.svelte:46-57, 118-125, 137-138, 149-156`: interpolates
   `card.agent.title`, `parent_title`, `cwd`, `last_message`, `pending.detail`, the
@@ -423,8 +424,64 @@ anywhere; that is the open Task 7 item in the follow-ups and is not part of the 
 
 **Minimal fix.** In `Session::apply`, before storing an agent or request, replace
 characters for which `acd_protocol::text::is_forbidden_control` or `is_forbidden_format`
-holds in every string field with a visible escape (as the daemon does for hook cards),
-keeping `\n` and `\t`; do the same in `notify::text`. Test: the ignored test above.
+holds with a visible escape (as the daemon does for hook cards), keeping `\n` and `\t`,
+in **display text fields only**: agent `title`, `parent_title`, `cwd`, `last_message`, request
+`title`, `detail`, `question` and its parts, option `label` and `description`, and the machine
+name. Never touch protocol identifiers (agent, request, option and question ids, revisions,
+cursors, epochs): they route answers, and an altered id would make the answer miss or fail
+closed. Do the same for the strings in `notify::text`. Test: the ignored test above.
+
+---
+
+## F11. An option's label can contradict its effect, and only the label is drawn (Low–Medium)
+
+**Where.**
+- `acd_protocol` `RequestOption { label, effect, … }` (`model.rs:203, 205`): two independent fields.
+- `crates/acd-client/src/session.rs:119-125, 156-164, 173` store and pass on peer requests and
+  agents as sent; nothing checks that a label agrees with its effect.
+- `crates/acd-voice/src/plan.rs:651-652` (`proposal_view`) copies both `option: o.label` and
+  `effect: o.effect` into `ProposalView`.
+- `app/src/components/Hud.svelte:110` draws `Answer “{p.option}”` (the label); `effect` is
+  never rendered. `app/src/components/Card.svelte:180` draws `o.label`; the effect only picks a
+  CSS class (`deny` for a deny, `primary` for the first allow, `Card.svelte:93-95`). The same
+  Svelte bundle is the iOS shell's frontend (`apps/ios/src-tauri/tauri.conf.json`,
+  `frontendDist ../../../app/dist`). The Omarchy panel draws `number. label (rule)`
+  (`clients/omarchy/Panel.qml:415`).
+- `crates/acd-voice/src/safety.rs:52-80` and `fast.rs:155-195`: "option N" picks by position
+  and is `Level::Countdown` when the option's effect is `allow` or `deny`, on a selected or
+  only-pending card.
+
+**Attacker.** (b), a compromised paired peer: it sends `{label:"Deny", effect:"allow"}`.
+(c) cannot do it today: hook options are fixed, and the T3 and external adapters give agent
+text a label but always `Effect::Choose` (`t3/map.rs:253-260`, `external/state.rs:246-249`,
+and `external/wire.rs:84-91` has no `effect` field). An honest daemon is not affected.
+This corrects the earlier "considered and rejected" entry, which looked only at the daemon's
+adapters and so missed that the effect crosses the wire from the peer.
+
+**Steps.**
+1. The peer's request shows two buttons: `1. Deny` (effect `allow`) and `2. Allow` (effect `deny`).
+2. The card is selected. The user says "option 1", meaning the button labelled Deny.
+3. The fast path picks option 1 and, because its effect is `allow`, starts the 2 s countdown.
+   The HUD says `Answer “Deny”`. At the end, the pick for option id `o1` goes to the peer.
+
+**Impact.** The user is shown one decision and the client sends a different one. Bounded: the
+answer goes only to that peer's own agent, and a compromised peer interprets every answer as
+it likes anyway, so it gains little it did not have. The harm is that the client's own
+confirmation table (which trusts `effect`) and its display disagree, and a user who relies on
+voice and the HUD has no cue. The `primary` class on the allow button in `Card.svelte` is a
+weak visual cue (not rendered here). Hence Low–Medium, the same class as F10.
+
+**Reproduced: yes, router level.** `tests/findings.rs::an_option_whose_label_contradicts_its_effect_is_refused`
+(ignored): `cargo test -p acd-voice --test findings --locked -- --ignored an_option_whose` fails
+with `counts down as Answer "Deny" but sends an allow: Proposal(… Answer { … option_id: "o1" } …
+level: Countdown)`. **Not run:** the Svelte renderers, the Omarchy panel (read only).
+
+**Minimal fix.** Either (a) draw the effect with the label in every renderer (HUD verb,
+`Card.svelte`, `Panel.qml`), for example `Deny (allow)` when they differ, or (b) refuse in the
+client, when a request is stored, an option whose normalised label is exactly an allow or deny
+word that the effect contradicts (treat the option as `Unknown`, which is already not
+selectable and refused for a model). (b) is one function and covers all three renderers.
+Test: the ignored test above, plus a `Session` test for (b).
 
 ---
 
@@ -469,11 +526,6 @@ keeping `\n` and `\t`; do the same in `notify::text`. Test: the ignored test abo
   modifier's down and up, and "another key" with no key code (`Tap.swift:51-75`,
   `realTap`). Synthetic events need Accessibility, the same-user boundary the earlier
   reviews accept.
-- **Effect and label disagree in the HUD.** The HUD never draws `effect`
-  (`Hud.svelte`), only the label. Every adapter assigns fixed labels today (hooks,
-  T3, external producers use fixed text and `Effect::Choose`), so a label cannot
-  contradict its effect. Worth drawing the effect if a future adapter copies labels
-  from remote text.
 - **XSS or HTML injection in `app/src`.** No `{@html}`, `innerHTML`, `eval`, `href`
   or `iframe` (the test `no-html.test.ts` pins `{@html}`); Svelte text interpolation
   escapes. Card, HUD, notice and machine-name text all go through it.
