@@ -12,6 +12,7 @@ mod procfs;
 mod producers;
 mod rng;
 mod soak;
+mod workdir;
 
 #[tokio::main]
 async fn main() {

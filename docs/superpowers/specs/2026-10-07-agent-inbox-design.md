@@ -249,7 +249,10 @@ requests.
   detection reads, or the hook source reported the end of the request.
 - **Non-reusable keys** (T3 request ids) are
   tombstoned once their request resolves. They never open another
-  request, even after the dialog is confirmed gone. The generation counter
+  request, even after the dialog is confirmed gone, while the tombstone is
+  retained. Tombstones are bounded to the newest 4096 resolved keys
+  (`RETIRED_KEYS_CAP`, all agents together). A replay of a key older than
+  that is treated as new and opens a request. The generation counter
   only applies to reusable keys.
 
 **Hook occurrences (O1 to O7).** For hooks, the key alone does not decide

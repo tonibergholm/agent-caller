@@ -495,6 +495,20 @@ impl Registry {
                     }
                 }
             }
+            // The moved keys keep their place in the eviction order under
+            // the target; an entry for a key the target already retired
+            // keeps only its newer position.
+            for r in self.retired.iter_mut().filter(|(a, _)| a == from) {
+                r.0 = to.to_string();
+            }
+            let mut seen_ids = HashSet::new();
+            let mut kept: VecDeque<_> = std::mem::take(&mut self.retired)
+                .into_iter()
+                .rev()
+                .filter(|r| seen_ids.insert(r.clone()))
+                .collect();
+            kept.make_contiguous().reverse();
+            self.retired = kept;
             let req = self
                 .requests
                 .get(&p.id)
@@ -512,6 +526,7 @@ impl Registry {
         // The request moved: nothing is resolved here.
         self.agents.remove(from);
         self.keys.retain(|_, k| k.agent_id != from);
+        self.retired.retain(|(a, _)| a != from);
         self.seen.remove(from);
         out.push(Change::AgentRemoved(from.to_string()));
         out

@@ -169,6 +169,15 @@ async fn ws_hello(sock: &Path, token: &str, client_id: &str) -> Result<Ws, Strin
     Ok(ws)
 }
 
+/// Peer text never reaches the harness output: only a short identifier-like code survives.
+fn bounded_code(code: Option<&str>) -> String {
+    match code {
+        Some(c) if !c.is_empty() && c.len() <= 32 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.') => c.to_owned(),
+        Some(_) => "unrecognised".into(),
+        None => "?".into(),
+    }
+}
+
 /// Reads until a message of `kind` or the end; returns (its length, the close, what ended it).
 async fn read_until(ws: &mut Ws, want: impl Fn(&serde_json::Value) -> bool, limit: Duration) -> (Option<(usize, serde_json::Value)>, String) {
     let end = tokio::time::Instant::now() + limit;
@@ -176,9 +185,9 @@ async fn read_until(ws: &mut Ws, want: impl Fn(&serde_json::Value) -> bool, limi
         match tokio::time::timeout_at(end, ws.next()).await {
             Err(_) => return (None, "timeout".into()),
             Ok(None) => return (None, "stream ended".into()),
-            Ok(Some(Err(e))) => return (None, format!("error: {e}")),
+            Ok(Some(Err(_))) => return (None, "websocket error".into()),
             Ok(Some(Ok(Message::Close(c)))) => {
-                return (None, format!("close {:?}", c.map(|c| (u16::from(c.code), c.reason.to_string()))));
+                return (None, format!("close code={} reason_len={}", c.as_ref().map_or("none".into(), |c| u16::from(c.code).to_string()), c.as_ref().map_or(0, |c| c.reason.len())));
             }
             Ok(Some(Ok(Message::Text(t)))) => {
                 let n = t.len();
@@ -216,7 +225,7 @@ async fn frames(p: &Proc, dir: &Path) {
         let _ = ws.send(Message::text(serde_json::to_string(&msg).unwrap())).await;
         let (got, end) = read_until(&mut ws, |v| v["type"] == "result", Duration::from_secs(3)).await;
         out(&format!("agent_send_text_{label}"), match got {
-            Some((_, v)) => format!("result code={} ", v["error"]["code"].as_str().or(v["code"].as_str()).unwrap_or("?")),
+            Some((_, v)) => format!("result code={} ", bounded_code(v["error"]["code"].as_str().or(v["code"].as_str()))),
             None => format!("no result: {end}"),
         });
     }
@@ -252,7 +261,11 @@ async fn idem_flood(p: &Proc, dir: &Path) {
     let _ = b.send(Message::text(serde_json::to_string(&msg).unwrap())).await;
     let (got, end) = read_until(&mut b, |v| v["type"] == "result", Duration::from_secs(5)).await;
     out("idem_flood_other_client_next_command", match got {
-        Some((_, v)) => format!("{}: {}", v["error"]["code"].as_str().unwrap_or("?"), v["error"]["message"].as_str().unwrap_or("")),
+        Some((_, v)) => format!(
+            "code={} message_len={}",
+            bounded_code(v["error"]["code"].as_str()),
+            v["error"]["message"].as_str().map_or(0, str::len)
+        ),
         None => format!("no result: {end}"),
     });
 }
@@ -315,8 +328,7 @@ async fn agents_probe(label: &str, n: usize, detail: usize, work: &Path) -> Resu
 
 pub async fn run(a: Args) -> Result<(), String> {
     let which = a.str("only", "all");
-    let work = PathBuf::from(a.str("work", "/tmp/lt-limits"));
-    let _ = std::fs::remove_dir_all(&work);
+    let work = crate::workdir::prepare(&PathBuf::from(a.str("work", "/tmp/lt-limits")))?;
     if which == "all" || which == "daemon" {
         let mut p = Proc::new(Target::Acd { bin: a.str("acd-bin", "../../target/release/acd").into() }, work.join("d"));
         p.init()?;

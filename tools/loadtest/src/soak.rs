@@ -37,8 +37,7 @@ fn sizes(dir: &std::path::Path) -> [String; 8] {
 
 pub async fn run(a: Args) -> Result<(), String> {
     let host = a.str("target", "acd") == "host";
-    let work = PathBuf::from(a.str("work", "/tmp/acd-loadtest"));
-    let _ = std::fs::remove_dir_all(&work);
+    let work = crate::workdir::prepare(&PathBuf::from(a.str("work", "/tmp/acd-loadtest")))?;
     let dir = work.join("cfg");
     let duration = Duration::from_secs_f64(a.f64("duration", 600.0));
     let interval = Duration::from_secs_f64(a.f64("sample", 10.0));
@@ -49,6 +48,15 @@ pub async fn run(a: Args) -> Result<(), String> {
     let csv_path = PathBuf::from(a.str("csv", "soak.csv"));
     let summary_path = PathBuf::from(a.str("summary", "soak-summary.txt"));
 
+    if !host {
+        let n = agents.div_ceil(32).clamp(1, 8);
+        let actual = n * (agents / n).clamp(1, 32);
+        if actual != agents {
+            return Err(format!(
+                "--agents {agents} is not supported by the acd target: it would create {actual} slots (1 to 256, a multiple of ceil(agents/32) producers)"
+            ));
+        }
+    }
     let target = if host {
         Target::Host {
             args: vec![
