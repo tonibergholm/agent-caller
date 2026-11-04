@@ -52,8 +52,11 @@ if [ "$usegit" = 1 ]; then
 	# makepkg points git at /etc/makepkg.d/gitconfig only (GIT_CONFIG_GLOBAL and
 	# _SYSTEM are overridden in makepkg/source/git.sh), so the mirror goes there.
 	mkdir -p /etc/makepkg.d
-	git config --file /etc/makepkg.d/gitconfig --add safe.directory '*'
-	git config --file /etc/makepkg.d/gitconfig url."file:///mirror.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
+	# Point makepkg's git at MIRROR (a bare repo path) for the GitHub URL.
+	mirror_to() {
+		printf '[safe]\n\tdirectory = *\n[url "file://%s"]\n\tinsteadOf = https://github.com/tonibergholm/agent-caller.git\n' "$1" >/etc/makepkg.d/gitconfig
+	}
+	mirror_to /mirror.git
 else
 	cp /in/src.tar /work/agent-caller-src.tar && chown builder /work/agent-caller-src.tar
 fi
@@ -171,7 +174,7 @@ if [ "$usegit" = 1 ]; then
 	echo "-- pkgver: $(basename "$(gitpk agent-caller-git)")"
 	case "$(basename "$(gitpk agent-caller-git)")" in agent-caller-git-"$ver".r0.g*) ok "pkgver() is tag.rN.gSHA";; *) bad "unexpected -git package name";; esac
 	if pacman -U --noconfirm "$(gitpk agent-caller-git)" "$(gitpk agent-caller-omarchy-git)"; then ok "pacman -U -git packages"; else bad "pacman -U -git packages"; fi
-	[ "$(pacman -Qq --provides agent-caller-git | grep -c '^agent-caller$')" -ge 1 ] && ok "agent-caller-git provides agent-caller" || bad "provides"
+	pacman -Qi agent-caller-git | grep -Eq '^Provides +: .*agent-caller( |$)' && ok "agent-caller-git provides agent-caller" || bad "agent-caller-git provides agent-caller"
 	if as_builder bash /usr/share/agent-caller/smoke-test.sh; then ok "smoke test on the -git packages"; else bad "smoke test on the -git packages"; fi
 	pacman -R --noconfirm agent-caller-git agent-caller-omarchy-git >/dev/null 2>&1 && ok "pacman -R -git packages" || bad "pacman -R -git packages"
 
@@ -181,11 +184,11 @@ if [ "$usegit" = 1 ]; then
 	git -C /work/old-src add -A && git -C /work/old-src -c user.name=t -c user.email=t@example.invalid commit -q -m "no packaging"
 	git -C /work/old-src tag -f "v$ver" >/dev/null
 	git clone -q --bare /work/old-src /mirror-old.git
-	git config --file /etc/makepkg.d/gitconfig --replace-all url."file:///mirror-old.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
+	mirror_to /mirror-old.git
 	if build agent-caller old-tag; then bad "release PKGBUILD built from a tag without packaging/"; else
 		grep -q "has no packaging/" /out/old-tag.log && ok "release PKGBUILD refuses a tag without packaging/ with a clear message" || bad "refusal message missing"
 	fi
-	git config --file /etc/makepkg.d/gitconfig --replace-all url."file:///mirror.git".insteadOf "https://github.com/tonibergholm/agent-caller.git"
+	mirror_to /mirror.git
 else
 	echo "SKIP  no git in the container: -git packages not built"
 fi
