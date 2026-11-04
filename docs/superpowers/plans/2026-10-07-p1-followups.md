@@ -294,12 +294,15 @@ needs a decision or a small follow-up.
   snapshot stays silent, as before. The client's notified set is unbounded
   (security review finding 5).
 - **Security review findings still open** (`docs/research/2026-11-03-security-review-core.md`
-  and `-local.md`): core 3 (16 MiB frames, unbounded agent state), 4 (no
-  connection or auth log), 5 (unbounded notifications), 7 and 8 (pairing host
-  and `agent.send` character rules); local F2 (T3 token goes to whoever holds
-  the loopback port), F3 (hook listeners have no read timeout), F4 (herdr
-  socket discovery checks no owner), F5 (service files from unescaped paths).
-  Core 1, 2 and 6 and local F1 are fixed.
+  and `-local.md`): core 4 (no connection or auth log), 5 (unbounded
+  notifications); local F2 (T3 token goes to whoever holds the loopback
+  port), F3 (hook listeners have no read timeout), F4 (herdr socket discovery
+  checks no owner), F5 (service files from unescaped paths).
+  Core 1, 2, 3, 6, 7 and 8 and local F1 are fixed. Core 3 limits the client
+  (1 MiB frames, 1000 agents, 64 KiB per agent; each breach, an oversized
+  frame included, ends as a resync without the resume cursor); the daemon registry is fed
+  by local adapters, not by peers, so it has no new cap. Core 7 accepts ASCII
+  hostnames only; IDNA names must be paired as punycode.
 - **Owner decisions still open:** same-user denial of service on the local
   socket and the four-source pre-auth residual (see Pre-auth residuals); the
   relay spec's lock-screen content rule and handle revocation (see its review
