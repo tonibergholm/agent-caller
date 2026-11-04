@@ -57,14 +57,14 @@ async fn run_command_replies_unless_revoked_first() {
     let stale_rx = auth.subscribe();
     auth.rotate("u".into());
     let (tx, mut out) = mpsc::channel(4);
-    run_command(core.clone(), "cl".into(), answer("c0", &rid), 0, stale_rx, tx, ()).await;
+    run_command(core.clone(), "cl".into(), Origin::Local, answer("c0", &rid), 0, stale_rx, tx, ()).await;
     assert!(out.recv().await.is_none(), "a revoked command sends no reply");
     assert!(fake.delivered().is_empty());
 
     // Current generation: delivered and answered.
     let rx = auth.subscribe();
     let (tx, mut out) = mpsc::channel(4);
-    run_command(core.clone(), "cl".into(), answer("c1", &rid), auth.generation(), rx, tx, ()).await;
+    run_command(core.clone(), "cl".into(), Origin::Local, answer("c1", &rid), auth.generation(), rx, tx, ()).await;
     let Some(Message::Text(t)) = out.recv().await else { panic!("expected a reply") };
     assert!(t.as_str().contains("\"c1\"") && t.as_str().contains("delivered"), "{t}");
     assert_eq!(fake.delivered().len(), 1);

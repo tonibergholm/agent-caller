@@ -78,8 +78,14 @@ the remaining 91 were tested by a second run. `acd-voice`'s missed mutants inclu
 (see below). For `t3/detail.rs` the "before" run was stopped early, so its "before" covers 33 of the
 57 mutants; the "after" run is complete.
 
-Total tests added: 141 (1733 -> 1874 passing in `cargo test --workspace --locked --no-fail-fast` on
-this machine; the same 29 tests fail before and after, see the pull request).
+Total tests added: 141 (1814 passing on `origin/main` 3f7c7df, 1955 on this branch merged with it, from
+`cargo test --workspace --locked --no-fail-fast` in this sandbox; the same 29 tests fail on both, all
+in the `acd` binary crate; see the pull request).
+
+**Base.** All mutation runs were made on `origin/main` 3404287 plus the new tests. Main moved afterwards
+(for example `acd-core` `idem.rs`, `server.rs` and `registry.rs`, and `acd-securefs`, which gained
+Windows ACL code). The branch was merged with main afterwards and the full suite re-run, but the
+mutation counts were **not** re-measured on the merged code.
 
 ## What was added
 
