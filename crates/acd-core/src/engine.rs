@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
 use crate::adapter::{Adapter, DeliverError};
-use crate::idem::{Begin, IdemCache};
+use crate::idem::{Begin, IdemCache, Origin};
 use crate::log::EventLog;
 use crate::registry::{Answer, Change, CorrelationKey, Observation, Registry};
 
@@ -182,7 +182,14 @@ impl Core {
         (initial, rx)
     }
 
+    /// `handle_from` for a command that came in on the local socket.
     pub async fn handle(&self, client_id: &str, msg: ClientMessage) -> CommandResult {
+        self.handle_from(client_id, Origin::Local, msg).await
+    }
+
+    /// Runs one command. `origin` is the connection's source, which the
+    /// idempotency table charges alongside `client_id` (the peer chooses that).
+    pub async fn handle_from(&self, client_id: &str, origin: Origin, msg: ClientMessage) -> CommandResult {
         if let ClientMessage::Hello { .. } | ClientMessage::Ping { .. } = msg {
             let id = msg.command_id().unwrap_or("");
             return CommandResult::err(id, ErrorCode::BadRequest, "not a command");
@@ -194,6 +201,13 @@ impl Core {
         if let Err(why) = check_limits(&msg) {
             return CommandResult::err(&id, ErrorCode::BadRequest, why);
         }
+        // Re-running mark_seen gives the same result and delivers nothing, so
+        // it needs no exactly-once entry. Keeping it out of the table means a
+        // peer cannot fill the table with it.
+        if let ClientMessage::AgentMarkSeen { .. } = msg {
+            let phase = Mutex::new(Phase::Start);
+            return self.execute(&id, msg, &phase).await.0;
+        }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&Sha256::digest(
             serde_json::to_vec(&msg).expect("serializable"),
@@ -203,7 +217,7 @@ impl Core {
             .lock()
             .unwrap()
             .idem
-            .begin(client_id, &id, hash, Instant::now());
+            .begin_from(client_id, origin, &id, hash, Instant::now());
         match begin {
             Begin::Done(result) => return result,
             Begin::Mismatch => {

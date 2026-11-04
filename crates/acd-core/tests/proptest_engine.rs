@@ -341,15 +341,10 @@ impl Model {
     }
 }
 
+/// Only a command that reached the agent is cached. A refusal changed no
+/// state, so it releases its id (`Core::handle`).
 fn cacheable(e: &Expect) -> bool {
-    match e {
-        Expect::Delivered | Expect::DeliveredUncertain => true,
-        Expect::Released(_) => false,
-        Expect::Refused(c) => !matches!(
-            c,
-            ErrorCode::RequestNotReady | ErrorCode::RequestBusy | ErrorCode::SourceUnavailable | ErrorCode::RequestChanged
-        ),
-    }
+    matches!(e, Expect::Delivered | Expect::DeliveredUncertain)
 }
 
 // ---- the runner -------------------------------------------------------------
