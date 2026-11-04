@@ -11,7 +11,7 @@ use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 use crate::engine::{Core, MAX_ID_BYTES, RING_CAPACITY};
@@ -153,7 +153,7 @@ struct AppState {
     opts: ServerOptions,
     /// Pre-auth slots for network peers. Each source address is also capped in
     /// `tls::Admission`, so one peer cannot hold more than a few of them.
-    preauth: Arc<Semaphore>,
+    preauth: Arc<SourcePool>,
     /// Pre-auth slots for the Unix socket, apart from the network pool so
     /// that no remote peer can starve the local client.
     local_preauth: Arc<Semaphore>,
@@ -167,7 +167,7 @@ struct AppState {
 /// The acd/1 WebSocket server. Serve clones of one router on every listener
 /// so the limits apply daemon-wide.
 pub fn router(core: Arc<Core>, auth: Arc<Auth>, opts: ServerOptions) -> Router {
-    let preauth = Arc::new(Semaphore::new(opts.max_preauth));
+    let preauth = Arc::new(SourcePool::new(opts.max_preauth));
     let local_preauth = Arc::new(Semaphore::new(opts.max_preauth));
     let inflight_total = Arc::new(Semaphore::new(opts.max_inflight_total));
     Router::new().route("/", get(upgrade)).with_state(AppState {
@@ -199,18 +199,78 @@ async fn upgrade(
     }
     // A connection without admission info did not come through the TLS
     // listener: it is on the Unix socket.
-    let pool = if admit.is_some() {
-        &st.preauth
-    } else {
-        &st.local_preauth
-    };
-    let Ok(permit) = pool.clone().try_acquire_owned() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    let permit: Box<dyn Send> = match &admit {
+        Some(a) => {
+            let Some(source) = a.peer().map(|p| p.ip()) else {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
+            match st.preauth.try_acquire(source) {
+                Some(slot) => Box::new(slot),
+                None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            }
+        }
+        None => match st.local_preauth.clone().try_acquire_owned() {
+            Ok(permit) => Box::new(permit),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        },
     };
     let max = st.opts.max_frame;
     ws.max_message_size(max)
         .max_frame_size(max)
         .on_upgrade(move |socket| session(st, socket, permit, admit.map(|ConnectInfo(a)| a)))
+}
+
+/// Slots of the post-upgrade pre-auth pool that only a source with no
+/// connection waiting for its hello may take. Without them, a few sources
+/// holding their per-source share each could take the whole pool.
+const PREAUTH_RESERVE: usize = 2;
+
+/// The post-upgrade pre-auth pool for network peers. Like `tls::Admission`
+/// it remembers each source: a source holds at most
+/// `tls::MAX_UNAUTHENTICATED_PER_SOURCE` slots, and the last
+/// `PREAUTH_RESERVE` slots go only to sources holding none.
+struct SourcePool {
+    capacity: usize,
+    held: Mutex<std::collections::HashMap<std::net::IpAddr, usize>>,
+}
+
+struct SourceSlot {
+    pool: Arc<SourcePool>,
+    source: std::net::IpAddr,
+}
+
+impl SourcePool {
+    fn new(capacity: usize) -> Self {
+        Self { capacity, held: Mutex::default() }
+    }
+
+    fn try_acquire(self: &Arc<Self>, source: std::net::IpAddr) -> Option<SourceSlot> {
+        let source = source.to_canonical();
+        let mut held = self.held.lock().unwrap();
+        let total: usize = held.values().sum();
+        let mine = held.get(&source).copied().unwrap_or(0);
+        let reserve = PREAUTH_RESERVE.min(self.capacity.saturating_sub(1));
+        if mine >= crate::tls::MAX_UNAUTHENTICATED_PER_SOURCE
+            || total >= self.capacity
+            || (mine > 0 && total >= self.capacity - reserve)
+        {
+            return None;
+        }
+        *held.entry(source).or_insert(0) += 1;
+        Some(SourceSlot { pool: self.clone(), source })
+    }
+}
+
+impl Drop for SourceSlot {
+    fn drop(&mut self) {
+        let mut held = self.pool.held.lock().unwrap();
+        if let Some(n) = held.get_mut(&self.source) {
+            *n -= 1;
+            if *n == 0 {
+                held.remove(&self.source);
+            }
+        }
+    }
 }
 
 fn text(msg: &ServerMessage) -> Message {
@@ -256,7 +316,7 @@ async fn reply(out: &mpsc::Sender<Message>, msg: &ServerMessage) -> Result<(), C
 async fn session(
     st: AppState,
     mut socket: WebSocket,
-    permit: OwnedSemaphorePermit,
+    permit: Box<dyn Send>,
     admit: Option<crate::tls::Admit>,
 ) {
     if let Some(mut gate) = st.opts.hello_gate.clone() {

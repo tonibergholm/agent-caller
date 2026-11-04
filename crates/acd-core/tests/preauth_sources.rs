@@ -290,26 +290,27 @@ async fn one_source_cannot_lock_the_local_socket_out() {
     assert!(hello_ok(&mut local).await);
 }
 
-/// Saturates the whole network pool (8 slots) from four sources, so the
+/// Saturates the whole network pool (8 slots) from eight sources, so the
 /// per-source cap cannot be what protects the local socket. Fails if the
 /// local socket shares the network pool.
 #[tokio::test]
 async fn a_saturated_network_pool_leaves_the_local_socket_usable() {
-    let sources = ["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5"];
-    if !can_bind(&["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5", "127.0.0.6"]) {
+    let sources: Vec<String> = (2..10).map(|i| format!("127.0.0.{i}")).collect();
+    let all: Vec<&str> = sources.iter().map(String::as_str).chain(["127.0.0.10"]).collect();
+    if !can_bind(&all) {
         return;
     }
     let s = serve().await;
     let mut held = Vec::new();
-    for src in sources {
-        let h = idle_tls(s.tcp, src, 2).await;
-        assert_eq!(h.len(), 2, "{src} holds its two slots");
+    for src in &sources {
+        let h = idle_tls(s.tcp, src, 1).await;
+        assert_eq!(h.len(), 1, "{src} holds one slot");
         held.extend(h);
     }
     assert_eq!(held.len(), 8);
     // Saturated now: a fresh source (under its own cap) gets HTTP 503.
     assert_eq!(
-        open_tls_result(s.tcp, "127.0.0.6").await.err().map(|r| format!("{r:?}")),
+        open_tls_result(s.tcp, "127.0.0.10").await.err().map(|r| format!("{r:?}")),
         Some("Http(503)".to_string()),
         "a full network pool answers the upgrade with HTTP 503"
     );
@@ -317,6 +318,27 @@ async fn a_saturated_network_pool_leaves_the_local_socket_usable() {
         .await
         .expect("local upgrade is not refused while the network pool is full");
     assert!(hello_ok(&mut local).await);
+}
+
+/// Four sources holding two slots each used to take all 8 post-upgrade slots
+/// and lock out every new client. The last two slots are reserved for sources
+/// holding none, so a fifth source still gets in.
+#[tokio::test]
+async fn four_sources_at_their_cap_cannot_lock_a_fifth_source_out() {
+    let sources = ["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5"];
+    if !can_bind(&["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5", "127.0.0.6"]) {
+        return;
+    }
+    let s = serve().await;
+    let mut held = Vec::new();
+    for src in sources {
+        held.extend(idle_tls(s.tcp, src, 2).await);
+    }
+    assert_eq!(held.len(), 7, "the fourth source cannot take a reserved slot for its second connection");
+    let mut fifth = open_tls(s.tcp, "127.0.0.6")
+        .await
+        .expect("a source with nothing outstanding takes a reserved slot");
+    assert!(hello_ok(&mut fifth).await);
 }
 
 #[tokio::test]
