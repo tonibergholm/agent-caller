@@ -174,10 +174,12 @@ started typing again (the end of a terminal command is Enter).
 1. The user releases the hold key and goes back to a terminal.
 2. A model-origin step arrives (F2) and the HUD steals key focus.
 3. The user's next Enter, or a held one (auto-repeat), confirms it. A digit typed
-   while a which-one list is open picks that card and starts a 2 s countdown.
+   while a which-one list is open picks that card. For a fast-path "approve" that
+   starts a 2 s countdown; a model-origin pick binds as `Selected` but stays
+   `Origin::Model`, so it goes to Confirm.
 
-**Impact.** A confirmation the user never looked at. The 2 s countdown after a which-one
-pick is cancellable only if the user notices.
+**Impact.** A confirmation the user never looked at. After a fast-path which-one pick the 2 s countdown is cancellable only if the
+user notices.
 
 **Reproduced: component level yes.** `Hud.findings.test.ts` (skipped): an
 auto-repeating Enter sent right after a `confirm` state renders makes the HUD call
