@@ -1,9 +1,9 @@
 # Security review: voice, Mac app, app-core, iOS shell, Svelte frontend (findings only)
 
-Date: 2026-11-04. Base: `main` at `28e4664` (rebased; every file and line below re-checked on it). Read-only review: no source file changed.
+Date: 2026-11-04. Base: `main` at `d91be2e` (merged into the branch; the review was written against `28e4664`). Read-only review: no source file changed.
 Code added: only `#[ignore]`d Rust demonstrations that fail today:
-`crates/acd-voice/tests/findings.rs` (five: F2, F4, F5, F6, F11) and one in
-`crates/acd-client/src/session.rs` (F10). The one frontend demonstration (F3) is kept as a recipe in this document, not as a file.
+`crates/acd-voice/tests/findings.rs` (four: F2, F4, F5, F6) and two in
+`crates/acd-client/src/session.rs` (F10, F11). The one frontend demonstration (F3) is kept as a recipe in this document, not as a file.
 
 This review covers what `2026-11-03-security-review-core.md` and `-local.md` did not:
 the voice crates and Swift bridge, `app/src-tauri`, `crates/acd-app-core`, `apps/ios`
@@ -16,7 +16,7 @@ it says so.
 |---|---|---|---|---|
 | F1 | Medium | The voice HUD shows about 5 lines of a request or payload and acknowledges it as shown; the rest is behind a scroll nobody is told about | c, d | yes (real component rendered in Chromium) |
 | F2 | Low (hardening) | A model plan's payload text and target are never compared with what the user said; the plan always lands on a Confirm step, as spec §5.5 intends | c, b | router level yes; the model itself no |
-| F3 | Low–Medium | The HUD takes key focus, and Enter or a digit acts at once, with no repeat guard and no grace period | none (race); chains with F2 | component level yes; focus theft no |
+| F3 | Low | The HUD takes key focus, and Enter or a digit acts at once, with no repeat guard and no grace period | none (race); chains with F2 | component level yes; focus theft no |
 | F4 | Low–Medium | A bare "yes" is not tied to the request that was read aloud | c | yes (executor level) |
 | F5 | Low | "Read it" cuts the command at 400 characters; the cut is only a trailing `…` in the string handed to the synthesiser | c | yes (string level) |
 | F6 | Low (hardening) | A model `select` of a card the user did not name is `Level::None` (as the safety table says), and it later picks the card a bare "yes" acts on | c | router level yes |
@@ -24,7 +24,7 @@ it says so.
 | F8 | Low | OS notification text is the peer's text, not cleaned or capped | b | by reading only |
 | F9 | Low | "Add from clipboard" pairs at once and shows neither host nor pin first | d | by reading only |
 | F10 | Low–Medium | Peer-supplied agent text (title, command, detail, labels) reaches the cards with bidi controls intact; the client never cleans inbound text | b | yes (Rust, no macOS) |
-| F11 | Low–Medium | A paired peer can send an option whose label contradicts its effect (label "Deny", effect `allow`); the HUD, cards and Omarchy panel draw the label only, so "option 1" counts down as "Deny" and sends an allow | b (not c: no adapter can produce it) | yes (router level, Rust) |
+| F11 | Low–Medium | A paired peer can send an option whose label contradicts its effect (label "Deny", effect `allow`); the HUD, cards and Omarchy panel draw the label only, so "option 1" counts down as "Deny" and sends an allow | b (not c: no adapter can produce it) | store step yes (Rust, `Session`); the countdown by reading the safety table |
 
 No XSS, HTML injection, remote content, deep-link or URL-scheme handler, updater,
 auto-launch, notification action, key logging, audio persistence, network call from the
@@ -47,6 +47,18 @@ claims about it come from reading; each finding says so. The sandbox ran as uid 
 without IPv6; the workspace test result is compared with a clean `origin/main` run in
 the PR description.
 
+**Citation recheck (round 3, full).** `origin/main` was merged into the branch (`d91be2e`).
+Since the review's first base (`28e4664`) main changed only `tests/redteam/`, two red-team test
+files (`crates/acd-core/tests/redteam_idem_exhaustion.rs`,
+`crates/acd-inbox/tests/redteam_socket.rs`) and `docs/research/2026-11-04-red-team-acd.md`; no
+cited source file moved. All 74 `path:line` citations in this document were extracted with a
+script, resolved to files by basename, and the first and last line of each range was printed
+and compared with the claim by hand. Three ranges were corrected (`validate.rs` 64-71 ->
+64-68, `plan.rs` 219-233 -> 219-231, `safety.rs` 52-80 -> 52-76) plus `wire.rs` 84-91 ->
+85-92 and `Tap.swift` 51-75 -> 54-75. Statements about behaviour (not only line numbers) were
+re-read for F3, F5, F6 and F11 in this round; for the other findings the cited code was
+re-read at the printed lines but the behavioural claims were not re-derived.
+
 ---
 
 ## F1. The voice HUD hides the tail of what the user is asked to approve (Medium)
@@ -56,7 +68,7 @@ the PR description.
   holds `p.question` (the request's command or question), `p.rule` and `p.text` (the
   payload to send). One line is `1.3rem`, so about 4.6 lines show.
 - `Hud.svelte:35-45` acknowledges the proposal (`voiceShown`) one `tick()` after it is
-  in the DOM, whether or not the block is cut. `crates/acd-voice/src/plan.rs:219-233`
+  in the DOM, whether or not the block is cut. `crates/acd-voice/src/plan.rs:219-231`
   (`shown`) starts the countdown or allows `confirm` on that acknowledgement.
 - `app/src-tauri/src/voice/hud.rs:19` caps the panel at 420 px, but the block's own cap
   applies first.
@@ -102,7 +114,7 @@ expect either no `voiceShown` or a block with `scrollHeight <= clientHeight`.
 ## F2. A model's payload and target are not bound to what the user said (Low, hardening)
 
 **Where.**
-- `crates/acd-voice/src/router/validate.rs:64-71` (`checked_text`) checks the model's
+- `crates/acd-voice/src/router/validate.rs:64-68` (`checked_text`) checks the model's
   `text` for size and forbidden characters only. `validate.rs:80-141` (`aim`) strips
   the payload from the transcript only to find names. Nothing requires the payload to
   occur in the transcript.
@@ -150,11 +162,12 @@ from a hostile title (needs macOS 26 with Apple Intelligence and the Swift bridg
   transcript; otherwise refuse with `BadText`.
 - For `send` with no named or selected card, do not take the model's pick: return
   `WhichOne` over the visible cards.
-- Test for the fix: the ignored test above.
+- Test for the fix: the ignored test above. It passes for either bullet: it requires only that
+  the result is not a `Proposal` (a `Refused` or a `WhichOne` both pass).
 
 ---
 
-## F3. The HUD takes key focus and acts on the first key, with no guard (Low–Medium)
+## F3. The HUD takes key focus and acts on the first key, with no guard (Low)
 
 **Where.**
 - `app/src/components/Hud.svelte:118-143`: Enter confirms a `confirm` step; a digit
@@ -164,8 +177,13 @@ from a hostile title (needs macOS 26 with Apple Intelligence and the Swift bridg
   `Confirm`, `WhichOne` and `Countdown` make the HUD the key window
   (`show_and_make_key`) the moment they are shown, and they swallow the user's
   keystrokes meanwhile.
-- The inbox panel already treats this risk: `app/src/lib/keys.ts:155` says "A held
-  key must neither arm nor confirm: only a fresh press counts". The HUD does not.
+- For comparison, the inbox panel's guard is narrow. `app/src/lib/keys.ts:155-156` returns
+  early on `ev.repeat` only for an option that requires confirmation (`option.confirm`); it
+  arms on the first press and fires on a second within `CONFIRM_MS`. A plain digit pick in the
+  panel has no repeat check, there is no minimum display time, and there is no general
+  "keyup, then keydown" requirement anywhere in `keys.ts`. So the HUD is not an outlier
+  against a stricter panel; neither has a general guard. The HUD's difference is that it takes
+  key focus by itself while the user is typing elsewhere.
 
 **Attacker.** None needed: it is a race. It matters because it removes the "user must
 read and press a key on purpose" assumption behind F2. A model reply takes about 2 s warm and up to
@@ -199,14 +217,22 @@ test("an auto-repeating Enter must not confirm a voice step", async () => {
 });
 ```
 
-Replace `proposal` in the snippet with `proposal({ level: "confirm" })`. Run in this
-review's sandbox (as a separate, since removed, file) it failed with `voiceConfirm` called once. The existing test
+Replace `proposal` in the snippet with `proposal({ level: "confirm" })`. Run in the first
+round's sandbox (as a separate, since removed, file) it failed with `voiceConfirm` called once. The existing test
 (`Hud.test.ts:112`) shows a plain Enter after render confirms too. **Not run:** the
 actual focus handoff, which needs the macOS panel.
 
-**Minimal fix.** Ignore `e.repeat`; ignore keys for the first 500 ms after
-`voiceShown` returns; and for `confirm` require a keyup then keydown (as the panel
-does). Test: the skipped test, plus "Enter at 100 ms does nothing".
+**Rating.** Low, down from Low–Medium. There is no attacker; it needs a model-origin
+`confirm` step first, and F2 (the only route to one) is hardening. The earlier text said the
+panel already required a fresh press. It does so only for options that need confirmation
+(`keys.ts:155-156`), so the contrast that made the HUD look like a regression was overstated.
+What remains is a real but small gap: a stray or auto-repeated Enter confirms a step the user
+has not read.
+
+**Minimal fix.** In `Hud.svelte` `key()`, ignore `e.repeat` for Enter and digits, and ignore
+keys for the first 500 ms after `voiceShown` returns. (A keyup-then-keydown rule would be new
+behaviour for the HUD, not parity with the panel; the repeat check and the grace period are
+enough.) Test: the recipe above, plus "Enter at 100 ms does nothing".
 
 ---
 
@@ -263,7 +289,9 @@ with F1 the user has been given only the start of the command in both channels.
 The test pins only that string. It does not show how it sounds.
 
 **Minimal fix.** When `clean` cut anything, append spoken words ("and more") or refuse
-to read, and tell the user to check the panel. Test: the ignored test.
+to read, and tell the user to check the panel. Test: the ignored test. It requires that the
+body was cut (a precondition) and that the result either is `None` (refused) or contains the
+word "more"; removing the ellipsis alone does not satisfy it.
 
 ---
 
@@ -291,12 +319,39 @@ next fast phrase acts on, and it moves keyboard focus (see F3 for digits in the
 panel: `keys.ts:149-173` picks an option on a plain digit).
 
 **Reproduced: router level yes.** `tests/findings.rs::a_model_select_of_a_card_the_user_did_not_name_is_not_free`
-(ignored): `{"step":"select","agent":"a2"}` for "handle it" returns a `Select`
+(ignored; a control, `..._the_user_named_stays_free`, passes today and after the fix): `{"step":"select","agent":"a2"}` for "handle it" returns a `Select`
 proposal at `Level::None`. **Not run:** the panel republishing its selection, which
 needs the webview.
 
-**Minimal fix.** A model-origin `select` of a card the transcript did not name is
-`Level::Confirm`, or does not open the panel. Test: the ignored test.
+**Minimal fix (safe to apply).** Do **not** just make a model-origin `select` `Level::Confirm`:
+that would panic. A `Confirm` step goes to `plan.rs` `take` -> `self.view(&p)` ->
+`proposal_view`, whose `Step::Select` arm is `unreachable!` (`plan.rs:644-646`, "safety::level
+gives these level None"). Confirmed steps then go through `confirm()` -> `enqueue()` ->
+`operation()`, which returns `None` for `Step::Select` (`plan.rs:575`), so even without the
+panic a confirmed select would end in an error, not a selection. The immediate selection path
+(`plan.rs:478-483`, `Reaction.select`) is reached only from `Level::None` (`take`, `plan.rs:439`).
+
+Two safe options:
+
+1. **Refuse in the router (recommended; no UI change).** In `router/mod.rs` `apply`, for
+   `Template::Select` with `origin == Origin::Model` and `resolved.provenance ==
+   Provenance::Inferred`, return `Routed::Refused(Refusal::NoTarget)` (or a `WhichOne` over the
+   visible cards; `bind` then yields `Provenance::Selected`, so the user's own pick selects).
+   Named and already-selected targets are unchanged. No `Level` changes, so `plan.rs`,
+   `safety.rs` and the table test `every_combination_matches_the_table` are untouched.
+2. **A confirm path for selection.** All of these must change together: `safety::level` returns
+   `Confirm` for `StepKind::Select` when `origin == Model` and the provenance is `Inferred`
+   (and the 1,680-combination table test is updated); `hud.rs` `ProposalAction` gets a `Select`
+   variant; `proposal_view` (`plan.rs:644`) builds a view for `Step::Select` (no option, no
+   text, no question) instead of `unreachable!`; `confirm()` handles `Step::Select` by
+   returning the `immediate` selection reaction (`select: Some(card)`), because `operation()`
+   has no select operation; the HUD TypeScript type (`app/src/lib/hud.ts`) and `Hud.svelte`
+   learn the new action. The `unreachable!` comment at `plan.rs:645` is then wrong and must go.
+
+Test: the ignored test, which passes for either option: a `Proposal` must not be `Level::None`,
+and a refusal or `WhichOne` is also acceptable. It also asserts the control that naming the
+card ("select the studio one") still gives `Level::None`, so a router that refuses every
+select does not satisfy it.
 
 ---
 
@@ -447,14 +502,14 @@ closed. Do the same for the strings in `notify::text`. Test: the ignored test ab
   Svelte bundle is the iOS shell's frontend (`apps/ios/src-tauri/tauri.conf.json`,
   `frontendDist ../../../app/dist`). The Omarchy panel draws `number. label (rule)`
   (`clients/omarchy/Panel.qml:415`).
-- `crates/acd-voice/src/safety.rs:52-80` and `fast.rs:155-195`: "option N" picks by position
+- `crates/acd-voice/src/safety.rs:52-76` and `fast.rs:155-195`: "option N" picks by position
   and is `Level::Countdown` when the option's effect is `allow` or `deny`, on a selected or
   only-pending card.
 
 **Attacker.** (b), a compromised paired peer: it sends `{label:"Deny", effect:"allow"}`.
 (c) cannot do it today: hook options are fixed, and the T3 and external adapters give agent
 text a label but always `Effect::Choose` (`t3/map.rs:253-260`, `external/state.rs:246-249`,
-and `external/wire.rs:84-91` has no `effect` field). An honest daemon is not affected.
+and `external/wire.rs:85-92` (`OptionIn`) has no `effect` field). An honest daemon is not affected.
 This corrects the earlier "considered and rejected" entry, which looked only at the daemon's
 adapters and so missed that the effect crosses the wire from the peer.
 
@@ -471,17 +526,24 @@ confirmation table (which trusts `effect`) and its display disagree, and a user 
 voice and the HUD has no cue. The `primary` class on the allow button in `Card.svelte` is a
 weak visual cue (not rendered here). Hence Low–Medium, the same class as F10.
 
-**Reproduced: yes, router level.** `tests/findings.rs::an_option_whose_label_contradicts_its_effect_is_refused`
-(ignored): `cargo test -p acd-voice --test findings --locked -- --ignored an_option_whose` fails
-with `counts down as Answer "Deny" but sends an allow: Proposal(… Answer { … option_id: "o1" } …
-level: Countdown)`. **Not run:** the Svelte renderers, the Omarchy panel (read only).
+**Reproduced: the store step, yes.** `crates/acd-client/src/session.rs`, test
+`peer_option_whose_label_contradicts_its_effect_is_not_kept_as_an_allow` (ignored): a snapshot
+whose agent has a pending request with the option `{label: "Deny", effect: "allow"}` is stored as
+sent. `cargo test -p acd-client --lib --locked peer_option -- --ignored` fails today. The
+countdown that follows ("option 1" on a selected card with an `allow` effect is
+`Level::Countdown`) comes from the safety table (`safety.rs:63-76`) and was seen in round 3 as a
+router-level run on a hand-built snapshot (output in the PR description); that test is not kept,
+because a snapshot built directly bypasses `Session` and so could not pass with fix (b).
+**Not run:** the Svelte renderers, the Omarchy panel (read only).
 
 **Minimal fix.** Either (a) draw the effect with the label in every renderer (HUD verb,
 `Card.svelte`, `Panel.qml`), for example `Deny (allow)` when they differ, or (b) refuse in the
 client, when a request is stored, an option whose normalised label is exactly an allow or deny
 word that the effect contradicts (treat the option as `Unknown`, which is already not
 selectable and refused for a model). (b) is one function and covers all three renderers.
-Test: the ignored test above, plus a `Session` test for (b).
+Test: the ignored `Session` test above passes with (b) and only (b): fix (a) changes renderers,
+which no Rust test can see, and it needs its own vitest (`Hud.test.ts` / `Card` test) that this
+PR does not add.
 
 ---
 
@@ -523,7 +585,7 @@ Test: the ignored test above, plus a `Session` test for (b).
   `clean`-ed, capped at 4 KB, and a header line in a title cannot start a section
   (`prompt.rs` tests `hostile_titles_stay_inside_the_data_section`).
 - **Hold key as a key logger.** The tap is `listenOnly`; it forwards only the hold
-  modifier's down and up, and "another key" with no key code (`Tap.swift:51-75`,
+  modifier's down and up, and "another key" with no key code (`Tap.swift:54-75`,
   `realTap`). Synthetic events need Accessibility, the same-user boundary the earlier
   reviews accept.
 - **XSS or HTML injection in `app/src`.** No `{@html}`, `innerHTML`, `eval`, `href`
