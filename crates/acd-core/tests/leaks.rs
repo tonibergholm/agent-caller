@@ -91,7 +91,46 @@ fn a_replay_after_eviction_opens_a_new_request_and_a_newer_key_does_not() {
     core.observe(Observation::RequestSeen(unique("a2", "occ-1")));
     core.observe(Observation::RequestSeen(unique("a1", &format!("occ-{}", RETIRED_KEYS_CAP))));
     assert_eq!(core.sizes().requests, 0, "a recent tombstone was lost");
-    // The oldest key of a1 was evicted: its replay opens a new request (documented residual).
-    core.observe(Observation::RequestSeen(unique("a1", "occ-0")));
+    // The oldest keys of a1 were evicted by that traffic: occ-1 survived the four earlier
+    // resolutions and fell only to the cross-agent ones, so its replay opens a new request
+    // (documented residual).
+    core.observe(Observation::RequestSeen(unique("a1", "occ-1")));
     assert_eq!(core.sizes().requests, 1, "an evicted key must be treated as new");
+}
+
+#[test]
+fn a_migration_that_replaces_a_tombstone_does_not_leave_its_old_eviction_entry() {
+    let core = Core::new(test_machine(), vec![FakeAdapter::new()]);
+    for id in ["a", "b", "c"] {
+        core.observe(Observation::AgentUpsert(agent_obs(id)));
+    }
+    cycle(&core, "b", "k");
+    for i in 0..RETIRED_KEYS_CAP - 2 {
+        cycle(&core, "c", &format!("c-{i}"));
+    }
+    core.observe(Observation::RequestSeen(unique("a", "k")));
+    core.observe(Observation::AgentMigrated { from: "a".into(), to: "b".into() });
+    core.observe(Observation::RequestEnded { agent_id: "b".into(), key: CorrelationKey("k".into()), by: ResolvedBy::Inbox });
+    cycle(&core, "c", "fresh");
+    // (b, k) was resolved last, so it is among the newest tombstones: it must not reopen.
+    core.observe(Observation::RequestSeen(unique("b", "k")));
+    assert_eq!(core.sizes().requests, 0, "a stale entry evicted the new tombstone");
+}
+
+#[test]
+fn an_agent_removed_and_recreated_does_not_keep_its_old_eviction_entries() {
+    let core = Core::new(test_machine(), vec![FakeAdapter::new()]);
+    for id in ["a", "c"] {
+        core.observe(Observation::AgentUpsert(agent_obs(id)));
+    }
+    cycle(&core, "a", "k");
+    for i in 0..RETIRED_KEYS_CAP - 2 {
+        cycle(&core, "c", &format!("c-{i}"));
+    }
+    core.observe(Observation::AgentGone { agent_id: "a".into() });
+    core.observe(Observation::AgentUpsert(agent_obs("a")));
+    cycle(&core, "a", "k");
+    cycle(&core, "c", "fresh");
+    core.observe(Observation::RequestSeen(unique("a", "k")));
+    assert_eq!(core.sizes().requests, 0, "a stale entry evicted the new tombstone");
 }

@@ -317,13 +317,28 @@ async fn agents_probe(label: &str, n: usize, detail: usize, work: &Path) -> Resu
     let st = h.state().borrow().clone();
     let snap = snapshot_bytes(&dir).await;
     out(&format!("agents_{label}"), format!(
-        "n={n} detail_bytes={detail} snapshot_bytes={} client_online={online} client_agents={} connection_ends_in_15s={resyncs} status={:?}",
+        "n={n} detail_bytes={detail} snapshot_bytes={} client_online={online} client_agents={} connection_ends_in_15s={resyncs} status={} status_text_bytes={}",
         snap.map_or("?".into(), |b| b.to_string()), st.session.agents.len(),
-        match st.status { MachineStatus::Online => "Online".to_string(), s => format!("{s:?}") }
+        status_name(&st.status).0, status_name(&st.status).1.min(999)
     ));
     h.cancel();
     p.stop(true);
     Ok(())
+}
+
+/// The status variant and the byte length of the text it carries. The text itself comes from the
+/// peer and is never printed.
+fn status_name(s: &MachineStatus) -> (&'static str, usize) {
+    match s {
+        MachineStatus::Connecting => ("Connecting", 0),
+        MachineStatus::Syncing => ("Syncing", 0),
+        MachineStatus::Online => ("Online", 0),
+        MachineStatus::Offline { error, .. } => ("Offline", error.len()),
+        MachineStatus::AuthFailed { message } => ("AuthFailed", message.len()),
+        MachineStatus::IdentityChanged { message } => ("IdentityChanged", message.len()),
+        MachineStatus::Incompatible { message } => ("Incompatible", message.len()),
+        MachineStatus::LocalUnavailable { message } => ("LocalUnavailable", message.len()),
+    }
 }
 
 pub async fn run(a: Args) -> Result<(), String> {

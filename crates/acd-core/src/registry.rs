@@ -200,6 +200,9 @@ struct KeyState {
     last_request: Option<String>,
     /// A non-reusable key is tombstoned once its request resolves.
     reusable: bool,
+    /// Identifies the tombstone made when this key last resolved (0: none).
+    /// A retirement entry only evicts the state whose token it carries.
+    tomb: u64,
 }
 
 pub struct Registry {
@@ -210,7 +213,8 @@ pub struct Registry {
     /// Agents whose current `done` was marked seen; cleared when the agent leaves `done`.
     seen: HashSet<String>,
     /// Resolved non-reusable keys, oldest first; see `RETIRED_KEYS_CAP`.
-    retired: VecDeque<(String, CorrelationKey)>,
+    retired: VecDeque<(String, CorrelationKey, u64)>,
+    next_tomb: u64,
     next_id: u64,
 }
 
@@ -223,6 +227,7 @@ impl Registry {
             keys: HashMap::new(),
             seen: HashSet::new(),
             retired: VecDeque::new(),
+            next_tomb: 0,
             next_id: 0,
         }
     }
@@ -444,10 +449,15 @@ impl Registry {
     /// Remembers a resolved non-reusable key and forgets the oldest ones past
     /// the cap. Such a key never reopens, so its state is only a tombstone.
     fn retire(&mut self, id: (String, CorrelationKey)) {
-        self.retired.push_back(id);
+        self.next_tomb += 1;
+        let token = self.next_tomb;
+        let Some(k) = self.keys.get_mut(&id) else { return };
+        k.tomb = token;
+        self.retired.push_back((id.0, id.1, token));
         while self.retired.len() > RETIRED_KEYS_CAP {
-            let Some(old) = self.retired.pop_front() else { break };
-            if self.keys.get(&old).is_some_and(|k| k.open_request.is_none() && !k.reusable) {
+            let Some((a, key, t)) = self.retired.pop_front() else { break };
+            let old = (a, key);
+            if self.keys.get(&old).is_some_and(|k| k.tomb == t && k.open_request.is_none() && !k.reusable) {
                 self.keys.remove(&old);
             }
         }
@@ -544,19 +554,15 @@ impl Registry {
                 }
             }
             // The moved keys keep their place in the eviction order under
-            // the target; an entry for a key the target already retired
-            // keeps only its newer position.
-            for r in self.retired.iter_mut().filter(|(a, _)| a == from) {
+            // the target. An entry only counts while the state under its key
+            // still carries its token: a target state that was replaced (or
+            // kept over the source's) leaves its old entries stale.
+            for r in self.retired.iter_mut().filter(|(a, _, _)| a == from) {
                 r.0 = to.to_string();
             }
-            let mut seen_ids = HashSet::new();
-            let mut kept: VecDeque<_> = std::mem::take(&mut self.retired)
-                .into_iter()
-                .rev()
-                .filter(|r| seen_ids.insert(r.clone()))
-                .collect();
-            kept.make_contiguous().reverse();
-            self.retired = kept;
+            let keys = &self.keys;
+            self.retired
+                .retain(|(a, k, t)| keys.get(&(a.clone(), k.clone())).is_some_and(|s| s.tomb == *t));
             let req = self
                 .requests
                 .get(&p.id)
@@ -574,7 +580,7 @@ impl Registry {
         // The request moved: nothing is resolved here.
         self.agents.remove(from);
         self.keys.retain(|_, k| k.agent_id != from);
-        self.retired.retain(|(a, _)| a != from);
+        self.retired.retain(|(a, _, _)| a != from);
         self.seen.remove(from);
         out.push(Change::AgentRemoved(from.to_string()));
         out
@@ -644,6 +650,7 @@ impl Registry {
         }
         self.agents.remove(agent_id);
         self.keys.retain(|_, k| k.agent_id != agent_id);
+        self.retired.retain(|(a, _, _)| a != agent_id);
         self.seen.remove(agent_id);
         out.push(Change::AgentRemoved(agent_id.to_string()));
         out
