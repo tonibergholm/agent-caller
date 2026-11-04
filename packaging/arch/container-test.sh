@@ -146,7 +146,7 @@ pacman -R --noconfirm agent-caller agent-caller-omarchy >/dev/null 2>&1 && ok "p
 step "reproducibility: same tag, another directory, same bytes"
 for p in agent-caller agent-caller-omarchy; do
 	build "$p" "$p-3" || { bad "rebuild $p"; continue; }
-	a=$(pk "$p"); b=$(ls /out/$p-3/*.pkg.tar.zst)
+	a=$(pk "$p"); b=$(ls /out/$p-3/$p-$ver-1-*.pkg.tar.zst)
 	bin=acd; [ "$p" = agent-caller-omarchy ] && bin=acd-inbox
 	ba=$(bsdtar -xOf "$a" usr/bin/$bin | sha256sum | cut -c1-16)
 	bb=$(bsdtar -xOf "$b" usr/bin/$bin | sha256sum | cut -c1-16)
