@@ -104,6 +104,9 @@ step "install both packages (root, pacman -U)"
 pacman -U --noconfirm "$(pk agent-caller)" "$(pk agent-caller-omarchy)" && ok "pacman -U" || bad "pacman -U"
 
 step "smoke test as a normal user"
+# A container has no init, so nothing created /run/systemd. systemd-analyze
+# verify wants to write there as an unprivileged user; a booted host has it.
+mkdir -p /run/systemd && chmod 1777 /run/systemd
 if as_builder bash /usr/share/agent-caller/smoke-test.sh; then ok "smoke test"; else bad "smoke test"; fi
 
 step "smoke test fails on a stale per-user plugin copy, passes when it matches"
