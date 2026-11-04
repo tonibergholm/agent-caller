@@ -27,7 +27,7 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
   `acd pair` prints a pairing line containing the pin and client token. TCP
   clients must verify the configured pin; there is no plaintext fallback.
   The pairing host is an ASCII hostname (at most 253 bytes; labels of 1 to 63
-  letters, digits and hyphens) or an IP literal, with IPv6 in brackets, then
+  letters, digits and hyphens, not starting or ending with a hyphen) or an IP literal, with IPv6 in brackets, then
   `:port`. Anything else (whitespace, control or bidi characters, userinfo,
   path, query, non-ASCII) is not a pairing line.
   `acd tls rotate` changes the certificate for new sessions, keeps existing
@@ -72,8 +72,10 @@ References written as "spec §N" point to docs/superpowers/specs/2026-10-07-agen
 - **Ids and text.** A command `id`, `request_id`, `agent_id` and
   `hello.client.id` are at most 128 bytes. Answer `text` and `agent.send`
   `text` are at most 64 KiB. Both texts hold no control character other
-  than newline and tab, no bidi override and no line or paragraph separator;
-  otherwise the command gets `bad_request`. An oversized command gets a `bad_request`
+  than newline and tab, no bidi control (U+061C, U+200E, U+200F, U+202A to
+  U+202E, U+2066 to U+2069) and no line or paragraph separator (U+2028,
+  U+2029), and are not empty or only whitespace; otherwise the command gets
+  `bad_request`. An oversized command gets a `bad_request`
   result and reserves nothing. A `hello` with an oversized `client.id` gets
   `error {code: "bad_request"}` and the connection is closed with 4401.
 - **Commands in flight.** At most 32 per session and 256 across the daemon,

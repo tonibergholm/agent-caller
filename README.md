@@ -407,7 +407,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cd app && npm ci && npm run verify   # macOS only
 ```
 
-CI runs the workspace on Ubuntu and macOS and the app on macOS.
+CI runs the workspace on Ubuntu and macOS, the Windows and Android
+type-check (`just portability-check`) on Ubuntu, and the app on macOS.
 
 To preview the UI with sample data, run `npm ci` and `npm run dev` in
 `app/`, then open `/preview.html?scene=main` or

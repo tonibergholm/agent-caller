@@ -1,6 +1,6 @@
 # Known gaps and deferred work
 
-Reviewed against `main` on 2026-11-04 (merged through PR #103). Items are
+Reviewed against `main` on 2026-11-04 (head `28e4664`, the merge of #98). Items are
 grouped by area. Completed task history is in
 [the archived review ledger](../../archive/p1-followups-2026-10.md); phase
 plans and live-run records keep the original evidence.
@@ -388,7 +388,7 @@ Open test work:
   a fixed 400 ms sleep) failed once on PR #87, which does not touch
   `acd-client`; a rerun passed. Fix: wait for the answer to arrive. PR #105
   does this; it is not merged. Other tests in that file still sleep for fixed
-  times (for example `reconnect_within_undo_window_cancels`).
+  times (for example `pick_waits_for_the_undo_then_sends_once`).
 - **Auth log test (#90).** `crates/acd-core/tests/tls.rs` (`a_hello_naming_itself_after_the_token_does_not_log_the_token`)
   accepts any shared "hello accepted" line, so another test can mask this
   hello timing out, and prints a token substring in its failure message
@@ -443,10 +443,11 @@ Checked in code on 2026-11-04.
   selection (#73).
 - Notification history on a flap: Omarchy keeps a bounded history
   (`SEEN_HISTORY_MAX`, `crates/acd-inbox/src/notify.rs`, #73, keyed on
-  `opened_at` in a later commit). The Mac app and iOS use the shared
-  `NotifyGate` in `acd-client` (`seen` evicts only past 256 keys, #81, #90), so
-  a request that leaves the view on a disconnect does not notify again. I found
-  no test of a flap itself.
+  `opened_at` in a later commit). The Mac app (`app/src-tauri/src/notify.rs`)
+  and iOS take `InboxEvent`s from the shared `NotifyGate` in `acd-client`
+  (`seen` evicts only past 256 keys, #81, #90). The test
+  `notifications_only_for_opened_events_and_deduped` closes the connection,
+  reconnects with the same request and asserts no second event.
 - Core 1 (#82), 2 and 6 (#81), 3, 7, 8 (#88), 4 and 5 (#90); local F1 (#80,
   #83), F3 (#87), F4 and F5 (#86).
 - Test hardening (#89): `status_change_before_resubscribe_is_caught` accepts
