@@ -57,3 +57,9 @@ check-version:
 # Runs the release script tests (scripts/tests; also run in CI on ubuntu).
 test-scripts:
     scripts/tests/run.sh
+
+# Runs every fuzz target for 30 seconds (fuzz/README.md). Needs the nightly
+# toolchain and cargo-fuzz. New inputs go to fuzz/target/smoke, not into the
+# committed corpus. Not part of CI.
+fuzz-smoke:
+    cd fuzz && for t in $(cargo +nightly fuzz list); do mkdir -p "target/smoke/$t"; cargo +nightly fuzz run "$t" "target/smoke/$t" "corpus/$t" -- -max_total_time=30 -rss_limit_mb=4096 || exit 1; done
