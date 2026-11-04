@@ -9,6 +9,11 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Added
 
+- Fuzz targets (`fuzz/`, cargo-fuzz) for the parsers that read untrusted bytes:
+  acd/1 frames, pairing strings, hook payloads, T3 frames, herdr screens, the
+  Omarchy socket protocol and the shared text rules. Not part of CI; see
+  `fuzz/README.md`.
+
 - Voice, free-form commands on macOS: anything that is not a fixed phrase goes
   to Apple's on-device model, which proposes one step. The app validates it
   against the request, agent and options on screen. Anything it asks to send
@@ -33,6 +38,17 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Fixed
 
+- acd: a request whose text exceeds 40 KiB (for example a question at every
+  field cap in 4-byte characters) is published read-only, and a working
+  directory is cut to 8 KiB of JSON. Over 64 KiB an agent made every client
+  drop the connection and resync, in a loop, for as long as it existed.
+- acd: a question whose text, header, option label or description was cut or
+  altered by cleaning (hooks and T3) is read-only: it can no longer be answered
+  from a card that shows it cut.
+- A sub-millisecond timestamp is cut to the millisecond on the way in, so a
+  message decodes to what it re-encodes to.
+- Log redaction masks a `Bearer` token even when the previous line ends in the
+  word `bearer`.
 - acd: one device that opens connections and never sends `hello` can no longer
   keep other clients out. Each source address may hold two unauthenticated
   connections at a time (a third is dropped), and the local socket has its own

@@ -12,8 +12,16 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request stops the superseded run, which also drops its
+# macOS jobs from the runner queue. Other events get a group of their own, so
+# they never cancel or replace each other (and release.yml's gate is unaffected).
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.ref) || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +46,22 @@ jobs:
       - if: matrix.os == 'ubuntu-latest'
         run: scripts/tests/run.sh
 
+  # Type-check only (no linking, so no NDK or Windows SDK): keeps the client
+  # crates building for Windows and Android (PR #79). See scripts/portability-check.sh.
+  portability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc,aarch64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: scripts/portability-check.sh
+
   app:
+    timeout-minutes: 20
     runs-on: macos-latest
     defaults:
       run:

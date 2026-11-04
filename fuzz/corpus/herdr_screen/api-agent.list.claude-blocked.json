@@ -1,0 +1,29 @@
+{
+ "id": "1",
+ "result": {
+  "type": "agent_list",
+  "agents": [
+   {
+    "terminal_id": "term_65d4be91bf58b2",
+    "agent": "claude",
+    "terminal_title": "\u2733 x.txt file in proj",
+    "terminal_title_stripped": "x.txt file in proj",
+    "agent_status": "blocked",
+    "agent_session": {
+     "source": "herdr:claude",
+     "agent": "claude",
+     "kind": "id",
+     "value": "fd1db5a4-2a69-483d-b64c-dc51ce6befb8"
+    },
+    "workspace_id": "w1",
+    "tab_id": "w1:t1",
+    "pane_id": "w1:p2",
+    "focused": false,
+    "state_change_seq": 6,
+    "cwd": "/tmp/acp2/proj",
+    "foreground_cwd": "/private/tmp/acp2/proj",
+    "revision": 10
+   }
+  ]
+ }
+}

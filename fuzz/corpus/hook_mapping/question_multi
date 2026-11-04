@@ -1,0 +1,1 @@
+{"session_id": "s1", "prompt_id": "p1", "turn_id": "t1", "cwd": "/w", "tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": "Q", "header": "H", "multiSelect": true, "options": [{"label": "A"}, {"label": "B"}]}, {"question": "Q2", "header": "H", "options": [{"label": "A"}]}]}}

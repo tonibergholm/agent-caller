@@ -1,5 +1,7 @@
 # External source: design
 
+Implementation status (2026-11-04): implemented and released in 0.9.0 (#56). Wire contract: PROTOCOL.md section 8.
+
 Status: approved by the user 2026-10-13, after Sol's review of the merged
 plan. Target release 0.9.0.
 
