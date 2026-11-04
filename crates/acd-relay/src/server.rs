@@ -165,18 +165,22 @@ impl AppState {
     }
 
     fn client_ip(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
-        if self.trusted_proxy == Some(peer)
+        // A dual-stack listener reports IPv4 peers as ::ffff:a.b.c.d. The
+        // configured proxy address and the forwarded address are compared
+        // and keyed in the same normalised form.
+        let peer = normalise_ip(peer);
+        if self.trusted_proxy.map(normalise_ip) == Some(peer)
             && let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
             && let Some(last) = v.rsplit(',').next()
             && let Ok(ip) = last.trim().parse::<IpAddr>()
         {
-            return ip;
+            return normalise_ip(ip);
         }
         peer
     }
 
     fn ip_key(&self, ip: IpAddr) -> [u8; 16] {
-        match ip {
+        match normalise_ip(ip) {
             IpAddr::V4(a) => self.keyer.key("ip4", &a.octets()),
             // IPv6 sources are keyed by their /64.
             IpAddr::V6(a) => self.keyer.key("ip6", &a.octets()[..8]),
@@ -195,6 +199,18 @@ impl AppState {
             &[kind as u8],
             address.as_bytes(),
         ])
+    }
+}
+
+/// IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d) addresses
+/// become the plain IPv4 address, so an IPv4 client is one source whether
+/// the listener is dual-stack or not. `::` and `::1` stay IPv6.
+pub fn normalise_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(a) if !a.is_unspecified() && !a.is_loopback() => {
+            a.to_ipv4().map_or(ip, IpAddr::V4)
+        }
+        _ => ip,
     }
 }
 
@@ -552,5 +568,90 @@ async fn confirm_inner(
                 .unwrap_or_default();
             (axum::Json(HandleIssued { handle, expires_at }).into_response(), platform)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ManualClock;
+
+    struct NoSender;
+    #[async_trait::async_trait]
+    impl PushSender for NoSender {
+        fn supports(&self, _: Platform) -> bool {
+            false
+        }
+        async fn wake(&self, _: &Address) -> Result<(), SendError> {
+            Err(SendError::Unavailable)
+        }
+        async fn challenge(&self, _: &Address, _: &str) -> Result<(), SendError> {
+            Err(SendError::Unavailable)
+        }
+    }
+
+    fn state(trusted_proxy: Option<IpAddr>) -> Arc<AppState> {
+        AppState::new(
+            Options {
+                keys: Keys::new(vec![(1, [7u8; 32])]).unwrap(),
+                allowed_apps: vec![],
+                trusted_proxy,
+                rates: Rates::default(),
+            },
+            Arc::new(NoSender),
+            Arc::new(ManualClock::new(1)),
+        )
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn mapped_ipv4_clients_get_separate_buckets() {
+        let st = state(None);
+        assert_ne!(st.ip_key(ip("::ffff:192.0.2.1")), st.ip_key(ip("::ffff:198.51.100.7")));
+        // Same /24 in the mapped space is still a different client.
+        assert_ne!(st.ip_key(ip("::ffff:192.0.2.1")), st.ip_key(ip("::ffff:192.0.2.2")));
+    }
+
+    #[test]
+    fn a_mapped_address_shares_a_bucket_with_the_plain_ipv4_address() {
+        let st = state(None);
+        assert_eq!(st.ip_key(ip("::ffff:192.0.2.1")), st.ip_key(ip("192.0.2.1")));
+        assert_eq!(st.ip_key(ip("::192.0.2.1")), st.ip_key(ip("192.0.2.1")));
+    }
+
+    #[test]
+    fn ipv6_is_keyed_by_its_slash_64() {
+        let st = state(None);
+        assert_eq!(st.ip_key(ip("2001:db8:1:2::1")), st.ip_key(ip("2001:db8:1:2:ffff::9")));
+        assert_ne!(st.ip_key(ip("2001:db8:1:2::1")), st.ip_key(ip("2001:db8:1:3::1")));
+        // Loopback and unspecified stay IPv6, not 0.0.0.x.
+        assert_ne!(st.ip_key(ip("::1")), st.ip_key(ip("0.0.0.1")));
+    }
+
+    #[test]
+    fn one_mapped_source_exhausts_only_its_own_allowance() {
+        let st = state(None);
+        let per_hour = Rates::default().issue_ip.per_hour;
+        let a = st.ip_key(ip("::ffff:192.0.2.1"));
+        let b = st.ip_key(ip("::ffff:198.51.100.7"));
+        let mut denied = false;
+        for _ in 0..=per_hour {
+            denied |= !st.issue_ip.check(a, 1);
+        }
+        assert!(denied, "the first source hits its limit");
+        assert!(st.issue_ip.check(b, 1), "another IPv4 client is unaffected");
+    }
+
+    #[test]
+    fn the_trusted_proxy_matches_in_mapped_form_and_forwarded_addresses_are_normalised() {
+        let st = state(Some(ip("203.0.113.9")));
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", HeaderValue::from_static("10.0.0.1, ::ffff:192.0.2.1"));
+        assert_eq!(st.client_ip(ip("::ffff:203.0.113.9"), &h), ip("192.0.2.1"));
+        // An untrusted mapped peer cannot use the header, and is keyed as IPv4.
+        assert_eq!(st.client_ip(ip("::ffff:203.0.113.10"), &h), ip("203.0.113.10"));
     }
 }
