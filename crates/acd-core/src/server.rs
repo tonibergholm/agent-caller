@@ -802,3 +802,7 @@ mod log_limit_tests {
 #[cfg(test)]
 #[path = "mutants_server.rs"]
 mod mutants_server;
+
+#[cfg(test)]
+#[path = "mutants_pool.rs"]
+mod mutants_pool;
