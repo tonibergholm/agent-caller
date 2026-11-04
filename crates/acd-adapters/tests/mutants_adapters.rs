@@ -280,3 +280,50 @@ fn retain_thread_keeps_the_named_target_and_other_threads() {
     targets.remove("r4");
     assert!(targets.is_empty());
 }
+
+/// detail.rs:45 `&&` -> `||` (`valid_projection`): both the thread identity and all three lists must be there.
+#[test]
+fn a_projection_needs_its_thread_and_all_three_lists() {
+    let thread = json!({"activeProviderThreadId": "p1"});
+    let lists = |extra: serde_json::Value| {
+        let mut v = json!({"providerThreads": [], "runtimeRequests": [], "turnItems": []});
+        if let Some(o) = extra.as_object() {
+            for (k, val) in o {
+                v[k] = val.clone();
+            }
+        }
+        v
+    };
+    let mut ok = lists(json!({}));
+    ok["thread"] = thread.clone();
+    assert!(ThreadDetail::valid_projection(&ok));
+    for missing in ["providerThreads", "runtimeRequests", "turnItems"] {
+        let mut p = ok.clone();
+        p.as_object_mut().unwrap().remove(missing);
+        assert!(!ThreadDetail::valid_projection(&p), "no {missing}");
+        let mut p = ok.clone();
+        p[missing] = json!({});
+        assert!(!ThreadDetail::valid_projection(&p), "{missing} is not a list");
+    }
+    let mut no_thread = lists(json!({}));
+    no_thread["thread"] = json!("not an object");
+    assert!(!ThreadDetail::valid_projection(&no_thread));
+}
+
+/// detail.rs:128 `delete match arm UserInputRequest` (`prune`): a question whose request is
+/// gone is dropped with it; one whose request is pending stays.
+#[test]
+fn prune_drops_questions_of_requests_that_are_gone() {
+    let mut d = ThreadDetail::default();
+    d.apply(&event("runtime-request.updated", request("rq-live", "pending"))).unwrap();
+    for (item, request_id) in [("i-live", "rq-live"), ("i-gone", "rq-gone")] {
+        d.apply(&event(
+            "turn-item.updated",
+            json!({"type": "user_input_request", "id": item, "requestId": request_id, "questions": []}),
+        ))
+        .unwrap();
+    }
+    assert_eq!(d.retained(), (1, 2));
+    d.prune(&[]);
+    assert_eq!(d.retained(), (1, 1), "only the pending request's question stays");
+}
