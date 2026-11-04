@@ -114,8 +114,8 @@ key or a quiet room is the worst case for this backend. Required mitigations
 (carried into the design):
 
 1. `voiced` is computed from the **samples** by a VAD in the backend, never from the ASR text.
-2. No `Final` is emitted when the voiced time is under `MIN_VOICED`, or when the engine's own
-   no-speech signal says so (U: whisper.cpp exposes a no-speech threshold; confirm the
+2. No engine call is made, and no text is returned, when the voiced time is under `MIN_VOICED`, or when the engine's own
+   no-speech signal says so (the backend then emits a `Final` with **empty text** and the measured `voiced`, as the design §4.2 specifies, so the controller can classify it as silent, empty or too short; never a guessed word) (U: whisper.cpp exposes a no-speech threshold; confirm the
    parameter name and behaviour on the pinned version).
 3. A silence/noise/cough/music fixture set that must produce **no fast-path intent**, with zero tolerance.
 4. The 2 s countdown and the full-command HUD stay mandatory (already so in spec §6.1).

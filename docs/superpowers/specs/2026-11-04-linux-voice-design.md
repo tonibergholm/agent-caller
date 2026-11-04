@@ -159,21 +159,35 @@ macOS CI needs no CMake, no `libpipewire`, no models; research §9): `capture-pi
    have its own deadline shorter than that or return `Error(Failed)`.
 5. `max` is enforced by the backend as well as the controller (`MAX_RECORDING` 60 s): a
    lost release must not leave the microphone on.
-6. **Transcription is cancellable and has a deadline.** Each job carries a `StopToken` (cancel flag plus a deadline
+6. **Transcription is supervised for every engine.** Each job carries a `StopToken` (cancel flag plus a deadline
    shorter than `FINAL_TIMEOUT`, taken from an injected clock). `start(g2)`, `cancel(g1)`, lock and shutdown set the
-   token of the running job; the engine adapter must observe it. whisper.cpp: `whisper_full_params` has
-   `abort_callback` / `abort_callback_user_data` (checked in `include/whisper.h` v1.8.2; the version that
-   `whisper-rs` 0.16.0 pins is **not yet checked**, so step 2 verifies the header and the `whisper-rs` setter before relying on it).
-   The callback reads the token. An engine with no abort hook (a sherpa-onnx offline recognizer, unverified) runs the job
-   on a **disposable worker**: the transcription thread abandons the job at cancel, marks that engine instance
-   *busy-poisoned* (its result is dropped on arrival, the generation check discards it), and generation 2 uses a second
-   instance or reports `Error(Failed)` immediately if none is free. It never waits behind the cancelled job. With the
-   token set, the audio buffer of that job is zeroed and dropped by the transcription thread before the next job is taken;
-   an abandoned job's buffer is dropped when its engine call returns. A cancelled job never emits `Final`.
-   Test: an engine double that ignores the token for a fixed number of steps (stays busy after cancellation). Using a
-   controlled clock and a gate the test releases, generation 2 must produce its `Final` or `Error` without
-   generation 1 having finished, generation 1 produces nothing, and the deadline path returns `Error(Failed)` before
-   `FINAL_TIMEOUT` on the controlled clock.
+   token of the running job. A cooperative abort hook is an optimisation, never the guarantee: the transcription thread
+   itself never blocks inside an engine call. Every engine instance runs on its own **disposable worker** (a thread, or a
+   child process for an engine that cannot be unwound), and the transcription thread only waits on that worker's result
+   channel and on a **watchdog**.
+   - **With an abort hook** (whisper.cpp: `whisper_full_params` has `abort_callback` / `abort_callback_user_data`, checked in
+     `include/whisper.h` v1.8.2; the header `whisper-rs` 0.16.0 pins is **not yet checked**, so step 2 verifies it and the
+     setter): the hook reads the token and the worker is given a bounded **grace** (`ABORT_GRACE`, injected, well under
+     `FINAL_TIMEOUT`) to return.
+   - **Without one** (a sherpa-onnx offline recognizer, unverified): grace is zero, the job is abandoned at cancel.
+   - **Watchdog:** if the worker has not returned when the grace ends (hook present but ignored or slow, or no hook), the
+     instance is **abandoned**: its result and buffer are dropped on arrival (the generation check discards it), it is never
+     reused, and a **replacement** instance is built (model load on a fresh worker) for the next job. Generation 2 never waits
+     behind generation 1: until the replacement is ready it reports `Error(Failed)` at once, it does not queue.
+   - **Bound:** at most `MAX_ABANDONED` (default 2) abandoned workers may be alive. Hitting the bound puts the transcription
+     backend in a **fail-closed** state: every new job gets `Error(Failed)`, `capabilities` reports `Unavailable`
+     (engine wedged), no new worker or instance is created, and only a process restart clears it. Abandoned workers that do
+     return are joined and decrement the count. A worker that is a child process is killed and reaped instead of abandoned.
+   - Audio: the job's buffer is zeroed and dropped when the engine call returns or when the worker is killed; a cancelled or
+     abandoned job never emits `Final`.
+   - **Test (both engine kinds, controlled clock, gates the test releases, no sleeps):** two doubles, one that polls the token
+     and one with no hook. (a) Hook double that honours the token: returns within `ABORT_GRACE`, no abandonment. (b) Hook
+     double that ignores the token and stays busy, and (c) no-hook double that stays busy: after cancel and the clock advanced
+     past the grace, generation 2 gets its `Final` or `Error` while generation 1 is still blocked on its gate, generation 1
+     emits nothing, the count of abandoned workers is 1, and the replacement instance serves generation 2. (d) Repeat until
+     `MAX_ABANDONED` is reached: the next job yields `Error(Failed)`, no new worker starts, `capabilities` is `Unavailable`.
+     (e) Releasing a gate joins that worker and its late result is dropped. (f) The deadline path returns `Error(Failed)`
+     before `FINAL_TIMEOUT` on the controlled clock.
 7. No text in `Debug`, errors, tracing or panics: all text is `VoiceText`; engine and library
    errors are mapped to `ListenError` codes at the boundary and the original is dropped.
 
@@ -331,26 +345,47 @@ confirm plus the already-bound Esc binding.
 ## 6. Speech output
 
 `Speaker` for Linux spawns the engine as a **child process** per utterance (eSpeak NG first; Piper opt-in),
-piping PCM to PipeWire playback (`pw-cat`/`pw-play`, or cpal output; U on the machine). The synthesizer exiting is **not**
-playback completion: PCM can still sit in the pipe, in the playback process, or in the audio server's buffer.
+piping PCM to a **PipeWire playback child** (`pw-cat`/`pw-play`; which one is U on the machine). There is no in-process
+output stream: cpal 0.18.2 has no stream drain callback (stated by the round-3 review; not independently checked in this session), so a cpal output cannot say when the last frame was heard and
+is not an option. The synthesizer exiting is **not** playback completion: PCM can still sit in the pipe, in the playback
+process, or in the audio server's buffer.
 
-- **Pipeline ownership:** one `PlaybackPipeline` per utterance owns the synthesizer child, the playback child (or the cpal
-  output stream) and the pipe between them, started in one process group (or one cpal stream plus one child). Nothing outlives it.
-- **Completion:** `spoken(g)` is emitted only after the playback end is done: the playback child has exited 0 after its stdin
-  closed (it drains before exit), or the cpal stream's drain callback reported the last frame played, **and** the
-  synthesizer exited. A synthesizer failure with nothing played also emits `spoken(g)` so the controller does not wait for the
-  speech cap. A failure of the playback process emits `spoken(g)` too (nothing more will be heard).
+- **Pipeline ownership:** one `PlaybackPipeline` per utterance owns the synthesizer child, the playback child and the pipe
+  between them, started in one process group. Nothing outlives it.
+- **Completion:** `spoken(g)` is emitted only when the playback child has exited 0 after its stdin closed (it drains before
+  exit; the `pw-cat` drain-on-EOF behaviour is verified on the machine, §13, and if it does not hold the playback command is
+  not usable), **and** the synthesizer exited. A synthesizer failure with nothing played also emits `spoken(g)` so the
+  controller does not wait for the speech cap. A failure of the playback process emits `spoken(g)` too (nothing more will be heard).
 - **`say(g, ..)`** stops the previous pipeline (below) before starting the next one.
-- **`stop()` silences the whole pipeline before returning:** kill the whole process group (synthesizer and playback), drop or
-  close the cpal stream, flush or discard queued PCM, and reap every child synchronously. It does not return while any
-  part can still emit sound, because a microphone may open next (plan V12) and would capture the app's own speech. A stopped
-  pipeline emits **no** event. If a child cannot be reaped, the speaker reports it as an overflow-class failure and the
-  host invalidates (fail closed) rather than opening the microphone.
-- **Test:** a fast synthesizer double (writes all PCM and exits at once) and a deliberately slow playback double (reads
-  slowly and exits only when its input is drained, released by the test). Asserts: no `spoken` while playback runs even
-  after the synthesizer exited; `spoken` once playback is released; `stop()` during that gap returns only after both doubles are
-  dead, produces no `spoken`, and a following capture request sees no playback process alive. Synchronised on the doubles'
-  events, not on sleeps.
+- **`stop()` silences the whole pipeline and says so synchronously.** It kills the whole process group (synthesizer and
+  playback), discards queued PCM, and reaps every child before it returns. It returns `Ok(())` only when the whole pipeline is
+  confirmed silent (every child reaped); otherwise `Err(SilenceFailed)`. A stopped pipeline emits **no** event.
+  A callback or overflow latch cannot carry this result: callbacks are asynchronous, the controller calls the speaker under
+  its core lock, and `start_listening` would already have opened capture before the callback could be handled.
+- **Required change to the port trait (`acd-voice/src/speak.rs`):** `fn stop(&self)` becomes
+  `fn stop(&self) -> Result<(), SilenceFailed>` (a unit-like error carrying no text). The doc comment keeps "before it returns".
+  Every existing implementor changes with it: the Swift-bridge adapter in `app/src-tauri` (the Swift `stop` is documented to run to
+  completion before returning, so it maps to `Ok(())`; a bridge-level failure to call it maps to `Err`), and the test
+  doubles in `acd-voice/src/speak.rs` and `crates/acd-voice-client/tests/speaking.rs`. The Mac change is mechanical and cannot be
+  verified on Linux (CLAUDE.md platform limits).
+- **Required change to the controller (`acd-voice-client`):** `Controller::silence` and `stop_speech` return that result.
+  `start_listening` calls `silence` and, on `Err`, **refuses to start capture**: it does not call `input.start`, it
+  invalidates voice exactly as `overflow()` does (epoch bump, recorder cancelled, HUD error), and reports a refusal through
+  `listen_failed`. Other callers of `silence`/`stop_speech` (lock, disable, new speech) treat `Err` the same way: invalidate
+  and open no capture until a later press re-checks. Because `start_listening` already holds the core lock across
+  `silence` and `input.start`, the synchronous result is the only mechanism that can gate capture; no asynchronous event is relied on.
+- **Tests:**
+  1. Speaker (pipeline doubles): a fast synthesizer double (writes all PCM and exits at once) and a deliberately slow playback
+     double (reads slowly and exits only when its input is drained, released by the test). Asserts: no `spoken` while playback
+     runs even after the synthesizer exited; `spoken` once playback is released; `stop()` during that gap returns `Ok` only after
+     both doubles are dead, produces no `spoken`, and a following capture request sees no playback process alive.
+  2. Speaker, unkillable playback: a playback double that refuses to die (ignores the kill, never exits) with a fast
+     synthesizer. `stop()` returns `Err(SilenceFailed)` and does not report success while the child lives.
+  3. Controller (`acd-voice-client`): a `Speaker` double whose `stop` returns `Err`, speech in progress, then a hold press:
+     `input.start` is **never** called (the `SpeechInput` double records zero starts), the HUD shows the error, and a later
+     press after `stop` returns `Ok` starts capture normally. This test fails without the change (today `stop` returns `()` and
+     capture opens).
+  All synchronised on the doubles' events and a controlled clock, not on sleeps.
 
 Playback is the part of "kill the child" still to prove on the machine (§13). Text goes to the child on **stdin**,
 never on the command line (visible in `ps`). Rate maps to the engine's speed argument. Voices list from the engine.
