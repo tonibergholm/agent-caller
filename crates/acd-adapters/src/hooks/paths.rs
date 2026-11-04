@@ -281,3 +281,7 @@ mod tests {
         assert_eq!(p.get(Path::new("/s1")), Resolved::Unknown);
     }
 }
+
+#[cfg(test)]
+#[path = "mutants_paths.rs"]
+mod mutants_paths;

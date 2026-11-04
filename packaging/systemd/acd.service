@@ -1,0 +1,14 @@
+# acd-managed:v1
+[Unit]
+Description=agent-caller daemon (acd)
+
+[Service]
+ExecStart="/usr/bin/acd" run
+Environment="ACD_CONFIG_DIR=%h/.config/acd"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+

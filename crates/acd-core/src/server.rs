@@ -798,3 +798,11 @@ mod log_limit_tests {
         assert_eq!(l.pass_at(t0 + LogLimiter::WINDOW), Some((991, 1002)));
     }
 }
+
+#[cfg(test)]
+#[path = "mutants_server.rs"]
+mod mutants_server;
+
+#[cfg(test)]
+#[path = "mutants_pool.rs"]
+mod mutants_pool;
