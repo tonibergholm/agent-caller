@@ -113,7 +113,11 @@ pub async fn rig_with(
     }));
     let app = hooks.router(auth);
     tokio::spawn(async move {
-        axum::serve(acd_adapters::hooks::endpoint::capped(listener, 128), app)
+        acd_adapters::hooks::endpoint::serve_capped(
+            acd_adapters::hooks::endpoint::capped(listener, 128),
+            app,
+            std::future::pending(),
+        )
             .await
             .unwrap()
     });

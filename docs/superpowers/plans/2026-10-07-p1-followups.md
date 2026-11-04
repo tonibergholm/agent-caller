@@ -294,10 +294,32 @@ needs a decision or a small follow-up.
   snapshot stays silent, as before. The client's notified set is bounded
   (256 keys) and notifications are rate limited per machine (security review
   finding 5; see the findings entry below).
+- **Flaky test, macOS CI (seen 2026-11-04).** `repairing_inside_the_undo_window_sends_nothing`
+  (`crates/acd-client/tests/inbox.rs`, final `assert_eq!(answers(&f), 1)` after
+  a fixed 400 ms sleep) failed once on PR #87, which does not touch
+  `acd-client`; a rerun passed. Fix: wait for the answer to arrive (poll with
+  a deadline) instead of sleeping.
+- **Core limits (#88), left open.** After an established session drops, a peer
+  can send a frame over 1 MiB before the next `welcome`; `next_server()` in
+  `crates/acd-client/src/conn.rs` maps that capacity error to `End::Offline`,
+  so the following connection still sends the old resume cursor. Memory stays
+  bounded; only the documented resync does not happen on that path.
+- **Auth log test (#90).** `crates/acd-core/tests/tls.rs` (about lines 494 and
+  497) accepts any shared "hello accepted" line, so another test can mask this
+  hello timing out, and prints a token substring in its failure message
+  (CLAUDE.md: use a static message).
 - **Security review findings still open** (`docs/research/2026-11-03-security-review-core.md`
-  and `-local.md`): local F2 (T3 token goes to whoever holds the loopback
-  port), F3 (hook listeners have no read timeout).
-  Core 1, 2, 3, 4, 5, 6, 7 and 8 and local F1, F4 and F5 are fixed. Core 3 limits the client
+  and `-local.md`): local F2 (T3 token goes to whoever holds
+  the loopback port; **not fixed by the review's ticket fix**: the ticket
+  request `POST /api/auth/websocket-ticket` itself needs `Authorization:
+  Bearer <t3.token>` over plain HTTP to the same port, so a squatter receives
+  the long-lived token there instead of on the upgrade. The endpoint is
+  confirmed (`docs/research/2026-10-08-t3-gate3.md` §1,
+  `tests/fixtures/t3/http_websocket_ticket_200.json`). A real fix has to
+  prove who holds the port first, for example the listener's owner uid from
+  `/proc/net/tcp` on Linux, or a narrower and shorter-lived T3 token; needs an
+  owner decision).
+  Core 1, 2, 3, 4, 5, 6, 7 and 8 and local F1, F3 (apart from its residual), F4 and F5 are fixed. Core 3 limits the client
   (1 MiB frames, 1000 agents, 64 KiB per agent; each breach, an oversized
   frame included, ends as a resync without the resume cursor); the daemon registry is fed
   by local adapters, not by peers, so it has no new cap. Core 7 accepts ASCII
@@ -310,6 +332,19 @@ needs a decision or a small follow-up.
   a same-user process, and the instant between the check and the connect
   (closing it would need a peer-credential check on the connection). F5 rejects control characters in the home,
   executable and config-dir paths; other characters were already escaped.
+  F3 fix: the hook listeners are served through hyper's own
+  `http1::Builder::header_read_timeout` (`serve_capped`, hyper 1.12 with
+  `hyper_util::rt::TokioTimer`), 10 s. The deadline starts at accept, covers
+  a head that never completes (nothing sent, or only blank lines), is cleared
+  by hyper when it has parsed a head, and starts again after each response,
+  so an idle keep-alive connection is closed too. No byte of the request is
+  scanned by acd, so it cannot disagree with hyper about where a head ends
+  (the first fix did, for blank-line and LF-only heads). A held permission
+  request is not cut: hyper reads no head while a request is in flight.
+  F3 residual: a slow body after the token check is bounded only by the 5 s
+  `body_timeout`, there is no per-peer connection cap, so a peer can still
+  fill the 128 slots for up to 10 s at a time by sending nothing, and the
+  slot is taken before accept. Local F2 stays **open**, as above.
   Core 4 logs each accepted and rejected `hello` at 10 lines per 10 s per
   kind: peer address, protocol, outcome and reason. Peer free text is never
   logged; client id and name appear only as byte length plus an 8-hex SHA-256
