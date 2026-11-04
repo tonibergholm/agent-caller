@@ -9,7 +9,7 @@ waits on a question, or an agent in herdr or T3 Code finishes, the request
 shows up in one place, on whichever machine the agent runs. You answer it
 there, with a 2-second undo, without hunting for the terminal.
 
-agent-caller has three parts:
+agent-caller has four parts:
 
 - **`acd`**, a Rust daemon that runs on every machine with agents. It
   collects requests from Claude Code and Codex hooks, from herdr, and from
@@ -19,16 +19,19 @@ agent-caller has three parts:
   commands.
 - **The Omarchy inbox**, a bar icon and panel for the Omarchy shell on
   Linux, served by a small user service, `acd-inbox`.
+- **Agent Caller for iOS**, a foreground inbox for remote machines over
+  Tailscale. It is built from source and has no push notifications: see
+  [iOS](#ios-foreground-only).
 
-The Mac app is the reference client. Any other client (a CLI, a phone app)
-can speak `acd/1` to the same daemon. The protocol is in
+The Mac app is the reference client. Any other client can speak `acd/1` to
+the same daemon. The protocol is in
 [`crates/acd-protocol/PROTOCOL.md`](crates/acd-protocol/PROTOCOL.md).
 
 > **Status: pre-release (0.9.0).** Each release is published on
 > [GitHub Releases](https://github.com/tonibergholm/agent-caller/releases)
 > as a pre-release. The macOS binaries are ad-hoc signed, and the Mac app is
 > not notarized, so macOS asks you to confirm its first launch. The Linux
-> binaries are unsigned. See [docs/release.md](docs/release.md). You can also
+> binaries are unsigned. Windows and Android are not supported yet. See [docs/release.md](docs/release.md). You can also
 > build from source.
 > Expect breaking changes to the config and protocol before 1.0.
 
@@ -254,9 +257,10 @@ and hook-only agents (all off by default). Hook-only agents still appear
 when they have a pending request or are waiting on you. Hidden subagent
 threads are excluded from counts, the tray badge and notifications.
 
-Notifications appear for new requests while the panel is closed. If macOS
-does not show them, enable Agent Caller in System Settings → Notifications;
-the app does not yet request authorization or display its permission state.
+Notifications appear for new requests while the panel is closed. The app
+asks macOS for notification permission at launch and Settings shows the
+state. If macOS does not show them, enable Agent Caller in System Settings →
+Notifications. This has not been checked on a bundled build yet.
 
 ### Voice (macOS)
 
@@ -312,8 +316,9 @@ the user service, and installs the shell plugin. It never restarts the
 shell: run `omarchy-restart-shell` once so the bar icon appears. To
 install on the machine itself, run `acd-inbox install` there.
 `acd-inbox status` shows the service, the socket, the keyring and the
-plugin. `acd-inbox uninstall` removes the service, the plugin and the
-binary; it leaves a keybinding you added and prints how to remove it.
+plugin. `acd-inbox uninstall` removes the service and the plugin. It removes the
+binary only when it also found the unit it installed. It leaves a keybinding
+you added and prints how to remove it.
 
 The bar icon opens the panel, which shows the same cards and has the same
 2-second undo as the Mac app. It reads the local `acd` and any remote machines you
@@ -326,6 +331,19 @@ yourself (the installer prints it and only adds it when you say yes):
 ```lua
 o.bind("SUPER + ALT + A", "Agent inbox", "omarchy-shell tonibergholm.agentcaller toggle")
 ```
+
+## iOS (foreground only)
+
+The iOS app is a Tauri shell around the same client library and Svelte UI.
+It reaches remote machines over Tailscale (pair with the same pairing line)
+and shows requests only while the app is open. The local machine is never
+offered. There is no push notification, no relay, no background refresh, and
+no panel, hotkey or voice. It is not in the release files: build it from
+source and install it with a free personal team, which expires the install
+after 7 days and allows 3 devices. TestFlight distribution and push wait for
+the signed-release step. A debug build was checked on one iPhone on
+2026-10-13 (pairing, answering, relaunch); a release build was not.
+See [apps/ios/README.md](apps/ios/README.md).
 
 ## Configuration
 
@@ -359,15 +377,18 @@ Other commands:
 | `crates/acd-core` | Request engine, agent registry, server, TLS, idempotency |
 | `crates/acd-adapters` | Sources: `hooks/` (Claude Code, Codex), `herdr/`, `t3/` |
 | `crates/acd-client` | Client library used by the clients |
+| `crates/acd-app-core` | App core shared by the Mac app and the iOS shell: inbox setup, pairing import, Keychain store, commands |
 | `crates/acd-voice` | Voice command rules: routing, safety, recording, HUD states |
 | `crates/acd-voice-client` | Voice controller that connects those rules to the inbox |
 | `crates/acd-inbox` | The Omarchy `acd-inbox` service and installer |
 | `crates/acd-securefs` | Owner-only file access |
 | `crates/acd` | The `acd` binary: daemon, CLI, hook shim, service install |
 | `app/` | Svelte frontend and Tauri backend (`app/src-tauri`), including the Swift speech bridge |
+| `apps/ios/` | iOS shell (foreground inbox), its own Cargo workspace |
 | `clients/omarchy/` | Omarchy shell plugin (Quickshell QML) |
 | `tests/` | Recorded fixtures and the live end-to-end harness |
-| `docs/` | Design spec, plans, research and live check records |
+| `scripts/` | Install, version check, release notes and the Windows/Android type-check |
+| `docs/` | Design spec, plans, research and live check records: start at [docs/README.md](docs/README.md) |
 
 The design spec,
 [`docs/superpowers/specs/2026-10-07-agent-inbox-design.md`](docs/superpowers/specs/2026-10-07-agent-inbox-design.md),
@@ -405,9 +426,11 @@ it, and the workspace is not run through `cargo fmt` yet.
 
 ## Not in v1
 
-Voice on Linux and Windows, a phone client and push
-notifications, a self-hosted relay, starting new agents, transcript
-browsing, multi-select answers, and a Windows desktop client. The protocol advertises
+Voice on Linux and Windows, push notifications (the iOS client
+is foreground only), a self-hosted relay, starting new agents, transcript
+browsing, multi-select answers, an Android client, and a Windows desktop
+client. The client crates are type-checked for Windows and Android, nothing
+more; see [docs/windows.md](docs/windows.md). The protocol advertises
 `capabilities` so these can arrive without breaking clients.
 
 ## License
