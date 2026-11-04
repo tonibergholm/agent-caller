@@ -202,7 +202,7 @@ SOURCE_DATE_EPOCH=$(git log -1 --format=%ct v0.9.0) makepkg
 ```
 
 The container test builds each package twice in different directories and
-compares the installed binary; its result is in the pull request that added it.
+compares the installed binary. In the run recorded for the pull request that added it the binaries were byte-identical across two directories; the `.pkg.tar.zst` files were not (makepkg writes build metadata such as `.BUILDINFO` into the package; not investigated further), so compare binaries, not package files.
 
 ## Testing the packages
 
