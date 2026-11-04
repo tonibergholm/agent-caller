@@ -71,6 +71,7 @@ dependencies = [
  "security-framework",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -178,6 +179,7 @@ version = "0.9.0"
 dependencies = [
  "libc",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
