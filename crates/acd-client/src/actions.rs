@@ -479,3 +479,7 @@ mod tests {
         assert!(a.views().is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "mutants_actions.rs"]
+mod mutants_actions;

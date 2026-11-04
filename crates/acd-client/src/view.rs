@@ -1322,3 +1322,7 @@ mod tests {
         assert_eq!(v.cards.iter().map(|c| c.agent.id.as_str()).collect::<Vec<_>>(), ["waiting"]);
     }
 }
+
+#[cfg(test)]
+#[path = "mutants_view.rs"]
+mod mutants_view;
