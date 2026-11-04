@@ -525,14 +525,26 @@ Relay limits. Windows are fixed windows that start at a key's first hit.
 | `POST /v1/handles/confirm`, per source IP | 60 per hour. |
 | Pending challenges | 256 in total, 2 per binding (§5.3). |
 | Sends in flight to the push service | 64; more get 503 `busy`. |
-| Request size | Body at most 2 KiB, handle at most 512 bytes, 5 s read deadline, 10 s total. |
+| Request size and time | Body at most 2 KiB, handle at most 512 bytes. The body must arrive within 5 s of the routed request. A send to the push service has one 10 s deadline covering the wait for the OAuth token lock, a token refresh and the push exchange (`SEND_DEADLINE`); past it the answer is 503 `unavailable` and the in-flight slot is freed. |
+| Connections | At most 1024 open at once (`MAX_CONNECTIONS`); `accept` waits for a slot, so the rest queue in the kernel. A connection must send a complete request head within 10 s of accept and within 10 s of the end of each response (hyper's `header_read_timeout`), so idle, keep-alive and half-sent connections are closed and free their slot. |
+
+**Proxy expectation.** The relay's own limits are a backstop, not the front
+line. The supported deployment puts a reverse proxy (or a tailnet listener)
+in front that terminates TLS, enforces its own client header and body
+timeouts and connection limits, and talks to the relay over loopback. The
+connection cap and head deadline above exist so that a relay reached without
+such a proxy, or through one that forwards idle connections, still cannot be
+made to hold unbounded descriptors and tasks.
 
 Every rate-limit map has a fixed key cap (4096 per map). A full map sweeps
 expired entries first. If it is still full, a new key is **not** inserted
 and does not evict anyone (evicting would let an attacker reset their own
 counters); it is counted against one shared overflow bucket with the same
 limits, so a flood of distinct keys cannot grow memory and cannot reset
-existing counters. The global limit is the backstop for all of them. Map
+existing counters. A background sweep also runs every 30 s (`SWEEP_INTERVAL`),
+whatever the fill level: it drops counters whose windows have ended and
+challenges past their 120 s, and never touches a counter whose window is
+still open. It ends with the server (§8). The global limit is the backstop for all of them. Map
 keys are HMACs under a per-boot random key, never the IP, handle or address.
 IPv6 sources are keyed by their /64. Behind a proxy the source IP is read
 from `X-Forwarded-For` only when the TCP peer equals the configured
@@ -920,7 +932,16 @@ keys or credentials file is missing, unreadable, not mode 0600, or invalid;
 not true; or the CA file cannot be read. The FCM client reads credentials from
 the file path only; the key and tokens are never logged and never appear in
 an error string. FCM access tokens are cached until 60 s before expiry and
-refreshed single-flight.
+refreshed single-flight under the token lock. A refresh that fails, or is
+cut off by the send deadline (§4.6), is remembered for 5 s
+(`REFRESH_BACKOFF_SECS`): sends in that time fail at once with 503
+`unavailable` instead of each starting another OAuth request. Start-up also
+fails when the credentials file's `token_uri` is empty, not `https`, has no
+host or carries userinfo.
+
+The relay speaks plain HTTP and expects the proxy described in §4.6; it
+serves at most 1024 connections and closes any that does not send a
+complete request head within 10 s.
 
 ## 6. FCM and APNs specifics
 
@@ -1054,8 +1075,8 @@ the same text.
 |---|---|---|
 | Push credentials, sealing keys | Relay config, files mode 0600 | Until rotated. A retired sealing key stays in the file for 30 days so its handles still open, then is deleted. |
 | Handles, push addresses | Not stored. Opened in memory per call. | Request duration. |
-| Pending challenges `{challenge_id → code_mac, binding_mac, attempts, expires_at}` (MACs under a per-boot key; no code, no address) | Memory, at most 256 | 120 s, or until used or burned. |
-| Rate-limit counters keyed by HMAC(handle), HMAC(address), HMAC(source IP /64 or /32) under a per-boot key | Memory, at most 4096 keys per map plus one overflow bucket each | Fixed windows of 1 minute and 1 hour. Lost on restart. |
+| Pending challenges `{challenge_id → code_mac, binding_mac, attempts, expires_at}` (MACs under a per-boot key; no code, no address) | Memory, at most 256 | 120 s, or until used or burned. Expired entries are dropped by a sweep every 30 s, not only when the table is full. |
+| Rate-limit counters keyed by HMAC(handle), HMAC(address), HMAC(source IP /64 or /32) under a per-boot key | Memory, at most 4096 keys per map plus one overflow bucket each | Fixed windows of 1 minute and 1 hour. Entries whose windows have ended are dropped by a sweep every 30 s, not only when a map is full. Lost on restart. |
 | Logs | stdout / journal | Fields: time, route, status, platform, 8 hex chars of HMAC(handle) (per-boot key). Never handles, addresses, codes, IPs, bodies, credentials. Third-party targets (axum, hyper, rustls) are pinned to `warn` whatever `RUST_LOG` says, because at `trace` `axum::serve` logs every peer address (found by `logs_never_contain_secrets`). Retention is the host's journal setting; recommend 7 days. |
 
 Metadata does exist even though the relay stores almost nothing: while a
@@ -1180,6 +1201,21 @@ function names.
 | `UNREGISTERED` → gone | `fcm_client_maps_unregistered_to_gone` |
 | No credential in any error string | `fcm_client_errors_never_contain_credentials` |
 | Credentials file must be private | `fcm_credentials_file_must_be_private` |
+| `token_uri` must be non-empty `https` with a host and no userinfo; the error does not echo it | `token_uri_must_be_a_usable_https_uri` |
+| A refusing OAuth endpoint is asked once, again only after the 5 s backoff | `failed_token_refresh_is_not_retried_until_the_backoff_ends` |
+| 64 concurrent sends against a stalled OAuth endpoint all end within `SEND_DEADLINE` (virtual time; the per-exchange timeout is set far above it), and the abandoned refresh is remembered | `concurrent_sends_against_a_stalled_oauth_endpoint_all_end_by_the_deadline` |
+
+**Relay: connections and sweep** (`crates/acd-relay/tests/connections.rs`, this PR)
+
+| Rule | Test |
+|---|---|
+| Idle connections, more than the cap, are closed after the head deadline and a later request succeeds | `idle_connections_beyond_the_cap_are_closed_after_the_deadline` |
+| Half-sent request heads are closed after the deadline | `incomplete_request_heads_are_closed_after_the_deadline` |
+| A keep-alive connection idle after a response is closed | `a_keep_alive_connection_that_goes_idle_after_a_response_is_closed` |
+| A connection over the cap is served only after a slot frees | `a_connection_over_the_cap_is_served_only_after_a_slot_frees` |
+| Expired counters and challenges are swept while the maps are far below capacity; live ones are kept | `expired_entries_are_swept_while_the_maps_are_below_capacity` |
+| A sweep never gives a live counter's budget back | `a_sweep_never_resets_a_live_counter` |
+| The sweeper ends with the server | `the_sweeper_ends_with_serve` |
 
 **acd: sender state machine** (`crates/acd-relay/tests/wake_client.rs`, feature `client`, against a fake relay; this PR)
 

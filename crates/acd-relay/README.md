@@ -41,7 +41,13 @@ any config problem (unknown key, loose file mode, empty `allowed_apps`, ...).
   front, or listen on a tailnet address only. Behind a proxy set
   `trusted_proxy` to the proxy's address, or every request shares the
   proxy's rate-limit bucket.
-- Rate limits and state are in memory and bounded; a restart forgets them and
+- The proxy should also enforce its own client header/body timeouts and
+  connection limits and reach the relay over loopback. As a backstop the
+  relay serves at most 1024 connections and closes any connection that does
+  not send a complete request head within 10 s (also between requests on a
+  keep-alive connection). A push send has one 10 s deadline.
+- Rate limits and state are in memory and bounded, and a sweep every 30 s
+  drops expired counters and challenges; a restart forgets them and
   keeps every issued handle valid.
 - Logs carry route, status, platform and a short tag; never handles,
   addresses, codes, IPs or credentials. Keep the journal retention short.
