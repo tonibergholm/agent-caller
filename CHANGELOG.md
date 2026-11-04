@@ -9,6 +9,12 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Added
 
+- Android, foreground inbox over Tailscale (`apps/android`, `docs/android.md`):
+  pair by pasting the `acd pair` line, list the cards, answer with the same
+  whole-or-read-only rules as the other clients. Machine secrets are kept in
+  files wrapped by an Android Keystore AES-GCM key (`acd-app-core::wrapped`);
+  the store fails closed. A debug APK builds with `just android-apk`. It has
+  not been run on a device or an emulator, and there is no push yet.
 - Voice, free-form commands on macOS: anything that is not a fixed phrase goes
   to Apple's on-device model, which proposes one step. The app validates it
   against the request, agent and options on screen. Anything it asks to send
