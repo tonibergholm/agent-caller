@@ -18,9 +18,16 @@ acd-adapters = { path = "../crates/acd-adapters" }
 acd-core = { path = "../crates/acd-core" }
 acd-client = { path = "../crates/acd-client" }
 acd-inbox = { path = "../crates/acd-inbox" }
+acd-relay = { path = "../crates/acd-relay" }
 serde_json = "1"
 serde = "1"
-tokio = { version = "1", features = ["rt", "io-util"] }
+tokio = { version = "1", features = ["rt", "io-util", "time", "sync"] }
+base64 = "0.23"
+toml = "1"
+async-trait = "0.1"
+axum = "0.8"
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"] }
+chrono = "0.4"
 jsonschema = { version = "0.58", default-features = false }
 
 [workspace]
@@ -77,6 +84,83 @@ bench = false
 [[bin]]
 name = "text_rules"
 path = "fuzz_targets/text_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_wire"
+path = "fuzz_targets/relay_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_handle"
+path = "fuzz_targets/relay_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_challenge"
+path = "fuzz_targets/relay_challenge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_limiter"
+path = "fuzz_targets/relay_limiter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_fcm"
+path = "fuzz_targets/relay_fcm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_http"
+path = "fuzz_targets/relay_http.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_client"
+path = "fuzz_targets/relay_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "idem_table"
+path = "fuzz_targets/idem_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "registry_keys"
+path = "fuzz_targets/registry_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "notify_gate"
+path = "fuzz_targets/notify_gate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hook_question"
+path = "fuzz_targets/hook_question.rs"
 test = false
 doc = false
 bench = false
