@@ -45,7 +45,9 @@ fuzz_target!(|data: &[u8]| {
     let token = pin.strip_prefix("sha256:").unwrap().to_string();
     let address = if h.bracket { format!("[{}]", h.host) } else { h.host.clone() };
     let line = format!("acd://{address}:{}?pin={pin}#{token}", h.port);
-    if let Ok(p) = Pairing::parse(&line) {
+    // A host that is itself written in brackets is the bracketed form.
+    let ambiguous = !h.bracket && h.host.starts_with('[');
+    if let (Ok(p), false) = (Pairing::parse(&line), ambiguous) {
         assert!(host_ok(&h.host), "parsed {line:?} with the rejected host {:?}", h.host);
         assert_eq!(p.host, h.host);
         assert_eq!(p.port, h.port);

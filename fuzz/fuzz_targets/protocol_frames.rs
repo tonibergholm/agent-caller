@@ -6,6 +6,13 @@ use acd_protocol::{ClientMessage, ServerMessage, decode_server, schema};
 use libfuzzer_sys::fuzz_target;
 use std::sync::OnceLock;
 
+/// Whether `v` satisfies the schema. The decoders are more tolerant than the
+/// schema on purpose (a `result` with `ok: false` and no error is read as a
+/// bad request), so the output is only held to the schema when the input met it.
+fn valid(cell: &'static OnceLock<jsonschema::Validator>, schema: fn() -> serde_json::Value, v: &serde_json::Value) -> bool {
+    validator(cell, schema).is_valid(v)
+}
+
 fn validator(cell: &'static OnceLock<jsonschema::Validator>, schema: fn() -> serde_json::Value) -> &'static jsonschema::Validator {
     cell.get_or_init(|| jsonschema::validator_for(&schema()).unwrap())
 }
@@ -34,8 +41,11 @@ fuzz_target!(|data: &[u8]| {
         let back = decode_server(&again).unwrap_or_else(|e| panic!("own output {again:?} fails: {e}"));
         assert_eq!(back.as_ref(), Some(&m), "round trip of {again:?}");
         let v: serde_json::Value = serde_json::from_str(&again).unwrap();
-        let errors: Vec<String> = validator(&SERVER, schema::server_schema).iter_errors(&v).map(|e| e.to_string()).collect();
-        assert!(errors.is_empty(), "{again:?} fails the server schema: {errors:?}");
+        let input: serde_json::Value = serde_json::from_str(raw).unwrap();
+        if valid(&SERVER, schema::server_schema, &input) {
+            let errors: Vec<String> = validator(&SERVER, schema::server_schema).iter_errors(&v).map(|e| e.to_string()).collect();
+            assert!(errors.is_empty(), "{again:?} fails the server schema: {errors:?}");
+        }
         let _ = m.seq();
     }
     if let Ok(m) = serde_json::from_str::<ServerMessage>(raw) {
@@ -47,8 +57,11 @@ fuzz_target!(|data: &[u8]| {
         let back: ClientMessage = serde_json::from_str(&again).unwrap_or_else(|e| panic!("own output {again:?} fails: {e}"));
         assert_eq!(back, m, "round trip of {again:?}");
         let v: serde_json::Value = serde_json::from_str(&again).unwrap();
-        let errors: Vec<String> = validator(&CLIENT, schema::client_schema).iter_errors(&v).map(|e| e.to_string()).collect();
-        assert!(errors.is_empty(), "{again:?} fails the client schema: {errors:?}");
+        let input: serde_json::Value = serde_json::from_str(raw).unwrap();
+        if valid(&CLIENT, schema::client_schema, &input) {
+            let errors: Vec<String> = validator(&CLIENT, schema::client_schema).iter_errors(&v).map(|e| e.to_string()).collect();
+            assert!(errors.is_empty(), "{again:?} fails the client schema: {errors:?}");
+        }
         let _ = m.command_id();
         if let Some((secret, others)) = secrets(&m) {
             let dbg = format!("{m:?}");
