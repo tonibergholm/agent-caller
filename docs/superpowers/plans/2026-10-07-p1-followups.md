@@ -422,6 +422,46 @@ Open test work:
 - minos: agents started over SSH cannot use the login keychain; acceptance
   there relies on locally started sessions.
 
+Seen failing on CI in 2026-11 (each passed on rerun; none reproduced alone):
+
+- `crates/acd-adapters/tests/hooks_codex.rs:698`
+  `a_rival_recheck_that_finds_the_dialog_collapsed_revokes_the_live_target`.
+- `crates/acd-adapters/tests/hooks_bounds.rs:299`
+  `queued_holds_cannot_delay_a_due_timer_past_one_batch` (also in the list
+  below).
+- Swift `SpeakerTests.testTheTailIsWaitedWhenRustStoppedSpeechJustBefore`
+  (macOS `app` job, seen on PR #109): an upper time bound. PR #91 made it
+  best-of-five; a single rerun was enough on #109.
+
+Residuals from the 2026-11 relay and review work, none blocking:
+
+- **Push revocation after a failed disk write (#109).** If the state directory
+  is not writable when the client token rotates, registrations are dropped from
+  memory and retried every 30 s, but a restart before a retry succeeds loads
+  the old `push.json` again (wake timing only, no content). The fix is to bind
+  registrations to the token generation; it changes the `push.json` schema and
+  every `Store::load` caller, so it was deferred. Documented in `docs/push.md`.
+- **Mutation tests (#101).** Some tests wait for indirect 5 s bounds, and the
+  counts quoted in the mutation document are stale.
+- **Bug-hunt reproducers (#110).** `#[ignore]`d tests that fail today: B1
+  (`claude_key`/`codex_key` ambiguous when ids contain `:`), B2 (`cap_chars`
+  at max 0), B4 (voice `truncate` at max 0). `Pairing::parse` accepts a `+`
+  port (`+8443`). Not audited: `hooks/state.rs`, the T3 and herdr reconcilers,
+  `acd-client/conn.rs` resume, `acd-core/engine.rs` claim/deliver. See
+  `docs/research/2026-11-05-bug-hunt.md`.
+- **Fuzz campaign (#108).** The registry never evicts `keys` while an agent
+  lives. Not fuzzed: `Config::parse`, OAuth token parse,
+  `ServiceAccount::from_json`, `WakeSender` classification. NotifyGate is
+  exposed to the fuzz target only through the `fuzzing` feature of
+  `acd-client`.
+- **Relay red team (#107).** `tests/redteam-relay/` needs root, edits
+  `/etc/hosts` and binds port 443: run it on a throwaway machine only (see
+  its README). The two `#[ignore]`d repros in `crates/acd-relay/tests/redteam.rs`
+  document open findings.
+- **CI QML job (#111).** The Omarchy QML checks run on Ubuntu with Qt 6.4
+  from apt; `tests/qmllint.known` is the baseline for that Qt version and
+  needs regeneration (`run-qml.sh --update`) when the runner image changes.
+
 Historical flakes, not reproduced in the 2026-10 audit:
 
 - `crates/acd-adapters/tests/t3_conn.rs`
