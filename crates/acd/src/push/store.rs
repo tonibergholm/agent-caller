@@ -270,6 +270,18 @@ impl Store {
         self.commit(next)
     }
 
+    /// Revokes every registration (client token rotation, spec 4.8). Fails
+    /// closed: the registrations are gone from memory even when the file
+    /// cannot be rewritten, so no further wake uses them.
+    pub fn clear(&mut self) -> Result<(), StoreError> {
+        if self.devices.is_empty() {
+            return Ok(());
+        }
+        let written = self.commit(BTreeMap::new());
+        self.devices.clear();
+        written
+    }
+
     /// Applies a wake outcome to `client_id`, if it is still registered at
     /// `generation`. Returns whether it changed anything.
     pub fn apply_wake(&mut self, client_id: &str, generation: u64, state: &WakeState) -> bool {

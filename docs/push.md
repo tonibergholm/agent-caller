@@ -48,8 +48,15 @@ Restart acd after changing the section.
 - `acd push --help` repeats the configuration.
 
 A damaged `push.json` (loose mode, bad content) is reported as
-`push: degraded (reason)`: acd runs with no registrations and leaves the file
-alone until a device registers again.
+`push: degraded (reason)`: acd runs with no registrations and never rewrites
+the file. Registering fails (`source_unavailable`) until you repair or remove
+`push.json` by hand. An invalid single entry is skipped, kept in
+`push.json.quarantine` at the next write, and does not cost the other devices.
+
+Rotating the client token (`acd token rotate client`) deletes every
+registration: the running daemon drops them in memory and in `push.json`, and
+the command removes `push.json` itself when no daemon runs. Devices register
+again with the new token.
 
 ## Not here
 

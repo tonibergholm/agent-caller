@@ -745,8 +745,11 @@ config and `push.json`, not from the running daemon.
 *Implemented, F3:* with a valid `[push]` and an unsafe or invalid `push.json`
 (loose mode, symlink, bad JSON, unknown field, bad handle, more than 8
 devices) the daemon starts with no registrations and still advertises `push`,
-so a device can register again; the first valid registration replaces the file
-(0600, atomic). Until then the file is not touched. The reason is fixed text
+but registering is refused (`source_unavailable`) while the file as a whole is
+unusable: it is never overwritten, so the operator repairs or removes it by
+hand. A single invalid entry is skipped, kept in `push.json.quarantine` at the
+next write, and the healthy entries are used. Token rotation (§4.8) clears the
+registrations, in memory and on disk. The reason is fixed text
 (never file content). `push.json` is deliberately not in the start-up mode
 preflight, which would make a loose mode fatal.
 

@@ -742,6 +742,45 @@ async fn registrations_and_their_state_survive_a_restart() {
     assert!(again.status("phone").await.registered);
 }
 
+#[tokio::test]
+async fn rotating_the_client_token_revokes_every_registration_also_after_a_restart() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    rig.enroll("tablet").await;
+    rig.push.revoke_all().await;
+    assert!(!rig.status("phone").await.registered);
+    rig.open(1);
+    rig.push.handled(1).await;
+    assert_eq!(rig.relay.hits(), 0, "a revoked phone gets no wake");
+    let Rig { dir, relay, .. } = rig;
+    let again = Rig::in_dir(dir, relay.clone(), NO_WINDOW, Duration::from_secs(5));
+    assert!(!again.status("tablet").await.registered, "the file no longer lists it");
+    again.open(2);
+    again.push.handled(1).await;
+    assert_eq!(relay.hits(), 0);
+}
+
+#[tokio::test]
+async fn a_new_registration_after_revocation_wakes_again() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    rig.push.revoke_all().await;
+    rig.enroll("phone").await;
+    rig.open(1);
+    rig.relay.wait_hits(1).await;
+}
+
+#[test]
+fn the_offline_rotation_removes_push_json() {
+    let d = private_dir();
+    let mut st = Store::load(d.path());
+    st.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
+    assert!(d.path().join(super::store::FILE).exists());
+    super::forget_registrations(d.path()).unwrap();
+    assert_eq!(Store::load(d.path()).len(), 0);
+    super::forget_registrations(d.path()).unwrap(); // idempotent
+}
+
 // ---- registration over acd/1 ----
 
 #[tokio::test]

@@ -166,6 +166,17 @@ impl Push {
             .ok()
     }
 
+    /// Client token rotation: deletes every registration, persisted and in
+    /// memory (spec 4.8). Devices with the new token register again.
+    pub async fn revoke_all(&self) {
+        if self.blocking(|s| s.clear()).await != Some(Ok(())) {
+            tracing::error!("push registrations revoked in memory; push.json could not be rewritten");
+        } else {
+            tracing::info!("push registrations revoked");
+        }
+        self.wake.notify_one();
+    }
+
     async fn run(self: Arc<Self>) {
         let min = self.settings.min_interval;
         let mut gates: HashMap<String, Gate> = HashMap::new();
@@ -211,6 +222,11 @@ impl Push {
             let (this, permits) = (self.clone(), permits.clone());
             sends.spawn(async move {
                 let _permit = permits.acquire_owned().await;
+                // A send that waited for a permit must not use a registration
+                // revoked (or replaced) meanwhile.
+                if this.store().get(&id).map(|e| e.generation) != Some(generation) {
+                    return (id, generation, state, Outcome::Skipped, Instant::now());
+                }
                 // The debounce window starts when the send does, not when the
                 // pass did: a send queued behind slow ones must not wake the
                 // device again less than `min` after it.
@@ -382,4 +398,12 @@ pub fn list(dir: &Path, cfg: &crate::config::Config, out: &mut impl std::io::Wri
         )?;
     }
     Ok(())
+}
+
+/// Deletes `push.json` (the registrations) without a running daemon.
+pub fn forget_registrations(dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(dir.join(store::FILE)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }

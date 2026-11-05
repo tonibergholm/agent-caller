@@ -210,6 +210,8 @@ fn real_main() -> Result<()> {
                 TokenKind::Client => {
                     let token = secrets::new_token();
                     secrets::write_secret(&dir.join("client.token"), &token)?;
+                    // Spec 4.8: registrations go with the token, also while no daemon runs.
+                    push::forget_registrations(&dir)?;
                     println!("{token}");
                     Ok(())
                 }
