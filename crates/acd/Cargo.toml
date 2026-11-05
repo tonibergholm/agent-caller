@@ -8,6 +8,7 @@ license.workspace = true
 acd-adapters.workspace = true
 acd-core.workspace = true
 acd-protocol.workspace = true
+acd-relay.workspace = true
 acd-securefs.workspace = true
 anyhow.workspace = true
 axum.workspace = true
