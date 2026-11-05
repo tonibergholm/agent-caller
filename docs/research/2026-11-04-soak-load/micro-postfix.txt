@@ -1,0 +1,19 @@
+registry: one agent, open+resolve with unique keys
+    cycles     us/cycle       keys
+      5000          9.4       4096
+     10000         13.0       4096
+     15000         12.1       4096
+     20000         12.7       4096
+     25000         11.3       4096
+     30000         12.3       4096
+     35000         13.4       4096
+     40000         13.6       4096
+
+idempotency cache: begin()+finish() of one new command at a given fill
+   entries   us/command
+       100          0.9
+      1000          6.0
+      4000         25.6
+      8000         60.7
+     12000         86.9
+     16000        146.5

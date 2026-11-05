@@ -22,6 +22,10 @@ impl EventLog {
     pub fn epoch(&self) -> &str { &self.epoch }
     pub fn seq(&self) -> u64 { self.seq }
 
+    /// Events held for resume (leak checks).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn held(&self) -> usize { self.ring.len() }
+
     pub fn record(&mut self, change: Change) -> ServerMessage {
         self.seq += 1;
         let (epoch, seq) = (self.epoch.clone(), self.seq);
