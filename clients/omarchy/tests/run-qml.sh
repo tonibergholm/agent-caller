@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Static analysis and headless wiring tests for the Omarchy plugin's QML.
 # Needs Qt 6 declarative tools (Debian/Ubuntu: qt6-declarative-dev-tools and
-# the qml6-module-qttest, -qtquick, -qtquick-layouts, -qtquick-controls,
+# the qml6-module-qttest, -qtquick, -qtquick-layouts, -qtquick-controls, -qtquick-window, -qtqml,
 # -qtqml-workerscript packages). Quickshell itself is NOT needed: tests/stubs
 # stands in for the qs.Commons, qs.Ui and Quickshell modules.
 #   tests/run-qml.sh            lint, then run the tests

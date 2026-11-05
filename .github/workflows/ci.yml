@@ -47,7 +47,7 @@ jobs:
       - if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-declarative-dev qt6-declarative-dev-tools qml6-module-qtqml qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-layouts qml6-module-qtquick-controls qml6-module-qtqml-workerscript
+          sudo apt-get install -y qt6-declarative-dev qt6-declarative-dev-tools qml6-module-qtqml qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-layouts qml6-module-qtquick-window qml6-module-qtquick-controls qml6-module-qtqml-workerscript
       - if: matrix.os == 'ubuntu-latest'
         run: clients/omarchy/tests/run-qml.sh
       - if: matrix.os == 'ubuntu-latest'
