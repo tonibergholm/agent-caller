@@ -58,6 +58,11 @@ check-version:
 test-scripts:
     scripts/tests/run.sh
 
+# qmllint and the headless Panel tests for the Omarchy plugin (also run in CI on
+# ubuntu). Needs the Qt 6 declarative tools; see clients/omarchy/tests/run-qml.sh.
+omarchy-qml:
+    clients/omarchy/tests/run-qml.sh
+
 # Runs every fuzz target for 30 seconds (fuzz/README.md). Needs the nightly
 # toolchain and cargo-fuzz. New inputs go to fuzz/target/smoke, not into the
 # committed corpus. Not part of CI.
