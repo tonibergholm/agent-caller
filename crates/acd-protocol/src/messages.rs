@@ -1,4 +1,4 @@
-use crate::model::{Agent, Machine, Request, ResolveReason, ResolvedBy};
+use crate::model::{Agent, Machine, Request, ResolveReason, ResolvedBy, Timestamp, ts, ts_opt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,57 @@ pub enum ClientMessage {
     AgentMarkSeen { id: String, agent_id: String },
     #[serde(rename = "ping")]
     Ping { id: String },
+    /// Registers the session's `client.id` for wake pushes. Needs the `push`
+    /// capability. `handle` is a relay secret: `Debug` shows only its length.
+    #[serde(rename = "push.register")]
+    PushRegister {
+        id: String,
+        relay: String,
+        handle: String,
+        platform: PushPlatform,
+        #[serde(with = "ts")]
+        #[schemars(with = "String", extend("format" = "date-time"))]
+        expires_at: Timestamp,
+    },
+    #[serde(rename = "push.unregister")]
+    PushUnregister { id: String },
+    #[serde(rename = "push.status")]
+    PushStatus { id: String },
+}
+
+/// The push service behind a registered device.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PushPlatform {
+    Android,
+    Ios,
+}
+
+/// What the daemon last learned about a device's wakes. `expired` and
+/// `invalid` mean wakes are disabled until the device registers again;
+/// `relay_error` means the last wake failed transiently and wakes go on.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PushDeviceStatus {
+    Ok,
+    Expired,
+    Invalid,
+    RelayError,
+    /// A status this version does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The `push` field of a `push.status` result.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+pub struct PushInfo {
+    pub registered: bool,
+    /// Absent when `registered` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<PushDeviceStatus>,
+    #[serde(default, with = "ts_opt")]
+    #[schemars(with = "Option<String>", extend("format" = "date-time"))]
+    pub last_wake_at: Option<Timestamp>,
 }
 
 impl std::fmt::Debug for ClientMessage {
@@ -79,6 +130,18 @@ impl std::fmt::Debug for ClientMessage {
                 f.debug_struct("AgentMarkSeen").field("id", id).field("agent_id", agent_id).finish()
             }
             ClientMessage::Ping { id } => f.debug_struct("Ping").field("id", id).finish(),
+            ClientMessage::PushRegister { id, relay, handle, platform, expires_at } => f
+                .debug_struct("PushRegister")
+                .field("id", id)
+                .field("relay", relay)
+                .field("handle_bytes", &handle.len())
+                .field("platform", platform)
+                .field("expires_at", expires_at)
+                .finish(),
+            ClientMessage::PushUnregister { id } => {
+                f.debug_struct("PushUnregister").field("id", id).finish()
+            }
+            ClientMessage::PushStatus { id } => f.debug_struct("PushStatus").field("id", id).finish(),
         }
     }
 }
@@ -90,6 +153,9 @@ impl ClientMessage {
             ClientMessage::RequestAnswer { id, .. }
             | ClientMessage::AgentSend { id, .. }
             | ClientMessage::AgentMarkSeen { id, .. }
+            | ClientMessage::PushRegister { id, .. }
+            | ClientMessage::PushUnregister { id }
+            | ClientMessage::PushStatus { id }
             | ClientMessage::Ping { id } => Some(id),
         }
     }
@@ -159,6 +225,9 @@ pub struct CommandResult {
     pub outcome: Option<Outcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorBody>,
+    /// Only on the result of `push.status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<PushInfo>,
 }
 
 impl CommandResult {
@@ -168,6 +237,13 @@ impl CommandResult {
             ok: true,
             outcome: None,
             error: None,
+            push: None,
+        }
+    }
+    pub fn push_status(id: &str, info: PushInfo) -> Self {
+        Self {
+            push: Some(info),
+            ..Self::ok(id)
         }
     }
     pub fn delivered(id: &str) -> Self {
@@ -176,6 +252,7 @@ impl CommandResult {
             ok: true,
             outcome: Some(Outcome::Delivered),
             error: None,
+            push: None,
         }
     }
     pub fn err(id: &str, code: ErrorCode, message: &str) -> Self {
@@ -187,6 +264,7 @@ impl CommandResult {
                 code,
                 message: message.into(),
             }),
+            push: None,
         }
     }
     pub fn error_code(&self) -> Option<ErrorCode> {

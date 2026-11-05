@@ -1,0 +1,24 @@
+Panel.qml | Property "Drafts" not found on type "model" | property var drafts: new Model.Drafts()
+Panel.qml | Property "callLater" is a QJSValue property. It may or may not be a method. Use a regular Q_INVOKABLE instead. | Qt.callLater(() => { if (focusId === "" && focusedField === null) keyCatcher.forceActiveFocus(); });
+Panel.qml | Property "callLater" is a QJSValue property. It may or may not be a method. Use a regular Q_INVOKABLE instead. | Qt.callLater(() => { if (focusId === id && focusedField === null) releaseFocus(); });
+Panel.qml | Unqualified access | Repeater { model: panel.doneOpen ? panel.groups.done : []; delegate: CardItem { required property var modelData; inbox: panel; card: modelData } }
+Panel.qml | Unqualified access | Repeater { model: panel.groups.needs; delegate: CardItem { required property var modelData; inbox: panel; card: modelData } }
+Panel.qml | Unqualified access | Repeater { model: panel.groups.working; delegate: CardItem { required property var modelData; inbox: panel; card: modelData } }
+Panel.qml | Unqualified access | color: panel.muted
+Panel.qml | Unqualified access | if (activeFocus) { panel.focusedField = nameField; panel.focusId = fid; }
+Panel.qml | Unqualified access | onAccepted: panel.service.send("rename_machine", { machine: modelData.key, name: text }, reply => {
+Panel.qml | Unqualified access | onClicked: cardItem.inbox.pickOption(cardItem.card, optionRow.modelData.id)
+Panel.qml | Unqualified access | onClicked: { panel.disarm(); panel.machineFilter = selected ? "" : modelData.key }
+Panel.qml | Unqualified access | onClicked: { panel.disarm(); panel.service.send("retry_machine", { machine: modelData.key }, panel.report) }
+Panel.qml | Unqualified access | onTextChanged: panel.drafts.set(draft, text === modelData.name ? "" : text)
+Panel.qml | Unqualified access | panel.disarm();
+Panel.qml | Unqualified access | readonly property string draft: Model.draftKey.rename(modelData.key)
+Panel.qml | Unqualified access | readonly property string fid: Model.fieldId.rename(modelData.key)
+Panel.qml | Unqualified access | selected: panel.machineFilter === modelData.key
+Panel.qml | Unqualified access | text = panel.drafts.get(draft) || modelData.name;
+Panel.qml | Unqualified access | text: (panel.chips.find(c => c.key === modelData.key) ?? { label: "" }).label
+Panel.qml | Unqualified access | visible: modelData.endpoint.kind === "tcp"
+Service.qml | Property "Backoff" not found on type "model" | property var backoff: new Model.Backoff()
+Service.qml | Property "Ids" not found on type "model" | property var ids: new Model.Ids("omarchy")
+Service.qml | Property "LineReader" not found on type "model" | property var reader: new Model.LineReader()
+Service.qml | Property "Tracker" not found on type "model" | property var tracker: new Model.Tracker()

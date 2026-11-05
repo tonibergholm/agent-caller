@@ -1,0 +1,657 @@
+//! The relay's HTTP API (spec §5.3). Plain HTTP; TLS is terminated in front.
+
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use axum::serve::Listener;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
+use axum::body::{Body, to_bytes};
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use serde::de::DeserializeOwned;
+use serde_json::json;
+use tokio::sync::Semaphore;
+
+use crate::challenge::{Challenges, Confirm, IssueError};
+use crate::fcm::{Address, PushSender, SendError};
+use crate::handle::{self, Keys, OpenError, Sealed};
+use crate::limits::{Keyer, Limit, Limiter};
+use crate::provisional::HANDLE_LIFETIME_SECS;
+use crate::wire::*;
+use crate::Clock;
+
+pub const MAX_BODY: usize = 2048;
+pub const READ_DEADLINE: Duration = Duration::from_secs(5);
+pub const MAX_IN_FLIGHT: usize = 64;
+/// Open connections the relay serves at once; `accept` waits for a slot.
+pub const MAX_CONNECTIONS: usize = 1024;
+/// How long a connection may take to send a complete request head, counted
+/// from accept and again from the end of each response (so it also bounds
+/// an idle keep-alive connection).
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often expired counters and challenges are dropped.
+pub const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Rate limits and map caps (spec §4.6). Starting values, not measured.
+#[derive(Debug, Clone)]
+pub struct Rates {
+    pub map_cap: usize,
+    pub wake_handle: Limit,
+    pub wake_address: Limit,
+    pub wake_ip: Limit,
+    pub wake_global: Limit,
+    pub issue_ip: Limit,
+    pub issue_address: Limit,
+    pub issue_global: Limit,
+    pub confirm_ip: Limit,
+    pub max_in_flight: usize,
+}
+
+impl Default for Rates {
+    fn default() -> Rates {
+        let handle = Limit { per_minute: 10, per_hour: 120 };
+        Rates {
+            map_cap: 4096,
+            wake_handle: handle,
+            wake_address: handle,
+            wake_ip: Limit::hourly(600),
+            wake_global: Limit::hourly(6000),
+            issue_ip: Limit::hourly(10),
+            issue_address: Limit::hourly(5),
+            issue_global: Limit::hourly(600),
+            confirm_ip: Limit::hourly(60),
+            max_in_flight: MAX_IN_FLIGHT,
+        }
+    }
+}
+
+pub struct Options {
+    pub keys: Keys,
+    pub allowed_apps: Vec<String>,
+    pub trusted_proxy: Option<IpAddr>,
+    pub rates: Rates,
+}
+
+pub struct AppState {
+    keys: Keys,
+    allowed_apps: Vec<String>,
+    trusted_proxy: Option<IpAddr>,
+    sender: Arc<dyn PushSender>,
+    clock: Arc<dyn Clock>,
+    keyer: Arc<Keyer>,
+    challenges: Challenges,
+    wake_handle: Limiter,
+    wake_address: Limiter,
+    wake_ip: Limiter,
+    wake_global: Limiter,
+    issue_ip: Limiter,
+    issue_address: Limiter,
+    issue_global: Limiter,
+    confirm_ip: Limiter,
+    in_flight: Arc<Semaphore>,
+}
+
+impl AppState {
+    pub fn new(opts: Options, sender: Arc<dyn PushSender>, clock: Arc<dyn Clock>) -> Arc<AppState> {
+        let keyer = Arc::new(Keyer::new());
+        let r = opts.rates;
+        let l = |limit| Limiter::new(r.map_cap, limit);
+        Arc::new(AppState {
+            keys: opts.keys,
+            allowed_apps: opts.allowed_apps,
+            trusted_proxy: opts.trusted_proxy,
+            sender,
+            clock,
+            challenges: Challenges::new(keyer.clone()),
+            keyer,
+            wake_handle: l(r.wake_handle),
+            wake_address: l(r.wake_address),
+            wake_ip: l(r.wake_ip),
+            wake_global: Limiter::new(1, r.wake_global),
+            issue_ip: l(r.issue_ip),
+            issue_address: l(r.issue_address),
+            issue_global: Limiter::new(1, r.issue_global),
+            confirm_ip: l(r.confirm_ip),
+            in_flight: Arc::new(Semaphore::new(r.max_in_flight)),
+        })
+    }
+
+    /// Drop every expired counter and challenge (spec §8).
+    pub fn sweep(&self) {
+        let now = self.clock.now_secs();
+        for l in [
+            &self.wake_handle,
+            &self.wake_address,
+            &self.wake_ip,
+            &self.wake_global,
+            &self.issue_ip,
+            &self.issue_address,
+            &self.issue_global,
+            &self.confirm_ip,
+        ] {
+            l.sweep(now);
+        }
+        self.challenges.sweep(now);
+    }
+
+    /// Sweep every `every` until dropped.
+    pub async fn sweep_loop(self: Arc<AppState>, every: Duration) {
+        let mut tick = tokio::time::interval(every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await; // the first tick is immediate
+        loop {
+            tick.tick().await;
+            self.sweep();
+        }
+    }
+
+    /// Sizes of the bounded maps, for tests.
+    pub fn map_sizes(&self) -> Vec<usize> {
+        vec![
+            self.wake_handle.len(),
+            self.wake_address.len(),
+            self.wake_ip.len(),
+            self.issue_ip.len(),
+            self.issue_address.len(),
+            self.confirm_ip.len(),
+            self.challenges.len(),
+        ]
+    }
+
+    fn client_ip(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+        // A dual-stack listener reports IPv4 peers as ::ffff:a.b.c.d. The
+        // configured proxy address and the forwarded address are compared
+        // and keyed in the same normalised form.
+        let peer = normalise_ip(peer);
+        if self.trusted_proxy.map(normalise_ip) == Some(peer)
+            && let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+            && let Some(last) = v.rsplit(',').next()
+            && let Ok(ip) = last.trim().parse::<IpAddr>()
+        {
+            return normalise_ip(ip);
+        }
+        peer
+    }
+
+    fn ip_key(&self, ip: IpAddr) -> [u8; 16] {
+        match normalise_ip(ip) {
+            IpAddr::V4(a) => self.keyer.key("ip4", &a.octets()),
+            // IPv6 sources are keyed by their /64.
+            IpAddr::V6(a) => self.keyer.key("ip6", &a.octets()[..8]),
+        }
+    }
+
+    fn addr_key(&self, kind: AddressKind, address: &str) -> [u8; 16] {
+        self.keyer.key("addr", &[&[kind as u8][..], address.as_bytes()].concat())
+    }
+
+    fn binding(&self, p: Platform, app: &str, kind: AddressKind, address: &str) -> [u8; 32] {
+        self.keyer.mac(&[
+            b"bind",
+            &[p as u8],
+            app.as_bytes(),
+            &[kind as u8],
+            address.as_bytes(),
+        ])
+    }
+}
+
+/// IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d) addresses
+/// become the plain IPv4 address, so an IPv4 client is one source whether
+/// the listener is dual-stack or not. `::` and `::1` stay IPv6.
+pub fn normalise_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(a) if !a.is_unspecified() && !a.is_loopback() => {
+            a.to_ipv4().map_or(ip, IpAddr::V4)
+        }
+        _ => ip,
+    }
+}
+
+pub fn router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/v1/wake", post(wake))
+        .route("/v1/handles", post(register))
+        .route("/v1/handles/confirm", post(confirm))
+        .route("/healthz", get(healthz))
+        .fallback(|| async { err(StatusCode::NOT_FOUND, "not_found") })
+        .with_state(state)
+}
+
+/// Connection limits for [`serve_with`].
+#[derive(Debug, Clone, Copy)]
+pub struct ServeOptions {
+    pub max_connections: usize,
+    pub head_timeout: Duration,
+    /// `None` runs no sweeper (tests that need a quiet timer wheel).
+    pub sweep_interval: Option<Duration>,
+}
+
+impl Default for ServeOptions {
+    fn default() -> ServeOptions {
+        ServeOptions { max_connections: MAX_CONNECTIONS, head_timeout: HEAD_TIMEOUT, sweep_interval: Some(SWEEP_INTERVAL) }
+    }
+}
+
+/// Serve on `listener` until the future is dropped.
+pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> std::io::Result<()> {
+    serve_with(listener, state, ServeOptions::default(), std::future::pending()).await
+}
+
+/// Aborts the sweeper if the serve future is dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl AbortOnDrop {
+    /// Abort and wait, so the task's references are gone on return.
+    async fn stop(mut self) {
+        self.0.abort();
+        let _ = (&mut self.0).await;
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The per-connection HTTP/1 settings: the head deadline. One place, used by
+/// [`serve_with`] and by tests that drive a connection over an in-memory pipe
+/// under controlled time.
+pub fn connection_builder(head_timeout: Duration) -> http1::Builder {
+    let mut builder = http1::Builder::new();
+    builder.timer(TokioTimer::new()).header_read_timeout(head_timeout);
+    builder
+}
+
+/// Serve one HTTP/1 connection per accept, at most `max_connections` at a
+/// time (`accept` waits for a slot, which lives in the connection's task).
+/// The head deadline is hyper's own `header_read_timeout`: it covers a head
+/// that never completes and restarts after each response, so an idle
+/// keep-alive connection is closed too. A background task sweeps expired
+/// counters and challenges; it ends with this function.
+///
+/// When `shutdown` completes it stops accepting, lets each connection finish
+/// its in-flight request and returns once they are done.
+pub async fn serve_with(
+    mut listener: tokio::net::TcpListener,
+    state: Arc<AppState>,
+    opts: ServeOptions,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
+    let sweeper = opts.sweep_interval.map(|every| AbortOnDrop(tokio::spawn(state.clone().sweep_loop(every))));
+    let app = router(state);
+    let slots = Arc::new(Semaphore::new(opts.max_connections));
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let mut connections = tokio::task::JoinSet::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        let slot = tokio::select! {
+            s = slots.clone().acquire_owned() => s.expect("semaphore is never closed"),
+            () = &mut shutdown => break,
+        };
+        let (io, peer) = tokio::select! {
+            r = Listener::accept(&mut listener) => r,
+            () = &mut shutdown => break,
+        };
+        // Reap finished connections so the set does not grow.
+        while connections.try_join_next().is_some() {}
+        let service = TowerToHyperService::new(app.clone().layer(axum::Extension(ConnectInfo(peer))));
+        let builder = connection_builder(opts.head_timeout);
+        let mut stopped = stopped.clone();
+        connections.spawn(async move {
+            let _slot = slot;
+            let mut conn = std::pin::pin!(builder.serve_connection(TokioIo::new(io), service));
+            tokio::select! {
+                _ = conn.as_mut() => {}
+                () = async { let _ = stopped.wait_for(|stop| *stop).await; } => {
+                    conn.as_mut().graceful_shutdown();
+                    let _ = conn.as_mut().await;
+                }
+            }
+        });
+    }
+    stop.send_replace(true);
+    while connections.join_next().await.is_some() {}
+    if let Some(s) = sweeper {
+        s.stop().await;
+    }
+    Ok(())
+}
+
+/// A refusal: status and error code. Small, so `Result` stays cheap.
+#[derive(Debug, Clone, Copy)]
+struct Refuse(StatusCode, &'static str);
+
+impl Refuse {
+    fn into_response(self) -> Response {
+        err(self.0, self.1)
+    }
+}
+
+fn err(status: StatusCode, code: &'static str) -> Response {
+    let mut r = (status, axum::Json(json!({"error": code}))).into_response();
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+    }
+    r
+}
+
+fn hex8(k: &[u8; 16]) -> String {
+    k[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// One log line per request: route, status, platform and a short tag.
+fn log(route: &str, status: u16, platform: Option<Platform>, tag: Option<[u8; 16]>) {
+    tracing::info!(
+        route,
+        status,
+        platform = platform.map(Platform::as_str).unwrap_or("-"),
+        tag = tag.map(|t| hex8(&t)).unwrap_or_default(),
+        "request"
+    );
+}
+
+async fn read_json<T: DeserializeOwned>(body: Body) -> Result<T, Refuse> {
+    let bytes = match tokio::time::timeout(READ_DEADLINE, to_bytes(body, MAX_BODY)).await {
+        Err(_) => return Err(Refuse(StatusCode::REQUEST_TIMEOUT, "timeout")),
+        Ok(Err(_)) => return Err(Refuse(StatusCode::PAYLOAD_TOO_LARGE, "too_large")),
+        Ok(Ok(b)) => b,
+    };
+    serde_json::from_slice(&bytes).map_err(|_| Refuse(StatusCode::BAD_REQUEST, "bad_request"))
+}
+
+async fn healthz() -> Response {
+    axum::Json(json!({"ok": true})).into_response()
+}
+
+async fn wake(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let (res, platform, tag) = wake_inner(&st, peer.ip(), &headers, body).await;
+    log("wake", res.status().as_u16(), platform, tag);
+    res
+}
+
+async fn wake_inner(
+    st: &AppState,
+    peer: IpAddr,
+    headers: &HeaderMap,
+    body: Body,
+) -> (Response, Option<Platform>, Option<[u8; 16]>) {
+    let req: WakeRequest = match read_json(body).await {
+        Ok(r) => r,
+        Err(e) => return (e.into_response(), None, None),
+    };
+    if req.v != 1 {
+        return (err(StatusCode::BAD_REQUEST, "bad_request"), None, None);
+    }
+    let now = st.clock.now_secs();
+    // Cheapest checks first, each before anything is sent.
+    if !st.wake_global.check([0; 16], now) {
+        return (err(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), None, None);
+    }
+    let ip = st.client_ip(peer, headers);
+    if !st.wake_ip.check(st.ip_key(ip), now) {
+        return (err(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), None, None);
+    }
+    let opened = match handle::open(&st.keys, &req.handle, now) {
+        Ok(s) if st.allowed_apps.contains(&s.app) => s,
+        Ok(_) | Err(OpenError::Invalid) => return (err(StatusCode::BAD_REQUEST, "invalid_handle"), None, None),
+        Err(OpenError::Gone) => return (err(StatusCode::NOT_FOUND, "gone"), None, None),
+    };
+    // Keyed only now, so garbage handles cannot fill these maps.
+    let hkey = st.keyer.key("handle", req.handle.as_bytes());
+    let platform = Some(opened.platform);
+    if !st.wake_handle.check(hkey, now)
+        || !st.wake_address.check(st.addr_key(opened.kind, &opened.address), now)
+    {
+        return (err(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), platform, Some(hkey));
+    }
+    let Ok(_permit) = st.in_flight.clone().try_acquire_owned() else {
+        return (err(StatusCode::SERVICE_UNAVAILABLE, "busy"), platform, Some(hkey));
+    };
+    if !st.sender.supports(opened.platform) {
+        return (err(StatusCode::SERVICE_UNAVAILABLE, "unavailable"), platform, Some(hkey));
+    }
+    let to = Address { kind: opened.kind, value: opened.address };
+    let res = match st.sender.wake(&to).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(SendError::Gone) => err(StatusCode::NOT_FOUND, "gone"),
+        Err(SendError::Unavailable) => err(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+    };
+    (res, platform, Some(hkey))
+}
+
+/// Validated registration fields.
+struct Fields {
+    platform: Platform,
+    app: String,
+    kind: AddressKind,
+    address: String,
+}
+
+fn validate(st: &AppState, platform: &str, app: &str, kind: &str, address: &str) -> Result<Fields, Refuse> {
+    let bad = || Refuse(StatusCode::BAD_REQUEST, "bad_request");
+    let platform = Platform::parse(platform).ok_or(Refuse(StatusCode::BAD_REQUEST, "unsupported_platform"))?;
+    if !st.sender.supports(platform) {
+        return Err(Refuse(StatusCode::BAD_REQUEST, "unsupported_platform"));
+    }
+    if !app_ok(app) || !st.allowed_apps.iter().any(|a| a == app) {
+        return Err(Refuse(StatusCode::BAD_REQUEST, "unsupported_app"));
+    }
+    let kind = AddressKind::parse(kind).ok_or_else(bad)?;
+    if kind.platform() != platform || !address_ok(address) {
+        return Err(bad());
+    }
+    Ok(Fields { platform, app: app.to_string(), kind, address: address.to_string() })
+}
+
+async fn register(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let (res, platform, tag) = register_inner(&st, peer.ip(), &headers, body).await;
+    log("register", res.status().as_u16(), platform, tag);
+    res
+}
+
+async fn register_inner(
+    st: &AppState,
+    peer: IpAddr,
+    headers: &HeaderMap,
+    body: Body,
+) -> (Response, Option<Platform>, Option<[u8; 16]>) {
+    let req: RegisterRequest = match read_json(body).await {
+        Ok(r) => r,
+        Err(e) => return (e.into_response(), None, None),
+    };
+    let f = match validate(st, &req.platform, &req.app, &req.address_kind, &req.address) {
+        Ok(f) => f,
+        Err(e) => return (e.into_response(), None, None),
+    };
+    let platform = Some(f.platform);
+    let now = st.clock.now_secs();
+    let ip = st.client_ip(peer, headers);
+    let akey = st.addr_key(f.kind, &f.address);
+    if !st.issue_global.check([0; 16], now)
+        || !st.issue_ip.check(st.ip_key(ip), now)
+        || !st.issue_address.check(akey, now)
+    {
+        return (err(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), platform, None);
+    }
+    let binding = st.binding(f.platform, &f.app, f.kind, &f.address);
+    let (id, code) = match st.challenges.issue(binding, now) {
+        Ok(x) => x,
+        Err(IssueError::Busy) => return (err(StatusCode::SERVICE_UNAVAILABLE, "busy"), platform, None),
+        Err(IssueError::BindingCap) => {
+            return (err(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), platform, None);
+        }
+    };
+    let Ok(_permit) = st.in_flight.clone().try_acquire_owned() else {
+        st.challenges.cancel(&id);
+        return (err(StatusCode::SERVICE_UNAVAILABLE, "busy"), platform, None);
+    };
+    let to = Address { kind: f.kind, value: f.address };
+    let res = match st.sender.challenge(&to, &code).await {
+        Ok(()) => (StatusCode::ACCEPTED, axum::Json(ChallengeIssued { challenge_id: id })).into_response(),
+        Err(SendError::Gone) => {
+            st.challenges.cancel(&id);
+            err(StatusCode::NOT_FOUND, "gone")
+        }
+        Err(SendError::Unavailable) => {
+            st.challenges.cancel(&id);
+            err(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+        }
+    };
+    (res, platform, None)
+}
+
+async fn confirm(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let (res, platform) = confirm_inner(&st, peer.ip(), &headers, body).await;
+    log("confirm", res.status().as_u16(), platform, None);
+    res
+}
+
+async fn confirm_inner(
+    st: &AppState,
+    peer: IpAddr,
+    headers: &HeaderMap,
+    body: Body,
+) -> (Response, Option<Platform>) {
+    let req: ConfirmRequest = match read_json(body).await {
+        Ok(r) => r,
+        Err(e) => return (e.into_response(), None),
+    };
+    let now = st.clock.now_secs();
+    let ip = st.client_ip(peer, headers);
+    if !st.confirm_ip.check(st.ip_key(ip), now) {
+        return (err(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), None);
+    }
+    let f = match validate(st, &req.platform, &req.app, &req.address_kind, &req.address) {
+        Ok(f) => f,
+        Err(e) => return (e.into_response(), None),
+    };
+    let platform = Some(f.platform);
+    let binding = st.binding(f.platform, &f.app, f.kind, &f.address);
+    match st.challenges.confirm(&req.challenge_id, &req.code, &binding, now) {
+        Confirm::Unknown => (err(StatusCode::NOT_FOUND, "unknown_challenge"), platform),
+        Confirm::Failed => (err(StatusCode::FORBIDDEN, "challenge_failed"), platform),
+        Confirm::Ok => {
+            let issued = u32::try_from(now).ok();
+            let expires = u32::try_from(now + HANDLE_LIFETIME_SECS).ok();
+            let (Some(issued_at), Some(expires_at)) = (issued, expires) else {
+                return (err(StatusCode::SERVICE_UNAVAILABLE, "unavailable"), platform);
+            };
+            let handle = handle::seal(
+                &st.keys,
+                &Sealed { platform: f.platform, kind: f.kind, app: f.app, address: f.address, issued_at, expires_at },
+            );
+            let expires_at = chrono::DateTime::from_timestamp(i64::from(expires_at), 0)
+                .map(|d| d.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+                .unwrap_or_default();
+            (axum::Json(HandleIssued { handle, expires_at }).into_response(), platform)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ManualClock;
+
+    struct NoSender;
+    #[async_trait::async_trait]
+    impl PushSender for NoSender {
+        fn supports(&self, _: Platform) -> bool {
+            false
+        }
+        async fn wake(&self, _: &Address) -> Result<(), SendError> {
+            Err(SendError::Unavailable)
+        }
+        async fn challenge(&self, _: &Address, _: &str) -> Result<(), SendError> {
+            Err(SendError::Unavailable)
+        }
+    }
+
+    fn state(trusted_proxy: Option<IpAddr>) -> Arc<AppState> {
+        AppState::new(
+            Options {
+                keys: Keys::new(vec![(1, [7u8; 32])]).unwrap(),
+                allowed_apps: vec![],
+                trusted_proxy,
+                rates: Rates::default(),
+            },
+            Arc::new(NoSender),
+            Arc::new(ManualClock::new(1)),
+        )
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn mapped_ipv4_clients_get_separate_buckets() {
+        let st = state(None);
+        assert_ne!(st.ip_key(ip("::ffff:192.0.2.1")), st.ip_key(ip("::ffff:198.51.100.7")));
+        // Same /24 in the mapped space is still a different client.
+        assert_ne!(st.ip_key(ip("::ffff:192.0.2.1")), st.ip_key(ip("::ffff:192.0.2.2")));
+    }
+
+    #[test]
+    fn a_mapped_address_shares_a_bucket_with_the_plain_ipv4_address() {
+        let st = state(None);
+        assert_eq!(st.ip_key(ip("::ffff:192.0.2.1")), st.ip_key(ip("192.0.2.1")));
+        assert_eq!(st.ip_key(ip("::192.0.2.1")), st.ip_key(ip("192.0.2.1")));
+    }
+
+    #[test]
+    fn ipv6_is_keyed_by_its_slash_64() {
+        let st = state(None);
+        assert_eq!(st.ip_key(ip("2001:db8:1:2::1")), st.ip_key(ip("2001:db8:1:2:ffff::9")));
+        assert_ne!(st.ip_key(ip("2001:db8:1:2::1")), st.ip_key(ip("2001:db8:1:3::1")));
+        // Loopback and unspecified stay IPv6, not 0.0.0.x.
+        assert_ne!(st.ip_key(ip("::1")), st.ip_key(ip("0.0.0.1")));
+    }
+
+    #[test]
+    fn one_mapped_source_exhausts_only_its_own_allowance() {
+        let st = state(None);
+        let per_hour = Rates::default().issue_ip.per_hour;
+        let a = st.ip_key(ip("::ffff:192.0.2.1"));
+        let b = st.ip_key(ip("::ffff:198.51.100.7"));
+        let mut denied = false;
+        for _ in 0..=per_hour {
+            denied |= !st.issue_ip.check(a, 1);
+        }
+        assert!(denied, "the first source hits its limit");
+        assert!(st.issue_ip.check(b, 1), "another IPv4 client is unaffected");
+    }
+
+    #[test]
+    fn the_trusted_proxy_matches_in_mapped_form_and_forwarded_addresses_are_normalised() {
+        let st = state(Some(ip("203.0.113.9")));
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", HeaderValue::from_static("10.0.0.1, ::ffff:192.0.2.1"));
+        assert_eq!(st.client_ip(ip("::ffff:203.0.113.9"), &h), ip("192.0.2.1"));
+        // An untrusted mapped peer cannot use the header, and is keyed as IPv4.
+        assert_eq!(st.client_ip(ip("::ffff:203.0.113.10"), &h), ip("203.0.113.10"));
+    }
+}

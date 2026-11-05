@@ -106,7 +106,7 @@ impl LogLimiter {
 /// A peer-chosen string is never logged, because it may be the token itself.
 /// Its log form is the byte length and the first 8 hex characters of its
 /// SHA-256, enough to tell clients apart and nothing to read back.
-fn log_tag(s: &str) -> (usize, String) {
+pub fn log_tag(s: &str) -> (usize, String) {
     use std::fmt::Write;
     let digest = Sha256::digest(s.as_bytes());
     let mut hex = String::with_capacity(8);

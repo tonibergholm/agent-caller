@@ -23,6 +23,29 @@ pub(crate) mod ts {
     }
 }
 
+/// `ts`, for an optional timestamp.
+pub(crate) mod ts_opt {
+    use chrono::{DateTime, SecondsFormat, Utc};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(t: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error> {
+        match t {
+            Some(t) => s.serialize_str(&t.to_rfc3339_opts(SecondsFormat::Millis, true)),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<DateTime<Utc>>, D::Error> {
+        Option::<String>::deserialize(d)?
+            .map(|s| {
+                DateTime::parse_from_rfc3339(&s)
+                    .map(|t| t.with_timezone(&Utc))
+                    .map_err(serde::de::Error::custom)
+            })
+            .transpose()
+    }
+}
+
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]

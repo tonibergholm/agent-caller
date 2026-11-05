@@ -158,6 +158,17 @@
               "type": "null"
             }
           ]
+        },
+        "push": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PushInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only on the result of `push.status`."
         }
       },
       "required": [
@@ -247,6 +258,56 @@
         "delivered"
       ],
       "type": "string"
+    },
+    "PushDeviceStatus": {
+      "description": "What the daemon last learned about a device's wakes. `expired` and\n`invalid` mean wakes are disabled until the device registers again;\n`relay_error` means the last wake failed transiently and wakes go on.",
+      "oneOf": [
+        {
+          "enum": [
+            "ok",
+            "expired",
+            "invalid",
+            "relay_error"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "A status this version does not know.",
+          "type": "string"
+        }
+      ]
+    },
+    "PushInfo": {
+      "description": "The `push` field of a `push.status` result.",
+      "properties": {
+        "last_wake_at": {
+          "default": null,
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registered": {
+          "type": "boolean"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PushDeviceStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent when `registered` is false."
+        }
+      },
+      "required": [
+        "registered"
+      ],
+      "type": "object"
     },
     "Question": {
       "properties": {

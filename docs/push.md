@@ -1,0 +1,75 @@
+# Wake pushes (acd side)
+
+Spec: [relay spec](superpowers/specs/2026-11-03-relay-push-design.md), section 5.
+Wire: [PROTOCOL.md §5.1](../crates/acd-protocol/PROTOCOL.md).
+
+Off unless `config.toml` has a `[push]` section that resolves. Off means no
+`push` capability, no `push.json`, no outbound connection.
+
+```toml
+[push]
+relay = "https://relay.example.net"            # https only
+ca_file = "/etc/ssl/certs/ca-certificates.crt"  # optional
+```
+
+- `relay`: base URL of an `acd-relay`. No userinfo, query or fragment.
+- `ca_file`: PEM. The relay's certificate must chain to a certificate in this
+  file; nothing else is trusted. Use a CA bundle, or the relay's own
+  certificate for a relay without a public one. Without it acd tries
+  `/etc/ssl/certs/ca-certificates.crt`, then `/etc/ssl/cert.pem`.
+- Any other key, a non-https URL, an unreadable or empty CA file, or
+  `relay_pin` (not implemented) turns push off. The daemon still starts.
+  `acd status` prints `push: off (reason)`.
+
+Restart acd after changing the section.
+
+## What happens
+
+1. A phone registers over acd/1 (`push.register`) with a handle from the
+   relay. acd stores the handle, never a push address, in `push.json` in the
+   config directory (mode 0600, written atomically). At most 8 devices.
+2. When a request opens, acd sends each registered device one wake:
+   `POST <relay>/v1/wake {"v":1,"handle":"..."}`. Nothing about the request,
+   agent or machine is in it, and request ids are not used.
+3. Per device: at most one wake per 30 s, with one trailing wake for requests
+   that open inside the window; at most 4 sends at once; each send has a 5 s
+   deadline; redirects are not followed; at most 1 KiB of a response is read.
+4. A 5xx, timeout, connection or TLS error, redirect or unexpected answer is
+   transient: the device stays enabled, wakes are skipped for
+   `10 s * 2^(n-1)` (cap 900 s), the next wake after that goes out. Only a
+   `gone` or `invalid_handle` answer disables a device (`expired` or
+   `invalid`) until it registers again. A 429 drops that one wake.
+
+## Commands
+
+- `acd push list`: devices and their state, from `push.json`. Never prints
+  handles.
+- `acd status` shows a `push:` line.
+- `acd push --help` repeats the configuration.
+
+A damaged `push.json` (loose mode, bad content) is reported as
+`push: degraded (reason)`: acd runs with no registrations and never rewrites
+the file. Registering fails (`source_unavailable`) until you repair or remove
+`push.json` by hand. An invalid single entry is skipped, kept in
+`push.json.quarantine` at the next write, and does not cost the other devices.
+
+Rotating the client token (`acd token rotate client`) deletes every
+registration: the running daemon drops them in memory and in `push.json`, and
+the command removes `push.json` itself when no daemon runs. Devices register
+again with the new token.
+
+A wake already on its way when the token rotates is cancelled. If the daemon
+cannot rewrite or remove `push.json` at that moment (for example the state
+directory is not writable), the registrations are gone from memory at once and
+the daemon retries every 30 seconds, logging when it succeeds. Known limit: a
+restart before that retry succeeds loads the old file again, and the pending
+retry is lost, so fix the directory permissions and rotate again, or run `acd token rotate client` with the daemon stopped,
+which removes the file.
+
+## Not here
+
+Removing a device from the command line (`acd push remove`) and sending a test
+wake (`acd push test`) are not implemented; a device removes itself with
+`push.unregister`. The provisional owner decisions (generic notification text,
+no per-handle revocation, stolen push address) live only in
+`crates/acd-relay/src/provisional.rs`; acd does not touch them.

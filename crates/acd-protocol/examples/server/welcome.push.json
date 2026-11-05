@@ -1,0 +1,1 @@
+{"type":"welcome","machine":{"id":"mac-1a2b3c4d","name":"Mac","acd_version":"0.10.0","sources":{"hooks":{"state":"ok"},"herdr":{"state":"ok"},"t3":{"state":"ok"},"external":true}},"capabilities":["answer","send","mark_seen","answer.revision","push"],"epoch":"e1","seq":42}

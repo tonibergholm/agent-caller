@@ -1,0 +1,419 @@
+//! `push.json`: the device registrations (relay spec §2.2, §4.10 F3).
+//!
+//! It holds relay handles, never push addresses (acd never sees one), and is
+//! written owner-only (0600) through the same atomic writer as the tokens.
+//! The daemon is the only writer. A file that is missing is an empty store;
+//! a file that is unsafe or invalid as a whole (not a JSON object, unknown
+//! version, wrong shape) starts the daemon with no registrations and a
+//! reason, and is never rewritten: registering fails closed until an
+//! operator repairs or removes it. One bad entry inside a valid file is
+//! skipped on its own; the healthy entries load, and before the file is next
+//! rewritten the skipped entries' raw text is kept in `push.json.quarantine`
+//! (0600, never logged), so a rewrite never destroys them silently.
+//!
+//! Nothing here logs or prints a handle, and no error carries file content
+//! (serde errors can quote values, so they are never shown).
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use acd_protocol::{PushDeviceStatus, PushPlatform};
+use acd_relay::client::{Status, WakeState};
+use serde::{Deserialize, Serialize};
+
+pub const FILE: &str = "push.json";
+/// Sibling file holding the raw text of entries skipped at load.
+pub const QUARANTINE: &str = "push.json.quarantine";
+const MAX_QUARANTINE_BYTES: u64 = 1024 * 1024;
+/// Most devices one daemon wakes (relay spec §5.1).
+pub const MAX_DEVICES: usize = 8;
+const MAX_FILE_BYTES: u64 = 64 * 1024;
+const VERSION: u32 = 1;
+const MAX_ID_BYTES: usize = 128;
+
+/// Client id rule, shared by registration and `read_file`: what is stored
+/// must always be loadable.
+pub fn client_id_ok(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_ID_BYTES
+}
+
+/// Handle syntax: 1 to 512 bytes of base64url (acd does not parse it).
+pub fn handle_ok(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= acd_relay::wire::MAX_HANDLE_LEN
+        && h.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StatusRepr {
+    Ok,
+    Expired,
+    Invalid,
+    RelayError,
+}
+
+impl From<Status> for StatusRepr {
+    fn from(s: Status) -> Self {
+        match s {
+            Status::Ok => StatusRepr::Ok,
+            Status::Expired => StatusRepr::Expired,
+            Status::Invalid => StatusRepr::Invalid,
+            Status::RelayError => StatusRepr::RelayError,
+        }
+    }
+}
+
+impl From<StatusRepr> for Status {
+    fn from(s: StatusRepr) -> Self {
+        match s {
+            StatusRepr::Ok => Status::Ok,
+            StatusRepr::Expired => Status::Expired,
+            StatusRepr::Invalid => Status::Invalid,
+            StatusRepr::RelayError => Status::RelayError,
+        }
+    }
+}
+
+/// One registered device, as stored.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Device {
+    pub platform: PushPlatform,
+    handle: String,
+    /// RFC 3339, informational: the relay decides expiry (spec §7).
+    pub expires_at: String,
+    status: StatusRepr,
+    failures: u32,
+    retry_after: u64,
+    last_wake_at: Option<u64>,
+}
+
+impl std::fmt::Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Device")
+            .field("platform", &self.platform)
+            .field("handle_bytes", &self.handle.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Device {
+    pub fn new(platform: PushPlatform, handle: String, expires_at: String) -> Device {
+        Device::with_state(platform, handle, expires_at, &WakeState::default())
+    }
+
+    fn with_state(platform: PushPlatform, handle: String, expires_at: String, w: &WakeState) -> Device {
+        Device {
+            platform,
+            handle,
+            expires_at,
+            status: w.status.into(),
+            failures: w.failures,
+            retry_after: w.retry_after,
+            last_wake_at: w.last_wake_at,
+        }
+    }
+
+    pub fn handle(&self) -> &str {
+        &self.handle
+    }
+
+    pub fn wake_state(&self) -> WakeState {
+        WakeState {
+            status: self.status.into(),
+            failures: self.failures,
+            retry_after: self.retry_after,
+            last_wake_at: self.last_wake_at,
+        }
+    }
+
+    pub fn set_wake_state(&mut self, w: &WakeState) {
+        self.status = w.status.into();
+        self.failures = w.failures;
+        self.retry_after = w.retry_after;
+        self.last_wake_at = w.last_wake_at;
+    }
+
+    pub fn status(&self) -> PushDeviceStatus {
+        match self.status {
+            StatusRepr::Ok => PushDeviceStatus::Ok,
+            StatusRepr::Expired => PushDeviceStatus::Expired,
+            StatusRepr::Invalid => PushDeviceStatus::Invalid,
+            StatusRepr::RelayError => PushDeviceStatus::RelayError,
+        }
+    }
+
+    pub fn last_wake_at(&self) -> Option<u64> {
+        self.last_wake_at
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileRepr {
+    version: u32,
+    devices: BTreeMap<String, Device>,
+}
+
+/// A device and the registration generation it belongs to. A wake outcome
+/// is applied only to the generation it was sent for, so a device that
+/// registers again while a wake is in flight keeps its fresh state.
+#[derive(Debug, Clone)]
+pub struct Entry {
+    pub device: Device,
+    pub generation: u64,
+}
+
+pub struct Store {
+    path: PathBuf,
+    devices: BTreeMap<String, Entry>,
+    next_generation: u64,
+    degraded: Option<String>,
+    /// The file as a whole was unusable: nothing is ever written over it.
+    locked: bool,
+    /// Entries skipped at load: client id and raw value.
+    skipped: Vec<(String, serde_json::Value)>,
+    quarantined: std::cell::Cell<bool>,
+    /// A revocation whose file could not be rewritten or removed: retried
+    /// until `push.json` no longer lists the revoked registrations.
+    clear_pending: bool,
+}
+
+struct Loaded {
+    devices: BTreeMap<String, Device>,
+    skipped: Vec<(String, serde_json::Value)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreError {
+    TooMany,
+    BadId,
+    Write,
+    /// `push.json` is corrupt as a whole; it is left untouched.
+    Corrupt,
+}
+
+impl Store {
+    /// Never fails: an unusable file gives an empty store with a reason.
+    pub fn load(dir: &Path) -> Store {
+        let path = dir.join(FILE);
+        let mut store = Store {
+            path,
+            devices: BTreeMap::new(),
+            next_generation: 1,
+            degraded: None,
+            locked: false,
+            skipped: Vec::new(),
+            quarantined: std::cell::Cell::new(false),
+            clear_pending: false,
+        };
+        match read_file(&store.path) {
+            Ok(None) => {}
+            Ok(Some(Loaded { devices, skipped })) => {
+                store.skipped = skipped;
+                for (id, device) in devices {
+                    let generation = store.next_generation;
+                    store.next_generation += 1;
+                    store.devices.insert(id, Entry { device, generation });
+                }
+            }
+            Err(why) => {
+                store.degraded = Some(why.to_string());
+                store.locked = true;
+            }
+        }
+        store
+    }
+
+    /// Ids of the entries skipped at load (callers log only a redacted tag).
+    pub fn skipped_ids(&self) -> impl Iterator<Item = &str> {
+        self.skipped.iter().map(|(id, _)| id.as_str())
+    }
+
+    /// Why the file was not used, if it was not.
+    pub fn degraded(&self) -> Option<&str> {
+        self.degraded.as_deref()
+    }
+
+    pub fn len(&self) -> usize {
+        self.devices.len()
+    }
+
+    pub fn get(&self, client_id: &str) -> Option<&Entry> {
+        self.devices.get(client_id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Entry)> {
+        self.devices.iter()
+    }
+
+    /// Stores (or replaces) a registration with a fresh wake state.
+    pub fn register(&mut self, client_id: &str, device: Device) -> Result<(), StoreError> {
+        if !client_id_ok(client_id) {
+            return Err(StoreError::BadId);
+        }
+        if !self.devices.contains_key(client_id) && self.devices.len() >= MAX_DEVICES {
+            return Err(StoreError::TooMany);
+        }
+        let generation = self.next_generation;
+        let mut next = self.devices.clone();
+        next.insert(client_id.to_string(), Entry { device, generation });
+        self.commit(next)?;
+        self.next_generation += 1;
+        Ok(())
+    }
+
+    /// Idempotent: no write when `client_id` is not registered.
+    pub fn remove(&mut self, client_id: &str) -> Result<(), StoreError> {
+        if !self.devices.contains_key(client_id) {
+            return Ok(());
+        }
+        let mut next = self.devices.clone();
+        next.remove(client_id);
+        self.commit(next)
+    }
+
+    /// Revokes every registration (client token rotation, spec 4.8). Fails
+    /// closed: the registrations are gone from memory even when the file
+    /// cannot be rewritten, so no further wake uses them. If the rewrite
+    /// fails the file is removed instead; if that fails too the revocation
+    /// stays pending (`retry_clear`); a restart before that succeeds loads the file again (documented in docs/push.md).
+    pub fn clear(&mut self) -> Result<(), StoreError> {
+        if self.devices.is_empty() && !self.clear_pending {
+            return Ok(());
+        }
+        let written = self.commit(BTreeMap::new()).or_else(|e| match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(r) if r.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(e),
+        });
+        self.devices.clear();
+        self.clear_pending = written.is_err();
+        written
+    }
+
+    /// A revocation is waiting for the file to become writable.
+    pub fn clear_pending(&self) -> bool {
+        self.clear_pending
+    }
+
+    /// Repeats a revocation whose file write failed.
+    pub fn retry_clear(&mut self) {
+        if self.clear_pending && self.clear().is_ok() {
+            tracing::info!("push registrations revoked on disk");
+        }
+    }
+
+    /// Applies a wake outcome to `client_id`, if it is still registered at
+    /// `generation`. Returns whether it changed anything.
+    pub fn apply_wake(&mut self, client_id: &str, generation: u64, state: &WakeState) -> bool {
+        if self.locked {
+            return false;
+        }
+        let Some(e) = self.devices.get_mut(client_id) else {
+            return false;
+        };
+        if e.generation != generation || e.device.wake_state() == *state {
+            return false;
+        }
+        e.device.set_wake_state(state);
+        // The state in memory is what the next wake uses; a failed write only
+        // loses the backoff across a restart.
+        let _ = self.persist(&self.devices);
+        true
+    }
+
+    fn commit(&mut self, next: BTreeMap<String, Entry>) -> Result<(), StoreError> {
+        if self.locked {
+            return Err(StoreError::Corrupt);
+        }
+        self.persist(&next)?;
+        self.devices = next;
+        self.degraded = None;
+        // The file now holds exactly `devices`: nothing revoked is left in it.
+        self.clear_pending = false;
+        Ok(())
+    }
+
+    /// Appends the skipped entries to the quarantine file (once per load).
+    /// Fails closed: if they cannot be kept, the main file is not rewritten.
+    fn quarantine(&self) -> Result<(), StoreError> {
+        if self.skipped.is_empty() || self.quarantined.get() {
+            return Ok(());
+        }
+        let path = self.path.with_file_name(QUARANTINE);
+        let mut kept: Vec<serde_json::Value> = match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Err(StoreError::Write),
+            Ok(_) => {
+                let bytes = acd_securefs::read_private(&path, 0o600, MAX_QUARANTINE_BYTES)
+                    .map_err(|_| StoreError::Write)?;
+                serde_json::from_slice(&bytes).map_err(|_| StoreError::Write)?
+            }
+        };
+        for (id, entry) in &self.skipped {
+            let item = serde_json::json!({ "id": id, "entry": entry });
+            if !kept.contains(&item) {
+                kept.push(item);
+            }
+        }
+        let bytes = serde_json::to_vec_pretty(&kept).map_err(|_| StoreError::Write)?;
+        crate::secrets::write_atomic(&path, &bytes, 0o600).map_err(|_| StoreError::Write)?;
+        self.quarantined.set(true);
+        Ok(())
+    }
+
+    fn persist(&self, devices: &BTreeMap<String, Entry>) -> Result<(), StoreError> {
+        self.quarantine()?;
+        let repr = FileRepr {
+            version: VERSION,
+            devices: devices.iter().map(|(k, v)| (k.clone(), v.device.clone())).collect(),
+        };
+        let bytes = serde_json::to_vec_pretty(&repr).map_err(|_| StoreError::Write)?;
+        crate::secrets::write_atomic(&self.path, &bytes, 0o600).map_err(|_| StoreError::Write)
+    }
+}
+
+/// Reads `push.json`. `Ok(None)`: no file. `Err`: fixed text, never content.
+/// The file as a whole must be a JSON object `{version, devices}`; each
+/// device entry is then checked on its own, so one bad entry never costs the
+/// healthy ones.
+fn read_file(path: &Path) -> Result<Option<Loaded>, &'static str> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("push.json cannot be inspected"),
+        Ok(_) => {}
+    }
+    let bytes = acd_securefs::read_private(path, 0o600, MAX_FILE_BYTES)
+        .map_err(|_| "push.json is unsafe (mode, owner or type) or unreadable")?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "push.json is not valid")?;
+    let serde_json::Value::Object(mut top) = value else {
+        return Err("push.json is not valid");
+    };
+    let version = top.remove("version");
+    let entries = top.remove("devices");
+    if !top.is_empty() {
+        return Err("push.json is not valid");
+    }
+    if version.and_then(|v| v.as_u64()) != Some(VERSION as u64) {
+        return Err("push.json has an unknown version");
+    }
+    let Some(serde_json::Value::Object(entries)) = entries else {
+        return Err("push.json is not valid");
+    };
+    let mut devices = BTreeMap::new();
+    let mut skipped = Vec::new();
+    for (id, raw) in entries {
+        match serde_json::from_value::<Device>(raw.clone()) {
+            Ok(d) if client_id_ok(&id) && handle_ok(&d.handle) => {
+                devices.insert(id, d);
+            }
+            _ => skipped.push((id, raw)),
+        }
+    }
+    if devices.len() > MAX_DEVICES {
+        return Err("push.json lists too many devices");
+    }
+    Ok(Some(Loaded { devices, skipped }))
+}
