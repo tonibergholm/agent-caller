@@ -62,8 +62,8 @@ A wake already on its way when the token rotates is cancelled. If the daemon
 cannot rewrite or remove `push.json` at that moment (for example the state
 directory is not writable), the registrations are gone from memory at once and
 the daemon retries every 30 seconds, logging when it succeeds. Known limit: a
-restart before that retry succeeds loads the old file again, so fix the
-directory permissions or run `acd token rotate client` with the daemon stopped,
+restart before that retry succeeds loads the old file again, and the pending
+retry is lost, so fix the directory permissions and rotate again, or run `acd token rotate client` with the daemon stopped,
 which removes the file.
 
 ## Not here

@@ -278,7 +278,7 @@ impl Store {
     /// closed: the registrations are gone from memory even when the file
     /// cannot be rewritten, so no further wake uses them. If the rewrite
     /// fails the file is removed instead; if that fails too the revocation
-    /// stays pending (`retry_clear`) so a restart cannot bring them back.
+    /// stays pending (`retry_clear`); a restart before that succeeds loads the file again (documented in docs/push.md).
     pub fn clear(&mut self) -> Result<(), StoreError> {
         if self.devices.is_empty() && !self.clear_pending {
             return Ok(());
