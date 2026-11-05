@@ -88,18 +88,29 @@ fn flipping_any_one_bit_cutting_or_extending_is_never_accepted() {
 }
 
 #[test]
-fn a_handle_never_opens_under_another_key_set_and_a_dropped_kid_revokes_it() {
-    check("handle_keys", 300, (keys(), keys(), sealed()), |((a, kids_a), (b, kids_b), mut s)| {
+fn a_handle_opens_only_under_the_key_it_was_sealed_with() {
+    let map = || prop::collection::btree_map(any::<u8>(), any::<[u8; 32]>(), 1..4);
+    check("handle_keys", 300, (map(), 0usize..32, sealed()), |(m, at, mut s)| {
         s.expires_at = s.expires_at.max(1);
-        let h = seal(&a, &s);
-        let sealing = *kids_a.last().unwrap();
-        if kids_b.contains(&sealing) {
-            // Same kid, different key bytes (the strategy draws them anew): refused.
-            if let Ok(back) = open(&b, &h, 0) {
-                prop_assert_eq!(back, s, "only the same key can open it, and then to the same value");
-            }
-        } else {
-            prop_assert_eq!(open(&b, &h, 0), Err(OpenError::Gone));
+        let all = |m: &std::collections::BTreeMap<u8, [u8; 32]>| Keys::new(m.iter().map(|(k, v)| (*k, *v)).collect()).unwrap();
+        let sealing = *m.keys().next_back().unwrap();
+        let h = seal(&all(&m), &s);
+        // Same keys: opens to the same value (the success case).
+        prop_assert_eq!(open(&all(&m), &h, 0), Ok(s.clone()));
+        // The SAME kid with DIFFERENT key bytes, everything else equal: refused.
+        // A derivation that ignored the sealing secret would open it.
+        let mut changed = m.clone();
+        changed.get_mut(&sealing).unwrap()[at % 32] ^= 0x01;
+        prop_assert_eq!(open(&all(&changed), &h, 0), Err(OpenError::Invalid), "a different key under the sealing kid opened it");
+        // A different kid: unknown, so gone.
+        let mut dropped = m.clone();
+        dropped.remove(&sealing);
+        let fresh = (0..=u8::MAX).find(|k| !m.contains_key(k)).unwrap_or(sealing);
+        if fresh != sealing {
+            dropped.insert(fresh, [9u8; 32]);
+        }
+        if !dropped.is_empty() {
+            prop_assert_eq!(open(&all(&dropped), &h, 0), Err(OpenError::Gone));
         }
         Ok(())
     });
