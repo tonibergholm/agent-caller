@@ -70,8 +70,20 @@ fuzz_target!(|data: &[u8]| {
     let fixed = Keys::new(vec![(1, [7u8; 32]), (2, [8u8; 32])]).unwrap();
     let text = String::from_utf8_lossy(data);
     let r = open(&fixed, &text, 0);
-    assert!(!is_ok(&r), "accepted a handle nobody sealed: {text:?}");
-    assert!(matches!(format!("{r:?}").as_str(), "Err(Invalid)" | "Err(Gone)"));
+    match &r {
+        // The keys are public, so input may be a handle really sealed under
+        // them (expiry above zero): production correctly accepts it. Then
+        // the value must survive a seal and open round trip unchanged.
+        Ok(s) => {
+            assert!(s.expires_at > 0, "accepted an expired handle: {text:?}");
+            let again = seal(&fixed, s);
+            assert!(again.len() <= MAX_HANDLE_LEN);
+            assert_eq!(open(&fixed, &again, 0).as_ref(), Ok(s), "round trip changed the payload");
+        }
+        Err(_) => {
+            assert!(matches!(format!("{r:?}").as_str(), "Err(Invalid)" | "Err(Gone)"));
+        }
+    }
 
     // 3. Seal, open and tamper.
     let mut u = arbitrary::Unstructured::new(data);

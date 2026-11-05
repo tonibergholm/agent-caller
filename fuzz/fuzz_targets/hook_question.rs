@@ -81,17 +81,17 @@ fuzz_target!(|i: Input| {
         let (text, p1) = build(&q.text, None);
         let (header, p2) = build(&q.header, None);
         all_plain &= p1 && p2;
-        within_caps &= (1..=DETAIL_CHARS).contains(&text.chars().count()) && header.chars().count() <= TITLE_CHARS;
+        within_caps &= !text.is_empty() && text.trim().chars().count() <= DETAIL_CHARS && header.trim().chars().count() <= TITLE_CHARS;
         let mut opts = vec![];
         for (k, (l, d)) in q.options.iter().take(11).enumerate() {
             let (label, p3) = build(l, Some(k));
             all_plain &= p3;
-            within_caps &= (1..=TITLE_CHARS).contains(&label.chars().count());
+            within_caps &= !label.is_empty() && label.trim().chars().count() <= TITLE_CHARS;
             let mut o = json!({"label": label});
             if let Some(d) = d {
                 let (d, p4) = build(d, None);
                 all_plain &= p4;
-                within_caps &= d.chars().count() <= DESCRIPTION_CHARS;
+                within_caps &= d.trim().chars().count() <= DESCRIPTION_CHARS;
                 o["description"] = Value::String(d);
             }
             opts.push(o);
@@ -107,17 +107,24 @@ fuzz_target!(|i: Input| {
     };
     let answerable = obs.answer_path == AnswerPath::Keys;
     if answerable {
+        // Compare with the ORIGINAL generated JSON, never with what the
+        // parser itself returns, so a cut made inside it cannot hide.
+        assert!(within_caps, "over cap yet answerable: {}", format!("{:?}", (qs[0]["question"].as_str().unwrap().chars().count(), qs[0]["header"].as_str().unwrap().chars().count(), qs[0]["options"].as_array().unwrap().iter().map(|o| (o["label"].as_str().unwrap().chars().count(), o.get("description").map(|d| d.as_str().unwrap().chars().count()))).collect::<Vec<_>>())));
+        assert_eq!(qs.len(), 1);
+        let orig = &qs[0];
         let specs = question_specs(&payload.tool_input).expect("answerable needs valid specs");
         assert_eq!(specs.len(), 1);
         let shown = &obs.questions.as_ref().unwrap()[0];
-        assert_eq!(shown.text, specs[0].question.trim(), "question cut or altered");
+        let want = |v: &Value| v.as_str().unwrap().trim().to_owned();
+        assert_eq!(shown.text, want(&orig["question"]), "question cut or altered");
         assert!(shown.text.chars().count() <= DETAIL_CHARS);
-        assert_eq!(shown.header.as_deref(), Some(specs[0].header.trim()), "header cut or altered");
+        assert_eq!(shown.header.as_deref(), Some(want(&orig["header"]).as_str()), "header cut or altered");
         assert!(shown.header.as_deref().unwrap().chars().count() <= TITLE_CHARS);
-        assert_eq!(shown.options.len(), specs[0].options.len(), "options dropped");
-        for (o, (label, d)) in shown.options.iter().zip(&specs[0].options) {
-            assert_eq!(o.label, label.trim(), "label cut or altered");
-            assert_eq!(o.description.as_deref(), d.as_deref().map(str::trim), "description cut or altered");
+        let orig_opts = orig["options"].as_array().unwrap();
+        assert_eq!(shown.options.len(), orig_opts.len(), "options dropped");
+        for (o, w) in shown.options.iter().zip(orig_opts) {
+            assert_eq!(o.label, want(&w["label"]), "label cut or altered");
+            assert_eq!(o.description, w.get("description").map(want), "description cut or altered");
             assert!(!o.label.chars().any(char::is_control));
             assert!(o.description.as_deref().is_none_or(|d| d.chars().count() <= DESCRIPTION_CHARS));
         }
