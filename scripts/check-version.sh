@@ -64,6 +64,9 @@ check "apps/ios/src-tauri/Cargo.lock (agent-caller-ios)" \
 	"$(awk '/^name = "agent-caller-ios"$/ { getline; gsub(/^[^"]*"|"[^"]*$/, ""); print; exit }' apps/ios/src-tauri/Cargo.lock)"
 check "apps/ios/src-tauri/tauri.conf.json" "$(json_field apps/ios/src-tauri/tauri.conf.json version)"
 check "apps/ios/package.json" "$(json_field apps/ios/package.json version)"
+check "apps/android/Cargo.toml [package]" "$(toml_value "[package]" version apps/android/Cargo.toml)"
+check "apps/android/Cargo.lock (agent-caller-android)" \
+	"$(awk '/^name = "agent-caller-android"$/ { getline; gsub(/^[^"]*"|"[^"]*$/, ""); print; exit }' apps/android/Cargo.lock)"
 check "clients/omarchy/manifest.json" "$(json_field clients/omarchy/manifest.json version)"
 
 for manifest in crates/*/Cargo.toml; do

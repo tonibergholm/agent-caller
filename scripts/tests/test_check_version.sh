@@ -15,7 +15,7 @@ DRIFT=9.9.9-drift
 # VERSION to the workspace version of that copy.
 prepare_tree() {
 	_tree=$WORK/tree
-	mkdir -p "$_tree/app/src-tauri" "$_tree/apps/ios/src-tauri" "$_tree/clients/omarchy" "$_tree/crates"
+	mkdir -p "$_tree/app/src-tauri" "$_tree/apps/ios/src-tauri" "$_tree/apps/android" "$_tree/clients/omarchy" "$_tree/crates"
 	cp "$ROOT/CHANGELOG.md" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$_tree/"
 	cp "$ROOT/app/package.json" "$ROOT/app/package-lock.json" "$_tree/app/"
 	cp "$ROOT/app/src-tauri/Cargo.toml" "$ROOT/app/src-tauri/Cargo.lock" \
@@ -23,6 +23,7 @@ prepare_tree() {
 	cp "$ROOT/apps/ios/package.json" "$_tree/apps/ios/"
 	cp "$ROOT/apps/ios/src-tauri/Cargo.toml" "$ROOT/apps/ios/src-tauri/Cargo.lock" \
 		"$ROOT/apps/ios/src-tauri/tauri.conf.json" "$_tree/apps/ios/src-tauri/"
+	cp "$ROOT/apps/android/Cargo.toml" "$ROOT/apps/android/Cargo.lock" "$_tree/apps/android/"
 	cp "$ROOT/clients/omarchy/manifest.json" "$_tree/clients/omarchy/"
 	for _m in "$ROOT"/crates/*/Cargo.toml; do
 		_d=$(basename "$(dirname "$_m")")
@@ -123,6 +124,25 @@ version = \"$DRIFT\""
 	check_in_tree
 	assert_eq "$R_RC" 1 "exit status"
 	assert_contains "$R_ERR" "agent-caller-ios) is '$DRIFT'"
+}
+
+test_rejects_android_cargo_toml_drift() {
+	prepare_tree
+	replace "$WORK/tree/apps/android/Cargo.toml" "version = \"$VERSION\"" "version = \"$DRIFT\""
+	check_in_tree
+	assert_eq "$R_RC" 1 "exit status"
+	assert_contains "$R_ERR" "apps/android/Cargo.toml [package] is '$DRIFT'"
+}
+
+test_rejects_android_cargo_lock_drift() {
+	prepare_tree
+	replace "$WORK/tree/apps/android/Cargo.lock" \
+		"name = \"agent-caller-android\"
+version = \"$VERSION\"" "name = \"agent-caller-android\"
+version = \"$DRIFT\""
+	check_in_tree
+	assert_eq "$R_RC" 1 "exit status"
+	assert_contains "$R_ERR" "agent-caller-android) is '$DRIFT'"
 }
 
 test_rejects_omarchy_manifest_drift() {

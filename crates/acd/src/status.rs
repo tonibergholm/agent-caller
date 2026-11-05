@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
@@ -56,6 +57,10 @@ pub async fn status(dir: &Path) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), read_status(&mut ws, &mut out))
         .await
         .context("timed out waiting for the daemon's snapshot")??;
+    // From the config and push.json, not from the daemon.
+    if let Ok(cfg) = crate::config::Config::load(dir) {
+        writeln!(out, "{}", crate::push::report(dir, &cfg))?;
+    }
     finish(&mut std::io::stdout().lock(), &out)
 }
 

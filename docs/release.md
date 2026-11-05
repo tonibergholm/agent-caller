@@ -52,6 +52,9 @@ Notes on the choices:
    - `apps/ios/src-tauri/Cargo.toml`, the `agent-caller-ios` entry in
      `apps/ios/src-tauri/Cargo.lock`, `apps/ios/src-tauri/tauri.conf.json`
      and `apps/ios/package.json`
+   - `apps/android/Cargo.toml` and the `agent-caller-android` entry in
+     `apps/android/Cargo.lock` (the APK's version name is read from
+     `Cargo.toml` by `apps/android/build-apk.sh`)
    - `clients/omarchy/manifest.json`
 3. In `CHANGELOG.md`, add a `## [X.Y.Z] - YYYY-MM-DD` section above the
    entries in `[Unreleased]`, and move those entries into it.

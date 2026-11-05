@@ -679,6 +679,15 @@ push.status      {id}
   returns the cached result.
 - `push.*` never returns a handle or another device's state.
 
+*Implemented (acd side, PROTOCOL.md §5.1), differences from the text above:*
+`push.status` leaves `status` out when `registered` is false (there is no
+state to report). A daemon with push off answers `push.*` with
+`not_supported` (a pre-push daemon still answers `bad_request`, so clients
+treat both as "push not available"). `relay` is compared with the configured
+URL as normalized (a trailing `/` removed), not with the raw config text.
+`handle` must be 1 to 512 bytes of base64url, else `bad_request`. A write
+failure of `push.json` is `source_unavailable` and changes nothing.
+
 Logs: `client.id`, status and relay HTTP status. Never the handle.
 
 ### 5.2 Configuration (acd)
@@ -688,6 +697,23 @@ Logs: `client.id`, status and relay HTTP status. Never the handle.
 relay = "https://relay.example.net"   # absent: push off, no egress
 # relay_pin = "sha256:..."            # tailnet relay without a public cert
 ```
+
+*Implemented:* the key that works today is `ca_file`, not `relay_pin`:
+
+```toml
+[push]
+relay = "https://relay.example.net"
+ca_file = "/etc/ssl/certs/ca-certificates.crt"   # optional
+```
+
+`ca_file` is a PEM file; the relay's certificate must chain to a certificate
+in it, and nothing else is trusted (the sender has no built-in roots). It
+can be a CA bundle or the relay's own certificate, which covers the tailnet
+case without a hash verifier. Without it acd uses the first existing of
+`/etc/ssl/certs/ca-certificates.crt` and `/etc/ssl/cert.pem`; if none exists
+push is off with a reason. A `ca_file` that is not a string, cannot be read or
+holds no certificate turns push off, as does `ca_file` without `relay`.
+`relay_pin` still turns push off. See `docs/push.md`.
 
 Default: no `[push]` section, push off, no `push` capability, no outbound
 connection. The section is read separately from the rest of `config.toml`
@@ -707,6 +733,34 @@ is off, with a reason for `acd status`, when
 `acd push list` prints `client.id`, platform, status, last wake time.
 `acd push remove <client-id>` and `acd push test <client-id>` (sends one
 wake) are local CLI commands over `acd.sock`.
+
+*Implemented:* `acd push list` only, and it reads `push.json` directly (it
+never prints a handle). `remove` and `test` are not implemented: over
+`acd.sock` they need admin commands on acd/1, which is a wider wire change
+than §5.1, and the daemon is the only writer of `push.json`. A device removes
+itself with `push.unregister`. `acd status` gains a `push:` line (`off`,
+`off (reason)`, `on, N device(s)`, `degraded (reason)`) computed from the
+config and `push.json`, not from the running daemon.
+
+*Implemented, F3:* with a valid `[push]` and an unsafe or invalid `push.json`
+(loose mode, symlink, bad JSON, unknown field, bad handle, more than 8
+devices) the daemon starts with no registrations and still advertises `push`,
+but registering is refused (`source_unavailable`) while the file as a whole is
+unusable: it is never overwritten, so the operator repairs or removes it by
+hand. A single invalid entry is skipped, kept in `push.json.quarantine` at the
+next write, and the healthy entries are used. Token rotation (§4.8) clears the
+registrations, in memory and on disk. The reason is fixed text
+(never file content). `push.json` is deliberately not in the start-up mode
+preflight, which would make a loose mode fatal.
+
+*Implemented, sender:* the wake is triggered by the engine publishing
+`request.opened` (a hook called under the engine lock that takes no
+argument), coalesced per device by the 30 s debounce with one trailing wake.
+A burst is handled in one pass. At most 4 sends run at once, one per device
+(passes do not overlap), each under the sender's 5 s deadline. A wake outcome
+is applied only to the registration generation it was sent for, so a device
+that registers again mid-send keeps its fresh state. Wake state (status,
+failure streak, backoff, last wake) is persisted next to the handle.
 
 ### 5.3 Relay API
 
@@ -1081,7 +1135,7 @@ the same text.
 | Handles, push addresses | Not stored. Opened in memory per call. | Request duration. |
 | Pending challenges `{challenge_id → code_mac, binding_mac, attempts, expires_at}` (MACs under a per-boot key; no code, no address) | Memory, at most 256 | 120 s, or until used or burned. Expired entries are dropped by a sweep every 30 s, not only when the table is full. |
 | Rate-limit counters keyed by HMAC(handle), HMAC(address), HMAC(source IP /64 or /32) under a per-boot key | Memory, at most 4096 keys per map plus one overflow bucket each | Fixed windows of 1 minute and 1 hour (there is no day window). Entries whose windows (both) have ended are dropped by a sweep every 30 s, not only when a map is full. Lost on restart. |
-| Logs | stdout / journal | Fields: time, route, status, platform, 8 hex chars of HMAC(handle) (per-boot key). Never handles, addresses, codes, IPs, bodies, credentials. Third-party targets (axum, hyper, rustls) are pinned to `warn` whatever `RUST_LOG` says, because at `trace` `axum::serve` logs every peer address (found by `logs_never_contain_secrets`). Retention is the host's journal setting; recommend 7 days. |
+| Logs | stdout / journal | Fields: time, route, status, platform, 8 hex chars of HMAC(handle) (per-boot key). Never handles, addresses, codes, IPs, bodies, credentials. A ceiling applied after the `RUST_LOG` filter drops every event above `warn` from the targets `axum`, `hyper`, `hyper_util`, `h2`, `rustls` and `tokio_rustls` and their submodules, and no `RUST_LOG` directive, however specific (`rustls::client::hs=debug`), can raise it; at `trace` `axum::serve` logs every peer address and rustls can log the address of an OAuth endpoint (found by `logs_never_contain_secrets`; the ceiling is tested by `log_ceiling`). The guarantee covers those targets only: the relay's own code logs only the fields above, and a crate not in the list is not capped. Retention is the host's journal setting; recommend 7 days. |
 
 Metadata does exist even though the relay stores almost nothing: while a
 request is being handled the process sees the source IP, the handle and the

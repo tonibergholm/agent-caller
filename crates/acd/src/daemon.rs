@@ -494,6 +494,9 @@ pub async fn run(dir: &Path) -> Result<()> {
         machine,
         vec![herdr.clone(), t3.clone(), hooks.clone(), external.clone()],
     );
+    // Off unless `[push]` resolves: then the core advertises `push`, routes
+    // `push.*` commands and tells the sender when a request opens.
+    let push = crate::push::enable(dir, &cfg, &core);
     herdr.set_evidence(hooks.evidence());
     herdr.start(core.clone());
     t3.start(core.clone());
@@ -715,6 +718,7 @@ pub async fn run(dir: &Path) -> Result<()> {
     // Token rotation: re-read client.token every 2 s.
     let token_path = dir.join("client.token");
     let rot_auth = auth.clone();
+    let rot_push = push.clone();
     tokio::spawn(async move {
         let mut current = token;
         let mut invalid_logged = false;
@@ -724,6 +728,10 @@ pub async fn run(dir: &Path) -> Result<()> {
                 Ok(t) if t != current => {
                     tracing::info!("client token rotated");
                     rot_auth.rotate(t.clone());
+                    // Spec 4.8: the old holders of the token lose their wakes too.
+                    if let Some(p) = &rot_push {
+                        p.revoke_all().await;
+                    }
                     current = t;
                     invalid_logged = false;
                 }

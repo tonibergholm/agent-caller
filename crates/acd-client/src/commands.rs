@@ -719,3 +719,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mutants_commands.rs"]
+mod mutants_commands;

@@ -256,6 +256,16 @@ fn token_rotate_replaces_client_token() {
 }
 
 #[test]
+fn token_rotate_client_deletes_push_registrations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("acd");
+    assert!(acd(&dir).arg("init").output().unwrap().status.success());
+    std::fs::write(dir.join("push.json"), "{}").unwrap();
+    assert!(acd(&dir).args(["token", "rotate", "client"]).output().unwrap().status.success());
+    assert!(!dir.join("push.json").exists());
+}
+
+#[test]
 fn loose_token_mode_is_refused_with_fix() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("acd");
