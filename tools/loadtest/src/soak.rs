@@ -113,7 +113,7 @@ pub async fn run(a: Args) -> Result<(), String> {
         stop_rx.clone(),
     );
 
-    let mut csv = std::fs::File::create(&csv_path).map_err(|e| e.to_string())?;
+    let mut csv = crate::workdir::create_fresh(&csv_path)?;
     writeln!(csv, "{HEADER}").map_err(|e| e.to_string())?;
     let started = Instant::now();
     let mut w = Windows::default();
@@ -239,7 +239,7 @@ pub async fn run(a: Args) -> Result<(), String> {
     line(&mut out, "fds_last_10pct_median", median_of(&fd_series, 0.9, 1.0).to_string());
     line(&mut out, "errors", format!("{:?}", m.errors.lock().unwrap()));
     line(&mut out, "resolved_by_for_answered", format!("{:?}", m.resolved_by.lock().unwrap()));
-    std::fs::write(&summary_path, &out).map_err(|e| e.to_string())?;
+    crate::workdir::write_atomic(&summary_path, out.as_bytes())?;
     print!("{out}");
     proc.stop(true);
     Ok(())

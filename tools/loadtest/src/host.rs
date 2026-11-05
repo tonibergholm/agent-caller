@@ -88,19 +88,46 @@ fn write_token(tok: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// Removes a leftover socket of an earlier run in this run directory; anything that is not a
-/// socket owned by the current user is refused and left alone.
+/// The inode of the socket this tool bound, recorded beside it.
+fn sock_record(sock: &std::path::Path) -> std::path::PathBuf {
+    sock.with_file_name("acd.sock.ino")
+}
+
+fn read_record(path: &std::path::Path) -> Option<u64> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path).ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut s = String::new();
+    f.take(64).read_to_string(&mut s).ok()?;
+    s.trim().parse().ok()
+}
+
+/// Prepares the socket path. A missing path is fine. An existing one is unlinked only when it
+/// is a socket whose inode this tool recorded when it bound it, and nothing answers on it.
+/// Anything else (a foreign socket, a live host, an unrecorded file) is refused and left alone.
 fn clear_stale_socket(sock: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    match std::fs::symlink_metadata(sock) {
-        // SAFETY: geteuid has no preconditions.
-        Ok(m) if m.file_type().is_socket() && m.uid() == unsafe { libc::geteuid() } => {
-            std::fs::remove_file(sock).map_err(|e| format!("socket: {}", e.kind()))
-        }
-        Ok(_) => Err(format!("refusing {}: exists and is not a socket this tool created", sock.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("socket: {}", e.kind())),
+    let m = match std::fs::symlink_metadata(sock) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("socket: {}", e.kind())),
+    };
+    let refuse = |why: &str| Err(format!("refusing {}: {why}", sock.display()));
+    if !m.file_type().is_socket() {
+        return refuse("exists and is not a socket this tool created");
     }
+    if read_record(&sock_record(sock)) != Some(m.ino()) {
+        return refuse("a socket this tool did not create");
+    }
+    match std::os::unix::net::UnixStream::connect(sock) {
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {}
+        Ok(_) => return refuse("another host is listening on it"),
+        Err(e) => return refuse(&format!("cannot prove it is stale ({})", e.kind())),
+    }
+    std::fs::remove_file(sock).map_err(|e| format!("socket: {}", e.kind()))
 }
 
 pub async fn run(a: HostArgs) -> Result<(), String> {
@@ -116,6 +143,11 @@ pub async fn run(a: HostArgs) -> Result<(), String> {
     clear_stale_socket(&sock)?;
     let listener = tokio::net::UnixListener::bind(&sock).map_err(|e| e.to_string())?;
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    {
+        use std::os::unix::fs::MetadataExt;
+        let ino = std::fs::symlink_metadata(&sock).map_err(|e| e.to_string())?.ino();
+        crate::workdir::write_atomic(&sock_record(&sock), ino.to_string().as_bytes())?;
+    }
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -131,10 +163,7 @@ pub async fn run(a: HostArgs) -> Result<(), String> {
                     "{{\"agents\":{},\"requests\":{},\"keys\":{},\"seen\":{},\"idem\":{},\"ring\":{},\"receivers\":{},\"tasks\":{}}}",
                     s.agents, s.requests, s.keys, s.seen, s.idem, s.ring, s.receivers, tasks
                 );
-                let tmp = dir.join("sizes.json.tmp");
-                if std::fs::write(&tmp, body).is_ok() {
-                    let _ = std::fs::rename(&tmp, dir.join("sizes.json"));
-                }
+                let _ = crate::workdir::write_atomic(&dir.join("sizes.json"), body.as_bytes());
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         });
@@ -157,7 +186,7 @@ pub async fn run(a: HostArgs) -> Result<(), String> {
                     tokio::spawn(one_shot(j, a.clone(), core.clone(), adapter.clone(), counter.clone()));
                 }
             }
-            _ = term.recv() => { let _ = std::fs::remove_file(&sock); return Ok(()); }
+            _ = term.recv() => { let _ = std::fs::remove_file(&sock); let _ = std::fs::remove_file(sock_record(&sock)); return Ok(()); }
         }
     }
 }
@@ -299,6 +328,50 @@ mod tests {
         std::fs::write(d.join("run/acd.sock"), b"not a socket").unwrap();
         assert!(run(args(d.join("run"))).await.is_err());
         assert_eq!(std::fs::read(d.join("run/acd.sock")).unwrap(), b"not a socket");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    #[tokio::test]
+    async fn a_live_foreign_listener_at_the_socket_path_is_not_unlinked() {
+        let d = scratch("foreign");
+        crate::workdir::claim(&d.join("run")).unwrap();
+        let l = std::os::unix::net::UnixListener::bind(d.join("run/acd.sock")).unwrap();
+        assert!(run(args(d.join("run"))).await.is_err());
+        assert!(std::os::unix::net::UnixStream::connect(d.join("run/acd.sock")).is_ok());
+        drop(l);
+        // A dead foreign socket is no more ours: it has no record.
+        assert!(run(args(d.join("run"))).await.is_err());
+        assert!(d.join("run/acd.sock").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_second_host_refuses_and_leaves_the_running_host_alone() {
+        let d = scratch("second");
+        crate::workdir::claim(&d.join("run")).unwrap();
+        let first = tokio::spawn(run(args(d.join("run"))));
+        let sock = d.join("run/acd.sock");
+        while std::os::unix::net::UnixStream::connect(&sock).is_err() {
+            tokio::task::yield_now().await;
+        }
+        assert!(run(args(d.join("run"))).await.is_err());
+        assert!(std::os::unix::net::UnixStream::connect(&sock).is_ok());
+        first.abort();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_this_tool_recorded_is_replaced() {
+        let d = scratch("stale");
+        crate::workdir::claim(&d.join("run")).unwrap();
+        let sock = d.join("run/acd.sock");
+        drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        {
+            use std::os::unix::fs::MetadataExt;
+            let ino = std::fs::symlink_metadata(&sock).unwrap().ino();
+            crate::workdir::write_atomic(&sock_record(&sock), ino.to_string().as_bytes()).unwrap();
+        }
+        assert!(clear_stale_socket(&sock).is_ok());
+        assert!(!sock.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

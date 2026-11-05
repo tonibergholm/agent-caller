@@ -28,6 +28,53 @@ fn write_marker(dir: &Path, text: &[u8]) -> Result<(), String> {
     f.write_all(text).map_err(|e| format!("marker: {}", e.kind()))
 }
 
+/// Creates `path` fresh: an existing file or link at the path is unlinked (never followed),
+/// then the file is created with O_EXCL and mode 0600. A directory there is refused.
+pub fn create_fresh(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("refusing {}: {}", path.display(), e.kind())),
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{}: {}", path.display(), e.kind()))
+}
+
+/// Writes `body` to `path` through a uniquely named temp file created with O_EXCL (a
+/// pre-existing or linked temp name is refused, never followed), then renames it over `path`.
+/// The rename replaces a link at `path` itself and never writes through it.
+pub fn write_atomic(path: &Path, body: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let name = path.file_name().ok_or("no file name")?.to_string_lossy().into_owned();
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}.{}.{}.tmp",
+        std::process::id(),
+        crate::rng::now_us(),
+        N.fetch_add(1, Relaxed)
+    ));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|e| format!("{}: {}", tmp.display(), e.kind()))?;
+    let done = f.write_all(body).and_then(|()| f.flush());
+    drop(f);
+    if let Err(e) = done.and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {}", path.display(), e.kind()));
+    }
+    Ok(())
+}
+
 fn real_config_dir() -> Option<PathBuf> {
     let d = std::env::var_os("ACD_CONFIG_DIR")
         .map(PathBuf::from)
@@ -179,6 +226,25 @@ mod tests {
         std::fs::write(d.join(MARKER), b"mine").unwrap();
         prepare(&d).unwrap();
         assert_eq!(std::fs::read(d.join(MARKER)).unwrap(), b"mine");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    #[test]
+    fn a_symlinked_temp_name_never_truncates_its_target() {
+        let d = std::env::temp_dir().join(format!("lt-wa-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let target = d.join("valuable");
+        std::fs::write(&target, b"keep").unwrap();
+        // The old fixed temp name, and a link planted at the final name.
+        std::os::unix::fs::symlink(&target, d.join("sizes.json.tmp")).unwrap();
+        std::os::unix::fs::symlink(&target, d.join("sizes.json")).unwrap();
+        write_atomic(&d.join("sizes.json"), b"{}").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        assert_eq!(std::fs::read(d.join("sizes.json")).unwrap(), b"{}");
+        std::os::unix::fs::symlink(&target, d.join("soak.csv")).unwrap();
+        use std::io::Write;
+        create_fresh(&d.join("soak.csv")).unwrap().write_all(b"h").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -66,11 +66,10 @@ impl Proc {
             if !out.status.success() {
                 return Err(format!("acd init failed: {}", String::from_utf8_lossy(&out.stderr)));
             }
-            std::fs::write(
-                self.dir.join("config.toml"),
-                format!("port = {}\nhook_port = {}\nlisten = [\"127.0.0.1\"]\n", self.ports.0, self.ports.1),
-            )
-            .map_err(|e| e.to_string())?;
+            crate::workdir::write_atomic(
+                &self.dir.join("config.toml"),
+                format!("port = {}\nhook_port = {}\nlisten = [\"127.0.0.1\"]\n", self.ports.0, self.ports.1).as_bytes(),
+            )?;
         }
         Ok(())
     }
@@ -82,9 +81,11 @@ impl Proc {
     }
 
     pub async fn start(&mut self) -> Result<(), String> {
+        use std::os::unix::fs::OpenOptionsExt;
         let log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(self.dir.join("process.log"))
             .map_err(|e| e.to_string())?;
         let mut cmd = match &self.target {
