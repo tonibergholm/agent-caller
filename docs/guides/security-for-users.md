@@ -47,13 +47,17 @@ then pair every client again. A client that sees a different certificate than
 its pin shows "Server identity changed. Re-pair this machine." and does not
 connect. Do not re-pair until you know why the certificate changed.
 
-Hook token (for example `settings.json` was committed or shared):
+Hook token (for example `settings.json` was committed or shared). First stop
+tracking the file: `acd token rotate hook` and `acd hooks install` both refuse
+to touch a Git-tracked settings file, and the refusal happens before the token
+changes, so rotating first revokes nothing.
 
 ```sh
+git rm --cached <path-to-settings.json>
 acd token rotate hook
 ```
 
-Rotation alone does not revoke the leaked token. The daemon keeps the previous
+One rotation does not revoke the leaked token. The daemon keeps the previous
 token valid for Claude sessions that started before the rotation, until they
 exit or use the new token, at most 30 days. To cut the leaked token off now,
 rotate a second time, which drops it:
@@ -62,11 +66,12 @@ rotate a second time, which drops it:
 acd token rotate hook --force
 ```
 
-Restart or `/clear` Claude sessions that still fail with a retired token.
-Then remove the leaked file from the repository history. See
-[hooks-claude-code-and-codex.md](hooks-claude-code-and-codex.md). `acd hooks
-install` refuses to write into a Git-tracked file unless you pass
-`--allow-tracked`.
+If the first rotation reports that it could not update every settings file,
+fix that before the second rotation. The running daemon picks up the change on
+its next refresh, normally within about two seconds. Restart or `/clear`
+Claude sessions that still fail with a retired token. Then remove the leaked
+file from the repository history. See
+[hooks-claude-code-and-codex.md](hooks-claude-code-and-codex.md).
 
 T3 token: revoke it in T3, issue a new one, and save it to
 `~/.config/acd/t3.token` with mode 0600.
