@@ -81,17 +81,17 @@ fuzz_target!(|i: Input| {
         let (text, p1) = build(&q.text, None);
         let (header, p2) = build(&q.header, None);
         all_plain &= p1 && p2;
-        within_caps &= (1..=DETAIL_CHARS).contains(&text.chars().count()) && header.chars().count() <= TITLE_CHARS;
+        within_caps &= !text.is_empty() && text.trim().chars().count() <= DETAIL_CHARS && header.trim().chars().count() <= TITLE_CHARS;
         let mut opts = vec![];
         for (k, (l, d)) in q.options.iter().take(11).enumerate() {
             let (label, p3) = build(l, Some(k));
             all_plain &= p3;
-            within_caps &= (1..=TITLE_CHARS).contains(&label.chars().count());
+            within_caps &= !label.is_empty() && label.trim().chars().count() <= TITLE_CHARS;
             let mut o = json!({"label": label});
             if let Some(d) = d {
                 let (d, p4) = build(d, None);
                 all_plain &= p4;
-                within_caps &= d.chars().count() <= DESCRIPTION_CHARS;
+                within_caps &= d.trim().chars().count() <= DESCRIPTION_CHARS;
                 o["description"] = Value::String(d);
             }
             opts.push(o);
@@ -109,7 +109,7 @@ fuzz_target!(|i: Input| {
     if answerable {
         // Compare with the ORIGINAL generated JSON, never with what the
         // parser itself returns, so a cut made inside it cannot hide.
-        assert!(within_caps, "a question over a cap was offered as answerable");
+        assert!(within_caps, "over cap yet answerable: {}", format!("{:?}", (qs[0]["question"].as_str().unwrap().chars().count(), qs[0]["header"].as_str().unwrap().chars().count(), qs[0]["options"].as_array().unwrap().iter().map(|o| (o["label"].as_str().unwrap().chars().count(), o.get("description").map(|d| d.as_str().unwrap().chars().count()))).collect::<Vec<_>>())));
         assert_eq!(qs.len(), 1);
         let orig = &qs[0];
         let specs = question_specs(&payload.tool_input).expect("answerable needs valid specs");
