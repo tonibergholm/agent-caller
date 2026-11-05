@@ -13,6 +13,7 @@ rust-version = "1.90"
 acd-client = { path = "crates/acd-client" }
 acd-inbox = { path = "crates/acd-inbox" }
 acd-protocol = { path = "crates/acd-protocol" }
+acd-relay = { path = "crates/acd-relay", default-features = false, features = ["client"] }
 acd-core = { path = "crates/acd-core" }
 acd-adapters = { path = "crates/acd-adapters" }
 acd-securefs = { path = "crates/acd-securefs" }
