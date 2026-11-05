@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use acd_protocol::*;
@@ -8,6 +8,7 @@ use tokio::sync::broadcast;
 use crate::adapter::{Adapter, DeliverError};
 use crate::idem::{Begin, IdemCache, Origin};
 use crate::log::EventLog;
+use crate::push::{PushControl, PushRegistration};
 use crate::registry::{Answer, Change, CorrelationKey, Observation, Registry};
 
 pub const RING_CAPACITY: usize = 1000;
@@ -16,6 +17,10 @@ pub const IDEM_TTL: Duration = Duration::from_secs(900);
 pub const MAX_ID_BYTES: usize = 128;
 /// Longest answer or follow-up `text`, in bytes.
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
+/// Longest `push.register` handle, in bytes (relay spec §5.3.2).
+pub const MAX_PUSH_HANDLE_BYTES: usize = 512;
+/// Longest `push.register` relay URL, in bytes.
+pub const MAX_PUSH_RELAY_BYTES: usize = 2048;
 
 struct Inner {
     machine: Machine,
@@ -66,10 +71,27 @@ fn apply_bounded(registry: &mut Registry, obs: Observation) -> Vec<Change> {
     registry.apply(obs)
 }
 
+/// How many entries each of the core's tables holds. Enabled by the
+/// `testing` feature; used by leak tests and the load-test harness.
+#[cfg(any(test, feature = "testing"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sizes {
+    pub agents: usize,
+    pub requests: usize,
+    /// Correlation-key states, including those of resolved requests.
+    pub keys: usize,
+    pub seen: usize,
+    pub idem: usize,
+    pub ring: usize,
+    pub receivers: usize,
+}
+
 pub struct Core {
     inner: Mutex<Inner>,
     events: broadcast::Sender<ServerMessage>,
     adapters: Vec<Arc<dyn Adapter>>,
+    /// Set once at start-up when `[push]` is on (see `crate::push`).
+    push: OnceLock<Arc<dyn PushControl>>,
 }
 
 impl Core {
@@ -85,7 +107,22 @@ impl Core {
             }),
             events,
             adapters,
+            push: OnceLock::new(),
         })
+    }
+
+    /// Turns push on: `welcome` then advertises `push`, `push.*` commands go
+    /// to `push` and it hears of every opened request. Only the first call
+    /// has an effect; returns whether it was that one.
+    pub fn set_push(&self, push: Arc<dyn PushControl>) -> bool {
+        self.push.set(push).is_ok()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn sizes(&self) -> Sizes {
+        let st = self.inner.lock().unwrap();
+        let (agents, requests, keys, seen) = st.registry.sizes();
+        Sizes { agents, requests, keys, seen, idem: st.idem.entry_count(), ring: st.log.held(), receivers: self.events.receiver_count() }
     }
 
     pub fn epoch(&self) -> String {
@@ -156,7 +193,12 @@ impl Core {
         let st = self.inner.lock().unwrap();
         ServerMessage::Welcome {
             machine: st.machine.clone(),
-            capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+            capabilities: CAPABILITIES
+                .iter()
+                .copied()
+                .chain(self.push.get().map(|_| "push"))
+                .map(str::to_string)
+                .collect(),
             epoch: st.log.epoch().to_string(),
             seq: st.log.seq(),
         }
@@ -218,7 +260,7 @@ impl Core {
                 );
             }
             let phase = Mutex::new(Phase::Start);
-            return self.execute(&id, msg, &phase).await.0;
+            return self.execute(client_id, &id, msg, &phase).await.0;
         }
         let begin = self
             .inner
@@ -263,7 +305,7 @@ impl Core {
             phase: Mutex::new(Phase::Start),
             armed: true,
         };
-        let (result, delivery) = self.execute(&id, msg, &guard.phase).await;
+        let (result, delivery) = self.execute(client_id, &id, msg, &guard.phase).await;
         guard.armed = false;
         // Only a command that reached the agent is cached (exactly-once). Any
         // refusal changed no state and is cheap to recompute, so it releases
@@ -281,6 +323,7 @@ impl Core {
 
     async fn execute(
         &self,
+        client_id: &str,
         id: &str,
         msg: ClientMessage,
         phase: &Mutex<Phase>,
@@ -447,6 +490,38 @@ impl Core {
                 }
                 CommandResult::ok(id)
             }
+            ClientMessage::PushRegister {
+                relay,
+                handle,
+                platform,
+                expires_at,
+                ..
+            } => match self.push.get() {
+                None => push_off(id),
+                Some(push) => {
+                    let reg = PushRegistration {
+                        relay,
+                        handle,
+                        platform,
+                        expires_at,
+                    };
+                    match push.register(client_id, reg).await {
+                        Ok(()) => CommandResult::ok(id),
+                        Err(f) => CommandResult::err(id, f.code, f.message),
+                    }
+                }
+            },
+            ClientMessage::PushUnregister { .. } => match self.push.get() {
+                None => push_off(id),
+                Some(push) => match push.unregister(client_id).await {
+                    Ok(()) => CommandResult::ok(id),
+                    Err(f) => CommandResult::err(id, f.code, f.message),
+                },
+            },
+            ClientMessage::PushStatus { .. } => match self.push.get() {
+                None => push_off(id),
+                Some(push) => CommandResult::push_status(id, push.status(client_id).await),
+            },
             ClientMessage::Hello { .. } | ClientMessage::Ping { .. } => {
                 unreachable!("rejected in Core::handle")
             }
@@ -469,10 +544,17 @@ impl Core {
 
     fn publish(&self, st: &mut Inner, changes: Vec<Change>) {
         for change in changes {
+            if let (Change::RequestOpened(_), Some(push)) = (&change, self.push.get()) {
+                push.request_opened();
+            }
             let msg = st.log.record(change);
             let _ = self.events.send(msg);
         }
     }
+}
+
+fn push_off(id: &str) -> CommandResult {
+    CommandResult::err(id, ErrorCode::NotSupported, "push is not enabled on this daemon")
 }
 
 /// Size limits on a command's ids and text (PROTOCOL.md §1, Limits).
@@ -486,6 +568,20 @@ fn check_limits(msg: &ClientMessage) -> Result<(), &'static str> {
         } => (vec![id, request_id], text.as_deref()),
         ClientMessage::AgentSend { id, agent_id, text } => (vec![id, agent_id], Some(text)),
         ClientMessage::AgentMarkSeen { id, agent_id } => (vec![id, agent_id], None),
+        ClientMessage::PushRegister {
+            id, relay, handle, ..
+        } => {
+            if relay.len() > MAX_PUSH_RELAY_BYTES {
+                return Err("relay longer than 2048 bytes");
+            }
+            if handle.len() > MAX_PUSH_HANDLE_BYTES {
+                return Err("handle longer than 512 bytes");
+            }
+            (vec![id], None)
+        }
+        ClientMessage::PushUnregister { id } | ClientMessage::PushStatus { id } => {
+            (vec![id], None)
+        }
         ClientMessage::Hello { .. } | ClientMessage::Ping { .. } => (vec![], None),
     };
     if ids.iter().any(|s| s.len() > MAX_ID_BYTES) {

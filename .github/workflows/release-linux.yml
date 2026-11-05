@@ -1,0 +1,198 @@
+name: Release Linux
+
+# Linux packaging bundles for acd and the Omarchy plugin. Separate from
+# release.yml, which owns the v* tags and its own draft release. Two workflows
+# creating a draft for the same tag would delete or collide with each other,
+# so this one answers to its own tag, linux-vX.Y.Z (X.Y.Z must be the version
+# in the manifests), and to workflow_dispatch.
+#
+# Tag push (linux-v*): CI gate, build, then a DRAFT pre-release named after the
+# tag. The owner reviews and publishes it by hand.
+# workflow_dispatch: the same build. No release is created; the run uploads a
+# dist-linux artifact with SHA256SUMS.
+#
+# No signing and no publishing to the AUR yet. Needed for both: docs/packaging.md.
+# No secret is used. The only token is the job's GITHUB_TOKEN, and only the
+# draft job gets contents: write.
+
+on:
+  push:
+    tags:
+      - "linux-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-linux-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Check versions
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      epoch: ${{ steps.version.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check version fields and CHANGELOG
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = "tag" ]; then
+            ver=${REF_NAME#linux-v}
+            if [ "$ver" = "$REF_NAME" ] || [ -z "$ver" ]; then
+              echo "::error::Tag $REF_NAME must look like linux-vX.Y.Z."
+              exit 1
+            fi
+            version=$(scripts/check-version.sh "v$ver")
+          else
+            version=$(scripts/check-version.sh)
+            echo "Dry run on $REF_NAME, so the tag is not checked."
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # The commit time, so the archives carry the same timestamps on every build.
+          echo "epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+          echo "Version $version"
+
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: ${{ matrix.target }}
+    needs: [prepare, ci]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners, as in release.yml: glibc floor 2.35, and each
+          # binary is run once after packaging.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable (branch head at pin time)
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: linux-${{ matrix.target }}
+      - name: Build acd and acd-inbox
+        env:
+          TARGET: ${{ matrix.target }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+        run: |
+          set -euo pipefail
+          # Same flags as the PKGBUILDs: no build path or registry path in the binary.
+          export RUSTFLAGS="--remap-path-prefix=$PWD=/build/agent-caller --remap-path-prefix=$HOME/.cargo=/cargo"
+          cargo build --release --locked --target "$TARGET" -p acd -p acd-inbox
+          strip "target/$TARGET/release/acd" "target/$TARGET/release/acd-inbox"
+      - name: Package tarball
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+        run: |
+          set -euo pipefail
+          name="agent-caller-linux-$VERSION-$TARGET"
+          stage="$RUNNER_TEMP/$name"
+          rm -rf "$stage"
+          mkdir -p "$stage/bin" "$stage/systemd" "$stage/omarchy/tonibergholm.agentcaller" dist
+          cp "target/$TARGET/release/acd" "target/$TARGET/release/acd-inbox" "$stage/bin/"
+          cp packaging/systemd/acd.service packaging/systemd/acd-inbox.service "$stage/systemd/"
+          # The plugin files the installer embeds, as the Arch package lists them.
+          for f in manifest.json BarWidget.qml Panel.qml Service.qml model.mjs; do
+            cp "clients/omarchy/$f" "$stage/omarchy/tonibergholm.agentcaller/$f"
+          done
+          cp packaging/smoke-test.sh LICENSE "$stage/"
+          # Fixed order, owner and times, and no gzip timestamp: the same
+          # inputs give the same archive.
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime="@$SOURCE_DATE_EPOCH" --format=gnu \
+            -C "$RUNNER_TEMP" -cf - "$name" | gzip -n -9 > "dist/$name.tar.gz"
+          tar -tzf "dist/$name.tar.gz"
+      - name: Run the packaged binaries
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          out=$(mktemp -d)
+          tar -xzf "dist/agent-caller-linux-$VERSION-$TARGET.tar.gz" -C "$out"
+          root="$out/agent-caller-linux-$VERSION-$TARGET"
+          test "$("$root/bin/acd" --version)" = "acd $VERSION"
+          test "$("$root/bin/acd-inbox" --version)" = "acd-inbox $VERSION"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-linux-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          overwrite: true
+
+  checksums:
+    name: SHA256SUMS
+    needs: [build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Write and check SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum -- *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-linux
+          path: dist
+          if-no-files-found: error
+          overwrite: true
+
+  draft:
+    name: Draft release
+    needs: [prepare, checksums]
+    if: github.ref_type == 'tag' && github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-linux
+          path: dist
+      - name: Create the draft pre-release
+        # Never replaces or edits a release. If one exists for this tag
+        # (draft or published), the job stops and says so: delete the draft by
+        # hand and re-run.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::error::A release for $TAG already exists. Delete the draft by hand, then re-run."
+            exit 1
+          fi
+          scripts/release-notes.sh "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" dist/* \
+            --draft --prerelease --verify-tag \
+            --title "$TAG (Linux packages)" --notes-file "$RUNNER_TEMP/notes.md"

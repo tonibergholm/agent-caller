@@ -1,0 +1,27 @@
+frame_in_1MiB_text=pong returned (1048576 bytes)
+frame_in_1MiB+1_text=no pong: error: IO error: Connection reset by peer (os error 104)
+agent_send_text_64KiB=result code=agent_gone 
+agent_send_text_64KiB+1=result code=bad_request 
+hello_client_id_129_bytes=close Some((4401, "invalid hello"))
+unix_preauth_first_refusal=HTTP/1.1 503
+unix_preauth_upgrades_of_12=accepted=8 refused=4
+unix_preauth_slot_free_after_hello_timeout=true
+tcp_one_ip_5_connections=held=2 closed=3
+tcp_24_ips_x2_connections=held=16 closed=32
+tcp_still_open_after_11s=0
+tcp_new_connection_after_release_is_held=true
+hook_141st_connection_with_128_idle=no answer (timeout)
+hook_idle_connection_closed_after_s=7.2
+hook_request_after_release=answered 200
+idem_flood_17000_commands_s=4.9
+idem_flood_first_refused_command_index=16383
+idem_flood_other_client_next_command=bad_request: too many recent commands; retry later
+agents_1000=n=1000 detail_bytes=0 snapshot_bytes=688537 client_online=true client_agents=1000 connection_ends_in_15s=0 status="Online"
+agents_1001=n=1001 detail_bytes=0 snapshot_bytes=689231 client_online=false client_agents=0 connection_ends_in_15s=4 status="Connecting"
+agents_1100=n=1100 detail_bytes=0 snapshot_bytes=757937 client_online=false client_agents=0 connection_ends_in_15s=4 status="Connecting"
+agents_big_100=n=100 detail_bytes=4000 snapshot_bytes=468435 client_online=true client_agents=100 connection_ends_in_15s=0 status="Online"
+agents_big_200=n=200 detail_bytes=4000 snapshot_bytes=937335 client_online=true client_agents=200 connection_ends_in_15s=0 status="Online"
+agents_big_300=n=300 detail_bytes=4000 snapshot_bytes=1406235 client_online=false client_agents=0 connection_ends_in_15s=4 status="Connecting"
+agents_big_400=n=400 detail_bytes=4000 snapshot_bytes=1875136 client_online=false client_agents=0 connection_ends_in_15s=4 status="Connecting"
+agents_big_600=n=600 detail_bytes=4000 snapshot_bytes=2812936 client_online=false client_agents=0 connection_ends_in_15s=4 status="Connecting"
+agents_big_1000=n=1000 detail_bytes=4000 snapshot_bytes=4688537 client_online=false client_agents=0 connection_ends_in_15s=4 status="Connecting"

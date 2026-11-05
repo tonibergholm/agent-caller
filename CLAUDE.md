@@ -28,7 +28,12 @@ protocol. The reference client is a Tauri menubar app for macOS.
   speech bridge in `app/src-tauri/swift`. It is excluded from the Cargo
   workspace.
 - `apps/ios/`: iOS shell (`apps/ios/src-tauri`) for the foreground inbox over Tailscale. Own Cargo workspace, like `app/src-tauri`.
+- `apps/android/`: Android shell (Rust + JNI + a Java activity, no Tauri) for the foreground inbox over Tailscale. Own Cargo workspace. See `docs/android.md`; its tests are `just android-test`, not part of the root workspace.
 - `tests/fixtures/`: recorded herdr screens and other fixtures.
+- `tests/redteam/`: Python reproducers for the red-team findings (not run in CI).
+- `scripts/`: install, version check, release notes and `portability-check.sh`.
+- `docs/`: start at `docs/README.md`. `docs/windows.md` is the Windows groundwork (type-checked only), `docs/release.md` the release steps.
+- `SECURITY.md`: threat model and how to report.
 
 ## Docs
 

@@ -1,0 +1,1262 @@
+//! Push: registration, storage, the wake sender and its failure rules, against
+//! a fake relay. The same chain through the real relay is in `e2e.rs`.
+//!
+//! Handles are secrets: no assertion here prints one.
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use acd_core::testing::{agent_obs, permission_obs, test_machine};
+use acd_core::{Core, Observation};
+use acd_protocol::*;
+use acd_relay::ManualClock;
+use acd_relay::client::{MAX_RESPONSE, Status, WakeState};
+use acd_relay::http::HttpClient;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::routing::post;
+use tokio::sync::{Semaphore, watch};
+
+use super::*;
+
+pub const T0: u64 = 1_800_000_000;
+const NO_WINDOW: Settings = Settings { min_interval: Duration::ZERO, max_concurrent: MAX_CONCURRENT };
+
+/// A handle that looks like one and is unique per `name`.
+pub fn handle_for(name: &str) -> String {
+    format!("H{name}-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+}
+
+#[derive(Clone)]
+pub struct Reply {
+    pub status: u16,
+    pub body: Vec<u8>,
+    pub location: Option<String>,
+}
+
+impl Reply {
+    pub fn status(status: u16) -> Reply {
+        Reply { status, body: vec![], location: None }
+    }
+    pub fn json(status: u16, body: &str) -> Reply {
+        Reply { status, body: body.as_bytes().to_vec(), location: None }
+    }
+}
+
+/// A relay that records what it is sent and answers as scripted.
+pub struct FakeRelay {
+    pub url: RelayUrl,
+    bodies: Mutex<Vec<String>>,
+    replies: Mutex<VecDeque<Reply>>,
+    default: Mutex<Reply>,
+    hits: watch::Sender<usize>,
+    in_flight: watch::Sender<usize>,
+    max_in_flight: AtomicUsize,
+    gate: Mutex<Option<Arc<Semaphore>>>,
+    hang: AtomicBool,
+}
+
+impl FakeRelay {
+    /// A relay value that is never listened on (only its URL is used).
+    pub fn unbound() -> FakeRelay {
+        FakeRelay {
+            url: RelayUrl::for_tests("http://relay.invalid"),
+            bodies: Mutex::default(),
+            replies: Mutex::default(),
+            default: Mutex::new(Reply::status(204)),
+            hits: watch::channel(0).0,
+            in_flight: watch::channel(0).0,
+            max_in_flight: AtomicUsize::new(0),
+            gate: Mutex::new(None),
+            hang: AtomicBool::new(false),
+        }
+    }
+
+    pub async fn start() -> Arc<FakeRelay> {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = RelayUrl::for_tests(&format!("http://{}", l.local_addr().unwrap()));
+        let relay = Arc::new(FakeRelay {
+            url,
+            bodies: Mutex::default(),
+            replies: Mutex::default(),
+            default: Mutex::new(Reply::status(204)),
+            hits: watch::channel(0).0,
+            in_flight: watch::channel(0).0,
+            max_in_flight: AtomicUsize::new(0),
+            gate: Mutex::default(),
+            hang: AtomicBool::new(false),
+        });
+        async fn wake(State(f): State<Arc<FakeRelay>>, body: String) -> (StatusCode, HeaderMap, Vec<u8>) {
+            f.bodies.lock().unwrap().push(body);
+            f.hits.send_modify(|n| *n += 1);
+            f.in_flight.send_modify(|n| {
+                *n += 1;
+                f.max_in_flight.fetch_max(*n, Ordering::SeqCst);
+            });
+            struct Leave<'a>(&'a FakeRelay);
+            impl Drop for Leave<'_> {
+                fn drop(&mut self) {
+                    self.0.in_flight.send_modify(|n| *n -= 1);
+                }
+            }
+            let _leave = Leave(&f);
+            let gate = f.gate.lock().unwrap().clone();
+            if let Some(g) = gate {
+                drop(g.acquire().await.unwrap());
+            }
+            if f.hang.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            let r = f.replies.lock().unwrap().pop_front().unwrap_or_else(|| f.default.lock().unwrap().clone());
+            let mut h = HeaderMap::new();
+            if let Some(l) = &r.location {
+                h.insert(header::LOCATION, l.parse().unwrap());
+            }
+            (StatusCode::from_u16(r.status).unwrap(), h, r.body)
+        }
+        let app = axum::Router::new().route("/v1/wake", post(wake)).with_state(relay.clone());
+        tokio::spawn(async move { axum::serve(l, app).await });
+        relay
+    }
+
+    pub fn reply(&self, r: Reply) {
+        self.replies.lock().unwrap().push_back(r);
+    }
+    pub fn set_default(&self, r: Reply) {
+        *self.default.lock().unwrap() = r;
+    }
+    pub fn hits(&self) -> usize {
+        *self.hits.borrow()
+    }
+    pub async fn wait_hits(&self, n: usize) {
+        let _ = self.hits.subscribe().wait_for(|h| *h >= n).await;
+    }
+    pub async fn wait_in_flight(&self, n: usize) {
+        let _ = self.in_flight.subscribe().wait_for(|h| *h >= n).await;
+    }
+    pub fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(Ordering::SeqCst)
+    }
+    pub fn bodies(&self) -> Vec<String> {
+        self.bodies.lock().unwrap().clone()
+    }
+    /// Holds every request until `release` adds permits.
+    pub fn hold(&self) -> Arc<Semaphore> {
+        let g = Arc::new(Semaphore::new(0));
+        *self.gate.lock().unwrap() = Some(g.clone());
+        g
+    }
+    pub fn hang(&self) {
+        self.hang.store(true, Ordering::SeqCst);
+    }
+}
+
+pub struct Rig {
+    pub dir: tempfile::TempDir,
+    pub relay: Arc<FakeRelay>,
+    pub clock: Arc<ManualClock>,
+    pub push: Arc<Push>,
+    pub core: Arc<Core>,
+    next_id: AtomicUsize,
+}
+
+/// A relay behind in-memory pipes. It records when each request arrived (on
+/// the runtime clock, so paused time is exact), answers after `delay`, and
+/// counts the response bytes it managed to write.
+pub struct MemRelay {
+    pub starts: Mutex<Vec<(Instant, String)>>,
+    /// The first `.0` requests are answered after `.1`; later ones at once.
+    delay: Mutex<(usize, Duration)>,
+    status: std::sync::atomic::AtomicU16,
+    huge: AtomicBool,
+    pub written: AtomicUsize,
+}
+
+impl MemRelay {
+    pub fn new() -> Arc<MemRelay> {
+        Arc::new(MemRelay {
+            starts: Mutex::default(),
+            delay: Mutex::new((0, Duration::ZERO)),
+            status: std::sync::atomic::AtomicU16::new(204),
+            huge: AtomicBool::new(false),
+            written: AtomicUsize::new(0),
+        })
+    }
+
+    pub fn delay_first(&self, n: usize, d: Duration) {
+        *self.delay.lock().unwrap() = (n, d);
+    }
+
+    pub fn set_status(&self, s: u16) {
+        self.status.store(s, Ordering::SeqCst);
+    }
+
+    /// Every answer is a 200 whose body is [`HUGE`] bytes.
+    pub fn answer_huge(&self) {
+        self.huge.store(true, Ordering::SeqCst);
+    }
+
+    pub fn connector(self: &Arc<Self>) -> acd_relay::http::Connector {
+        let me = self.clone();
+        Arc::new(move || {
+            let (client, server) = tokio::io::duplex(8192);
+            tokio::spawn(me.clone().serve(server));
+            client
+        })
+    }
+
+    async fn serve(self: Arc<Self>, mut io: tokio::io::DuplexStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buf = Vec::new();
+        let head_end = loop {
+            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            let mut chunk = [0u8; 1024];
+            match io.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+        let len: usize = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        while buf.len() < head_end + len {
+            let mut chunk = [0u8; 1024];
+            match io.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let body = String::from_utf8_lossy(&buf[head_end..head_end + len]).into_owned();
+        let index = {
+            let mut starts = self.starts.lock().unwrap();
+            starts.push((Instant::now(), body));
+            starts.len() - 1
+        };
+        let (slow, delay) = *self.delay.lock().unwrap();
+        if index < slow {
+            tokio::time::sleep(delay).await;
+        }
+        if self.huge.load(Ordering::SeqCst) {
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {HUGE}\r\n\r\n");
+            if io.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let chunk = [b'x'; 1024];
+            for _ in 0..HUGE / chunk.len() {
+                if io.write_all(&chunk).await.is_err() {
+                    return;
+                }
+                self.written.fetch_add(chunk.len(), Ordering::SeqCst);
+            }
+        } else {
+            let st = self.status.load(Ordering::SeqCst);
+            let head = format!("HTTP/1.1 {st} X\r\nContent-Length: 0\r\n\r\n");
+            let _ = io.write_all(head.as_bytes()).await;
+        }
+        let _ = io.shutdown().await;
+    }
+}
+
+/// The body the huge-response relay announces.
+pub const HUGE: usize = 16 << 20;
+
+pub fn private_dir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    d
+}
+
+impl Rig {
+    pub async fn new(settings: Settings) -> Rig {
+        Rig::with_timeout(settings, Duration::from_secs(5)).await
+    }
+
+    pub async fn with_timeout(settings: Settings, timeout: Duration) -> Rig {
+        Rig::in_dir(private_dir(), FakeRelay::start().await, settings, timeout)
+    }
+
+    /// A daemon "start": loads `push.json` from `dir` and runs against `relay`.
+    pub fn in_dir(dir: tempfile::TempDir, relay: Arc<FakeRelay>, settings: Settings, timeout: Duration) -> Rig {
+        let clock = Arc::new(ManualClock::new(T0));
+        let sender = WakeSender::new(
+            HttpClient::plain_for_tests(timeout, MAX_RESPONSE),
+            relay.url.clone(),
+            clock.clone(),
+        );
+        let push = Push::new(&relay.url, sender, Store::load(dir.path()), settings);
+        let core = Core::new(test_machine(), vec![]);
+        assert!(core.set_push(push.clone()));
+        push.spawn();
+        Rig { dir, relay, clock, push, core, next_id: AtomicUsize::new(0) }
+    }
+
+    /// Like [`Rig::in_dir`], but the sender talks to `mem` over in-memory pipes:
+    /// no sockets, so paused time is deterministic.
+    pub fn in_memory(settings: Settings, mem: &Arc<MemRelay>) -> Rig {
+        let relay = Arc::new(FakeRelay::unbound());
+        let clock = Arc::new(ManualClock::new(T0));
+        let sender = WakeSender::new(
+            HttpClient::in_memory_for_tests(Duration::from_secs(3600), MAX_RESPONSE, mem.connector()),
+            relay.url.clone(),
+            clock.clone(),
+        );
+        let dir = private_dir();
+        let push = Push::new(&relay.url, sender, Store::load(dir.path()), settings);
+        let core = Core::new(test_machine(), vec![]);
+        assert!(core.set_push(push.clone()));
+        push.spawn();
+        Rig { dir, relay, clock, push, core, next_id: AtomicUsize::new(0) }
+    }
+
+    pub fn id(&self) -> String {
+        format!("c{}", self.next_id.fetch_add(1, Ordering::SeqCst))
+    }
+
+    pub fn register_msg(&self, handle: &str) -> ClientMessage {
+        ClientMessage::PushRegister {
+            id: self.id(),
+            relay: self.relay.url.as_str().to_string(),
+            handle: handle.to_string(),
+            platform: PushPlatform::Android,
+            expires_at: "2026-12-04T10:00:00Z".parse().unwrap(),
+        }
+    }
+
+    pub async fn register(&self, client: &str, handle: &str) -> CommandResult {
+        self.core.handle(client, self.register_msg(handle)).await
+    }
+
+    /// Registers `client` and checks it was accepted.
+    pub async fn enroll(&self, client: &str) {
+        let r = self.register(client, &handle_for(client)).await;
+        assert!(r.ok, "registration refused: {:?}", r.error_code());
+    }
+
+    /// Opens one more request; each is a different agent.
+    pub fn open(&self, n: usize) {
+        let agent = format!("agent-{n}");
+        self.core.observe(Observation::AgentUpsert(agent_obs(&agent)));
+        self.core.observe(Observation::RequestSeen(permission_obs(&agent, &format!("key-{n}"))));
+    }
+
+    pub fn state(&self, client: &str) -> WakeState {
+        self.push.store().get(client).expect("registered").device.wake_state()
+    }
+
+    pub async fn status(&self, client: &str) -> PushInfo {
+        let r = self.core.handle(client, ClientMessage::PushStatus { id: self.id() }).await;
+        r.push.expect("push.status carries push")
+    }
+}
+
+// ---- the wake carries no content ----
+
+#[test]
+fn the_wake_wire_type_has_no_free_text_field() {
+    use acd_relay::wire::WakeRequest;
+    let schema = serde_json::to_value(schemars::schema_for!(WakeRequest)).unwrap();
+    let mut props: Vec<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+    props.sort();
+    assert_eq!(props, ["handle", "v"]);
+    assert_eq!(schema["properties"]["v"]["type"], "integer");
+    assert_eq!(schema["properties"]["handle"]["type"], "string");
+    assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+}
+
+#[test]
+fn the_opened_signal_takes_no_argument() {
+    // If `request_opened` ever takes a request, an id or a name, this stops
+    // compiling: nothing about a request can reach the sender through it.
+    let _: fn(&Push) = <Push as PushControl>::request_opened;
+}
+
+#[tokio::test]
+async fn the_wake_body_is_exactly_the_version_and_the_registered_handle() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    rig.open(1);
+    rig.relay.wait_hits(1).await;
+    let bodies = rig.relay.bodies();
+    assert_eq!(bodies.len(), 1);
+    let v: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["handle", "v"]);
+    assert_eq!(v["v"], 1);
+    assert!(v["handle"].as_str() == Some(handle_for("phone").as_str()), "the handle is not the registered one");
+}
+
+#[tokio::test]
+async fn nothing_known_about_the_request_reaches_the_relay() {
+    const PLANTED: [&str; 6] = [
+        "PLANTED-AGENT-TITLE-7f3a",
+        "PLANTED-TITLE-9c1d",
+        "PLANTED-DETAIL-4b8e",
+        "PLANTED-OPTION-LABEL-2e6f",
+        "PLANTED-PROJECT-5a0c",
+        "PLANTED-CWD-/home/planted-3d7b",
+    ];
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    let mut agent = agent_obs("agent-planted");
+    agent.title = PLANTED[0].into();
+    agent.project = Some(PLANTED[4].into());
+    agent.cwd = Some(PLANTED[5].into());
+    rig.core.observe(Observation::AgentUpsert(agent));
+    let mut req = permission_obs("agent-planted", "key-planted");
+    req.title = PLANTED[1].into();
+    req.detail = PLANTED[2].into();
+    req.options[0].label = PLANTED[3].into();
+    rig.core.observe(Observation::RequestSeen(req));
+    rig.relay.wait_hits(1).await;
+    rig.push.handled(1).await;
+    // What the relay was sent, and what the request's id was: the id restarts
+    // at r1 on every start and must not be used as an identifier.
+    let ServerMessage::Snapshot { agents, .. } = rig.core.attach(None).0.remove(0) else { panic!("snapshot") };
+    let request_id = agents[0].pending.as_ref().unwrap().id.clone();
+    let wire = rig.relay.bodies().join("\n");
+    for text in PLANTED.into_iter().chain(["Test", "test-machine", "agent-planted", "key-planted"]) {
+        assert!(!wire.contains(text), "request or machine text reached the relay");
+    }
+    let v: serde_json::Value = serde_json::from_str(&rig.relay.bodies()[0]).unwrap();
+    assert_ne!(v["handle"].as_str(), Some(request_id.as_str()));
+    assert!(v.get("request_id").is_none() && v.get("id").is_none());
+}
+
+// ---- when a wake is sent ----
+
+#[tokio::test]
+async fn an_opened_request_wakes_each_registered_device_once() {
+    let rig = Rig::new(NO_WINDOW).await;
+    for c in ["phone-a", "phone-b", "phone-c"] {
+        rig.enroll(c).await;
+    }
+    rig.open(1);
+    rig.push.handled(1).await;
+    assert_eq!(rig.relay.hits(), 3);
+    let mut seen = rig.relay.bodies();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 3, "three different handles");
+}
+
+#[tokio::test]
+async fn no_registered_device_means_no_wake() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.open(1);
+    rig.push.handled(1).await;
+    assert_eq!(rig.relay.hits(), 0);
+}
+
+#[tokio::test]
+async fn a_flood_of_requests_wakes_a_device_once_per_window() {
+    let rig = Rig::new(Settings { min_interval: Duration::from_secs(3600), max_concurrent: MAX_CONCURRENT }).await;
+    rig.enroll("phone").await;
+    // Each request is handled before the next opens, so the debounce, not the
+    // coalescing of a burst, is what holds the wakes back.
+    for n in 0..50 {
+        rig.open(n);
+        rig.push.handled(n as u64 + 1).await;
+    }
+    // One immediate wake; the trailing one is owed for the window's end.
+    assert_eq!(rig.relay.hits(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_inside_the_window_gets_its_trailing_wake() {
+    let mem = MemRelay::new();
+    let rig = Rig::in_memory(Settings { min_interval: Duration::from_secs(30), max_concurrent: MAX_CONCURRENT }, &mem);
+    rig.enroll("phone").await;
+    rig.open(1);
+    rig.push.handled(1).await;
+    rig.open(2);
+    rig.push.handled(2).await;
+    assert_eq!(mem.starts.lock().unwrap().len(), 1, "the second request is inside the window");
+    // Time moves only when told: just before the window ends nothing is sent,
+    // at its end the trailing wake is.
+    tokio::time::sleep(Duration::from_secs(29)).await;
+    assert_eq!(mem.starts.lock().unwrap().len(), 1);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let starts = mem.starts.lock().unwrap();
+    assert_eq!(starts.len(), 2);
+    assert!(starts[1].0 - starts[0].0 >= Duration::from_secs(30));
+}
+
+/// Debounce is measured from when a send starts, not from when its pass
+/// began: devices queued behind slow sends are not woken again early.
+#[tokio::test(start_paused = true)]
+async fn queued_devices_never_wake_less_than_the_interval_apart() {
+    let min = Duration::from_secs(30);
+    let mem = MemRelay::new();
+    // The first four sends are slow; the four queued behind them are not.
+    mem.delay_first(4, Duration::from_secs(4));
+    let rig = Rig::in_memory(Settings { min_interval: min, max_concurrent: 4 }, &mem);
+    for n in 0..store::MAX_DEVICES {
+        rig.enroll(&format!("phone-{n}")).await;
+    }
+    rig.open(1);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    rig.open(2);
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let starts = mem.starts.lock().unwrap().clone();
+    let mut per_device: HashMap<String, Vec<Instant>> = HashMap::new();
+    for (at, body) in starts {
+        per_device.entry(body).or_default().push(at);
+    }
+    assert_eq!(per_device.len(), store::MAX_DEVICES);
+    for (handle, times) in per_device {
+        assert_eq!(times.len(), 2, "{handle}: the immediate and the trailing wake");
+        assert!(times[1] - times[0] >= min, "{handle}: woken {:?} apart", times[1] - times[0]);
+    }
+}
+
+#[tokio::test]
+async fn sends_run_together_but_never_more_than_the_bound() {
+    let rig = Rig::new(Settings { min_interval: Duration::ZERO, max_concurrent: 4 }).await;
+    let gate = rig.relay.hold();
+    for n in 0..store::MAX_DEVICES {
+        rig.enroll(&format!("phone-{n}")).await;
+    }
+    rig.open(1);
+    rig.relay.wait_in_flight(4).await;
+    gate.add_permits(store::MAX_DEVICES);
+    rig.push.handled(1).await;
+    assert_eq!(rig.relay.hits(), store::MAX_DEVICES, "every device was woken");
+    assert_eq!(rig.relay.max_in_flight(), 4, "no more than the bound at once");
+}
+
+// ---- failure and recovery ----
+
+#[tokio::test]
+async fn a_relay_that_is_down_backs_off_and_recovers_by_itself() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    rig.relay.set_default(Reply::json(503, r#"{"error":"unavailable"}"#));
+    rig.open(1);
+    rig.push.handled(1).await;
+    assert_eq!(rig.relay.hits(), 1);
+    assert_eq!(rig.state("phone").status, Status::RelayError);
+    assert_eq!(rig.status("phone").await.status, Some(PushDeviceStatus::RelayError));
+
+    // Inside the backoff window the wake is dropped without a request.
+    rig.open(2);
+    rig.push.handled(2).await;
+    assert_eq!(rig.relay.hits(), 1, "skipped while backing off");
+
+    // The relay is back and the window has passed: the next wake goes out and
+    // clears the failure. Nothing was queued for the wakes that were dropped.
+    rig.relay.set_default(Reply::status(204));
+    rig.clock.advance(acd_relay::client::backoff_secs(1));
+    rig.open(3);
+    rig.push.handled(3).await;
+    assert_eq!(rig.relay.hits(), 2);
+    let st = rig.status("phone").await;
+    assert_eq!(st.status, Some(PushDeviceStatus::Ok));
+    assert!(st.last_wake_at.is_some());
+}
+
+#[tokio::test]
+async fn a_refused_connection_is_transient_not_fatal() {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = RelayUrl::for_tests(&format!("http://{}", l.local_addr().unwrap()));
+    drop(l);
+    let dir = private_dir();
+    let clock = Arc::new(ManualClock::new(T0));
+    let sender = WakeSender::new(HttpClient::plain_for_tests(Duration::from_secs(5), MAX_RESPONSE), url.clone(), clock);
+    let push = Push::new(&url, sender, Store::load(dir.path()), NO_WINDOW);
+    let core = Core::new(test_machine(), vec![]);
+    core.set_push(push.clone());
+    push.spawn();
+    let r = core
+        .handle("phone", ClientMessage::PushRegister {
+            id: "c1".into(),
+            relay: url.as_str().into(),
+            handle: handle_for("phone"),
+            platform: PushPlatform::Android,
+            expires_at: "2026-12-04T10:00:00Z".parse().unwrap(),
+        })
+        .await;
+    assert!(r.ok);
+    core.observe(Observation::AgentUpsert(agent_obs("a")));
+    core.observe(Observation::RequestSeen(permission_obs("a", "k")));
+    push.handled(1).await;
+    let e = push.store().get("phone").unwrap().device.wake_state();
+    assert_eq!(e.status, Status::RelayError);
+    assert_eq!(e.failures, 1);
+}
+
+#[tokio::test]
+async fn an_invalid_registration_is_disabled_until_the_device_registers_again() {
+    for (reply, expect) in [
+        (Reply::json(404, r#"{"error":"gone"}"#), PushDeviceStatus::Expired),
+        (Reply::json(400, r#"{"error":"invalid_handle"}"#), PushDeviceStatus::Invalid),
+    ] {
+        let rig = Rig::new(NO_WINDOW).await;
+        rig.enroll("phone").await;
+        rig.relay.set_default(reply);
+        rig.open(1);
+        rig.push.handled(1).await;
+        assert_eq!(rig.status("phone").await.status, Some(expect));
+
+        // Disabled: later requests, even after a long time, send nothing.
+        rig.clock.advance(100_000);
+        rig.open(2);
+        rig.push.handled(2).await;
+        assert_eq!(rig.relay.hits(), 1);
+
+        // The state survives a restart.
+        let reloaded = Store::load(rig.dir.path());
+        assert!(reloaded.degraded().is_none());
+        assert_eq!(reloaded.get("phone").unwrap().device.status(), expect);
+
+        // Registering again enables it.
+        rig.relay.set_default(Reply::status(204));
+        assert!(rig.register("phone", &handle_for("phone")).await.ok);
+        assert_eq!(rig.status("phone").await.status, Some(PushDeviceStatus::Ok));
+        rig.open(3);
+        rig.push.handled(3).await;
+        assert_eq!(rig.relay.hits(), 2);
+    }
+}
+
+#[tokio::test]
+async fn only_an_invalid_registration_disables_other_answers_do_not() {
+    // 429 is dropped without a state change; every other answer outside the
+    // table is transient. None of them disables.
+    for (reply, expect) in [
+        (Reply::json(429, r#"{"error":"rate_limited"}"#), Status::Ok),
+        (Reply::json(400, r#"{"error":"bad_request"}"#), Status::RelayError),
+        (Reply::json(401, "{}"), Status::RelayError),
+        (Reply::json(403, "{}"), Status::RelayError),
+        (Reply::json(413, r#"{"error":"too_large"}"#), Status::RelayError),
+        (Reply::json(404, r#"{"error":"not_found"}"#), Status::RelayError),
+        (Reply::json(500, "boom"), Status::RelayError),
+        (Reply::json(200, "ok"), Status::RelayError),
+    ] {
+        let rig = Rig::new(NO_WINDOW).await;
+        rig.enroll("phone").await;
+        rig.relay.set_default(reply.clone());
+        rig.open(1);
+        rig.push.handled(1).await;
+        assert_eq!(rig.state("phone").status, expect, "status {}", reply.status);
+        assert!(!rig.state("phone").disabled());
+    }
+}
+
+#[tokio::test]
+async fn a_redirect_is_not_followed() {
+    let elsewhere = FakeRelay::start().await;
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    let mut r = Reply::status(307);
+    r.location = Some(format!("{}/v1/wake", elsewhere.url.as_str()));
+    rig.relay.set_default(r);
+    rig.open(1);
+    rig.push.handled(1).await;
+    assert_eq!(rig.relay.hits(), 1);
+    assert_eq!(elsewhere.hits(), 0, "the redirect target was contacted");
+    assert_eq!(rig.state("phone").status, Status::RelayError);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_huge_response_body_is_cut_off_and_treated_as_a_failure() {
+    let mem = MemRelay::new();
+    mem.answer_huge();
+    let rig = Rig::in_memory(NO_WINDOW, &mem);
+    rig.enroll("phone").await;
+    rig.open(1);
+    rig.push.handled(1).await;
+    assert_eq!(rig.state("phone").status, Status::RelayError);
+    assert_eq!(rig.state("phone").failures, 1);
+    // The cap is what failed it: the client stopped reading after the cap, so
+    // the relay could write only the cap plus what the pipe holds, nowhere
+    // near the 16 MiB announced.
+    let written = mem.written.load(Ordering::SeqCst);
+    assert!(written < 64 * 1024, "the client kept reading: {written} bytes written");
+}
+
+#[tokio::test]
+async fn a_relay_that_never_answers_hits_the_deadline() {
+    // The sender's deadline is the only thing that can end this send.
+    let rig = Rig::with_timeout(NO_WINDOW, Duration::from_millis(150)).await;
+    rig.enroll("phone").await;
+    rig.relay.hang();
+    rig.open(1);
+    rig.push.handled(1).await;
+    assert_eq!(rig.relay.hits(), 1);
+    assert_eq!(rig.state("phone").status, Status::RelayError);
+    assert_eq!(rig.state("phone").failures, 1);
+}
+
+#[tokio::test]
+async fn one_slow_device_does_not_hold_up_the_state_of_the_others() {
+    // Both devices share the relay; the first answer is a failure, the second
+    // a success. Each registration keeps its own state.
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone-a").await;
+    rig.enroll("phone-b").await;
+    rig.relay.reply(Reply::json(404, r#"{"error":"gone"}"#));
+    rig.open(1);
+    rig.push.handled(1).await;
+    let states = [rig.state("phone-a").status, rig.state("phone-b").status];
+    assert_eq!(states.iter().filter(|s| **s == Status::Expired).count(), 1);
+    assert_eq!(states.iter().filter(|s| **s == Status::Ok).count(), 1);
+}
+
+#[tokio::test]
+async fn a_late_outcome_never_overwrites_a_newer_registration() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    let gate = rig.relay.hold();
+    rig.relay.set_default(Reply::json(404, r#"{"error":"gone"}"#));
+    rig.open(1);
+    rig.relay.wait_in_flight(1).await;
+    // The device registers a new handle while the old wake is in flight.
+    assert!(rig.register("phone", &handle_for("phone-new")).await.ok);
+    gate.add_permits(1);
+    rig.push.handled(1).await;
+    assert_eq!(rig.status("phone").await.status, Some(PushDeviceStatus::Ok), "the old handle's 'gone' was applied");
+    assert!(!rig.state("phone").disabled());
+}
+
+#[tokio::test]
+async fn registrations_and_their_state_survive_a_restart() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    rig.relay.set_default(Reply::json(503, "{}"));
+    rig.open(1);
+    rig.push.handled(1).await;
+    let Rig { dir, relay, .. } = rig;
+    relay.set_default(Reply::status(204));
+    let again = Rig::in_dir(dir, relay, NO_WINDOW, Duration::from_secs(5));
+    let st = again.state("phone");
+    assert_eq!((st.status, st.failures), (Status::RelayError, 1));
+    assert!(again.status("phone").await.registered);
+}
+
+#[tokio::test]
+async fn rotating_the_client_token_revokes_every_registration_also_after_a_restart() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    rig.enroll("tablet").await;
+    rig.push.revoke_all().await;
+    assert!(!rig.status("phone").await.registered);
+    rig.open(1);
+    rig.push.handled(1).await;
+    assert_eq!(rig.relay.hits(), 0, "a revoked phone gets no wake");
+    let Rig { dir, relay, .. } = rig;
+    let again = Rig::in_dir(dir, relay.clone(), NO_WINDOW, Duration::from_secs(5));
+    assert!(!again.status("tablet").await.registered, "the file no longer lists it");
+    again.open(2);
+    again.push.handled(1).await;
+    assert_eq!(relay.hits(), 0);
+}
+
+#[tokio::test]
+async fn revoking_cancels_a_wake_that_is_already_in_flight() {
+    // An hour-long request deadline: only the cancellation can end the send,
+    // so without it this test hangs instead of passing on a timeout.
+    let rig = Rig::with_timeout(NO_WINDOW, Duration::from_secs(3600)).await;
+    rig.enroll("phone").await;
+    let _gate = rig.relay.hold(); // never released: only cancellation ends the send
+    rig.open(1);
+    rig.relay.wait_in_flight(1).await;
+    rig.push.revoke_all().await;
+    rig.push.handled(1).await;
+    assert!(!rig.status("phone").await.registered);
+}
+
+#[test]
+fn a_revocation_whose_file_write_fails_is_retried_and_survives_a_restart() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = private_dir();
+    let mut st = Store::load(d.path());
+    st.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
+    // The directory refuses new files and removals: neither rewrite nor unlink can work.
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(st.clear().is_err());
+    assert_eq!(st.len(), 0, "gone from memory even when the file stays");
+    assert_eq!(Store::load(d.path()).len(), 1, "the file still lists it");
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    st.retry_clear();
+    assert_eq!(Store::load(d.path()).len(), 0, "the retry made the revocation durable");
+}
+
+#[tokio::test]
+async fn a_new_registration_after_revocation_wakes_again() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    rig.push.revoke_all().await;
+    rig.enroll("phone").await;
+    rig.open(1);
+    rig.relay.wait_hits(1).await;
+}
+
+#[test]
+fn the_offline_rotation_removes_push_json() {
+    let d = private_dir();
+    let mut st = Store::load(d.path());
+    st.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
+    assert!(d.path().join(super::store::FILE).exists());
+    super::forget_registrations(d.path()).unwrap();
+    assert_eq!(Store::load(d.path()).len(), 0);
+    super::forget_registrations(d.path()).unwrap(); // idempotent
+}
+
+// ---- registration over acd/1 ----
+
+#[tokio::test]
+async fn registration_checks_the_relay_and_the_handle() {
+    let rig = Rig::new(NO_WINDOW).await;
+    let mut other = rig.register_msg(&handle_for("phone"));
+    if let ClientMessage::PushRegister { relay, .. } = &mut other {
+        *relay = "https://other.example".into();
+    }
+    let r = rig.core.handle("phone", other).await;
+    assert_eq!((r.error_code(), r.error.unwrap().message.as_str()), (Some(ErrorCode::BadRequest), "relay mismatch"));
+    for bad in ["", "has space", "plus+sign", "slash/sign", "pad=", "ünïcode"] {
+        let r = rig.register("phone", bad).await;
+        assert_eq!(r.error_code(), Some(ErrorCode::BadRequest), "handle {bad:?}");
+    }
+    assert!(!rig.status("phone").await.registered);
+    assert!(!rig.dir.path().join(store::FILE).exists(), "a refused registration wrote nothing");
+}
+
+#[tokio::test]
+async fn at_most_eight_devices_and_a_known_one_may_replace_itself() {
+    let rig = Rig::new(NO_WINDOW).await;
+    for n in 0..store::MAX_DEVICES {
+        rig.enroll(&format!("phone-{n}")).await;
+    }
+    let r = rig.register("phone-new", &handle_for("phone-new")).await;
+    assert_eq!((r.error_code(), r.error.unwrap().message.as_str()), (Some(ErrorCode::BadRequest), "too many push devices"));
+    assert!(rig.register("phone-3", &handle_for("phone-3-again")).await.ok);
+    assert_eq!(rig.push.store().len(), store::MAX_DEVICES);
+}
+
+#[tokio::test]
+async fn a_session_sees_and_changes_only_its_own_registration() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone-a").await;
+    assert!(rig.status("phone-a").await.registered);
+    assert!(!rig.status("phone-b").await.registered);
+    // B unregistering does not touch A.
+    let r = rig.core.handle("phone-b", ClientMessage::PushUnregister { id: rig.id() }).await;
+    assert!(r.ok);
+    assert!(rig.status("phone-a").await.registered);
+    // A unregistering removes it; asking again is still ok.
+    for _ in 0..2 {
+        let r = rig.core.handle("phone-a", ClientMessage::PushUnregister { id: rig.id() }).await;
+        assert!(r.ok);
+    }
+    assert!(!rig.status("phone-a").await.registered);
+    // The result never carries a handle.
+    let r = rig.core.handle("phone-a", ClientMessage::PushStatus { id: rig.id() }).await;
+    assert!(!serde_json::to_string(&r).unwrap().contains(&handle_for("phone-a")), "status carries the handle");
+}
+
+// ---- storage ----
+
+#[test]
+fn the_store_is_owner_only_and_holds_handles_but_no_push_address() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_dir();
+    let mut s = Store::load(dir.path());
+    s.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
+    let path = dir.path().join(store::FILE);
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains(&handle_for("phone")));
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut keys: Vec<&str> = v["devices"]["phone"].as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["expires_at", "failures", "handle", "last_wake_at", "platform", "retry_after", "status"]);
+    // A reload gives the same devices.
+    let again = Store::load(dir.path());
+    assert!(again.degraded().is_none());
+    assert_eq!(again.get("phone").unwrap().device, s.get("phone").unwrap().device);
+}
+
+#[test]
+fn a_device_never_shows_its_handle_in_debug() {
+    let d = Device::new(PushPlatform::Ios, handle_for("phone"), "2026-12-04T10:00:00.000Z".into());
+    assert!(!format!("{d:?}").contains(&handle_for("phone")));
+    let reg = PushRegistration {
+        relay: "https://r.example".into(),
+        handle: handle_for("phone"),
+        platform: PushPlatform::Android,
+        expires_at: "2026-12-04T10:00:00Z".parse().unwrap(),
+    };
+    assert!(!format!("{reg:?}").contains(&handle_for("phone")));
+}
+
+fn write_raw(dir: &std::path::Path, text: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join(store::FILE);
+    std::fs::write(&p, text).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+fn valid_file(handle: &str) -> String {
+    format!(
+        r#"{{"version":1,"devices":{{"phone":{{"platform":"android","handle":"{handle}","expires_at":"2026-12-04T10:00:00.000Z","status":"ok","failures":0,"retry_after":0,"last_wake_at":null}}}}}}"#
+    )
+}
+
+#[test]
+fn an_unsafe_or_invalid_file_starts_empty_with_a_reason_and_is_left_alone() {
+    let secret = "SECRET-HANDLE-MUST-NOT-APPEAR";
+    let cases: Vec<(&str, String, u32)> = vec![
+        ("loose mode", valid_file(&handle_for("x")), 0o644),
+        ("not json", format!("{{ {secret}"), 0o600),
+        ("unknown version", valid_file(&handle_for("x")).replace("\"version\":1", "\"version\":2"), 0o600),
+        ("top-level unknown field", valid_file(&handle_for("x")).replace("\"devices\"", &format!("\"{secret}\":1,\"devices\"")), 0o600),
+        ("not an object", format!("[\"{secret}\"]"), 0o600),
+        ("devices not an object", format!("{{\"version\":1,\"devices\":\"{secret}\"}}"), 0o600),
+    ];
+    for (name, text, mode) in cases {
+        let dir = private_dir();
+        write_raw(dir.path(), &text, mode);
+        let mut s = Store::load(dir.path());
+        let why = s.degraded().unwrap_or_else(|| panic!("{name}: not degraded")).to_string();
+        assert!(!why.contains(secret) && !why.contains("SECRET"), "{name}: reason quotes the file");
+        assert_eq!(s.len(), 0, "{name}");
+        // Nothing rewrites it: not a state update, not an unregister.
+        assert!(s.remove("phone").is_ok());
+        assert!(!s.apply_wake("phone", 1, &WakeState::default()));
+        assert_eq!(std::fs::read_to_string(dir.path().join(store::FILE)).unwrap(), text, "{name}: rewritten");
+    }
+}
+
+fn two_entries(bad_key: &str, bad_handle: &str) -> String {
+    let dev = |h: &str| {
+        format!(
+            r#"{{"platform":"ios","handle":"{h}","expires_at":"x","status":"ok","failures":0,"retry_after":0,"last_wake_at":null}}"#
+        )
+    };
+    format!(
+        r#"{{"version":1,"devices":{{"{bad_key}":{},"phone":{},"tablet":{}}}}}"#,
+        dev(&handle_for("a")),
+        dev(&handle_for("b")),
+        dev(bad_handle)
+    )
+}
+
+#[test]
+fn one_bad_entry_is_skipped_and_the_others_survive() {
+    for text in [two_entries("", "has space"), two_entries(&"k".repeat(129), "has space")] {
+        let dir = private_dir();
+        write_raw(dir.path(), &text, 0o600);
+        let s = Store::load(dir.path());
+        assert!(s.degraded().is_none(), "{:?}", s.degraded());
+        assert_eq!(s.len(), 1);
+        assert!(s.get("phone").is_some());
+    }
+}
+
+#[test]
+fn an_unusable_client_id_is_refused_before_anything_is_written() {
+    let dir = private_dir();
+    let mut s = Store::load(dir.path());
+    let dev = || Device::new(PushPlatform::Android, handle_for("x"), "x".into());
+    assert_eq!(s.register("", dev()), Err(StoreError::BadId));
+    assert_eq!(s.register(&"k".repeat(129), dev()), Err(StoreError::BadId));
+    assert!(s.register(&"k".repeat(128), dev()).is_ok());
+    assert!(!store::client_id_ok(""));
+    // Whatever registration accepts, a restart loads.
+    assert_eq!(Store::load(dir.path()).len(), 1);
+}
+
+#[tokio::test]
+async fn an_empty_client_id_cannot_poison_the_registrations_of_others() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    let r = rig.register("", &handle_for("evil")).await;
+    assert!(!r.ok);
+    assert_eq!(r.error_code(), Some(ErrorCode::BadRequest));
+    let again = Store::load(rig.dir.path());
+    assert!(again.degraded().is_none());
+    assert!(again.get("phone").is_some());
+}
+
+#[test]
+fn a_symlinked_file_is_not_followed() {
+    let dir = private_dir();
+    let real = dir.path().join("real.json");
+    std::fs::write(&real, valid_file(&handle_for("x"))).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join(store::FILE)).unwrap();
+    assert!(Store::load(dir.path()).degraded().is_some());
+}
+
+#[test]
+fn too_many_devices_in_the_file_is_degraded() {
+    let dir = private_dir();
+    let dev = |n: usize| {
+        format!(
+            r#""p{n}":{{"platform":"ios","handle":"{}","expires_at":"x","status":"ok","failures":0,"retry_after":0,"last_wake_at":null}}"#,
+            handle_for(&n.to_string())
+        )
+    };
+    let all: Vec<String> = (0..=store::MAX_DEVICES).map(dev).collect();
+    write_raw(dir.path(), &format!(r#"{{"version":1,"devices":{{{}}}}}"#, all.join(",")), 0o600);
+    assert!(Store::load(dir.path()).degraded().is_some());
+}
+
+#[test]
+fn a_corrupt_file_is_never_overwritten_by_a_registration() {
+    let dir = private_dir();
+    write_raw(dir.path(), "not json", 0o600);
+    let mut s = Store::load(dir.path());
+    assert!(s.degraded().is_some());
+    assert_eq!(
+        s.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "x".into())),
+        Err(StoreError::Corrupt)
+    );
+    assert_eq!(std::fs::read_to_string(dir.path().join(store::FILE)).unwrap(), "not json");
+    assert!(!dir.path().join(store::QUARANTINE).exists());
+}
+
+fn dev_json(handle: &str) -> String {
+    format!(
+        r#"{{"platform":"ios","handle":"{handle}","expires_at":"x","status":"ok","failures":0,"retry_after":0,"last_wake_at":null}}"#
+    )
+}
+
+/// A healthy phone beside four different kinds of bad entry.
+fn mixed_file() -> String {
+    let good = dev_json(&handle_for("phone"));
+    let bad_field = dev_json(&handle_for("a")).replace("\"failures\":0", "\"failures\":\"bad\"");
+    let bad_handle = dev_json("has space");
+    let truncated = r#"{"platform":"ios","handle":"abc"}"#;
+    let bad_id = dev_json(&handle_for("b"));
+    format!(
+        r#"{{"version":1,"devices":{{"phone":{good},"badfield":{bad_field},"badhandle":{bad_handle},"truncated":{truncated},"":{bad_id}}}}}"#
+    )
+}
+
+#[test]
+fn bad_entries_of_every_kind_leave_exactly_the_healthy_device() {
+    let dir = private_dir();
+    write_raw(dir.path(), &mixed_file(), 0o600);
+    let s = Store::load(dir.path());
+    assert!(s.degraded().is_none(), "{:?}", s.degraded());
+    assert_eq!(s.len(), 1);
+    assert!(s.get("phone").is_some());
+    assert_eq!(s.skipped_ids().count(), 4);
+    // Loading alone writes nothing.
+    assert!(!dir.path().join(store::QUARANTINE).exists());
+}
+
+#[test]
+fn a_registration_keeps_the_skipped_entries_in_an_owner_only_quarantine() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_dir();
+    write_raw(dir.path(), &mixed_file(), 0o600);
+    let mut s = Store::load(dir.path());
+    s.register("tablet", Device::new(PushPlatform::Android, handle_for("t"), "x".into())).unwrap();
+    let q = dir.path().join(store::QUARANTINE);
+    assert_eq!(std::fs::metadata(&q).unwrap().permissions().mode() & 0o7777, 0o600);
+    let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&q).unwrap()).unwrap();
+    let ids: std::collections::BTreeSet<&str> =
+        kept.as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["", "badfield", "badhandle", "truncated"].into_iter().collect());
+    // The bad field's raw value survives.
+    let bf = kept.as_array().unwrap().iter().find(|e| e["id"] == "badfield").unwrap();
+    assert_eq!(bf["entry"]["failures"], "bad");
+    // The main file now holds the healthy devices, and reloads without the bad ones.
+    let again = Store::load(dir.path());
+    assert!(again.get("phone").is_some() && again.get("tablet").is_some());
+    assert_eq!(again.skipped_ids().count(), 0);
+    // A second registration keeps the quarantine as it was.
+    let before = std::fs::read(&q).unwrap();
+    s.register("watch", Device::new(PushPlatform::Android, handle_for("w"), "x".into())).unwrap();
+    assert_eq!(std::fs::read(&q).unwrap(), before);
+}
+
+#[test]
+fn nothing_is_written_if_the_quarantine_cannot_be_kept() {
+    let dir = private_dir();
+    let text = mixed_file();
+    write_raw(dir.path(), &text, 0o600);
+    // A quarantine that is not valid cannot be extended, so the file stays.
+    write_quarantine_raw(dir.path(), "garbage");
+    let mut s = Store::load(dir.path());
+    assert_eq!(
+        s.register("tablet", Device::new(PushPlatform::Android, handle_for("t"), "x".into())),
+        Err(StoreError::Write)
+    );
+    assert_eq!(std::fs::read_to_string(dir.path().join(store::FILE)).unwrap(), text);
+}
+
+fn write_quarantine_raw(dir: &std::path::Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join(store::QUARANTINE);
+    std::fs::write(&p, text).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[test]
+fn a_failed_write_changes_nothing_in_memory() {
+    let dir = private_dir();
+    let mut s = Store::load(dir.path());
+    s.register("a", Device::new(PushPlatform::Android, handle_for("a"), "x".into())).unwrap();
+    // The directory is gone: the write fails and the registration is refused.
+    let path = dir.path().to_path_buf();
+    drop(dir);
+    assert!(!path.exists());
+    assert_eq!(
+        s.register("b", Device::new(PushPlatform::Android, handle_for("b"), "x".into())),
+        Err(store::StoreError::Write)
+    );
+    assert!(s.get("b").is_none() && s.get("a").is_some());
+}
+
+#[test]
+fn a_wake_outcome_for_an_old_generation_is_ignored() {
+    let dir = private_dir();
+    let mut s = Store::load(dir.path());
+    s.register("p", Device::new(PushPlatform::Android, handle_for("old"), "x".into())).unwrap();
+    let old = s.get("p").unwrap().generation;
+    s.register("p", Device::new(PushPlatform::Android, handle_for("new"), "x".into())).unwrap();
+    let gone = WakeState { status: Status::Expired, ..WakeState::default() };
+    assert!(!s.apply_wake("p", old, &gone));
+    assert_eq!(s.get("p").unwrap().device.status(), PushDeviceStatus::Ok);
+    assert!(s.apply_wake("p", s.get("p").unwrap().generation, &gone));
+    assert_eq!(s.get("p").unwrap().device.status(), PushDeviceStatus::Expired);
+}
+
+// ---- configuration ----
+
+fn section(src: &str) -> toml::Value {
+    toml::from_str::<toml::Value>(src).unwrap()["push"].clone()
+}
+
+fn ca_pem() -> String {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut p = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    p.self_signed(&key).unwrap().pem()
+}
+
+fn off_reason(r: Resolved) -> Option<String> {
+    match r {
+        Resolved::Off(why) => why,
+        Resolved::On { .. } => panic!("push resolved to on"),
+    }
+}
+
+fn clock() -> Arc<dyn acd_relay::Clock> {
+    Arc::new(ManualClock::new(T0))
+}
+
+#[test]
+fn push_is_off_without_a_section_or_a_relay() {
+    assert_eq!(off_reason(resolve(None, &[], clock())), None);
+    let empty = section("[push]\n");
+    assert_eq!(off_reason(resolve(Some(&empty), &[], clock())), None);
+}
+
+#[test]
+fn a_good_relay_with_a_usable_ca_file_turns_push_on() {
+    let d = tempfile::tempdir().unwrap();
+    let ca = d.path().join("ca.pem");
+    std::fs::write(&ca, ca_pem()).unwrap();
+    let s = section(&format!("[push]\nrelay = \"https://relay.example.net/\"\nca_file = \"{}\"\n", ca.display()));
+    match resolve(Some(&s), &[], clock()) {
+        Resolved::On { relay, .. } => assert_eq!(relay.as_str(), "https://relay.example.net"),
+        Resolved::Off(why) => panic!("off: {why:?}"),
+    }
+}
+
+#[test]
+fn without_ca_file_the_first_existing_default_is_used() {
+    let d = tempfile::tempdir().unwrap();
+    let (missing, present) = (d.path().join("missing.pem"), d.path().join("bundle.pem"));
+    std::fs::write(&present, ca_pem()).unwrap();
+    let s = section("[push]\nrelay = \"https://relay.example.net\"\n");
+    let defaults = [missing.to_str().unwrap(), present.to_str().unwrap()];
+    assert!(matches!(resolve(Some(&s), &defaults, clock()), Resolved::On { .. }));
+    // None of them exists: off, with a reason, and no silent fallback.
+    let why = off_reason(resolve(Some(&s), &[missing.to_str().unwrap()], clock()));
+    assert!(why.unwrap().contains("ca_file"));
+}
+
+#[test]
+fn every_bad_push_section_fails_closed_with_a_reason() {
+    let d = tempfile::tempdir().unwrap();
+    let ca = d.path().join("ca.pem");
+    std::fs::write(&ca, ca_pem()).unwrap();
+    let empty = d.path().join("empty.pem");
+    std::fs::write(&empty, "no certificates here").unwrap();
+    let c = ca.display();
+    let cases = [
+        format!("[push]\nrelay = \"http://relay.example.net\"\nca_file = \"{c}\"\n"),
+        format!("[push]\nrelay = \"https://u:p@relay.example.net\"\nca_file = \"{c}\"\n"),
+        format!("[push]\nrelay = \"https://relay.example.net/?x=1\"\nca_file = \"{c}\"\n"),
+        format!("[push]\nrelay = 5\nca_file = \"{c}\"\n"),
+        format!("[push]\nrelay = \"https://relay.example.net\"\nca_flie = \"{c}\"\n"),
+        format!("[push]\nrelay = \"https://relay.example.net\"\nrelay_pin = \"sha256:00\"\nca_file = \"{c}\"\n"),
+        "[push]\nrelay = \"https://relay.example.net\"\nca_file = 7\n".to_string(),
+        "[push]\nrelay = \"https://relay.example.net\"\nca_file = \"\"\n".to_string(),
+        format!("[push]\nca_file = \"{c}\"\n"),
+        "[push]\nrelay = \"https://relay.example.net\"\nca_file = \"/nonexistent/ca.pem\"\n".to_string(),
+        format!("[push]\nrelay = \"https://relay.example.net\"\nca_file = \"{}\"\n", empty.display()),
+    ];
+    for src in cases {
+        let s = section(&src);
+        assert!(off_reason(resolve(Some(&s), &[], clock())).is_some(), "no reason for: {src}");
+    }
+    // Not a table at all.
+    assert!(off_reason(resolve(Some(&toml::Value::Integer(5)), &[], clock())).is_some());
+}
+
+/// A client may choose its id, and so may choose the token. No push log line
+/// carries it, or any 8-character piece of it.
+#[tokio::test(start_paused = true)]
+async fn push_logs_never_contain_a_peer_chosen_client_id() {
+    use std::sync::Mutex as StdMutex;
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<StdMutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    // Global, not scoped: other tests hit the same call sites first, and a
+    // scoped subscriber can then miss them. This is the only test that sets it.
+    tracing::subscriber::set_global_default(subscriber).expect("no other test installs a global subscriber");
+    let token = "tok-QZXWVUTSRPNMLKJHGFDSA987654321";
+    let mem = MemRelay::new();
+    let rig = Rig::in_memory(NO_WINDOW, &mem);
+    rig.enroll(token).await;
+    rig.open(1);
+    rig.push.handled(1).await;
+    mem.set_status(503);
+    rig.open(2);
+    rig.push.handled(2).await;
+    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("push device registered") && logs.contains("wake failed"), "capture works: {logs}");
+    for w in token.as_bytes().windows(8) {
+        let piece = std::str::from_utf8(w).unwrap();
+        assert!(!logs.contains(piece), "{piece:?} leaked: {logs}");
+    }
+}

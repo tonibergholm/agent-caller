@@ -9,6 +9,16 @@ config and the `acd/1` protocol may change without a major version bump.
 
 ### Added
 
+- Android, foreground inbox over Tailscale (`apps/android`, `docs/android.md`):
+  pair by pasting the `acd pair` line, list the cards, answer with the same
+  whole-or-read-only rules as the other clients. Machine secrets are kept in
+  files wrapped by an Android Keystore AES-GCM key (`acd-app-core::wrapped`);
+  the store fails closed; a permanently invalidated key is replaced and the
+  user is told which machines to pair again (a pending-recovery record keeps
+  the list until the user dismisses the notice on a resumed screen, so a crash
+  or a refresh that finishes in the background cannot lose it). A debug APK builds with `just android-apk`. It has
+  not been run on a device or an emulator, and there is no push yet.
+
 - Fuzz targets (`fuzz/`, cargo-fuzz) for the parsers that read untrusted bytes:
   acd/1 frames, pairing strings, hook payloads, T3 frames, herdr screens, the
   Omarchy socket protocol and the shared text rules. Not part of CI; see

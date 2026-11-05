@@ -117,7 +117,8 @@ pub fn random_free_port(avoid: u16) -> Result<u16> {
 impl Config {
     /// Whether push is on, and the relay URL if so. Default off; a malformed
     /// section, an unknown key, an `http://` URL or a `relay_pin` (no verifier
-    /// yet) all mean off. Not wired to the daemon yet (relay spec P5b).
+    /// yet) all mean off. The daemon uses `push::resolve`, which also reads
+    /// `ca_file`; this is the relay-only view.
     #[allow(dead_code)]
     pub fn push_setting(&self) -> acd_relay::client::PushSetting {
         acd_relay::client::resolve(self.push.as_ref())

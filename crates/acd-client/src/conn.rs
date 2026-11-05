@@ -317,7 +317,13 @@ async fn next_server(ws: &mut Ws, deadline: Instant) -> Result<acd_protocol::Ser
             .await
             .map_err(|_| End::Offline("handshake timed out".into()))?
             .ok_or_else(|| End::Offline("closed".into()))?
-            .map_err(|e| End::Offline(e.to_string()))?;
+            .map_err(|e| match e {
+                // Same as serve(): drop the resume cursor.
+                tokio_tungstenite::tungstenite::Error::Capacity(_) => {
+                    End::Resync("frame over the size limit")
+                }
+                e => End::Offline(e.to_string()),
+            })?;
         if let Some(code) = close_code(&msg) {
             return Err(end_for_close(code));
         }
@@ -878,3 +884,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mutants_conn.rs"]
+mod mutants_conn;

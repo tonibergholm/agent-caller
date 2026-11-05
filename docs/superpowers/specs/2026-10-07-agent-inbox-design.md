@@ -1,5 +1,7 @@
 # Agent inbox v1: design spec
 
+Implementation status (2026-11-04): implemented. Core, herdr, hooks, T3 and the Mac app merged in PRs #1 to #25; live fixes in #10 to #23; released as 0.9.0 (#65). Voice, Omarchy and the external source have their own specs. Open items: [known gaps](../plans/2026-10-07-p1-followups.md).
+
 Date: 2026-10-07
 Status: revision 5.0. It folds in the P0 findings, the P1 review rulings,
 Sol rounds 4 and 5, gates 3 and 6, and the P3 gates 2, 4, 5 and 7 with the
@@ -249,7 +251,10 @@ requests.
   detection reads, or the hook source reported the end of the request.
 - **Non-reusable keys** (T3 request ids) are
   tombstoned once their request resolves. They never open another
-  request, even after the dialog is confirmed gone. The generation counter
+  request, even after the dialog is confirmed gone, while the tombstone is
+  retained. Tombstones are bounded to the newest 4096 resolved keys
+  (`RETIRED_KEYS_CAP`, all agents together). A replay of a key older than
+  that is treated as new and opens a request. The generation counter
   only applies to reusable keys.
 
 **Hook occurrences (O1 to O7).** For hooks, the key alone does not decide

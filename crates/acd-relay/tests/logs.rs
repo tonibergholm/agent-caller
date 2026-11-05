@@ -34,11 +34,11 @@ impl<'a> MakeWriter<'a> for Buf {
 #[tokio::test]
 async fn logs_never_contain_secrets() {
     let buf = Buf::default();
-    tracing_subscriber::fmt()
-        .with_env_filter(acd_relay::log_filter("trace"))
-        .with_writer(buf.clone())
-        .with_ansi(false)
-        .init();
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        tracing_subscriber::registry().with(acd_relay::log_layer("trace", buf.clone())).init();
+    }
 
     let fake = fake_fcm().await;
     let clock = Arc::new(ManualClock::new(T0));

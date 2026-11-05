@@ -227,6 +227,29 @@ async fn frame_over_one_mib_drops_the_connection() {
     assert!(f.hellos()[1].get("resume").is_none());
 }
 
+/// The frame arrives where a welcome should: the second connection's handshake
+/// reads it, and the third hello must not resume from the old cursor.
+#[tokio::test]
+async fn frame_over_one_mib_before_the_welcome_forces_resync_without_resume() {
+    let (f, h) = start().await;
+    let c = online(&f, &h).await;
+    f.set_handshake_error(
+        Some(serde_json::json!({"type":"future.thing","pad":"x".repeat(2 << 20)})),
+        None,
+    );
+    c.close(1001).await;
+    wait_for_connections(&f, 3).await;
+    assert_eq!(
+        f.hellos()[1]["resume"],
+        serde_json::json!({"epoch":"e1","seq":1}),
+        "the connection that reads the frame still resumed"
+    );
+    assert!(
+        f.hellos()[2].get("resume").is_none(),
+        "a peer that breaks the limit is not trusted to resume"
+    );
+}
+
 #[tokio::test]
 async fn snapshot_with_one_oversized_agent_forces_resync_without_state() {
     let (f, h) = start().await;

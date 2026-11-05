@@ -179,7 +179,7 @@ async fn failed_token_refresh_is_not_retried_until_the_backoff_ends() {
 /// can end these sends. Time is virtual.
 #[tokio::test(start_paused = true)]
 async fn concurrent_sends_against_a_stalled_oauth_endpoint_all_end_by_the_deadline() {
-    let fake = fake_fcm().await;
+    let fake = fake_fcm_offline();
     let clock = Arc::new(TokioClock::new(T0));
     let (c, _held) = client_with_stalled_oauth(&fake, clock.clone(), std::time::Duration::from_secs(120));
     let start = tokio::time::Instant::now();

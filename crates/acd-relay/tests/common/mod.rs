@@ -194,6 +194,20 @@ pub struct FakeFcm {
 
 pub const ACCESS_TOKEN: &str = "ya29.fake-access-token-for-tests";
 
+/// A fake with the state but no listener: for tests whose transport is in
+/// memory and that only need the credentials and the address text. Binds
+/// nothing, so it works where the sandbox denies sockets.
+pub fn fake_fcm_offline() -> FakeFcm {
+    let st = Arc::new(FcmState {
+        token_requests: AtomicUsize::new(0),
+        assertions: Mutex::new(vec![]),
+        sends: Mutex::new(vec![]),
+        send_reply: Mutex::new((200, r#"{"name":"projects/p-1/messages/1"}"#.into())),
+        token_reply: Mutex::new((200, format!(r#"{{"access_token":"{ACCESS_TOKEN}","expires_in":3600,"token_type":"Bearer"}}"#))),
+    });
+    FakeFcm { addr: "127.0.0.1:9".parse().unwrap(), st }
+}
+
 pub async fn fake_fcm() -> FakeFcm {
     let st = Arc::new(FcmState {
         token_requests: AtomicUsize::new(0),
