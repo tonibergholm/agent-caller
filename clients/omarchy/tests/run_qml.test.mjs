@@ -35,6 +35,12 @@ test("a linter that dies without a warning fails the wrapper", () => {
   assert.match(r.stderr, /exit 3/);
 });
 
+test("a linter that warns and then crashes fails the wrapper", () => {
+  const r = run('echo "Warning: x.qml:1:1: unqualified access"; echo "  code"; exit 139');
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /exit 139/);
+});
+
 test("a clean linter passes", () => {
   const r = run("exit 0");
   assert.equal(r.status, 0, r.stderr);

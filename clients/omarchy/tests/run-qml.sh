@@ -38,8 +38,9 @@ lint() {
       printf '%s\n' "$out" >&2
       exit 1
     fi
-    if [ "$rc" -ne 0 ] && ! printf '%s\n' "$out" | grep -q '^Warning: '; then
-      echo "qmllint: exit $rc on $(basename "$f") without a warning:" >&2
+    # qmllint exits 255 when it only warned; any other nonzero status is a crash or bad invocation.
+    if [ "$rc" -ne 0 ] && { [ "$rc" -ne 255 ] || ! printf '%s\n' "$out" | grep -q '^Warning: '; }; then
+      echo "qmllint: exit $rc on $(basename "$f"), not a warnings-only run:" >&2
       printf '%s\n' "$out" >&2
       exit 1
     fi
