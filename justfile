@@ -68,3 +68,14 @@ fuzz-smoke:
 # portability job does (scripts/portability-check.sh). Needs rustup; no NDK.
 portability-check:
     scripts/portability-check.sh
+
+# Android inbox: the debug APK (apps/android/build/agent-caller-debug.apk).
+# Needs ANDROID_NDK_HOME (a real NDK) or ACD_SANDBOX_NDK (tools/sandbox-ndk.sh
+# output), plus aapt, zipalign, apksigner and dx|d8. See docs/android.md.
+android-apk:
+    apps/android/build-apk.sh
+
+# Android shell tests that need no device: Rust unit tests, then the real JNI
+# glue on a host JVM. ORG_JSON_JAR is an org.json jar.
+android-test:
+    cd apps/android && cargo test --locked && ./jvm-test.sh
