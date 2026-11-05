@@ -171,6 +171,30 @@ impl NotifyGate {
     }
 }
 
+/// The gate for the fuzz target only (`--features fuzzing`); not part of the
+/// library API otherwise.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    #[derive(Default)]
+    pub struct NotifyGate(super::NotifyGate);
+    impl NotifyGate {
+        pub fn forget_machine(&mut self, machine_key: &str) {
+            self.0.forget_machine(machine_key);
+        }
+        pub fn admit(
+            &mut self,
+            machine_key: &str,
+            machine_id: String,
+            request_id: String,
+            opened_at: acd_protocol::Timestamp,
+            now: std::time::Instant,
+        ) -> bool {
+            self.0.admit(machine_key, machine_id, request_id, opened_at, now)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{default_machine_name, NotifyGate, NOTIFIED_HISTORY_MAX, NOTIFY_RATE_MAX, NOTIFY_RATE_WINDOW};

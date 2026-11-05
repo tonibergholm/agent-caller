@@ -299,7 +299,7 @@ impl FcmClient {
             return Err(SendError::Unavailable);
         };
         guard.done = true;
-        guard.state.token = Some(Token { value: value.clone(), expires_at: now + ttl });
+        guard.state.token = Some(Token { value: value.clone(), expires_at: now.saturating_add(ttl) });
         Ok(value)
     }
 
