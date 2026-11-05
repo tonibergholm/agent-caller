@@ -31,16 +31,39 @@ pub mod server;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The log filter: the user's directives (`RUST_LOG`), then third-party
-/// targets pinned to `warn`. At `trace`, `axum::serve` logs every peer
-/// address, and spec §8 says IPs never reach a log.
+/// Targets that can log peer addresses or credentials. Above `warn` they
+/// are dropped, whatever the user's directives say.
 #[cfg(feature = "server")]
-pub fn log_filter(user: &str) -> tracing_subscriber::EnvFilter {
-    let mut f = tracing_subscriber::EnvFilter::new(user);
-    for d in ["axum=warn", "hyper=warn", "hyper_util=warn", "rustls=warn", "tokio_rustls=warn"] {
-        f = f.add_directive(d.parse().expect("static directive"));
-    }
-    f
+const CAPPED_TARGETS: [&str; 6] = ["axum", "hyper", "hyper_util", "rustls", "tokio_rustls", "h2"];
+
+/// True when an event of `level` from `target` may be logged.
+#[cfg(feature = "server")]
+fn ceiling_allows(target: &str, level: &tracing::Level) -> bool {
+    let capped = CAPPED_TARGETS
+        .iter()
+        .any(|p| target == *p || target.strip_prefix(p).is_some_and(|rest| rest.starts_with("::")));
+    !capped || *level <= tracing::Level::WARN
+}
+
+/// The relay's log layer: the user's directives (`RUST_LOG`) decide what is
+/// logged, then a ceiling that no directive can raise drops events above
+/// `warn` from the third-party targets in `CAPPED_TARGETS` (and their
+/// submodules). At `trace`, `axum::serve` logs every peer address and
+/// rustls can log the address of an OAuth endpoint; spec §8 says IPs never
+/// reach a log.
+#[cfg(feature = "server")]
+pub fn log_layer<S, W>(user: &str, writer: W) -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + 'static,
+{
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::filter::{FilterExt, filter_fn};
+    let ceiling = filter_fn(|m| ceiling_allows(m.target(), m.level()));
+    tracing_subscriber::fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_filter(tracing_subscriber::EnvFilter::new(user).and(ceiling))
 }
 
 /// Seconds since the Unix epoch. A trait so tests can move time.
