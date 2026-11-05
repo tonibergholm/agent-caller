@@ -35,6 +35,14 @@
         "seq"
       ],
       "type": "object"
+    },
+    "PushPlatform": {
+      "description": "The push service behind a registered device.",
+      "enum": [
+        "android",
+        "ios"
+      ],
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -196,6 +204,72 @@
         },
         "type": {
           "const": "ping",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Registers the session's `client.id` for wake pushes. Needs the `push`\ncapability. `handle` is a relay secret: `Debug` shows only its length.",
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "handle": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "platform": {
+          "$ref": "#/$defs/PushPlatform"
+        },
+        "relay": {
+          "type": "string"
+        },
+        "type": {
+          "const": "push.register",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "relay",
+        "handle",
+        "platform",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "push.unregister",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "push.status",
           "type": "string"
         }
       },

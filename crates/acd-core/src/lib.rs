@@ -3,6 +3,7 @@ pub mod adapter;
 pub mod engine;
 pub mod idem;
 pub mod log;
+pub mod push;
 pub mod registry;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -16,6 +17,7 @@ pub use idem::{
     IDEM_SOURCE_SHARE_DIVISOR, IdemCache, IdemLimits, Origin,
 };
 pub use log::EventLog;
+pub use push::{PushControl, PushFailure, PushRegistration};
 pub use registry::*;
 pub mod server;
 pub mod tls;

@@ -180,6 +180,9 @@ request.answer   {id, request_id, revision?, option_id?, text?}    // revision i
 agent.send       {id, agent_id, text}
 agent.mark_seen  {id, agent_id}
 ping             {id}
+push.register    {id, relay, handle, platform: "android"|"ios", expires_at}   // only with the `push` capability
+push.unregister  {id}                                                         // only with the `push` capability
+push.status      {id}                                                         // only with the `push` capability
 ```
 
 **Daemon → client:**
@@ -193,7 +196,7 @@ request.opened   {epoch, seq, request}
 request.resolved {epoch, seq, request_id, agent_id,
                   by: "inbox"|"terminal"|"agent"|"superseded"|"uncertain"|"lost", option_id?, reason?, message?}   // option_id is absent/null for a text answer
 machine.updated  {epoch, seq, machine}
-result           {id, ok: true, outcome?} | {id, ok: false, error: {code, message}}
+result           {id, ok: true, outcome?, push?} | {id, ok: false, error: {code, message}}
 pong             {id}
 ```
 
@@ -313,9 +316,44 @@ react to events, such as notifications.
 
 ## 5. Capabilities
 
-- In v1, the daemon advertises `["answer", "send", "mark_seen", "answer.revision"]`.
+- In v1, the daemon advertises `["answer", "send", "mark_seen", "answer.revision"]`,
+  and also `"push"` when wake pushes are configured (§5.1).
 - A client must not send a command whose capability is not advertised.
 - New features add new capability strings.
+
+### 5.1 `push`: registering a device for wake pushes
+
+Advertised only when the daemon's `[push]` configuration resolved to an
+enabled relay. Without it a client sends no `push.*` command: a daemon that
+predates the capability answers one with `bad_request` (unknown type) and a
+daemon with push off answers `not_supported`, and a client cannot tell those
+two apart from the absence of the capability. The commands go through the
+normal command rules (§4): idempotency and the in-flight caps.
+
+- `push.register {id, relay, handle, platform, expires_at}` registers the
+  session's `hello.client.id`; there is no way to name another one. A
+  registration under the same `client.id` replaces the old one and enables
+  it again.
+  - `relay` must equal the daemon's configured relay URL (https, no trailing
+    slash), else `bad_request` "relay mismatch".
+  - `handle` is the opaque blob the relay issued: 1 to 512 bytes of base64url,
+    else `bad_request`. The daemon does not parse it and never logs it.
+  - `expires_at` is RFC 3339 and informational: the relay decides expiry.
+  - At most 8 devices per daemon; the ninth is `bad_request` "too many push
+    devices".
+  - Result: `{id, ok: true}` with no `outcome`. `source_unavailable` means the
+    registration could not be stored; retry.
+- `push.unregister {id}` removes the caller's registration. Idempotent.
+- `push.status {id}` returns the caller's own state as `result.push`:
+  `{registered, status?, last_wake_at}`. `status` is `ok`, `expired`,
+  `invalid` or `relay_error` and is absent when `registered` is false.
+  `expired` and `invalid` mean wakes are disabled until the device registers
+  again; `relay_error` means the last wake failed transiently and wakes go
+  on with a backoff. `last_wake_at` is RFC 3339 or `null`. Clients ignore an
+  unknown `status`.
+
+The daemon never returns a handle or another device's state. A wake carries
+no request, agent or machine text.
 
 ## 6. Data model and request lifecycle
 
