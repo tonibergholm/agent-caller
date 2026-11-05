@@ -166,7 +166,7 @@ TestCase {
         flick.contentY = 0;
         item.y = 0;
         verify(t.panel.cardFits("m1/a"));
-        t.panel.pickOption(item.card, "allow");
+        mouseClick(area);
         compare(t.svc.sentOf("pick").length, 1);
         t.panel.keyState = Model.selectCard("m1/a");
         t.panel.catcher.textKey("2", 0);

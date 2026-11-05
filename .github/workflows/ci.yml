@@ -41,6 +41,15 @@ jobs:
           rustup target add aarch64-apple-ios-sim aarch64-apple-ios
           cargo clippy -p acd-app-core --target aarch64-apple-ios-sim --locked -- -D warnings
           cargo clippy -p acd-app-core --target aarch64-apple-ios --locked -- -D warnings
+      # Qt 6 declarative tools for clients/omarchy/tests/run-qml.sh (qmllint and
+      # the headless Panel tests). If these packages disappear from the runner
+      # image this step fails loudly rather than skipping the QML checks.
+      - if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-layouts qml6-module-qtquick-controls qml6-module-qtqml-workerscript
+      - if: matrix.os == 'ubuntu-latest'
+        run: clients/omarchy/tests/run-qml.sh
       - if: matrix.os == 'ubuntu-latest'
         run: node --test 'clients/omarchy/tests/*.test.mjs'
       - if: matrix.os == 'ubuntu-latest'
