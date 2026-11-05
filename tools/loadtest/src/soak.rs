@@ -134,6 +134,8 @@ pub async fn run(a: Args) -> Result<(), String> {
         let t = started.elapsed().as_secs_f64();
         let dt = last_tick.elapsed().as_secs_f64().max(0.001);
         last_tick = Instant::now();
+        // An exit here is unexpected: restarts are ours and happen below.
+        check_alive(&mut proc)?;
         if restart_every > 0.0 && t >= next_restart {
             next_restart += restart_every;
             restarts += 1;
@@ -245,9 +247,53 @@ pub async fn run(a: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Fails the run when the process under test has exited on its own, so a
+/// stale sizes.json from a dead host is never read as a healthy sample.
+fn check_alive(proc: &mut Proc) -> Result<(), String> {
+    match proc.child.as_mut().map(|c| c.try_wait()) {
+        Some(Ok(Some(st))) => Err(format!("process exited unexpectedly during soak: {st}")),
+        Some(Err(e)) => Err(format!("cannot check process status: {e}")),
+        Some(Ok(None)) => Ok(()),
+        None => Err("process is not running during soak".into()),
+    }
+}
+
 fn median_of(series: &[(f64, u64)], lo: f64, hi: f64) -> u64 {
     let Some(&(end, _)) = series.last() else { return 0 };
     let mut v: Vec<u64> = series.iter().filter(|(t, _)| *t >= end * lo && *t <= end * hi).map(|(_, x)| *x).collect();
     v.sort_unstable();
     v.get(v.len() / 2).copied().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    fn proc_with(cmd: &mut Command) -> Proc {
+        let mut p = Proc::new(Target::Host { args: vec![] }, std::env::temp_dir());
+        p.child = Some(cmd.stdin(Stdio::piped()).spawn().unwrap());
+        p
+    }
+
+    #[test]
+    fn a_running_child_is_alive() {
+        let mut p = proc_with(&mut Command::new("cat"));
+        assert!(check_alive(&mut p).is_ok());
+    }
+
+    #[test]
+    fn an_exited_child_fails_the_run() {
+        let mut p = proc_with(Command::new("sh").args(["-c", "exit 3"]));
+        // Reap it so the exit is certain; try_wait then reports the status.
+        p.child.as_mut().unwrap().wait().unwrap();
+        let e = check_alive(&mut p).unwrap_err();
+        assert!(e.contains("exited unexpectedly") && e.contains('3'), "{e}");
+    }
+
+    #[test]
+    fn a_missing_child_fails_the_run() {
+        let mut p = Proc::new(Target::Host { args: vec![] }, std::env::temp_dir());
+        assert!(check_alive(&mut p).is_err());
+    }
 }

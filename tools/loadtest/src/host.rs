@@ -534,6 +534,10 @@ mod tests {
             .collect();
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "exactly one host may run");
+        // The winner holds the lock for its lifetime, so the loser must be turned away by the
+        // lock itself. Without it the loser fails later (bind or stale check) with another error.
+        let loser = results.iter().find_map(|r| r.as_ref().err()).unwrap();
+        assert!(loser.contains("another host holds the lock"), "loser was not stopped by the lock: {loser}");
         assert!(std::os::unix::net::UnixStream::connect(&sock).is_ok(), "the running host's socket was removed");
         drop(results);
         let _ = std::fs::remove_dir_all(&d);
