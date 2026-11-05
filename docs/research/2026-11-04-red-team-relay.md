@@ -1,7 +1,7 @@
 # Red team: dynamic attack on a running `acd-relay`
 
 Date: 2026-11-04. Base: `claude/relay-impl-1104-lz759n` (PR #97, the relay
-implementation, not yet on `main`) at `8b00ac1`. This is a dynamic,
+implementation; merged to `main` since) at `8b00ac1`. This is a dynamic,
 black-box test: a real `acd-relay` built with `cargo build --release
 -p acd-relay`, run as a subprocess against a fake FCM + OAuth endpoint,
 attacked from separate OS processes. It is a sequel to
