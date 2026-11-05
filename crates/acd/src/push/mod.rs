@@ -108,6 +108,9 @@ pub fn resolve(
 /// carries only its byte length and a SHA-256 prefix (as the server does).
 const MAX_DEVICES_LOGGED: usize = 8;
 
+/// How often a revocation that could not reach the disk is tried again.
+const REVOKE_RETRY: Duration = Duration::from_secs(30);
+
 fn client_tag(id: &str) -> String {
     let (len, sha) = acd_core::server::log_tag(id);
     format!("len={len} sha={sha}")
@@ -189,8 +192,13 @@ impl Push {
         let mut seen = 0;
         loop {
             let due = gates.values().filter_map(|g| g.deadline(min)).min();
+            // An idle daemon still retries a revocation the file refused.
+            let retry = self.store().clear_pending();
             tokio::select! {
                 () = self.wake.notified() => {}
+                () = async {
+                    if retry { tokio::time::sleep(REVOKE_RETRY).await } else { std::future::pending().await }
+                } => {}
                 () = async {
                     match due {
                         Some(at) => tokio::time::sleep_until(at).await,

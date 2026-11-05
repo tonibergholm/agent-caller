@@ -293,6 +293,11 @@ impl Store {
         written
     }
 
+    /// A revocation is waiting for the file to become writable.
+    pub fn clear_pending(&self) -> bool {
+        self.clear_pending
+    }
+
     /// Repeats a revocation whose file write failed.
     pub fn retry_clear(&mut self) {
         if self.clear_pending && self.clear().is_ok() {
