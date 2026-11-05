@@ -127,9 +127,8 @@ pub const NOTIFY_RATE_WINDOW: Duration = Duration::from_secs(10);
 
 /// Decides which opened requests raise a notification: each key once (bounded
 /// history), and at most `NOTIFY_RATE_MAX` per machine per window.
-#[doc(hidden)]
 #[derive(Default)]
-pub struct NotifyGate {
+struct NotifyGate {
     // `opened_at` tells a request from an earlier acd run: ids restart at r1.
     seen: HashSet<(String, String, acd_protocol::Timestamp)>,
     order: VecDeque<(String, String, acd_protocol::Timestamp)>,
@@ -139,10 +138,10 @@ pub struct NotifyGate {
 impl NotifyGate {
     /// Drop the rate-limit state of a removed machine, so the map holds only
     /// configured machines.
-    pub fn forget_machine(&mut self, machine_key: &str) {
+    fn forget_machine(&mut self, machine_key: &str) {
         self.recent.remove(machine_key);
     }
-    pub fn admit(
+    fn admit(
         &mut self,
         machine_key: &str,
         machine_id: String,
@@ -169,6 +168,30 @@ impl NotifyGate {
         }
         recent.push_back(now);
         true
+    }
+}
+
+/// The gate for the fuzz target only (`--features fuzzing`); not part of the
+/// library API otherwise.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    #[derive(Default)]
+    pub struct NotifyGate(super::NotifyGate);
+    impl NotifyGate {
+        pub fn forget_machine(&mut self, machine_key: &str) {
+            self.0.forget_machine(machine_key);
+        }
+        pub fn admit(
+            &mut self,
+            machine_key: &str,
+            machine_id: String,
+            request_id: String,
+            opened_at: acd_protocol::Timestamp,
+            now: std::time::Instant,
+        ) -> bool {
+            self.0.admit(machine_key, machine_id, request_id, opened_at, now)
+        }
     }
 }
 

@@ -8,7 +8,8 @@
 //! machine that spent its budget is refused until its oldest notification is
 //! 10 seconds old; one machine's flood never spends another's budget.
 #![no_main]
-use acd_client::inbox::{NOTIFIED_HISTORY_MAX, NOTIFY_RATE_MAX, NOTIFY_RATE_WINDOW, NotifyGate};
+use acd_client::inbox::fuzzing::NotifyGate;
+use acd_client::inbox::{NOTIFIED_HISTORY_MAX, NOTIFY_RATE_MAX, NOTIFY_RATE_WINDOW};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, VecDeque};

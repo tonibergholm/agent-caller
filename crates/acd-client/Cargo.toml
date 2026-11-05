@@ -8,6 +8,8 @@ license.workspace = true
 [features]
 testing = ["dep:acd-core"]
 ts = ["dep:ts-rs", "acd-protocol/ts"]
+# Exposes NotifyGate to fuzz/fuzz_targets/notify_gate.rs; nothing else enables it.
+fuzzing = []
 
 [dependencies]
 acd-protocol.workspace = true
