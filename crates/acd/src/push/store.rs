@@ -23,6 +23,12 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 const VERSION: u32 = 1;
 const MAX_ID_BYTES: usize = 128;
 
+/// Client id rule, shared by registration and `read_file`: what is stored
+/// must always be loadable.
+pub fn client_id_ok(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_ID_BYTES
+}
+
 /// Handle syntax: 1 to 512 bytes of base64url (acd does not parse it).
 pub fn handle_ok(h: &str) -> bool {
     !h.is_empty()
@@ -161,6 +167,7 @@ pub struct Store {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreError {
     TooMany,
+    BadId,
     Write,
 }
 
@@ -202,6 +209,9 @@ impl Store {
 
     /// Stores (or replaces) a registration with a fresh wake state.
     pub fn register(&mut self, client_id: &str, device: Device) -> Result<(), StoreError> {
+        if !client_id_ok(client_id) {
+            return Err(StoreError::BadId);
+        }
         if !self.devices.contains_key(client_id) && self.devices.len() >= MAX_DEVICES {
             return Err(StoreError::TooMany);
         }
@@ -272,10 +282,8 @@ fn read_file(path: &Path) -> Result<Option<BTreeMap<String, Device>>, &'static s
     if file.devices.len() > MAX_DEVICES {
         return Err("push.json lists too many devices");
     }
-    for (id, d) in &file.devices {
-        if id.is_empty() || id.len() > MAX_ID_BYTES || !handle_ok(&d.handle) {
-            return Err("push.json has an invalid entry");
-        }
-    }
-    Ok(Some(file.devices))
+    // One bad entry is skipped, never the whole file: the others still wake.
+    let mut devices = file.devices;
+    devices.retain(|id, d| client_id_ok(id) && handle_ok(&d.handle));
+    Ok(Some(devices))
 }

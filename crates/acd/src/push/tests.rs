@@ -59,6 +59,21 @@ pub struct FakeRelay {
 }
 
 impl FakeRelay {
+    /// A relay value that is never listened on (only its URL is used).
+    pub fn unbound() -> FakeRelay {
+        FakeRelay {
+            url: RelayUrl::for_tests("http://relay.invalid"),
+            bodies: Mutex::default(),
+            replies: Mutex::default(),
+            default: Mutex::new(Reply::status(204)),
+            hits: watch::channel(0).0,
+            in_flight: watch::channel(0).0,
+            max_in_flight: AtomicUsize::new(0),
+            gate: Mutex::new(None),
+            hang: AtomicBool::new(false),
+        }
+    }
+
     pub async fn start() -> Arc<FakeRelay> {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = RelayUrl::for_tests(&format!("http://{}", l.local_addr().unwrap()));
@@ -147,6 +162,111 @@ pub struct Rig {
     next_id: AtomicUsize,
 }
 
+/// A relay behind in-memory pipes. It records when each request arrived (on
+/// the runtime clock, so paused time is exact), answers after `delay`, and
+/// counts the response bytes it managed to write.
+pub struct MemRelay {
+    pub starts: Mutex<Vec<(Instant, String)>>,
+    /// The first `.0` requests are answered after `.1`; later ones at once.
+    delay: Mutex<(usize, Duration)>,
+    status: std::sync::atomic::AtomicU16,
+    huge: AtomicBool,
+    pub written: AtomicUsize,
+}
+
+impl MemRelay {
+    pub fn new() -> Arc<MemRelay> {
+        Arc::new(MemRelay {
+            starts: Mutex::default(),
+            delay: Mutex::new((0, Duration::ZERO)),
+            status: std::sync::atomic::AtomicU16::new(204),
+            huge: AtomicBool::new(false),
+            written: AtomicUsize::new(0),
+        })
+    }
+
+    pub fn delay_first(&self, n: usize, d: Duration) {
+        *self.delay.lock().unwrap() = (n, d);
+    }
+
+    pub fn set_status(&self, s: u16) {
+        self.status.store(s, Ordering::SeqCst);
+    }
+
+    /// Every answer is a 200 whose body is [`HUGE`] bytes.
+    pub fn answer_huge(&self) {
+        self.huge.store(true, Ordering::SeqCst);
+    }
+
+    pub fn connector(self: &Arc<Self>) -> acd_relay::http::Connector {
+        let me = self.clone();
+        Arc::new(move || {
+            let (client, server) = tokio::io::duplex(8192);
+            tokio::spawn(me.clone().serve(server));
+            client
+        })
+    }
+
+    async fn serve(self: Arc<Self>, mut io: tokio::io::DuplexStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buf = Vec::new();
+        let head_end = loop {
+            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            let mut chunk = [0u8; 1024];
+            match io.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+        let len: usize = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        while buf.len() < head_end + len {
+            let mut chunk = [0u8; 1024];
+            match io.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let body = String::from_utf8_lossy(&buf[head_end..head_end + len]).into_owned();
+        let index = {
+            let mut starts = self.starts.lock().unwrap();
+            starts.push((Instant::now(), body));
+            starts.len() - 1
+        };
+        let (slow, delay) = *self.delay.lock().unwrap();
+        if index < slow {
+            tokio::time::sleep(delay).await;
+        }
+        if self.huge.load(Ordering::SeqCst) {
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {HUGE}\r\n\r\n");
+            if io.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let chunk = [b'x'; 1024];
+            for _ in 0..HUGE / chunk.len() {
+                if io.write_all(&chunk).await.is_err() {
+                    return;
+                }
+                self.written.fetch_add(chunk.len(), Ordering::SeqCst);
+            }
+        } else {
+            let st = self.status.load(Ordering::SeqCst);
+            let head = format!("HTTP/1.1 {st} X\r\nContent-Length: 0\r\n\r\n");
+            let _ = io.write_all(head.as_bytes()).await;
+        }
+        let _ = io.shutdown().await;
+    }
+}
+
+/// The body the huge-response relay announces.
+pub const HUGE: usize = 16 << 20;
+
 pub fn private_dir() -> tempfile::TempDir {
     use std::os::unix::fs::PermissionsExt;
     let d = tempfile::tempdir().unwrap();
@@ -171,6 +291,24 @@ impl Rig {
             relay.url.clone(),
             clock.clone(),
         );
+        let push = Push::new(&relay.url, sender, Store::load(dir.path()), settings);
+        let core = Core::new(test_machine(), vec![]);
+        assert!(core.set_push(push.clone()));
+        push.spawn();
+        Rig { dir, relay, clock, push, core, next_id: AtomicUsize::new(0) }
+    }
+
+    /// Like [`Rig::in_dir`], but the sender talks to `mem` over in-memory pipes:
+    /// no sockets, so paused time is deterministic.
+    pub fn in_memory(settings: Settings, mem: &Arc<MemRelay>) -> Rig {
+        let relay = Arc::new(FakeRelay::unbound());
+        let clock = Arc::new(ManualClock::new(T0));
+        let sender = WakeSender::new(
+            HttpClient::in_memory_for_tests(Duration::from_secs(3600), MAX_RESPONSE, mem.connector()),
+            relay.url.clone(),
+            clock.clone(),
+        );
+        let dir = private_dir();
         let push = Push::new(&relay.url, sender, Store::load(dir.path()), settings);
         let core = Core::new(test_machine(), vec![]);
         assert!(core.set_push(push.clone()));
@@ -332,19 +470,52 @@ async fn a_flood_of_requests_wakes_a_device_once_per_window() {
     assert_eq!(rig.relay.hits(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_request_inside_the_window_gets_its_trailing_wake() {
-    // The window is short enough to wait out, long enough that the second
-    // request normally lands inside it. Either way the device must end up
-    // woken twice, and never more.
-    let rig = Rig::new(Settings { min_interval: Duration::from_millis(100), max_concurrent: MAX_CONCURRENT }).await;
+    let mem = MemRelay::new();
+    let rig = Rig::in_memory(Settings { min_interval: Duration::from_secs(30), max_concurrent: MAX_CONCURRENT }, &mem);
     rig.enroll("phone").await;
     rig.open(1);
-    rig.relay.wait_hits(1).await;
+    rig.push.handled(1).await;
     rig.open(2);
-    rig.relay.wait_hits(2).await;
     rig.push.handled(2).await;
-    assert_eq!(rig.relay.hits(), 2);
+    assert_eq!(mem.starts.lock().unwrap().len(), 1, "the second request is inside the window");
+    // Time moves only when told: just before the window ends nothing is sent,
+    // at its end the trailing wake is.
+    tokio::time::sleep(Duration::from_secs(29)).await;
+    assert_eq!(mem.starts.lock().unwrap().len(), 1);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let starts = mem.starts.lock().unwrap();
+    assert_eq!(starts.len(), 2);
+    assert!(starts[1].0 - starts[0].0 >= Duration::from_secs(30));
+}
+
+/// Debounce is measured from when a send starts, not from when its pass
+/// began: devices queued behind slow sends are not woken again early.
+#[tokio::test(start_paused = true)]
+async fn queued_devices_never_wake_less_than_the_interval_apart() {
+    let min = Duration::from_secs(30);
+    let mem = MemRelay::new();
+    // The first four sends are slow; the four queued behind them are not.
+    mem.delay_first(4, Duration::from_secs(4));
+    let rig = Rig::in_memory(Settings { min_interval: min, max_concurrent: 4 }, &mem);
+    for n in 0..store::MAX_DEVICES {
+        rig.enroll(&format!("phone-{n}")).await;
+    }
+    rig.open(1);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    rig.open(2);
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let starts = mem.starts.lock().unwrap().clone();
+    let mut per_device: HashMap<String, Vec<Instant>> = HashMap::new();
+    for (at, body) in starts {
+        per_device.entry(body).or_default().push(at);
+    }
+    assert_eq!(per_device.len(), store::MAX_DEVICES);
+    for (handle, times) in per_device {
+        assert_eq!(times.len(), 2, "{handle}: the immediate and the trailing wake");
+        assert!(times[1] - times[0] >= min, "{handle}: woken {:?} apart", times[1] - times[0]);
+    }
 }
 
 #[tokio::test]
@@ -495,19 +666,21 @@ async fn a_redirect_is_not_followed() {
     assert_eq!(rig.state("phone").status, Status::RelayError);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_huge_response_body_is_cut_off_and_treated_as_a_failure() {
-    let rig = Rig::new(NO_WINDOW).await;
+    let mem = MemRelay::new();
+    mem.answer_huge();
+    let rig = Rig::in_memory(NO_WINDOW, &mem);
     rig.enroll("phone").await;
-    let mut huge = Reply::status(200);
-    huge.body = vec![b'x'; 16 << 20];
-    rig.relay.set_default(huge);
     rig.open(1);
     rig.push.handled(1).await;
     assert_eq!(rig.state("phone").status, Status::RelayError);
-    // Not even a plausible success is believed when it comes with a big body
-    // of a status outside the table.
     assert_eq!(rig.state("phone").failures, 1);
+    // The cap is what failed it: the client stopped reading after the cap, so
+    // the relay could write only the cap plus what the pipe holds, nowhere
+    // near the 16 MiB announced.
+    let written = mem.written.load(Ordering::SeqCst);
+    assert!(written < 64 * 1024, "the client kept reading: {written} bytes written");
 }
 
 #[tokio::test]
@@ -677,7 +850,6 @@ fn an_unsafe_or_invalid_file_starts_empty_with_a_reason_and_is_left_alone() {
         ("not json", format!("{{ {secret}"), 0o600),
         ("unknown version", valid_file(&handle_for("x")).replace("\"version\":1", "\"version\":2"), 0o600),
         ("unknown field", valid_file(&handle_for("x")).replace("\"failures\":0", &format!("\"failures\":0,\"{secret}\":1")), 0o600),
-        ("bad handle", valid_file("has space"), 0o600),
         ("wrong type", valid_file(&handle_for("x")).replace("\"failures\":0", &format!("\"failures\":\"{secret}\"")), 0o600),
     ];
     for (name, text, mode) in cases {
@@ -692,6 +864,57 @@ fn an_unsafe_or_invalid_file_starts_empty_with_a_reason_and_is_left_alone() {
         assert!(!s.apply_wake("phone", 1, &WakeState::default()));
         assert_eq!(std::fs::read_to_string(dir.path().join(store::FILE)).unwrap(), text, "{name}: rewritten");
     }
+}
+
+fn two_entries(bad_key: &str, bad_handle: &str) -> String {
+    let dev = |h: &str| {
+        format!(
+            r#"{{"platform":"ios","handle":"{h}","expires_at":"x","status":"ok","failures":0,"retry_after":0,"last_wake_at":null}}"#
+        )
+    };
+    format!(
+        r#"{{"version":1,"devices":{{"{bad_key}":{},"phone":{},"tablet":{}}}}}"#,
+        dev(&handle_for("a")),
+        dev(&handle_for("b")),
+        dev(bad_handle)
+    )
+}
+
+#[test]
+fn one_bad_entry_is_skipped_and_the_others_survive() {
+    for text in [two_entries("", "has space"), two_entries(&"k".repeat(129), "has space")] {
+        let dir = private_dir();
+        write_raw(dir.path(), &text, 0o600);
+        let s = Store::load(dir.path());
+        assert!(s.degraded().is_none(), "{:?}", s.degraded());
+        assert_eq!(s.len(), 1);
+        assert!(s.get("phone").is_some());
+    }
+}
+
+#[test]
+fn an_unusable_client_id_is_refused_before_anything_is_written() {
+    let dir = private_dir();
+    let mut s = Store::load(dir.path());
+    let dev = || Device::new(PushPlatform::Android, handle_for("x"), "x".into());
+    assert_eq!(s.register("", dev()), Err(StoreError::BadId));
+    assert_eq!(s.register(&"k".repeat(129), dev()), Err(StoreError::BadId));
+    assert!(s.register(&"k".repeat(128), dev()).is_ok());
+    assert!(!store::client_id_ok(""));
+    // Whatever registration accepts, a restart loads.
+    assert_eq!(Store::load(dir.path()).len(), 1);
+}
+
+#[tokio::test]
+async fn an_empty_client_id_cannot_poison_the_registrations_of_others() {
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.enroll("phone").await;
+    let r = rig.register("", &handle_for("evil")).await;
+    assert!(!r.ok);
+    assert_eq!(r.error_code(), Some(ErrorCode::BadRequest));
+    let again = Store::load(rig.dir.path());
+    assert!(again.degraded().is_none());
+    assert!(again.get("phone").is_some());
 }
 
 #[test]
@@ -844,4 +1067,47 @@ fn every_bad_push_section_fails_closed_with_a_reason() {
     }
     // Not a table at all.
     assert!(off_reason(resolve(Some(&toml::Value::Integer(5)), &[], clock())).is_some());
+}
+
+/// A client may choose its id, and so may choose the token. No push log line
+/// carries it, or any 8-character piece of it.
+#[tokio::test(start_paused = true)]
+async fn push_logs_never_contain_a_peer_chosen_client_id() {
+    use std::sync::Mutex as StdMutex;
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<StdMutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    // Global, not scoped: other tests hit the same call sites first, and a
+    // scoped subscriber can then miss them. This is the only test that sets it.
+    tracing::subscriber::set_global_default(subscriber).expect("no other test installs a global subscriber");
+    let token = "tok-QZXWVUTSRPNMLKJHGFDSA987654321";
+    let mem = MemRelay::new();
+    let rig = Rig::in_memory(NO_WINDOW, &mem);
+    rig.enroll(token).await;
+    rig.open(1);
+    rig.push.handled(1).await;
+    mem.set_status(503);
+    rig.open(2);
+    rig.push.handled(2).await;
+    let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("push device registered") && logs.contains("wake failed"), "capture works: {logs}");
+    for w in token.as_bytes().windows(8) {
+        let piece = std::str::from_utf8(w).unwrap();
+        assert!(!logs.contains(piece), "{piece:?} leaked: {logs}");
+    }
 }

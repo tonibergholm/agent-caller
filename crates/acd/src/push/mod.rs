@@ -104,6 +104,13 @@ pub fn resolve(
     }
 }
 
+/// A client id is peer-chosen and may be the token itself, so a log line
+/// carries only its byte length and a SHA-256 prefix (as the server does).
+fn client_tag(id: &str) -> String {
+    let (len, sha) = acd_core::server::log_tag(id);
+    format!("len={len} sha={sha}")
+}
+
 /// The push engine: the registrations, the debounce and the sender.
 pub struct Push {
     relay: String,
@@ -202,29 +209,34 @@ impl Push {
             let (this, permits) = (self.clone(), permits.clone());
             sends.spawn(async move {
                 let _permit = permits.acquire_owned().await;
+                // The debounce window starts when the send does, not when the
+                // pass did: a send queued behind slow ones must not wake the
+                // device again less than `min` after it.
+                let started = Instant::now();
                 let outcome = this.sender.wake(&handle, &mut state).await;
-                (id, generation, state, outcome)
+                (id, generation, state, outcome, started)
             });
         }
         while let Some(done) = sends.join_next().await {
-            let Ok((id, generation, state, outcome)) = done else {
+            let Ok((id, generation, state, outcome, started)) = done else {
                 tracing::error!("a wake task failed");
                 continue;
             };
             let gate = gates.entry(id.clone()).or_default();
+            let tag = client_tag(&id);
             match outcome {
                 Outcome::Skipped | Outcome::Disabled => gate.dropped(),
-                _ => gate.attempted(now),
+                _ => gate.attempted(started),
             }
             match outcome {
-                Outcome::Sent => tracing::debug!(client = ?id, "wake sent"),
-                Outcome::RateLimited => tracing::info!(client = ?id, "wake dropped: relay rate limit"),
+                Outcome::Sent => tracing::debug!(client = %tag, "wake sent"),
+                Outcome::RateLimited => tracing::info!(client = %tag, "wake dropped: relay rate limit"),
                 Outcome::Skipped | Outcome::Disabled => {}
                 Outcome::Failed => tracing::warn!(
-                    client = ?id, failures = state.failures, "wake failed; retrying with backoff"
+                    client = %tag, failures = state.failures, "wake failed; retrying with backoff"
                 ),
                 Outcome::Invalidated => {
-                    tracing::warn!(client = ?id, status = ?state.status, "wake registration disabled");
+                    tracing::warn!(client = %tag, status = ?state.status, "wake registration disabled");
                 }
             }
             self.blocking(move |s| s.apply_wake(&id, generation, &state)).await;
@@ -261,10 +273,11 @@ impl PushControl for Push {
         let stored = self.blocking(move |s| s.register(&id, device)).await;
         match stored {
             Some(Ok(())) => {
-                tracing::info!(client = ?client_id, "push device registered");
+                tracing::info!(client = %client_tag(client_id), "push device registered");
                 Ok(())
             }
             Some(Err(StoreError::TooMany)) => bad("too many push devices"),
+            Some(Err(StoreError::BadId)) => bad("invalid client id"),
             Some(Err(StoreError::Write)) | None => Err(PushFailure {
                 code: ErrorCode::SourceUnavailable,
                 message: "could not store the registration",
