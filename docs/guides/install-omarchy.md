@@ -94,6 +94,7 @@ Problems: [troubleshooting.md](troubleshooting.md).
 Verified: `cargo build -p acd-inbox`; `acd-inbox --help`; `acd-inbox status`
 with no service (prints `service: not running`, `plugin: missing`);
 `acd service install --print`. Panel text comes from
-`clients/omarchy/model.mjs` and `Panel.qml`. Not verified: `acd-inbox
+`clients/omarchy/model.mjs` and `Panel.qml`;
+Not verified: `acd-inbox
 install` and `uninstall` (they need `systemctl --user` and `omarchy`), the
 shell plugin, notifications, the keybinding.

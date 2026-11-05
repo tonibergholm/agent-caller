@@ -99,8 +99,8 @@ reviewed once, not on main. Per that draft:
   or count.
 - It could not answer, approve or send anything. Every action still needs the
   client token over pinned TLS to `acd`, which the relay never has.
-- It would see metadata: the public IP of each `acd`, the time, and the push
-  handle. Over time that reveals how many devices you have, how many
+- It would see metadata: the public IP of each `acd`, the time, the push
+  handle, and, once it opens the handle, the push address and platform. Over time that reveals how many devices you have, how many
   machines wake them, and when your agents ask for input. It could drop wakes.
 - Push would be off unless you set a relay URL in `config.toml`. You could
   run the relay yourself. Apple or Google would be involved for push delivery
@@ -116,7 +116,8 @@ post a vulnerability in public. See [SECURITY.md](../../SECURITY.md).
 Verified: file names and modes (`acd init`), `acd token rotate client`,
 `acd token rotate hook`, `acd tls rotate`, `acd hooks install claude` (the
 token in `settings.json`, the tracked-file refusal text), `acd pair`. The
-rest is from `SECURITY.md`, `PROTOCOL.md` and the relay spec. Not verified:
+rest is from `SECURITY.md`, `PROTOCOL.md` and the relay spec;
+Not verified:
 rotation against live clients (the daemon cannot bind IPv6 in this sandbox),
 Tailscale ACL advice (general practice, not tested), and anything about the
 relay, which does not exist in this tree.

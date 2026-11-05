@@ -45,7 +45,7 @@ Tailscale name or address." A malformed line fails with "That is not an acd
 pairing line. Run `acd pair` on the machine and copy its output."
 
 The token is stored in the Keychain (Mac, iOS), the Secret Service keyring
-(Omarchy) or a Keystore-wrapped file (Android). On iOS the app clears the clipboard once the machine is saved.
+(Omarchy) or a Keystore-wrapped file (Android). The Mac app and iOS clear the clipboard once the machine is saved; a failed import leaves the line there for another try.
 
 ## Rotate the token
 
@@ -86,7 +86,8 @@ Problems: [troubleshooting.md](troubleshooting.md).
 Verified: `acd init`; `acd pair --host mini.tail1234.ts.net` (the line has
 the form shown); `acd pair` with no Tailscale CLI (error text above);
 `acd token rotate client`, `acd tls rotate` (output text above). Client
-messages are copied from `crates/acd-client` source. Not verified: a real
+messages are copied from `crates/acd-client` source;
+Not verified: a real
 pairing over Tailscale, the 30-second identity retry and the 4401 close
 against a running daemon (the sandbox cannot bind IPv6, so `acd run` exits;
 the behaviour is from `conn.rs`, `daemon.rs` and `server.rs`, which have

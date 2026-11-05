@@ -9,9 +9,11 @@ Neither is in the release files: you build them from source.
 - Pair a machine by pasting the line from `acd pair`
   ([pair-a-remote-machine.md](pair-a-remote-machine.md)). Only Tailscale
   addresses are accepted.
-- List the cards, answer a permission or a single-select question, reply to
-  an idle agent, mark seen, remove a machine. The answer has the same
-  2-second undo.
+- List the cards, answer a permission or a single-select question, mark
+  seen, remove a machine. The answer has the same 2-second undo. The iOS app
+  shares the desktop UI, so it also has typed answers and replies; the
+  Android bridge has pairing, pick, answer, mark seen and remove only
+  (`docs/android.md`).
 - Cards that cannot be answered whole are read-only, as on the desktop.
 - The secret is stored in the iOS Keychain (this-device-only, not backed up)
   or, on Android, in a file wrapped with an Android Keystore key.
@@ -91,7 +93,8 @@ pair by pasting the line.
 Problems: [troubleshooting.md](troubleshooting.md).
 
 Verified: the scope and limits, from `apps/ios/README.md`, `docs/android.md`
-and `README.md`. Not verified: every build and install command above (no
+and `README.md`;
+Not verified: every build and install command above (no
 Mac, Xcode, NDK or phone in this session), the Android app on any device,
 and `adb install`. The iOS README records a debug build checked on one
 iPhone on 2026-10-13; a release build was not.

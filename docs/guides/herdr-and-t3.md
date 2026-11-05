@@ -93,5 +93,6 @@ Verified: the table of what is answerable and the status messages are read
 from `PROTOCOL.md` (section 6), the design spec (section 6.2) and the
 adapter source (`t3/reconciler.rs`, `t3/conn.rs`, `herdr/discovery.rs`); the
 card labels from `app/src/components/Card.svelte` and
-`crates/acd-client/src/view.rs`. Not verified: any live herdr or T3 session;
+`crates/acd-client/src/view.rs`;
+Not verified: any live herdr or T3 session;
 the recorded live checks are in `docs/research/` (herdr gate 6, T3 gate 3).

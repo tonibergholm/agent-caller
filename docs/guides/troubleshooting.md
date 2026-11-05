@@ -46,7 +46,7 @@ connection is pinged after 15 s and dropped after 10 s more without reply.
 |---|---|---|
 | 4400 | Unsupported protocol. | Shows `incompatible`, waits for Retry. |
 | 4401 | No valid `hello`, invalid token, or `token rotated`. | Shows `auth failed`. A paired remote waits for Retry; the local app retries with backoff. |
-| 4408 | `client too slow`: the client queued over 1000 events. | Shows `connecting`, reconnects with the backoff above, resumes where it left off. If it repeats, the client or link is too slow. |
+| 4408 | `client too slow`: the client queued over 1000 events. | Shows `connecting`, reconnects with the backoff above, resumes where it left off, or gets a fresh snapshot if it fell too far behind. If it repeats, the client or link is too slow. |
 | anything else | Normal close. | `offline: closed`, then backoff. |
 
 ## Pre-auth refusals (HTTP 503)
@@ -100,7 +100,7 @@ the origin is in `allowed_origins` (empty by default).
 | Hidden. Nothing was sent. | The agent is hidden by a filter. |
 | Could not send: <reason>. | Any other daemon error (`bad_request`, `duplicate_mismatch`, `unauthorized`). |
 
-Daemon text never appears in these notices; only the code does.
+Daemon text does not appear in these notices; only the code does. One exception: an external producer's own message (at most 500 bytes) replaces the generic notice on a resolved card.
 
 ## Source states (`acd status`)
 
@@ -169,8 +169,9 @@ Verified: the strings are from `crates/acd-client` (`conn.rs`, `view.rs`,
 `inbox.rs`, `local.rs`), `crates/acd-protocol` (`pairing.rs`, `messages.rs`,
 `PROTOCOL.md`), `crates/acd-core/src/server.rs`, `clients/omarchy/model.mjs`,
 `crates/acd-inbox`, `apps/android/src`, `app/src`; `acd pair`, `acd token
-rotate`, `acd tls rotate` and `acd hooks` output was run. Not verified: no
+rotate`, `acd tls rotate` and `acd hooks` output was run;
+Not verified: no
 state was provoked against a running daemon (`acd run` cannot bind IPv6 in
-this sandbox), so fixes marked as reasoning, the exact `HTTP error: 503`
+this sandbox), so the fixes are reasoned from the code, not tried; also not verified: the exact `HTTP error: 503`
 wording (it is the WebSocket library's text for the 503 that tests assert),
 and the macOS voice and Omarchy strings in a running app.
