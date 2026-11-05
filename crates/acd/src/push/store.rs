@@ -175,6 +175,9 @@ pub struct Store {
     /// Entries skipped at load: client id and raw value.
     skipped: Vec<(String, serde_json::Value)>,
     quarantined: std::cell::Cell<bool>,
+    /// A revocation whose file could not be rewritten or removed: retried
+    /// until `push.json` no longer lists the revoked registrations.
+    clear_pending: bool,
 }
 
 struct Loaded {
@@ -203,6 +206,7 @@ impl Store {
             locked: false,
             skipped: Vec::new(),
             quarantined: std::cell::Cell::new(false),
+            clear_pending: false,
         };
         match read_file(&store.path) {
             Ok(None) => {}
@@ -272,14 +276,28 @@ impl Store {
 
     /// Revokes every registration (client token rotation, spec 4.8). Fails
     /// closed: the registrations are gone from memory even when the file
-    /// cannot be rewritten, so no further wake uses them.
+    /// cannot be rewritten, so no further wake uses them. If the rewrite
+    /// fails the file is removed instead; if that fails too the revocation
+    /// stays pending (`retry_clear`) so a restart cannot bring them back.
     pub fn clear(&mut self) -> Result<(), StoreError> {
-        if self.devices.is_empty() {
+        if self.devices.is_empty() && !self.clear_pending {
             return Ok(());
         }
-        let written = self.commit(BTreeMap::new());
+        let written = self.commit(BTreeMap::new()).or_else(|e| match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(r) if r.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(e),
+        });
         self.devices.clear();
+        self.clear_pending = written.is_err();
         written
+    }
+
+    /// Repeats a revocation whose file write failed.
+    pub fn retry_clear(&mut self) {
+        if self.clear_pending && self.clear().is_ok() {
+            tracing::info!("push registrations revoked on disk");
+        }
     }
 
     /// Applies a wake outcome to `client_id`, if it is still registered at
@@ -308,6 +326,8 @@ impl Store {
         self.persist(&next)?;
         self.devices = next;
         self.degraded = None;
+        // The file now holds exactly `devices`: nothing revoked is left in it.
+        self.clear_pending = false;
         Ok(())
     }
 

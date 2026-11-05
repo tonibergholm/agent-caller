@@ -124,6 +124,8 @@ pub struct Push {
     wake: Notify,
     /// The `opened` count the runner has handled (tests wait on it).
     handled: watch::Sender<u64>,
+    /// Bumped by every revocation. A send in flight is cancelled when it moves.
+    revoked: watch::Sender<u64>,
 }
 
 impl Push {
@@ -136,6 +138,7 @@ impl Push {
             opened: AtomicU64::new(0),
             wake: Notify::new(),
             handled: watch::channel(0).0,
+            revoked: watch::channel(0).0,
         })
     }
 
@@ -174,6 +177,9 @@ impl Push {
         } else {
             tracing::info!("push registrations revoked");
         }
+        // After the store is cleared: a send past its generation check is
+        // cancelled here instead of reaching the relay with a revoked handle.
+        self.revoked.send_modify(|n| *n += 1);
         self.wake.notify_one();
     }
 
@@ -203,6 +209,10 @@ impl Push {
     /// at most `max_concurrent` at a time, and the pass ends when they have.
     /// A device has at most one send in flight, because passes do not overlap.
     async fn cycle(self: &Arc<Self>, gates: &mut HashMap<String, Gate>, any_open: bool) {
+        // Before the snapshot: a revocation after it is seen by every send.
+        let revoked = self.revoked.subscribe();
+        // A rotation whose file rewrite failed is retried on every pass.
+        self.blocking(|s| s.retry_clear()).await;
         let now = Instant::now();
         let min = self.settings.min_interval;
         let targets: Vec<_> = self
@@ -220,6 +230,7 @@ impl Push {
                 continue;
             }
             let (this, permits) = (self.clone(), permits.clone());
+            let mut revoked = revoked.clone();
             sends.spawn(async move {
                 let _permit = permits.acquire_owned().await;
                 // A send that waited for a permit must not use a registration
@@ -231,7 +242,11 @@ impl Push {
                 // pass did: a send queued behind slow ones must not wake the
                 // device again less than `min` after it.
                 let started = Instant::now();
-                let outcome = this.sender.wake(&handle, &mut state).await;
+                let outcome = tokio::select! {
+                    o = this.sender.wake(&handle, &mut state) => o,
+                    // Dropping the send closes its connection.
+                    _ = revoked.changed() => Outcome::Skipped,
+                };
                 (id, generation, state, outcome, started)
             });
         }

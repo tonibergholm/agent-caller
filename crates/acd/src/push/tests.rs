@@ -761,6 +761,36 @@ async fn rotating_the_client_token_revokes_every_registration_also_after_a_resta
 }
 
 #[tokio::test]
+async fn revoking_cancels_a_wake_that_is_already_in_flight() {
+    // An hour-long request deadline: only the cancellation can end the send,
+    // so without it this test hangs instead of passing on a timeout.
+    let rig = Rig::with_timeout(NO_WINDOW, Duration::from_secs(3600)).await;
+    rig.enroll("phone").await;
+    let _gate = rig.relay.hold(); // never released: only cancellation ends the send
+    rig.open(1);
+    rig.relay.wait_in_flight(1).await;
+    rig.push.revoke_all().await;
+    rig.push.handled(1).await;
+    assert!(!rig.status("phone").await.registered);
+}
+
+#[test]
+fn a_revocation_whose_file_write_fails_is_retried_and_survives_a_restart() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = private_dir();
+    let mut st = Store::load(d.path());
+    st.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
+    // The directory refuses new files and removals: neither rewrite nor unlink can work.
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(st.clear().is_err());
+    assert_eq!(st.len(), 0, "gone from memory even when the file stays");
+    assert_eq!(Store::load(d.path()).len(), 1, "the file still lists it");
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    st.retry_clear();
+    assert_eq!(Store::load(d.path()).len(), 0, "the retry made the revocation durable");
+}
+
+#[tokio::test]
 async fn a_new_registration_after_revocation_wakes_again() {
     let rig = Rig::new(NO_WINDOW).await;
     rig.enroll("phone").await;
