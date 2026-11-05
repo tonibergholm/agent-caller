@@ -215,7 +215,8 @@ impl WakeSender {
             Class::Transient => {
                 state.failures = state.failures.saturating_add(1);
                 state.status = Status::RelayError;
-                state.retry_after = now + backoff_secs(state.failures);
+                // Ten seconds since the failure, not since the start of the request.
+                state.retry_after = self.clock.now_secs() + backoff_secs(state.failures);
                 Outcome::Failed
             }
         }

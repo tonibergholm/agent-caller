@@ -359,3 +359,46 @@ async fn an_ipv6_literal_connects_and_the_host_header_stays_bracketed_with_the_p
     let host = host_header_seen(l, format!("http://[::1]:{port}/v1/wake")).await;
     assert_eq!(host, format!("[::1]:{port}"));
 }
+
+/// A clock that moves with tokio's (paused) time.
+struct TokioClock(tokio::time::Instant);
+
+impl acd_relay::Clock for TokioClock {
+    fn now_secs(&self) -> u64 {
+        T0 + self.0.elapsed().as_secs()
+    }
+}
+
+/// Spec §5.4: the backoff runs ten seconds from the failure, not from the
+/// start of the request. A wake that times out at its deadline must refuse
+/// another send until ten seconds after that failure.
+#[tokio::test(start_paused = true)]
+async fn backoff_counts_from_the_failure_not_the_start() {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = RelayUrl::for_tests(&format!("http://{}", l.local_addr().unwrap()));
+    // Accepts and never answers.
+    tokio::spawn(async move {
+        let mut held = vec![];
+        while let Ok((s, _)) = l.accept().await {
+            held.push(s);
+        }
+    });
+    let clock = Arc::new(TokioClock(tokio::time::Instant::now()));
+    let sender = WakeSender::new(
+        HttpClient::plain_for_tests(Duration::from_secs(5), MAX_RESPONSE),
+        url,
+        clock.clone(),
+    );
+    let mut st = WakeState::default();
+    assert_eq!(sender.wake("H", &mut st).await, Outcome::Failed);
+    let failed_at = acd_relay::Clock::now_secs(&*clock);
+    assert_eq!(failed_at, T0 + 5, "the request ran to its deadline");
+    assert_eq!(st.retry_after, failed_at + 10);
+    // Nine seconds after the failure: still refused.
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(sender.wake("H", &mut st).await, Outcome::Skipped);
+    // Ten seconds after the failure: allowed (and fails again, at its deadline).
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(sender.wake("H", &mut st).await, Outcome::Failed);
+    assert_eq!(st.failures, 2);
+}
