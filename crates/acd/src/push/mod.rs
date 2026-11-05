@@ -106,6 +106,8 @@ pub fn resolve(
 
 /// A client id is peer-chosen and may be the token itself, so a log line
 /// carries only its byte length and a SHA-256 prefix (as the server does).
+const MAX_DEVICES_LOGGED: usize = 8;
+
 fn client_tag(id: &str) -> String {
     let (len, sha) = acd_core::server::log_tag(id);
     format!("len={len} sha={sha}")
@@ -278,6 +280,10 @@ impl PushControl for Push {
             }
             Some(Err(StoreError::TooMany)) => bad("too many push devices"),
             Some(Err(StoreError::BadId)) => bad("invalid client id"),
+            Some(Err(StoreError::Corrupt)) => Err(PushFailure {
+                code: ErrorCode::SourceUnavailable,
+                message: "push.json is corrupt; repair or remove it",
+            }),
             Some(Err(StoreError::Write)) | None => Err(PushFailure {
                 code: ErrorCode::SourceUnavailable,
                 message: "could not store the registration",
@@ -324,7 +330,12 @@ pub fn enable(dir: &Path, cfg: &crate::config::Config, core: &acd_core::Core) ->
         Resolved::On { relay, sender } => {
             let store = Store::load(dir);
             if let Some(why) = store.degraded() {
-                tracing::warn!(reason = %why, "push is degraded: starting with no registrations; the next registration replaces the file");
+                tracing::warn!(reason = %why, "push is degraded: starting with no registrations; push.json is left untouched and registering fails until it is repaired or removed");
+            }
+            let skipped = store.skipped_ids().count();
+            if skipped > 0 {
+                let tags: Vec<String> = store.skipped_ids().take(MAX_DEVICES_LOGGED).map(client_tag).collect();
+                tracing::warn!(skipped, ids = ?tags, "push.json: skipped invalid entries; kept in push.json.quarantine at the next write");
             }
             let push = Push::new(&relay, sender, store, Settings::default());
             core.set_push(push.clone());

@@ -849,8 +849,9 @@ fn an_unsafe_or_invalid_file_starts_empty_with_a_reason_and_is_left_alone() {
         ("loose mode", valid_file(&handle_for("x")), 0o644),
         ("not json", format!("{{ {secret}"), 0o600),
         ("unknown version", valid_file(&handle_for("x")).replace("\"version\":1", "\"version\":2"), 0o600),
-        ("unknown field", valid_file(&handle_for("x")).replace("\"failures\":0", &format!("\"failures\":0,\"{secret}\":1")), 0o600),
-        ("wrong type", valid_file(&handle_for("x")).replace("\"failures\":0", &format!("\"failures\":\"{secret}\"")), 0o600),
+        ("top-level unknown field", valid_file(&handle_for("x")).replace("\"devices\"", &format!("\"{secret}\":1,\"devices\"")), 0o600),
+        ("not an object", format!("[\"{secret}\"]"), 0o600),
+        ("devices not an object", format!("{{\"version\":1,\"devices\":\"{secret}\"}}"), 0o600),
     ];
     for (name, text, mode) in cases {
         let dir = private_dir();
@@ -941,17 +942,96 @@ fn too_many_devices_in_the_file_is_degraded() {
 }
 
 #[test]
-fn the_next_valid_registration_replaces_a_degraded_file() {
-    use std::os::unix::fs::PermissionsExt;
+fn a_corrupt_file_is_never_overwritten_by_a_registration() {
     let dir = private_dir();
-    write_raw(dir.path(), "not json", 0o644);
+    write_raw(dir.path(), "not json", 0o600);
     let mut s = Store::load(dir.path());
     assert!(s.degraded().is_some());
-    s.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "x".into())).unwrap();
-    assert!(s.degraded().is_none());
-    let p = dir.path().join(store::FILE);
-    assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o7777, 0o600);
-    assert!(Store::load(dir.path()).get("phone").is_some());
+    assert_eq!(
+        s.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "x".into())),
+        Err(StoreError::Corrupt)
+    );
+    assert_eq!(std::fs::read_to_string(dir.path().join(store::FILE)).unwrap(), "not json");
+    assert!(!dir.path().join(store::QUARANTINE).exists());
+}
+
+fn dev_json(handle: &str) -> String {
+    format!(
+        r#"{{"platform":"ios","handle":"{handle}","expires_at":"x","status":"ok","failures":0,"retry_after":0,"last_wake_at":null}}"#
+    )
+}
+
+/// A healthy phone beside four different kinds of bad entry.
+fn mixed_file() -> String {
+    let good = dev_json(&handle_for("phone"));
+    let bad_field = dev_json(&handle_for("a")).replace("\"failures\":0", "\"failures\":\"bad\"");
+    let bad_handle = dev_json("has space");
+    let truncated = r#"{"platform":"ios","handle":"abc"}"#;
+    let bad_id = dev_json(&handle_for("b"));
+    format!(
+        r#"{{"version":1,"devices":{{"phone":{good},"badfield":{bad_field},"badhandle":{bad_handle},"truncated":{truncated},"":{bad_id}}}}}"#
+    )
+}
+
+#[test]
+fn bad_entries_of_every_kind_leave_exactly_the_healthy_device() {
+    let dir = private_dir();
+    write_raw(dir.path(), &mixed_file(), 0o600);
+    let s = Store::load(dir.path());
+    assert!(s.degraded().is_none(), "{:?}", s.degraded());
+    assert_eq!(s.len(), 1);
+    assert!(s.get("phone").is_some());
+    assert_eq!(s.skipped_ids().count(), 4);
+    // Loading alone writes nothing.
+    assert!(!dir.path().join(store::QUARANTINE).exists());
+}
+
+#[test]
+fn a_registration_keeps_the_skipped_entries_in_an_owner_only_quarantine() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_dir();
+    write_raw(dir.path(), &mixed_file(), 0o600);
+    let mut s = Store::load(dir.path());
+    s.register("tablet", Device::new(PushPlatform::Android, handle_for("t"), "x".into())).unwrap();
+    let q = dir.path().join(store::QUARANTINE);
+    assert_eq!(std::fs::metadata(&q).unwrap().permissions().mode() & 0o7777, 0o600);
+    let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&q).unwrap()).unwrap();
+    let ids: std::collections::BTreeSet<&str> =
+        kept.as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["", "badfield", "badhandle", "truncated"].into_iter().collect());
+    // The bad field's raw value survives.
+    let bf = kept.as_array().unwrap().iter().find(|e| e["id"] == "badfield").unwrap();
+    assert_eq!(bf["entry"]["failures"], "bad");
+    // The main file now holds the healthy devices, and reloads without the bad ones.
+    let again = Store::load(dir.path());
+    assert!(again.get("phone").is_some() && again.get("tablet").is_some());
+    assert_eq!(again.skipped_ids().count(), 0);
+    // A second registration keeps the quarantine as it was.
+    let before = std::fs::read(&q).unwrap();
+    s.register("watch", Device::new(PushPlatform::Android, handle_for("w"), "x".into())).unwrap();
+    assert_eq!(std::fs::read(&q).unwrap(), before);
+}
+
+#[test]
+fn nothing_is_written_if_the_quarantine_cannot_be_kept() {
+    let dir = private_dir();
+    let text = mixed_file();
+    write_raw(dir.path(), &text, 0o600);
+    // A quarantine that is not valid cannot be extended, so the file stays.
+    write_quarantine_raw(dir.path(), "garbage");
+    let mut s = Store::load(dir.path());
+    assert_eq!(
+        s.register("tablet", Device::new(PushPlatform::Android, handle_for("t"), "x".into())),
+        Err(StoreError::Write)
+    );
+    assert_eq!(std::fs::read_to_string(dir.path().join(store::FILE)).unwrap(), text);
+}
+
+fn write_quarantine_raw(dir: &std::path::Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join(store::QUARANTINE);
+    std::fs::write(&p, text).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 #[test]
