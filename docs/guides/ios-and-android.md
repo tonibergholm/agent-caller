@@ -52,7 +52,7 @@ Device with a free personal team: sign in to Xcode with your Apple ID, open
 Personal Team under Signing & Capabilities for `agent-caller-ios_iOS`, enable
 Developer Mode on the phone, trust the developer under Settings → General →
 VPN & Device Management, install Tailscale on the phone (same tailnet), then
-`npm run tauri -- ios build --debug --target aarch64` and run from Xcode. If
+`(cd apps/ios && npm run tauri -- ios build --debug --target aarch64)` and run from Xcode. If
 the bundle identifier is taken, change `identifier` in
 `apps/ios/src-tauri/tauri.conf.json` and run `ios:init` again. Full steps and
 the free-team limit errors: [apps/ios/README.md](../../apps/ios/README.md).
@@ -90,11 +90,7 @@ The APK is signed with a throwaway debug key created in
 `apps/android/build/`. `minSdk` is 23. Install Tailscale on the phone and
 pair by pasting the line.
 
-Problems: [troubleshooting.md](troubleshooting.md).
+Limits: the iOS README records a debug build checked on one iPhone; no
+release build is recorded.
 
-Verified: the scope and limits, from `apps/ios/README.md`, `docs/android.md`
-and `README.md`;
-Not verified: every build and install command above (no
-Mac, Xcode, NDK or phone in this session), the Android app on any device,
-and `adb install`. The iOS README records a debug build checked on one
-iPhone on 2026-10-13; a release build was not.
+Problems: [troubleshooting.md](troubleshooting.md).

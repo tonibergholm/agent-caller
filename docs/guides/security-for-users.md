@@ -53,7 +53,17 @@ Hook token (for example `settings.json` was committed or shared):
 acd token rotate hook
 ```
 
-Also remove the leaked file from the repository history. See
+Rotation alone does not revoke the leaked token. The daemon keeps the previous
+token valid for Claude sessions that started before the rotation, until they
+exit or use the new token, at most 30 days. To cut the leaked token off now,
+rotate a second time, which drops it:
+
+```sh
+acd token rotate hook --force
+```
+
+Restart or `/clear` Claude sessions that still fail with a retired token.
+Then remove the leaked file from the repository history. See
 [hooks-claude-code-and-codex.md](hooks-claude-code-and-codex.md). `acd hooks
 install` refuses to write into a Git-tracked file unless you pass
 `--allow-tracked`.
@@ -112,12 +122,3 @@ Treat this as a plan, not a promise, until it ships.
 
 Open a GitHub issue titled "Security: contact request" with no details. Do not
 post a vulnerability in public. See [SECURITY.md](../../SECURITY.md).
-
-Verified: file names and modes (`acd init`), `acd token rotate client`,
-`acd token rotate hook`, `acd tls rotate`, `acd hooks install claude` (the
-token in `settings.json`, the tracked-file refusal text), `acd pair`. The
-rest is from `SECURITY.md`, `PROTOCOL.md` and the relay spec;
-Not verified:
-rotation against live clients (the daemon cannot bind IPv6 in this sandbox),
-Tailscale ACL advice (general practice, not tested), and anything about the
-relay, which does not exist in this tree.

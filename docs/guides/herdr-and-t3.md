@@ -15,8 +15,8 @@ Hooks (Claude Code, Codex) are in
 
 Cards are whole or read-only. acd never offers a part of a request:
 
-- A permission whose text is over the display limit (a detail cut at 3800
-  characters, or a request over 40 KiB) has no options. The card says to
+- A permission whose text is over the display limit (a detail cut at the
+  display limit, or a request over 40 KiB) has no options. The card says to
   answer in the terminal.
 - "Yes, always" appears only when the whole rule it will save can be shown.
 - A read-only card names where to answer: **Answer in T3** for T3 agents,
@@ -88,11 +88,3 @@ Source status messages and what to do:
 | `N T3 items could not be read (see the debug log)` | Some items are skipped. Update acd. |
 
 T3 message text never reaches the acd logs, only tags, lengths and hashes.
-
-Verified: the table of what is answerable and the status messages are read
-from `PROTOCOL.md` (section 6), the design spec (section 6.2) and the
-adapter source (`t3/reconciler.rs`, `t3/conn.rs`, `herdr/discovery.rs`); the
-card labels from `app/src/components/Card.svelte` and
-`crates/acd-client/src/view.rs`;
-Not verified: any live herdr or T3 session;
-the recorded live checks are in `docs/research/` (herdr gate 6, T3 gate 3).

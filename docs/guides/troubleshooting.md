@@ -164,14 +164,3 @@ Apple Intelligence; "approve", "deny", "yes always", "option N", "cancel",
 (say the agent or machine name); "That agent is filtered out. Say its
 machine."; "Could not register Control+Alt+M: in use. The previous shortcut
 stays active." (pick another shortcut).
-
-Verified: the strings are from `crates/acd-client` (`conn.rs`, `view.rs`,
-`inbox.rs`, `local.rs`), `crates/acd-protocol` (`pairing.rs`, `messages.rs`,
-`PROTOCOL.md`), `crates/acd-core/src/server.rs`, `clients/omarchy/model.mjs`,
-`crates/acd-inbox`, `apps/android/src`, `app/src`; `acd pair`, `acd token
-rotate`, `acd tls rotate` and `acd hooks` output was run;
-Not verified: no
-state was provoked against a running daemon (`acd run` cannot bind IPv6 in
-this sandbox), so the fixes are reasoned from the code, not tried; also not verified: the exact `HTTP error: 503`
-wording (it is the WebSocket library's text for the 503 that tests assert),
-and the macOS voice and Omarchy strings in a running app.

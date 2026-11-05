@@ -89,12 +89,3 @@ If the hold key does nothing, check System Settings → Privacy & Security →
 Input Monitoring. The toggle shortcut does not need it.
 
 Problems: [troubleshooting.md](troubleshooting.md).
-
-Verified: `cargo build -p acd`; `acd init`, `acd service install --print`
-(systemd form), `acd service install --help`, and every file name and mode
-above, on Linux. The command names, keys and voice text come from the README
-and the app source;
-Not verified: `acd service install` as a launchd agent,
-`just app-install`, the app, notifications and voice (no Mac in this
-session); `acd run` and `acd status` (the sandbox has no IPv6 and the daemon
-refuses to bind).

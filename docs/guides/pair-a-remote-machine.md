@@ -68,7 +68,7 @@ acd tls rotate
 ```
 
 This replaces the TLS key and certificate. The old pin no longer matches, so
-every paired client shows **identity changed: Server identity changed.
+every paired client, on its next connection, shows **identity changed: Server identity changed.
 Re-pair this machine.** and retries every 30 seconds without connecting.
 Run `acd pair` again and re-add the machine. If you rotated because the key
 may be compromised, also run `acd token rotate client`.
@@ -82,13 +82,3 @@ re-pair until you know why. See [security-for-users.md](security-for-users.md).
 paired clients: see [hooks-claude-code-and-codex.md](hooks-claude-code-and-codex.md).
 
 Problems: [troubleshooting.md](troubleshooting.md).
-
-Verified: `acd init`; `acd pair --host mini.tail1234.ts.net` (the line has
-the form shown); `acd pair` with no Tailscale CLI (error text above);
-`acd token rotate client`, `acd tls rotate` (output text above). Client
-messages are copied from `crates/acd-client` source;
-Not verified: a real
-pairing over Tailscale, the 30-second identity retry and the 4401 close
-against a running daemon (the sandbox cannot bind IPv6, so `acd run` exits;
-the behaviour is from `conn.rs`, `daemon.rs` and `server.rs`, which have
-their own tests), `acd pair` host discovery with a real Tailscale CLI.

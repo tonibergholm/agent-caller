@@ -75,11 +75,3 @@ leaves your other hooks alone. If acd created the file, the file is removed:
 "Removed <path> (acd created it)".
 
 Problems: [troubleshooting.md](troubleshooting.md).
-
-Verified: `acd hooks install claude`, `install codex`, `status` and
-`uninstall` for both, in a scratch `HOME`: the event list, the header, the
-codex command, the printed notices and the file removal above;
-Not
-verified: a real Claude Code or Codex session, the 3600-second hold, the
-Codex review prompt, `--allow-tracked` in a real Git repository, and `acd
-token rotate hook` against live Claude sessions.
