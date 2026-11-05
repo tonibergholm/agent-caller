@@ -111,6 +111,10 @@ impl IdemCache {
         Self::with_limits(ttl, IdemLimits::default())
     }
 
+    /// Reservations plus cached results (leak checks).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn entry_count(&self) -> usize { self.entries.len() }
+
     /// A cache holding at most `capacity` entries and no other bound.
     pub fn with_capacity(ttl: Duration, capacity: usize) -> Self {
         Self::with_limits(

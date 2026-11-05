@@ -71,6 +71,21 @@ fn apply_bounded(registry: &mut Registry, obs: Observation) -> Vec<Change> {
     registry.apply(obs)
 }
 
+/// How many entries each of the core's tables holds. Enabled by the
+/// `testing` feature; used by leak tests and the load-test harness.
+#[cfg(any(test, feature = "testing"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sizes {
+    pub agents: usize,
+    pub requests: usize,
+    /// Correlation-key states, including those of resolved requests.
+    pub keys: usize,
+    pub seen: usize,
+    pub idem: usize,
+    pub ring: usize,
+    pub receivers: usize,
+}
+
 pub struct Core {
     inner: Mutex<Inner>,
     events: broadcast::Sender<ServerMessage>,
@@ -101,6 +116,13 @@ impl Core {
     /// has an effect; returns whether it was that one.
     pub fn set_push(&self, push: Arc<dyn PushControl>) -> bool {
         self.push.set(push).is_ok()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn sizes(&self) -> Sizes {
+        let st = self.inner.lock().unwrap();
+        let (agents, requests, keys, seen) = st.registry.sizes();
+        Sizes { agents, requests, keys, seen, idem: st.idem.entry_count(), ring: st.log.held(), receivers: self.events.receiver_count() }
     }
 
     pub fn epoch(&self) -> String {
