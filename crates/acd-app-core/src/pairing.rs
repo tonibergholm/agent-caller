@@ -108,19 +108,27 @@ mod tests {
         assert!(inbox.machines().is_empty());
     }
 
-    /// With the refusing store (Windows, Android) a pairing stores no secret,
-    /// so it must commit nothing: no machine listed, no settings written, and
-    /// the clipboard line kept.
+    /// With a refusing store (Windows; Android before the Keystore store is
+    /// installed) a pairing stores no secret, so it must commit nothing: no
+    /// machine listed, no settings written, and the clipboard line kept.
     #[test]
     fn a_refusing_secret_store_commits_no_machine() {
+        refusing_store_commits_nothing(Arc::new(crate::nostore::UnsupportedSecrets));
+    }
+
+    #[test]
+    fn an_uninstalled_android_keystore_commits_no_machine() {
+        refusing_store_commits_nothing(Arc::new(crate::wrapped::KeystoreNotInstalled));
+    }
+
+    fn refusing_store_commits_nothing(secrets: Arc<dyn acd_client::settings::SecretStore>) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let dir = std::env::temp_dir().join(format!("acd-nostore-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("settings.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
         let _guard = runtime.enter();
         let inbox = Inbox::new(
             Settings { machines: vec![], ..Settings::fresh() },
-            Arc::new(crate::nostore::UnsupportedSecrets),
+            secrets,
             InboxOptions {
                 timing: Timing::default(),
                 settings_path: Some(path.clone()),
@@ -142,7 +150,6 @@ mod tests {
         assert!(inbox.machines().is_empty(), "no machine may be listed");
         assert!(!path.exists(), "no settings may be written");
         assert_eq!(cleared, 0, "the clipboard line is kept");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

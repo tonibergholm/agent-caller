@@ -706,3 +706,7 @@ mod io_tests {
         drop(client);
     }
 }
+
+#[cfg(test)]
+#[path = "mutants_tls.rs"]
+mod mutants_tls;

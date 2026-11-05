@@ -18,6 +18,27 @@ use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
+/// The host of `uri` without the square brackets of an IPv6 literal.
+pub(crate) fn bare_host(uri: &Uri) -> Result<String, HttpError> {
+    let host = uri.host().ok_or(HttpError::BadUrl)?;
+    let bare = match host.strip_prefix('[') {
+        Some(inner) => inner.strip_suffix(']').ok_or(HttpError::BadUrl)?,
+        None => host,
+    };
+    if bare.is_empty() {
+        return Err(HttpError::BadUrl);
+    }
+    Ok(bare.to_string())
+}
+
+/// An IP literal is verified as an IP address (no SNI); a name as a DNS name.
+pub(crate) fn tls_server_name(host: &str) -> Result<ServerName<'static>, HttpError> {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => Ok(ServerName::IpAddress(ip.into())),
+        Err(_) => ServerName::try_from(host.to_string()).map_err(|_| HttpError::BadUrl),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum HttpError {
     #[error("bad url")]
@@ -108,7 +129,10 @@ impl HttpClient {
         body: Vec<u8>,
     ) -> Result<HttpResponse, HttpError> {
         let uri: Uri = url.parse().map_err(|_| HttpError::BadUrl)?;
-        let host = uri.host().ok_or(HttpError::BadUrl)?.to_string();
+        // `Uri::host()` keeps the brackets of an IPv6 literal. Connecting and
+        // the TLS name need the bare address; the Host header keeps the
+        // authority as written.
+        let host = bare_host(&uri)?;
         let https = match uri.scheme_str() {
             Some("https") => true,
             Some("http") => false,
@@ -133,7 +157,7 @@ impl HttpClient {
         let req = Self::request(&uri, &host, path, content_type, headers, body)?;
         if https {
             let cfg = self.tls.clone().ok_or(HttpError::Tls)?;
-            let name = ServerName::try_from(host.clone()).map_err(|_| HttpError::BadUrl)?;
+            let name = tls_server_name(&host)?;
             let tls = TlsConnector::from(cfg)
                 .connect(name, tcp)
                 .await
@@ -200,5 +224,41 @@ impl HttpClient {
         };
         task.abort();
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn split(url: &str) -> (String, u16, String) {
+        let uri: Uri = url.parse().unwrap();
+        let https = uri.scheme_str() == Some("https");
+        (
+            bare_host(&uri).unwrap(),
+            uri.port_u16().unwrap_or(if https { 443 } else { 80 }),
+            uri.authority().unwrap().as_str().to_string(),
+        )
+    }
+
+    #[test]
+    fn an_ipv6_literal_is_unbracketed_for_connect_and_bracketed_in_the_host_header() {
+        assert_eq!(split("https://[fd7a:115c:a1e0::1]/v1/wake"), ("fd7a:115c:a1e0::1".into(), 443, "[fd7a:115c:a1e0::1]".into()));
+        assert_eq!(split("https://[fd7a:115c:a1e0::1]:8443/v1/wake"), ("fd7a:115c:a1e0::1".into(), 8443, "[fd7a:115c:a1e0::1]:8443".into()));
+    }
+
+    #[test]
+    fn ipv4_and_names_are_unchanged() {
+        assert_eq!(split("https://100.64.0.1:9/x"), ("100.64.0.1".into(), 9, "100.64.0.1:9".into()));
+        assert_eq!(split("https://relay.example.com/x"), ("relay.example.com".into(), 443, "relay.example.com".into()));
+    }
+
+    #[test]
+    fn tls_names_are_ip_addresses_for_literals_and_dns_names_otherwise() {
+        assert!(matches!(tls_server_name("fd7a:115c:a1e0::1"), Ok(ServerName::IpAddress(_))));
+        assert!(matches!(tls_server_name("100.64.0.1"), Ok(ServerName::IpAddress(_))));
+        assert!(matches!(tls_server_name("relay.example.com"), Ok(ServerName::DnsName(_))));
+        // The bracketed form is what the old code passed; it must not be a valid name.
+        assert!(tls_server_name("[fd7a:115c:a1e0::1]").is_err());
     }
 }
