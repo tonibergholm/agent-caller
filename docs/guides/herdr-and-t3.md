@@ -16,7 +16,7 @@ Hooks (Claude Code, Codex) are in
 Cards are whole or read-only. acd never offers a part of a request:
 
 - A permission whose text is over the display limit (a detail cut at the
-  display limit, or a request over 40 KiB) has no options. The card says to
+  display limit of 4000 characters, or a request over 40 KiB) has no options. The card says to
   answer in the terminal.
 - "Yes, always" appears only when the whole rule it will save can be shown.
 - A read-only card names where to answer: **Answer in T3** for T3 agents,
