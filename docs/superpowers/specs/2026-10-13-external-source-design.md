@@ -41,7 +41,8 @@ typed corrective answers. Nothing in acd is specific to it.
 - Agent id is derived from `(pid, agent_key)`, request id from
   `(pid, key)`. Both are opaque to clients.
 - Keys are **not reusable**, like T3 request ids. A resolved key is
-  tombstoned and never opens another request. The producer builds each
+  tombstoned and does not open another request while the tombstone is
+  retained (the core keeps the newest 4096 per daemon; an older replay opens a new request). The producer builds each
   key from its own durable occurrence id plus a hash of the card's
   meaning, so it opens a new occurrence by minting a new key.
 - Tombstones live in memory, bounded to the most recent 4096 per
