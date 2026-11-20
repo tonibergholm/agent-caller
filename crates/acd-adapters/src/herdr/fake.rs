@@ -122,6 +122,13 @@ pub fn fake_agent(pane_id: &str, agent: &str, status: &str) -> Value {
     })
 }
 
+/// `fake_agent` with a herdr agent name.
+pub fn fake_named_agent(pane_id: &str, agent: &str, status: &str, name: &str) -> Value {
+    let mut v = fake_agent(pane_id, agent, status);
+    v["name"] = name.into();
+    v
+}
+
 impl FakeHerdr {
     pub async fn start() -> FakeHerdr {
         FakeHerdr::start_with_version("0.9.3", 22).await
@@ -548,7 +555,12 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
     let mut keys_call: Option<(KeysHook, String, Vec<String>)> = None;
     let outcome = {
         let mut st = shared.state.lock().expect("fake state");
-        let find = |st: &State, t: &str| st.agents.iter().find(|a| a["pane_id"] == t).cloned();
+        // A target is a pane id or a live agent name. A name belongs to the
+        // agent value, so replacing the agent clears it.
+        let find = |st: &State, t: &str| {
+            let by_pane = st.agents.iter().find(|a| a["pane_id"] == t);
+            by_pane.or_else(|| st.agents.iter().find(|a| a["name"] == t)).cloned()
+        };
         match method {
             "ping" => Outcome::Reply(json!({
                 "type": "pong",
@@ -564,6 +576,8 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
                 let Some(agent) = find(&st, t) else {
                     return err("agent_not_found", &format!("agent target {t} not found"));
                 };
+                // Everything below works on the pane the target resolved to.
+                let t = agent["pane_id"].as_str().expect("pane_id");
                 match method {
                     "agent.get" => Outcome::Reply(json!({"type": "agent_info", "agent": agent})),
                     "agent.read" => {

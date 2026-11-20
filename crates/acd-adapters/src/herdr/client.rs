@@ -242,10 +242,12 @@ impl Herdr {
         })
     }
 
-    pub async fn prompt(&self, pane_id: &str, text: &str) -> Result<(), CallError> {
-        tracing::debug!(pane_id, len = text.len(), "herdr agent.prompt");
+    /// `target` is a pane id or a unique live agent name. A name follows the
+    /// current occupant of its pane, so a replaced agent gets `agent_not_found`.
+    pub async fn prompt(&self, target: &str, text: &str) -> Result<(), CallError> {
+        tracing::debug!(target, len = text.len(), "herdr agent.prompt");
         let v = self
-            .call("agent.prompt", json!({"target": pane_id, "text": text}))
+            .call("agent.prompt", json!({"target": target, "text": text}))
             .await?;
         expect_type(&v, "agent_prompted")
     }

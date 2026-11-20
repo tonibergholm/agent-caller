@@ -1,6 +1,6 @@
 use acd_adapters::herdr::{
     HerdrAdapter, HerdrConfig,
-    fake::{FakeHerdr, fake_agent},
+    fake::{FakeHerdr, fake_agent, fake_named_agent},
     keys::*,
     reconciler::Timing,
 };
@@ -135,6 +135,55 @@ async fn follow_up_errors_map_to_not_delivered() {
         Err(DeliverError::NotDelivered(ErrorCode::AgentGone))
     ));
     assert!(r.fake.prompts().is_empty());
+}
+
+/// The `target` of every `agent.prompt` call the fake saw.
+fn prompt_targets(r: &Rig) -> Vec<String> {
+    r.fake
+        .calls()
+        .iter()
+        .filter(|(m, _)| m == "agent.prompt")
+        .map(|(_, p)| p["target"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_named_agent_is_prompted_by_its_name() {
+    let r = rig(&[("w1:p1", "claude", "idle")]).await;
+    r.fake.set_agent(fake_named_agent("w1:p1", "claude", "idle", "builder"));
+    r.adapter.send(&agent(&r), "run the tests").await.unwrap();
+    assert_eq!(prompt_targets(&r), vec!["builder"]);
+    assert_eq!(r.fake.prompts(), vec![("w1:p1".to_string(), "run the tests".to_string())]);
+}
+
+#[tokio::test]
+async fn an_unnamed_agent_is_prompted_by_its_pane_id() {
+    let r = rig(&[("w1:p1", "claude", "idle")]).await;
+    r.adapter.send(&agent(&r), "run the tests").await.unwrap();
+    assert_eq!(prompt_targets(&r), vec!["w1:p1"]);
+}
+
+/// The live check passed, then the pane changes hands before herdr applies
+/// the prompt. The name went with the old agent, so herdr refuses.
+#[tokio::test]
+async fn a_named_agent_replaced_after_the_identity_check_gets_no_prompt() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    r.fake.set_agent(fake_named_agent("w1:p1", "claude", "idle", "builder"));
+    let old = agent(&r);
+    let gate = r.fake.block_next("agent.prompt");
+    let send = tokio::spawn({
+        let adapter = r.adapter.clone();
+        async move { adapter.send(&old, "run the tests").await }
+    });
+    gate.arrived().await; // every send check has passed; herdr has not applied the prompt
+    let mut codex = fake_agent("w1:p1", "codex", "idle");
+    codex["terminal_id"] = "term_other".into();
+    r.fake.set_agent(codex);
+    gate.release();
+    let res = send.await.unwrap();
+    assert!(matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))), "{res:?}");
+    assert_eq!(prompt_targets(&r), vec!["builder"]);
+    assert!(r.fake.prompts().is_empty(), "nothing was typed into the replacement");
 }
 
 /// A reconciler that never looks again on its own: the test decides what it sees.
