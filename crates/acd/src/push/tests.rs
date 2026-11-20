@@ -845,6 +845,31 @@ async fn a_registration_under_the_new_token_before_the_clear_is_refused_not_ackn
     assert_eq!(reloaded.len(), 1, "the acknowledged registration survives a restart");
 }
 
+/// `revoke_all` raises the minimum generation before it rotates the store. A
+/// register at the new generation in that gap passed both generation checks
+/// and was acknowledged under the old fingerprint.
+#[tokio::test]
+async fn a_registration_between_the_minimum_and_the_store_rotation_is_refused() {
+    const ROTATED: &str = "rotated-client-token";
+    let rig = Rig::new(NO_WINDOW).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    *rig.push.min_raised.lock().unwrap() = Some(barrier.clone());
+    let revoke = tokio::spawn({
+        let push = rig.push.clone();
+        async move { push.revoke_all(ROTATED, 1).await }
+    });
+    barrier.wait().await; // the minimum is 1, the store is not rotated yet
+    let gap = rig.register_at("phone", 1, &handle_for("phone")).await;
+    assert_eq!(gap.error_code(), Some(ErrorCode::SourceUnavailable), "{gap:?}");
+    assert!(!rig.status("phone").await.registered, "a refused register stored something");
+    barrier.wait().await;
+    revoke.await.unwrap();
+    let retry = rig.register_at("phone", 1, &handle_for("phone")).await;
+    assert!(retry.ok, "{:?}", retry.error_code());
+    let reloaded = Store::load(rig.dir.path(), &store::client_fingerprint(ROTATED));
+    assert!(reloaded.get("phone").is_some(), "the acknowledged registration survives a restart");
+}
+
 #[tokio::test]
 async fn revoking_cancels_a_wake_that_is_already_in_flight() {
     // An hour-long request deadline: only the cancellation can end the send,

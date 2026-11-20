@@ -201,6 +201,9 @@ pub struct Store {
     /// A revocation whose file could not be rewritten or removed: retried
     /// until `push.json` no longer lists the revoked registrations.
     clear_pending: bool,
+    /// The token generation `rotate_client_from` last applied, in memory only.
+    /// A session above it is on a token whose rotation this file has not seen.
+    applied: u64,
 }
 
 struct Loaded {
@@ -240,6 +243,7 @@ impl Store {
             skipped: Vec::new(),
             quarantined: std::cell::Cell::new(false),
             clear_pending: false,
+            applied: 0,
         };
         match read_file(&store.path) {
             Ok(None) => {}
@@ -277,6 +281,11 @@ impl Store {
 
     pub fn len(&self) -> usize {
         self.devices.len()
+    }
+
+    /// The token generation the last rotation moved this store to.
+    pub fn applied(&self) -> u64 {
+        self.applied
     }
 
     pub fn get(&self, client_id: &str) -> Option<&Entry> {
@@ -340,6 +349,7 @@ impl Store {
     /// kept entries cannot be written, everything is revoked (fail closed).
     pub fn rotate_client_from(&mut self, client: &str, min_auth: u64) -> Result<(), StoreError> {
         self.client = client.to_string();
+        self.applied = min_auth;
         let kept: BTreeMap<String, Entry> =
             self.devices.iter().filter(|(_, e)| e.auth >= min_auth).map(|(k, e)| (k.clone(), e.clone())).collect();
         if kept.is_empty() {
