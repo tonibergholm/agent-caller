@@ -72,7 +72,7 @@ fn client_message_debug_never_prints_tokens_or_text() {
     };
     let s = format!("{answer:?}");
     assert!(!s.contains("SECRET-ANSWER-TEXT") && s.contains("RequestAnswer") && s.contains("r1"), "{s}");
-    let send = ClientMessage::AgentSend { id: "c2".into(), agent_id: "a1".into(), text: "SECRET-SEND-TEXT".into() };
+    let send = ClientMessage::AgentSend { id: "c2".into(), agent_id: "a1".into(), text: "SECRET-SEND-TEXT".into(), incarnation: None };
     let s = format!("{send:?}");
     assert!(!s.contains("SECRET-SEND-TEXT") && s.contains("AgentSend") && s.contains("a1"), "{s}");
 }

@@ -8,6 +8,13 @@ import type { PermissionKind, Presentation, VoiceSettings, VoiceStatus } from ".
 /** macOS notification permission for this app (`notify.rs`). */
 export type NotificationAuthorization = "granted" | "denied" | "not_determined" | "unavailable";
 
+/** What a pairing line on the clipboard would add: no token (security review F9). */
+export interface PairingPreview {
+  host: string;
+  port: number;
+  pin: string;
+}
+
 export interface Api {
   pick(cardKey: string, requestId: string, optionId: string, revision: number): Promise<void>;
   reply(cardKey: string, text: string): Promise<string>;
@@ -23,7 +30,10 @@ export interface Api {
   hide(): Promise<void>;
   openSettings(): Promise<void>;
   listMachines(): Promise<MachineEntryView[]>;
-  importPairingFromClipboard(): Promise<MachineEntryView>;
+  /** Reads the clipboard and says what it would pair; saves nothing. */
+  previewPairingFromClipboard(): Promise<PairingPreview>;
+  /** Pairs the clipboard line, only while it is still the one `shown`. */
+  importPairingFromClipboard(shown: PairingPreview): Promise<MachineEntryView>;
   renameMachine(key: string, name: string): Promise<void>;
   removeMachine(key: string): Promise<void>;
   retryMachine(key: string): Promise<void>;
@@ -82,7 +92,8 @@ export const tauriApi: Api = {
   hide: () => invoke("hide_panel"),
   openSettings: () => invoke("open_settings"),
   listMachines: () => invoke("list_machines"),
-  importPairingFromClipboard: () => invoke("import_pairing_from_clipboard"),
+  previewPairingFromClipboard: () => invoke("preview_pairing_from_clipboard"),
+  importPairingFromClipboard: (shown) => invoke("import_pairing_from_clipboard", { shown }),
   renameMachine: (key, name) => invoke("rename_machine", { key, name }),
   removeMachine: (key) => invoke("remove_machine", { key }),
   retryMachine: (key) => invoke("retry_machine", { key }),

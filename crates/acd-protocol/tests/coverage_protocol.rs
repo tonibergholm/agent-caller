@@ -24,7 +24,7 @@ fn debug_of_client_messages_never_prints_tokens_or_text() {
         option_id: None,
         text: Some("TYPED-ANSWER-TEXT".into()),
     };
-    let send = ClientMessage::AgentSend { id: "i".into(), agent_id: "a".into(), text: "TYPED-REPLY".into() };
+    let send = ClientMessage::AgentSend { id: "i".into(), agent_id: "a".into(), text: "TYPED-REPLY".into(), incarnation: None };
     let seen = ClientMessage::AgentMarkSeen { id: "i".into(), agent_id: "a".into() };
     let ping = ClientMessage::Ping { id: "p".into() };
 
@@ -44,7 +44,7 @@ fn command_ids_exist_for_every_command_but_hello() {
     assert_eq!(hello.command_id(), None);
     for (m, id) in [
         (ClientMessage::RequestAnswer { id: "a".into(), request_id: "r".into(), revision: None, option_id: None, text: None }, "a"),
-        (ClientMessage::AgentSend { id: "b".into(), agent_id: "x".into(), text: "t".into() }, "b"),
+        (ClientMessage::AgentSend { id: "b".into(), agent_id: "x".into(), text: "t".into(), incarnation: None }, "b"),
         (ClientMessage::AgentMarkSeen { id: "c".into(), agent_id: "x".into() }, "c"),
         (ClientMessage::Ping { id: "d".into() }, "d"),
     ] {

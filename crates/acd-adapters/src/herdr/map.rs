@@ -20,6 +20,23 @@ pub fn agent_id(socket_hash: &str, pane_id: &str) -> String {
     crate::ids::bounded(&format!("herdr:{socket_hash}:"), pane_id)
 }
 
+/// The agent's `incarnation` on the wire: a tag random per daemon process,
+/// the pane incarnation (new for every replacement the reconciler sees, never
+/// repeated in a process) and the terminal it runs in. The process tag keeps
+/// a value from before a restart from matching after it, since the counter
+/// starts again at 1. Opaque to clients; `send` recomputes it from the pane.
+pub fn incarnation_id(incarnation: u64, terminal_id: Option<&str>) -> String {
+    static PROCESS: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        use std::hash::BuildHasher;
+        // RandomState is seeded from the OS RNG; no new dependency needed.
+        std::collections::hash_map::RandomState::new().hash_one(0u8)
+    });
+    let terminal: String = terminal_id
+        .map(|t| Sha256::digest(t.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect())
+        .unwrap_or_default();
+    format!("{:016x}.{incarnation}.{terminal}", *PROCESS)
+}
+
 /// `None` for a pane with no detected agent.
 pub fn kind(agent: Option<&str>) -> Option<AgentKind> {
     agent.map(|a| match a {
@@ -90,6 +107,29 @@ pub fn agent_obs(socket_hash: &str, info: &wire::AgentInfo) -> Option<AgentObs> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A restarted daemon counts pane incarnations from 1 again; the value
+    /// must still differ, or a reply kept across the restart would match.
+    #[test]
+    fn an_incarnation_differs_between_daemon_processes() {
+        if std::env::var_os("ACD_INCARNATION_CHILD").is_some() {
+            println!("INC={}", incarnation_id(1, Some("t")));
+            return;
+        }
+        let run = || {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "herdr::map::tests::an_incarnation_differs_between_daemon_processes", "--nocapture"])
+                .env("ACD_INCARNATION_CHILD", "1")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .find_map(|l| l.strip_prefix("INC=").map(str::to_owned))
+                .expect("the child prints its incarnation")
+        };
+        assert_ne!(run(), run());
+        assert_eq!(incarnation_id(1, Some("t")), incarnation_id(1, Some("t")));
+    }
 
     fn info(v: serde_json::Value) -> wire::AgentInfo {
         serde_json::from_value(v).unwrap()

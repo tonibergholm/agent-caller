@@ -8,7 +8,7 @@ fn answer(id: &str, request_id: &str) -> ClientMessage {
     ClientMessage::RequestAnswer {
         id: id.into(),
         request_id: request_id.into(),
-        revision: None,
+        revision: Some(1),
         option_id: Some("allow".into()),
         text: None,
     }
@@ -128,13 +128,29 @@ async fn stale_revision_rejects_before_delivery_and_same_id_retries_corrected_re
 }
 
 #[tokio::test]
-async fn old_style_answer_without_revision_still_delivers() {
+async fn an_answer_without_a_revision_is_refused() {
     let fake = FakeAdapter::new();
     let core = Core::new(test_machine(), vec![fake.clone()]);
     let rid = open_request(&core);
+    let msg = |id: &str, revision| ClientMessage::RequestAnswer {
+        id: id.into(),
+        request_id: rid.clone(),
+        revision,
+        option_id: Some("allow".into()),
+        text: None,
+    };
+    // The daemon advertises `answer.revision`, so the check cannot be skipped.
     assert_eq!(
-        core.handle("cl", answer("legacy", &rid)).await,
-        CommandResult::delivered("legacy")
+        core.handle("cl", msg("c1", None)).await.error_code(),
+        Some(ErrorCode::BadRequest)
+    );
+    assert!(fake.delivered().is_empty());
+    assert_eq!(core.request(&rid).unwrap().status, RequestStatus::Open);
+    // The refusal released the id: the same command with a revision delivers.
+    let current = core.request(&rid).unwrap().revision;
+    assert_eq!(
+        core.handle("cl", msg("c1", Some(current))).await,
+        CommandResult::delivered("c1")
     );
     assert_eq!(fake.delivered().len(), 1);
 }
@@ -269,6 +285,7 @@ async fn follow_up_send_goes_to_source_adapter() {
                 id: "s1".into(),
                 agent_id: "a1".into(),
                 text: "run tests".into(),
+                incarnation: None,
             },
         )
         .await;
@@ -277,6 +294,74 @@ async fn follow_up_send_goes_to_source_adapter() {
         fake.sent(),
         vec![("a1".to_string(), "run tests".to_string())]
     );
+}
+
+/// An id can outlive the agent behind it (a herdr pane). An agent that
+/// publishes an incarnation takes only a send that carries the same one.
+#[tokio::test]
+async fn follow_up_must_carry_the_agents_incarnation() {
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    let publish = |incarnation: &str| {
+        core.observe(Observation::AgentIncarnation {
+            agent_id: "a1".into(),
+            incarnation: incarnation.into(),
+        });
+        core.observe(Observation::AgentUpsert(AgentObs {
+            state: AgentState::Done,
+            ..agent_obs("a1")
+        }));
+    };
+    let send = |id: &str, incarnation: Option<&str>| ClientMessage::AgentSend {
+        id: id.into(),
+        agent_id: "a1".into(),
+        text: "run tests".into(),
+        incarnation: incarnation.map(Into::into),
+    };
+    publish("1.aa");
+    assert_eq!(core.agent("a1").unwrap().incarnation.as_deref(), Some("1.aa"));
+    assert_eq!(
+        core.handle("cl", send("s1", None)).await.error_code(),
+        Some(ErrorCode::AgentGone),
+        "a send without the incarnation is refused"
+    );
+    assert_eq!(
+        core.handle("cl", send("s2", Some("0.aa"))).await.error_code(),
+        Some(ErrorCode::AgentGone)
+    );
+    assert!(fake.sent().is_empty(), "nothing reached the adapter");
+    // The agent behind the id is replaced and republished under the same id.
+    core.observe(Observation::AgentGone { agent_id: "a1".into() });
+    publish("2.bb");
+    assert_eq!(
+        core.handle("cl", send("s3", Some("1.aa"))).await.error_code(),
+        Some(ErrorCode::AgentGone),
+        "a reply composed for the old agent"
+    );
+    assert!(fake.sent().is_empty());
+    assert_eq!(
+        core.handle("cl", send("s4", Some("2.bb"))).await,
+        CommandResult::delivered("s4")
+    );
+    assert_eq!(fake.sent().len(), 1);
+}
+
+#[tokio::test]
+async fn an_agent_without_an_incarnation_takes_a_send_without_one() {
+    let fake = FakeAdapter::new();
+    let core = Core::new(test_machine(), vec![fake.clone()]);
+    core.observe(Observation::AgentUpsert(AgentObs {
+        state: AgentState::Done,
+        ..agent_obs("a1")
+    }));
+    assert_eq!(core.agent("a1").unwrap().incarnation, None);
+    let msg = ClientMessage::AgentSend {
+        id: "s1".into(),
+        agent_id: "a1".into(),
+        text: "run tests".into(),
+        incarnation: None,
+    };
+    assert_eq!(core.handle("cl", msg).await, CommandResult::delivered("s1"));
 }
 
 #[test]
@@ -416,14 +501,14 @@ async fn oversized_ids_and_texts_are_bad_requests() {
         ClientMessage::RequestAnswer {
             id: "a".into(),
             request_id: long.clone(),
-            revision: None,
+            revision: Some(1),
             option_id: Some("allow".into()),
             text: None,
         },
         ClientMessage::RequestAnswer {
             id: "b".into(),
             request_id: "r1".into(),
-            revision: None,
+            revision: Some(1),
             option_id: None,
             text: Some(text.clone()),
         },
@@ -431,11 +516,13 @@ async fn oversized_ids_and_texts_are_bad_requests() {
             id: "s".into(),
             agent_id: long.clone(),
             text: "hi".into(),
+            incarnation: None,
         },
         ClientMessage::AgentSend {
             id: "t".into(),
             agent_id: "a1".into(),
             text: text.clone(),
+            incarnation: None,
         },
     ];
     for msg in cases {
@@ -451,6 +538,7 @@ async fn oversized_ids_and_texts_are_bad_requests() {
                 id: edge.clone(),
                 agent_id: "a1".into(),
                 text: "y".repeat(MAX_TEXT_BYTES),
+                incarnation: None,
             },
         )
         .await;
@@ -476,6 +564,7 @@ async fn agent_send_refuses_the_typed_answer_character_rule() {
                     id: format!("s{n}"),
                     agent_id: "a1".into(),
                     text: text.into(),
+                    incarnation: None,
                 },
             )
             .await;
@@ -496,6 +585,7 @@ async fn rejected_oversized_command_does_not_reserve_its_id() {
         id: "x".into(),
         agent_id: "a1".into(),
         text: "y".repeat(MAX_TEXT_BYTES + 1),
+        incarnation: None,
     };
     assert_eq!(
         core.handle("cl", big).await.error_code(),
@@ -505,6 +595,7 @@ async fn rejected_oversized_command_does_not_reserve_its_id() {
         id: "x".into(),
         agent_id: "a1".into(),
         text: "run tests".into(),
+        incarnation: None,
     };
     assert_eq!(
         core.handle("cl", small).await,

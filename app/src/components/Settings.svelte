@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import type { MachineEntryView } from "../lib/bindings/MachineEntryView";
   import type { MachineStatus } from "../lib/bindings/MachineStatus";
-  import type { Api, NotificationAuthorization } from "../lib/ipc";
+  import type { Api, NotificationAuthorization, PairingPreview } from "../lib/ipc";
   import { statusText } from "../lib/format";
   import { isMobile } from "../lib/platform";
   import {
@@ -278,11 +278,23 @@
       voice = await api.setVoiceSettings({ ...voice, toggle_shortcut: toggleDraft.trim() || null });
     }, "Could not save the voice shortcut");
 
-  const importPairing = () =>
+  // A clipboard line is parsed and shown first; nothing is saved until the user confirms (F9).
+  let preview = $state<PairingPreview | null>(null);
+  const previewPairing = () =>
     act(async () => {
-      const m = await api.importPairingFromClipboard();
+      preview = await api.previewPairingFromClipboard();
+    }, "Could not add the machine");
+  const importPairing = () => {
+    const shown = preview;
+    preview = null;
+    if (shown) return act(async () => {
+      const m = await api.importPairingFromClipboard(shown);
       added = `Added ${m.name}`;
     }, "Could not add the machine");
+  };
+  /** `host:port`, with an IPv6 host in brackets, and the pin's first 8 characters. */
+  const previewAddress = (p: PairingPreview) => (p.host.includes(":") ? `[${p.host}]:${p.port}` : `${p.host}:${p.port}`);
+  const previewPin = (p: PairingPreview) => `${p.pin.slice(0, 15)}…`;
 
   const rename = (m: MachineEntryView) => {
     const name = (names[m.key] ?? m.name).trim();
@@ -410,7 +422,16 @@
       On the machine, run <code>acd pair</code> and copy its line. Then click Add from clipboard.
       Copy something else afterwards; the line contains a secret.
     </p>
-    <button onclick={importPairing}>Add from clipboard</button>
+    {#if preview}
+      <p>
+        Add <strong>{previewAddress(preview)}</strong>, certificate pin <code>{previewPin(preview)}</code>?
+        Only add a machine you recognise.
+      </p>
+      <button onclick={importPairing}>Add machine</button>
+      <button onclick={() => (preview = null)}>Cancel</button>
+    {:else}
+      <button onclick={previewPairing}>Add from clipboard</button>
+    {/if}
   </section>
 
   {#if !mobile}

@@ -83,7 +83,7 @@ async fn answer_with_id(r: &Rig, req: &Request, option: &str, command_id: &str) 
             ClientMessage::RequestAnswer {
                 id: command_id.into(),
                 request_id: req.id.clone(),
-                revision: None,
+                revision: Some(1),
                 option_id: Some(option.into()),
                 text: None,
             },
@@ -192,7 +192,7 @@ async fn superseding_request_during_held_success_resolves_old_uncertain() {
             ClientMessage::RequestAnswer {
                 id: "held".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },
@@ -243,7 +243,7 @@ async fn removing_thread_during_held_success_resolves_uncertain() {
             ClientMessage::RequestAnswer {
                 id: "held-remove".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },
@@ -405,6 +405,7 @@ async fn hostile_failure_text_never_reaches_warn_logs_or_source_status() {
                 id: "follow-up".into(),
                 agent_id: agent.id,
                 text: "continue".into(),
+                incarnation: None,
             },
         )
         .await;
@@ -582,6 +583,7 @@ async fn a_written_follow_up_retry_returns_the_cached_uncertain_result() {
         id: "f1".into(),
         agent_id: agent.id,
         text: "hi".into(),
+        incarnation: None,
     };
     let first = r.core.handle("c", msg.clone()).await;
     assert_eq!(first.outcome, Some(Outcome::Delivered));
@@ -687,7 +689,7 @@ async fn answer_text(r: &Rig, req: &Request, text: &str, command_id: &str) -> Co
             ClientMessage::RequestAnswer {
                 id: command_id.into(),
                 request_id: req.id.clone(),
-                revision: None,
+                revision: Some(1),
                 option_id: None,
                 text: Some(text.into()),
             },

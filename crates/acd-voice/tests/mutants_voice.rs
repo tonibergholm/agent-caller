@@ -32,6 +32,7 @@ fn guard_of(c: &CardSnap) -> Guard {
         conn: c.conn.unwrap(),
         agent_id: c.agent_id.clone(),
         request: c.pending.as_ref().map(|r| (r.id.clone(), r.revision)),
+        incarnation: c.incarnation.clone(),
         named_send_only: false,
     }
 }

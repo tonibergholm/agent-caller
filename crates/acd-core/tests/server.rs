@@ -208,13 +208,13 @@ async fn answer_round_trip_and_second_client_gets_busy() {
         .to_string();
     send(
         &mut a,
-        json!({"type":"request.answer","id":"x1","request_id":rid,"option_id":"allow"}),
+        json!({"type":"request.answer","id":"x1","request_id":rid,"revision":1,"option_id":"allow"}),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     send(
         &mut b,
-        json!({"type":"request.answer","id":"y1","request_id":rid,"option_id":"deny"}),
+        json!({"type":"request.answer","id":"y1","request_id":rid,"revision":1,"option_id":"deny"}),
     )
     .await;
     let busy = loop {
@@ -391,12 +391,12 @@ async fn too_many_in_flight_commands_get_bad_request() {
         .collect();
     assert_eq!(ids.len(), 33);
     for (i, rid) in ids.iter().take(32).enumerate() {
-        send(&mut ws, json!({"type":"request.answer","id":format!("c{i}"),"request_id":rid,"option_id":"allow"})).await;
+        send(&mut ws, json!({"type":"request.answer","id":format!("c{i}"),"request_id":rid,"revision":1,"option_id":"allow"})).await;
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
     send(
         &mut ws,
-        json!({"type":"request.answer","id":"c32","request_id":ids[32],"option_id":"allow"}),
+        json!({"type":"request.answer","id":"c32","request_id":ids[32],"revision":1,"option_id":"allow"}),
     )
     .await;
     let r = loop {
@@ -440,7 +440,7 @@ async fn disconnect_mid_delivery_then_retry_gets_cached_result() {
         .as_str()
         .unwrap()
         .to_string();
-    let cmd = json!({"type":"request.answer","id":"x","request_id":rid,"option_id":"allow"});
+    let cmd = json!({"type":"request.answer","id":"x","request_id":rid,"revision":1,"option_id":"allow"});
     send(&mut a, cmd.clone()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     drop(a);
@@ -476,7 +476,7 @@ async fn rotation_aborts_in_flight_commands() {
         .to_string();
     send(
         &mut a,
-        json!({"type":"request.answer","id":"r","request_id":rid,"option_id":"allow"}),
+        json!({"type":"request.answer","id":"r","request_id":rid,"revision":1,"option_id":"allow"}),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -526,7 +526,7 @@ async fn wait_pending(core: &Core, agent: &str, want: Option<RequestStatus>) {
 }
 
 fn answer_cmd(id: &str, rid: &str) -> Value {
-    json!({"type":"request.answer","id":id,"request_id":rid,"option_id":"allow"})
+    json!({"type":"request.answer","id":id,"request_id":rid,"revision":1,"option_id":"allow"})
 }
 
 #[tokio::test]

@@ -771,3 +771,44 @@ async fn a_reader_waiting_on_a_slow_consumer_keeps_the_connection() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!conn.is_closed(), "closed: {}", conn.closed().await);
 }
+
+// With no process holding the server end, nothing proves who owns the port,
+// so connect refuses and the token is never written. (Linux cannot build
+// this case: the backlog socket carries the listener's uid, which is ours.)
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn loopback_server_end_not_proven_ours_gets_no_token() {
+    use tokio::io::AsyncReadExt;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = ws_url(&format!("http://{}", l.local_addr().unwrap())).unwrap();
+    let err = connect(&url, FAKE_TOKEN, &fast()).await.err().expect("refused");
+    assert!(matches!(err, ConnectError::NotOurs), "{err}");
+    let (mut s, _) = l.accept().await.unwrap();
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await.unwrap();
+    assert!(buf.is_empty(), "bytes were written to the squatter");
+}
+
+// Same, for the host's own non-loopback address (Tailscale or LAN): another
+// local user can bind it too while T3 is down.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn own_address_server_end_not_proven_ours_gets_no_token() {
+    use tokio::io::AsyncReadExt;
+    let Some(ip) = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| s.connect("192.0.2.1:9").and(s.local_addr()))
+        .ok()
+        .map(|a| a.ip())
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    else {
+        return;
+    };
+    let l = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
+    let url = format!("ws://{}/ws?orchestrationProtocol=2", l.local_addr().unwrap());
+    let err = connect(&url, FAKE_TOKEN, &fast()).await.err().expect("refused");
+    assert!(matches!(err, ConnectError::NotOurs), "{err}");
+    let (mut s, _) = l.accept().await.unwrap();
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await.unwrap();
+    assert!(buf.is_empty(), "bytes were written to the squatter");
+}

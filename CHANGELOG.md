@@ -40,6 +40,44 @@ config and the `acd/1` protocol may change without a major version bump.
   you talk or the screen is locked). Speech stops when you press the hold key,
   lock the screen, turn voice off or quit.
 
+### Security
+
+Fixes from the 2026-11-20 security audit.
+
+- Claude hooks run the `acd hook claude` shim over `hook.sock`, as Codex
+  hooks do. No hook token is written to Claude settings files. Run
+  `acd hooks install claude` to replace older HTTP hook entries; `acd status`
+  and `acd hooks status` warn while any remain, and name a settings file that
+  others can read.
+- `acd token rotate hook --revoke` ends the old hook token at once.
+- acd sends the T3 token to a T3 server on this machine only after it checks
+  that the server end of the connection belongs to the same user. A T3 server
+  run as another user on loopback is now refused.
+- `request.answer` must carry the request revision (`bad_request` without
+  it). `agent.send` must carry the agent's `incarnation` when the agent has
+  one, and is refused while the agent's screen shows a dialog. Neither has a
+  capability flag: update the apps, `acd-inbox` and the Omarchy plugin
+  together with the daemon, or older clients cannot answer requests or reply
+  to herdr agents.
+- Every loopback address counts as one source for the pre-auth limits.
+- Clients clean control and bidi characters from peer text, and treat an allow
+  option whose label does not start with an approval word as unanswerable.
+  Commands also show default-ignorable characters (such as U+3164) as
+  escapes.
+- Mac app: the HUD does not acknowledge a step whose text does not fit, and
+  Enter key repeat does not confirm. Inbox commands check which window
+  calls them. "Add from clipboard" shows the host and pin, and adds the
+  machine only after you confirm.
+- Push registrations are bound to the client token and are dropped after a
+  rotation, also across a restart. Existing registrations must register
+  once more. The relay checks per-IP limits before its global limit.
+- Debug logs record hook and herdr errors by name, length and hash, not by
+  their text.
+- Releases carry GitHub build provenance attestations, and
+  `scripts/install.sh` verifies them when `gh` is installed and signed in
+  (`ACD_INSTALL_SKIP_PROVENANCE=1` skips the check).
+  Dependabot also covers the cargo and npm dependencies.
+
 ### Changed
 
 - Esc in the inbox panel now also stops speech while the app is speaking. It

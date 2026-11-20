@@ -109,7 +109,8 @@ impl Rig {
             } = self.session.apply(&message)
                 && let Some(n) = view::resolution_notice(by, reason, message.as_deref())
             {
-                self.notices.insert(view::card_key("local", &agent_id), n);
+                let inc = self.session.agents.get(&agent_id).and_then(|a| a.incarnation.clone());
+                self.notices.insert(view::card_key("local", &agent_id, inc.as_deref()), n);
             }
         }
     }

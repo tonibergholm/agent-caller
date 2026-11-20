@@ -211,10 +211,11 @@ fn strip_owned(hooks: &mut Obj) -> Result<usize> {
 fn groups_for(ctx: &Ctx, held: &WriterLock, t: Target) -> Result<Vec<(String, Value)>> {
     Ok(match t {
         Target::Claude => {
-            let token = crate::hook_token::migrate_locked(&ctx.config_dir, held)?.current;
+            // The shim reads the token itself; this only makes sure a store exists.
+            crate::hook_token::migrate_locked(&ctx.config_dir, held)?;
             entries::claude_events(ctx.permission_hold)
                 .into_iter()
-                .map(|(e, m, t)| (e.to_string(), entries::claude_group(ctx, &token, e, m, t)))
+                .map(|(e, m, t)| (e.to_string(), entries::claude_group(ctx, e, m, t)))
                 .collect()
         }
         Target::Codex => entries::CODEX_EVENTS
@@ -276,8 +277,8 @@ fn read_pinned(
 
 /// `read_settings` for a path, but through the same pinned-directory,
 /// no-follow, descriptor-validated read the writes use. A missing directory
-/// reads as a missing file.
-fn read_settings_pinned(path: &Path) -> Result<Option<String>> {
+/// reads as a missing file. Also returns the file's permission bits.
+fn read_settings_pinned(path: &Path) -> Result<Option<(String, u32)>> {
     let parent = path.parent().context("settings path has no parent")?;
     let name = path.file_name().context("settings path has no file name")?;
     let dir = match crate::secrets::DirFd::open(parent, true) {
@@ -290,7 +291,7 @@ fn read_settings_pinned(path: &Path) -> Result<Option<String>> {
         }
         Err(e) => return Err(e),
     };
-    Ok(read_pinned(&dir, name)?.map(|(text, _)| text))
+    read_pinned(&dir, name)
 }
 
 /// A private copy of the pre-edit text. Names are unique and never reused:
@@ -672,28 +673,62 @@ pub fn uninstall(ctx: &Ctx, t: Target) -> Result<Report> {
     })
 }
 
-/// J2: how many entries are exactly acd's for `target`.
-pub fn owned_entries(text: &str, target: Target) -> Result<usize> {
+/// How many hook entries in `text` satisfy `keep(event, entry)`.
+fn count_entries(text: &str, keep: impl Fn(&str, &Value) -> bool) -> Result<usize> {
     let v: Value = serde_json::from_str(text)?;
     let Some(hooks) = v.get("hooks").and_then(Value::as_object) else {
         return Ok(0);
     };
-    Ok(hooks
-        .iter()
-        .flat_map(|(event, groups)| {
-            groups
-                .as_array()
-                .into_iter()
-                .flatten()
-                .flat_map(|g| {
-                    g.get("hooks")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                })
-                .filter(move |e| entries::classify_for(target, event, e) == Ownership::Owned)
-        })
-        .count())
+    let mut n = 0;
+    for (event, groups) in hooks {
+        for g in groups.as_array().into_iter().flatten() {
+            let entries = g.get("hooks").and_then(Value::as_array);
+            for e in entries.into_iter().flatten() {
+                n += usize::from(keep(event, e));
+            }
+        }
+    }
+    Ok(n)
+}
+
+/// J2: how many entries are exactly acd's for `target`.
+pub fn owned_entries(text: &str, target: Target) -> Result<usize> {
+    count_entries(text, |event, e| {
+        entries::classify_for(target, event, e) == Ownership::Owned
+    })
+}
+
+/// One warning per recorded Claude settings file that still holds the http
+/// hook of earlier versions. That entry carries the hook token, so a file
+/// readable by group or others leaks it (audit finding 2). Reinstalling
+/// replaces it with the shim command, which carries no token. Best effort: a
+/// file that cannot be read or parsed gives no warning here.
+pub fn legacy_warnings(config_dir: &Path) -> Vec<String> {
+    let Ok(record) = Record::load(config_dir) else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    for dest in record.claude_destinations() {
+        let Ok(Some((text, mode))) = read_settings_pinned(&dest) else {
+            continue;
+        };
+        if !count_entries(&text, entries::claude_http_owned).is_ok_and(|n| n > 0) {
+            continue;
+        }
+        let loose = if mode & 0o077 == 0 {
+            String::new()
+        } else {
+            format!(
+                ", and the file is readable by group or others (mode {:04o}), so also run `acd token rotate hook --revoke` after the reinstall",
+                mode & 0o7777
+            )
+        };
+        out.push(format!(
+            "{} still has the Claude http hook, which holds the hook token{loose}; run `acd hooks install claude` to replace it with the socket hook, which stores no token",
+            dest.display()
+        ));
+    }
+    out
 }
 
 /// `acd hooks status`: takes the writer lock, runs recovery, and reports the
@@ -717,6 +752,9 @@ pub fn status(ctx: &Ctx) -> Result<String> {
             Target::Codex => "codex",
         };
         out.push_str(&format!("{target}: {}\n", path.display()));
+    }
+    for w in legacy_warnings(&ctx.config_dir) {
+        out.push_str(&format!("warning: {w}\n"));
     }
     Ok(out)
 }
@@ -794,7 +832,7 @@ fn rewrite_event_token(
 /// same safe read and Git checks used by the subsequent writes.
 pub fn precheck_claude(ctx: &Ctx, _held: &WriterLock, flags: Flags) -> Result<()> {
     for dest in Record::load(&ctx.config_dir)?.claude_destinations() {
-        let text = read_settings_pinned(&dest)?;
+        let text = read_settings_pinned(&dest)?.map(|(text, _)| text);
         git::check(&dest, flags.allow_tracked, flags.allow_unknown_git)?;
         let Some(text) = text else { continue };
         let value: Value = serde_json::from_str(&text)
@@ -982,6 +1020,31 @@ mod tests {
         std::fs::canonicalize(path).unwrap()
     }
 
+    /// `install_into`, then acd's entries rewritten into the http form of
+    /// earlier versions (token in the headers). Foreign bytes stay as they are.
+    fn install_legacy_into(f: &mut Fixture, dir: &str, original: Option<&str>) -> PathBuf {
+        let path = install_into(f, dir, original);
+        let token = crate::hook_token::load(&f.ctx.config_dir).unwrap().current;
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = Obj::parse(&text).unwrap();
+        let mut hooks = Obj::parse(doc.get("hooks").unwrap().get()).unwrap();
+        strip_owned(&mut hooks).unwrap();
+        for (event, matcher, timeout) in entries::claude_events(f.ctx.permission_hold) {
+            let legacy =
+                entries::legacy_claude_group(f.ctx.hook_port, &token, event, matcher, timeout);
+            let mut items: Vec<Box<RawValue>> = match hooks.get(event) {
+                Some(a) => serde_json::from_str(a.get()).unwrap(),
+                None => Vec::new(),
+            };
+            items.push(raw(&legacy));
+            hooks.set(event, raw_text(render_array(&items)).unwrap());
+        }
+        let mut doc = doc;
+        doc.set("hooks", raw_text(hooks.render()).unwrap());
+        std::fs::write(&path, doc.render()).unwrap();
+        path
+    }
+
     #[test]
     fn records_larger_than_4_kib_round_trip() {
         let d = tempfile::tempdir().unwrap();
@@ -1012,8 +1075,8 @@ mod tests {
     #[test]
     fn a_batch_stops_at_the_first_failure_that_leaves_a_journal() {
         let mut f = fixture();
-        let a = install_into(&mut f, "claude-a", None);
-        let b = install_into(&mut f, "claude-b", None);
+        let a = install_legacy_into(&mut f, "claude-a", None);
+        let b = install_legacy_into(&mut f, "claude-b", None);
         let old_a = std::fs::read_to_string(&a).unwrap();
         let old_b = std::fs::read_to_string(&b).unwrap();
         let held = lock_writers(&f.ctx.config_dir).unwrap();
@@ -1072,6 +1135,43 @@ mod tests {
             "Claude shape only"
         );
         assert!(owned_entries("nope", Target::Claude).is_err());
+        let legacy = install_legacy_into(&mut f, "claude-b", Some(original));
+        assert_eq!(
+            owned_entries(&std::fs::read_to_string(legacy).unwrap(), Target::Claude).unwrap(),
+            7,
+            "the legacy http entries are acd's too"
+        );
+    }
+
+    #[test]
+    fn legacy_warnings_name_the_file_and_a_loose_mode_until_a_reinstall() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut f = fixture();
+        assert!(legacy_warnings(&f.ctx.config_dir).is_empty());
+        install_into(&mut f, "claude-a", None);
+        assert!(
+            legacy_warnings(&f.ctx.config_dir).is_empty(),
+            "a shim install holds no token"
+        );
+        let path = install_legacy_into(&mut f, "claude-a", None);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let w = legacy_warnings(&f.ctx.config_dir);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains(&path.display().to_string()), "{w:?}");
+        assert!(w[0].contains("acd hooks install claude"), "{w:?}");
+        assert!(!w[0].contains("readable by group or others"), "{w:?}");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let w = legacy_warnings(&f.ctx.config_dir);
+        assert!(
+            w[0].contains("readable by group or others (mode 0644)"),
+            "{w:?}"
+        );
+        install(&f.ctx, Target::Claude, FLAGS).unwrap();
+        assert!(legacy_warnings(&f.ctx.config_dir).is_empty());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the reinstall also makes it private");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("http") && !text.contains("X-Acd-Token"), "{text}");
     }
 
     #[test]
@@ -1083,7 +1183,7 @@ mod tests {
         let original = format!(
             "{{\n \"hooks\": {{\n  \"Stop\": [{{\"hooks\": [{foreign_a}]}}],\n  \"PreToolUse\": [{foreign_b}]\n }},\n \"model\": \"opus\"\n}}\n"
         );
-        let path = install_into(&mut f, "claude-a", Some(&original));
+        let path = install_legacy_into(&mut f, "claude-a", Some(&original));
         let held = lock_writers(&f.ctx.config_dir).unwrap();
         let report = rewrite_claude_token(&f.ctx, &held, "fresh-token", FLAGS).unwrap();
         assert_eq!(report.updated, vec![path.clone()], "{:?}", report.failed);

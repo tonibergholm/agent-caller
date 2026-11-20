@@ -18,7 +18,7 @@ use tokio::time::{Instant, sleep, sleep_until};
 
 use super::client::{AgentList, CALL_TIMEOUT, CallError, Herdr, ScreenRead, Subscription};
 use super::fallback::{self, Fallback, FbOut};
-use super::keys::{ABSENT_READS, KeysTargets};
+use super::keys::{ABSENT_READS, KeysTargets, classify};
 use super::map;
 use super::screen::find_dialog;
 use super::wire::{AgentInfo, Event};
@@ -88,6 +88,25 @@ impl PaneIdentity {
             || matches!((&self.terminal_id, &next.terminal_id), (Some(a), Some(b)) if a != b)
             || matches!((&self.session, &next.session), (Some(a), Some(b)) if a != b)
     }
+}
+
+/// Whether `info`, read from herdr just now, is no longer the agent `pane`
+/// was recorded for: a plain shell now, or a different terminal, session or
+/// kind. The reconciler may not have noticed yet.
+pub(super) fn pane_replaced(pane: &PaneRef, info: &AgentInfo) -> bool {
+    let Some(kind) = map::kind(info.agent.as_deref()) else {
+        return true;
+    };
+    PaneIdentity {
+        terminal_id: pane.terminal_id.clone(),
+        session: pane.session.clone(),
+        kind: pane.kind,
+    }
+    .replaced_by(&PaneIdentity {
+        terminal_id: info.terminal_id.clone(),
+        session: info.agent_session.as_ref().and_then(|s| s.value.clone()),
+        kind,
+    })
 }
 
 /// `agent_id -> PaneRef`. The reconciler inserts and removes; adapters read.
@@ -574,7 +593,7 @@ impl Reconciler {
                 Ok(())
             }
             Err(e) if is_server(&e) => {
-                tracing::debug!(error = %e, "herdr agent.get failed; resyncing");
+                tracing::debug!(error = %classify(&e), "herdr agent.get failed; resyncing");
                 self.resync.store(true, Ordering::Relaxed);
                 Ok(())
             }
@@ -649,7 +668,7 @@ impl Reconciler {
                 Ok(())
             }
             Err(e) if is_server(&e) => {
-                tracing::debug!(error = %e, "herdr agent.read failed");
+                tracing::debug!(error = %classify(&e), "herdr agent.read failed");
                 Ok(())
             }
             Err(e) => Err(Flow::Lost(e.to_string())),
@@ -764,7 +783,7 @@ impl Reconciler {
                 Ok(())
             }
             Err(e) if is_server(&e) => {
-                tracing::debug!(error = %e, "herdr agent.list failed");
+                tracing::debug!(error = %classify(&e), "herdr agent.list failed");
                 if !periodic {
                     // Connect-time: agents are still Unknown; retry promptly.
                     self.resync.store(true, Ordering::Relaxed);
@@ -843,8 +862,9 @@ impl Reconciler {
         } else {
             self.blocked.remove(pane_id);
         }
+        let marker = map::incarnation_id(incarnation, next.terminal_id.as_deref());
         self.panes.write().expect("pane map").insert(
-            agent_id,
+            agent_id.clone(),
             PaneRef {
                 herdr: self.herdr.clone(),
                 pane_id: pane_id.to_owned(),
@@ -862,6 +882,11 @@ impl Reconciler {
             obs.state == AgentState::NeedsYou,
             Instant::now().into_std(),
         );
+        // Before the upsert, so a new agent is first published with it.
+        self.core.observe(Observation::AgentIncarnation {
+            agent_id,
+            incarnation: marker,
+        });
         self.core.observe(Observation::AgentUpsert(obs));
     }
 
@@ -1026,7 +1051,7 @@ mod retire_tests {
                 acd_protocol::ClientMessage::RequestAnswer {
                     id: "x".into(),
                     request_id: r2,
-                    revision: None,
+                    revision: Some(1),
                     option_id: Some("allow".into()),
                     text: None,
                 },

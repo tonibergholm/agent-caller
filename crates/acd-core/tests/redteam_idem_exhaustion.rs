@@ -13,7 +13,7 @@ fn answer_nonexistent(id: &str, request_id: &str) -> ClientMessage {
     ClientMessage::RequestAnswer {
         id: id.into(),
         request_id: request_id.into(),
-        revision: None,
+        revision: Some(1),
         option_id: Some("allow".into()),
         text: None,
     }
@@ -76,7 +76,7 @@ fn mark_seen(id: &str) -> ClientMessage {
 }
 
 fn send(id: &str) -> ClientMessage {
-    ClientMessage::AgentSend { id: id.into(), agent_id: "a2".into(), text: "hi".into() }
+    ClientMessage::AgentSend { id: id.into(), agent_id: "a2".into(), text: "hi".into(), incarnation: None }
 }
 
 fn open_agent(core: &Core) {
@@ -101,7 +101,7 @@ fn src(n: u8) -> Origin {
 async fn flood(core: &Core, origin: Origin, clients: &[&str]) -> usize {
     for i in 0.. {
         let client = clients[i % clients.len()];
-        let r = core.handle_from(client, origin, send(&format!("f-{i}"))).await;
+        let r = core.handle_from(client, origin, 0, send(&format!("f-{i}"))).await;
         if !r.ok {
             assert_eq!(r.error_code(), Some(ErrorCode::BadRequest), "{r:?}");
             assert!(r.error.as_ref().unwrap().message.contains("too many recent commands"), "{r:?}");
@@ -122,10 +122,10 @@ async fn mark_seen_does_not_consume_table_entries() {
     open_agent(&core);
     for (n, origin) in [Origin::Local, src(1)].into_iter().enumerate() {
         for i in 0..IDEM_CAPACITY + 100 {
-            let r = core.handle_from("c", origin, mark_seen(&format!("m-{i}"))).await;
+            let r = core.handle_from("c", origin, 0, mark_seen(&format!("m-{i}"))).await;
             assert!(r.ok, "mark_seen #{i} from {origin:?}: {r:?}");
         }
-        assert!(core.handle_from("c", origin, send(&format!("after-{n}"))).await.ok, "{origin:?} can still send");
+        assert!(core.handle_from("c", origin, 0, send(&format!("after-{n}"))).await.ok, "{origin:?} can still send");
     }
     assert_eq!(fake.sent().len(), 2);
 }
@@ -142,11 +142,11 @@ async fn a_source_under_many_client_ids_cannot_lock_out_other_clients() {
     assert_eq!(n, IDEM_CAPACITY / IDEM_SOURCE_SHARE_DIVISOR, "stopped at the source quota, not at the per-client one");
     // A ninth id from the same source is refused whatever its quota.
     assert_eq!(
-        core.handle_from("x8", src(1), send("n")).await.error_code(),
+        core.handle_from("x8", src(1), 0, send("n")).await.error_code(),
         Some(ErrorCode::BadRequest)
     );
-    assert!(core.handle_from("b", src(2), send("first")).await.ok, "an unrelated client's first command");
-    assert!(core.handle_from("l", Origin::Local, send("first")).await.ok, "the local socket");
+    assert!(core.handle_from("b", src(2), 0, send("first")).await.ok, "an unrelated client's first command");
+    assert!(core.handle_from("l", Origin::Local, 0, send("first")).await.ok, "the local socket");
 }
 
 /// A delivered answer is never evicted before its TTL: a flood of successful
@@ -158,7 +158,7 @@ async fn a_delivered_answer_survives_a_flood_from_the_same_source() {
     let fake = FakeAdapter::new();
     let core = Core::new(test_machine(), vec![fake.clone()]);
     let rid = open_request(&core);
-    let first = core.handle_from("victim", src(1), answer_to("ans", &rid, "allow")).await;
+    let first = core.handle_from("victim", src(1), 0, answer_to("ans", &rid, "allow")).await;
     assert_eq!(first, CommandResult::delivered("ans"));
 
     let under_same_id = flood(&core, src(1), &["victim"]).await;
@@ -169,16 +169,16 @@ async fn a_delivered_answer_survives_a_flood_from_the_same_source() {
     assert_eq!(under_other_ids, 0, "the source is already at its quota");
 
     assert_eq!(
-        core.handle_from("victim", src(1), answer_to("ans", &rid, "allow")).await,
+        core.handle_from("victim", src(1), 0, answer_to("ans", &rid, "allow")).await,
         CommandResult::delivered("ans"),
         "the replay returns the original result"
     );
     assert_eq!(
-        core.handle_from("victim", src(1), answer_to("ans", &rid, "deny")).await.error_code(),
+        core.handle_from("victim", src(1), 0, answer_to("ans", &rid, "deny")).await.error_code(),
         Some(ErrorCode::DuplicateMismatch)
     );
     // The same id and payload as an early agent.send replays too: no second delivery.
-    assert!(core.handle_from("victim", src(1), send("f-0")).await.ok);
+    assert!(core.handle_from("victim", src(1), 0, send("f-0")).await.ok);
     assert_eq!(fake.delivered().len(), 1);
     assert_eq!(fake.sent().len(), sent_before, "replays deliver nothing");
 }
@@ -189,19 +189,19 @@ async fn one_source_is_limited_in_the_client_ids_it_can_use() {
     let core = Core::new(test_machine(), vec![FakeAdapter::new()]);
     open_agent(&core);
     for i in 0..IDEM_CLIENT_IDS_PER_SOURCE {
-        assert!(core.handle_from(&format!("c{i}"), src(1), send("1")).await.ok);
+        assert!(core.handle_from(&format!("c{i}"), src(1), 0, send("1")).await.ok);
     }
-    let r = core.handle_from("one-too-many", src(1), send("1")).await;
+    let r = core.handle_from("one-too-many", src(1), 0, send("1")).await;
     assert_eq!(r.error_code(), Some(ErrorCode::BadRequest));
-    assert!(core.handle_from("c0", src(1), send("2")).await.ok, "an id it already holds still works");
-    assert!(core.handle_from("one-too-many", src(2), send("1")).await.ok, "another source is unaffected");
+    assert!(core.handle_from("c0", src(1), 0, send("2")).await.ok, "an id it already holds still works");
+    assert!(core.handle_from("one-too-many", src(2), 0, send("1")).await.ok, "another source is unaffected");
 }
 
 fn answer_to(id: &str, request_id: &str, option: &str) -> ClientMessage {
     ClientMessage::RequestAnswer {
         id: id.into(),
         request_id: request_id.into(),
-        revision: None,
+        revision: Some(1),
         option_id: Some(option.into()),
         text: None,
     }

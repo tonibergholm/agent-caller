@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acd_core::testing::{agent_obs, permission_obs, test_machine};
-use acd_core::{Core, Observation};
+use acd_core::{Core, Observation, Origin};
 use acd_protocol::*;
 use acd_relay::ManualClock;
 use acd_relay::client::{MAX_RESPONSE, Status, WakeState};
@@ -22,6 +22,10 @@ use tokio::sync::{Semaphore, watch};
 use super::*;
 
 pub const T0: u64 = 1_800_000_000;
+const TOKEN: &str = "test-client-token";
+fn client() -> String {
+    super::store::client_fingerprint(TOKEN)
+}
 const NO_WINDOW: Settings = Settings { min_interval: Duration::ZERO, max_concurrent: MAX_CONCURRENT };
 
 /// A handle that looks like one and is unique per `name`.
@@ -291,7 +295,7 @@ impl Rig {
             relay.url.clone(),
             clock.clone(),
         );
-        let push = Push::new(&relay.url, sender, Store::load(dir.path()), settings);
+        let push = Push::new(&relay.url, sender, Store::load(dir.path(), &client()), settings);
         let core = Core::new(test_machine(), vec![]);
         assert!(core.set_push(push.clone()));
         push.spawn();
@@ -309,7 +313,7 @@ impl Rig {
             clock.clone(),
         );
         let dir = private_dir();
-        let push = Push::new(&relay.url, sender, Store::load(dir.path()), settings);
+        let push = Push::new(&relay.url, sender, Store::load(dir.path(), &client()), settings);
         let core = Core::new(test_machine(), vec![]);
         assert!(core.set_push(push.clone()));
         push.spawn();
@@ -332,6 +336,11 @@ impl Rig {
 
     pub async fn register(&self, client: &str, handle: &str) -> CommandResult {
         self.core.handle(client, self.register_msg(handle)).await
+    }
+
+    /// Like [`Rig::register`], from a session of token generation `generation`.
+    pub async fn register_at(&self, client: &str, generation: u64, handle: &str) -> CommandResult {
+        self.core.handle_from(client, Origin::Local, generation, self.register_msg(handle)).await
     }
 
     /// Registers `client` and checks it was accepted.
@@ -571,7 +580,7 @@ async fn a_refused_connection_is_transient_not_fatal() {
     let dir = private_dir();
     let clock = Arc::new(ManualClock::new(T0));
     let sender = WakeSender::new(HttpClient::plain_for_tests(Duration::from_secs(5), MAX_RESPONSE), url.clone(), clock);
-    let push = Push::new(&url, sender, Store::load(dir.path()), NO_WINDOW);
+    let push = Push::new(&url, sender, Store::load(dir.path(), &client()), NO_WINDOW);
     let core = Core::new(test_machine(), vec![]);
     core.set_push(push.clone());
     push.spawn();
@@ -613,7 +622,7 @@ async fn an_invalid_registration_is_disabled_until_the_device_registers_again() 
         assert_eq!(rig.relay.hits(), 1);
 
         // The state survives a restart.
-        let reloaded = Store::load(rig.dir.path());
+        let reloaded = Store::load(rig.dir.path(), &client());
         assert!(reloaded.degraded().is_none());
         assert_eq!(reloaded.get("phone").unwrap().device.status(), expect);
 
@@ -747,7 +756,7 @@ async fn rotating_the_client_token_revokes_every_registration_also_after_a_resta
     let rig = Rig::new(NO_WINDOW).await;
     rig.enroll("phone").await;
     rig.enroll("tablet").await;
-    rig.push.revoke_all().await;
+    rig.push.revoke_all(TOKEN, 1).await;
     assert!(!rig.status("phone").await.registered);
     rig.open(1);
     rig.push.handled(1).await;
@@ -760,6 +769,74 @@ async fn rotating_the_client_token_revokes_every_registration_also_after_a_resta
     assert_eq!(relay.hits(), 0);
 }
 
+/// A registration accepted under the old token (generation 0), whose write
+/// runs after the rotation (generation 1), must not be persisted.
+#[tokio::test]
+async fn a_registration_queued_before_a_rotation_is_not_stored_after_it() {
+    const ROTATED: &str = "rotated-client-token";
+    let rig = Rig::new(NO_WINDOW).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    *rig.push.accepted.lock().unwrap() = Some(barrier.clone());
+    let msg = rig.register_msg(&handle_for("phone"));
+    let pending = tokio::spawn({
+        let core = rig.core.clone();
+        async move { core.handle_from("phone", Origin::Local, 0, msg).await }
+    });
+    barrier.wait().await; // accepted under generation 0, nothing written yet
+    rig.push.revoke_all(ROTATED, 1).await;
+    barrier.wait().await; // the queued write now runs
+    let result = pending.await.unwrap();
+    assert_eq!(result.error_code(), Some(ErrorCode::Unauthorized), "{result:?}");
+    assert!(!rig.status("phone").await.registered);
+    // After a restart under the new token the file lists nothing.
+    let again = Store::load(rig.dir.path(), &store::client_fingerprint(ROTATED));
+    assert!(again.get("phone").is_none(), "the old holder's registration survived the rotation");
+}
+
+/// The command itself starts after the rotation but carries the old
+/// generation: the old fingerprint-at-entry check read the new fingerprint
+/// and accepted it.
+#[tokio::test]
+async fn a_registration_that_starts_after_a_rotation_with_the_old_generation_is_refused() {
+    const ROTATED: &str = "rotated-client-token";
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.push.revoke_all(ROTATED, 1).await;
+    let result = rig.register_at("phone", 0, &handle_for("phone")).await;
+    assert_eq!(result.error_code(), Some(ErrorCode::Unauthorized), "{result:?}");
+    assert!(!rig.status("phone").await.registered);
+    let again = Store::load(rig.dir.path(), &store::client_fingerprint(ROTATED));
+    assert!(again.get("phone").is_none(), "a revoked session's handle was persisted");
+}
+
+/// A session authenticated with the new token is never refused.
+#[tokio::test]
+async fn a_new_generation_session_registers_after_a_rotation() {
+    const ROTATED: &str = "rotated-client-token";
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.push.revoke_all(ROTATED, 1).await;
+    for generation in [1, 2] {
+        let result = rig.register_at("phone", generation, &handle_for("phone")).await;
+        assert!(result.ok, "generation {generation}: {:?}", result.error_code());
+    }
+    assert!(rig.status("phone").await.registered);
+}
+
+/// The daemon publishes the new token first and clears push after, so a
+/// device can register with the new token in between: that registration
+/// survives the clear, while the old session's does not, also on disk.
+#[tokio::test]
+async fn a_registration_under_the_new_token_before_the_clear_survives_it() {
+    const ROTATED: &str = "rotated-client-token";
+    let rig = Rig::new(NO_WINDOW).await;
+    assert!(rig.register_at("old-phone", 0, &handle_for("old-phone")).await.ok);
+    assert!(rig.register_at("new-phone", 1, &handle_for("new-phone")).await.ok);
+    rig.push.revoke_all(ROTATED, 1).await;
+    assert!(rig.status("new-phone").await.registered);
+    assert!(!rig.status("old-phone").await.registered);
+    let reloaded = Store::load(rig.dir.path(), &store::client_fingerprint(ROTATED));
+    assert_eq!(reloaded.len(), 1);
+}
+
 #[tokio::test]
 async fn revoking_cancels_a_wake_that_is_already_in_flight() {
     // An hour-long request deadline: only the cancellation can end the send,
@@ -769,33 +846,148 @@ async fn revoking_cancels_a_wake_that_is_already_in_flight() {
     let _gate = rig.relay.hold(); // never released: only cancellation ends the send
     rig.open(1);
     rig.relay.wait_in_flight(1).await;
-    rig.push.revoke_all().await;
+    rig.push.revoke_all(TOKEN, 1).await;
     rig.push.handled(1).await;
     assert!(!rig.status("phone").await.registered);
+}
+
+/// S14: cancelling sends in flight and the cutoff for new ones must not
+/// wait for the store's file I/O.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // held on purpose: it stalls the store's I/O
+async fn revoking_cancels_wakes_before_the_store_is_written() {
+    let rig = Rig::new(NO_WINDOW).await;
+    let mut cancelled = rig.push.revoked.subscribe();
+    let held = rig.push.store(); // the clear cannot run while this is held
+    let revoke = tokio::spawn({
+        let push = rig.push.clone();
+        async move { push.revoke_all(TOKEN, 1).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), cancelled.changed())
+        .await
+        .expect("sends in flight were cancelled before the store was written")
+        .unwrap();
+    assert_eq!(rig.push.min_generation.load(Ordering::SeqCst), 1, "no new send picks an old registration");
+    assert!(!revoke.is_finished(), "the clear is still waiting for the store");
+    drop(held);
+    revoke.await.unwrap();
+}
+
+/// S13: the daemon's rotation stops the old client token before push I/O.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // held on purpose: it stalls the store's I/O
+async fn the_client_token_rotates_before_push_writes_anything() {
+    let rig = Rig::new(NO_WINDOW).await;
+    let auth = Arc::new(acd_core::server::Auth::new(TOKEN.into()));
+    let held = rig.push.store();
+    let rotate = tokio::spawn({
+        let (auth, push) = (auth.clone(), rig.push.clone());
+        async move { super::rotate_client_token(&auth, Some(&push), "rotated-client-token".into()).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while auth.generation() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the token rotated while push was blocked");
+    assert!(!rotate.is_finished(), "push is still waiting for the store");
+    drop(held);
+    rotate.await.unwrap();
+}
+
+#[test]
+fn an_older_token_generation_cannot_replace_a_newer_registration() {
+    let d = private_dir();
+    let mut st = Store::load(d.path(), &client());
+    let dev = |h: &str| Device::new(PushPlatform::Android, handle_for(h), "2026-12-04T10:00:00.000Z".into());
+    st.register_at("phone", dev("new"), 1).unwrap();
+    assert_eq!(st.register_at("phone", dev("old"), 0), Err(StoreError::Revoked));
+    assert_eq!(st.get("phone").map(|e| e.auth), Some(1));
+}
+
+#[test]
+fn old_generation_entries_do_not_take_a_new_tokens_slots() {
+    let d = private_dir();
+    let mut st = Store::load(d.path(), &client());
+    let dev = |h: &str| Device::new(PushPlatform::Android, handle_for(h), "2026-12-04T10:00:00.000Z".into());
+    for i in 0..8 {
+        st.register_at(&format!("old-{i}"), dev(&format!("old-{i}")), 0).unwrap();
+    }
+    assert_eq!(st.register_at("old-8", dev("old-8"), 0), Err(StoreError::TooMany));
+    st.register_at("new", dev("new"), 1).unwrap();
+    assert_eq!(st.len(), 1, "the old token's entries are gone");
 }
 
 #[test]
 fn a_revocation_whose_file_write_fails_is_retried_and_survives_a_restart() {
     use std::os::unix::fs::PermissionsExt;
     let d = private_dir();
-    let mut st = Store::load(d.path());
+    let mut st = Store::load(d.path(), &client());
     st.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
     // The directory refuses new files and removals: neither rewrite nor unlink can work.
     std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-    assert!(st.clear().is_err());
+    let new = store::client_fingerprint("rotated");
+    assert!(st.rotate_client(&new).is_err());
     assert_eq!(st.len(), 0, "gone from memory even when the file stays");
-    assert_eq!(Store::load(d.path()).len(), 1, "the file still lists it");
+    // A restart before the retry: the file still lists the phone, but under the old token.
+    let restarted = Store::load(d.path(), &new);
+    assert_eq!(restarted.len(), 0, "a revoked registration does not come back");
+    assert!(restarted.clear_pending(), "the restarted daemon still has to clean the file");
     std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     st.retry_clear();
-    assert_eq!(Store::load(d.path()).len(), 0, "the retry made the revocation durable");
+    assert_eq!(Store::load(d.path(), &new).len(), 0, "the retry made the revocation durable");
+    // The old token's view of the file is empty too.
+    assert_eq!(Store::load(d.path(), &client()).len(), 0);
+}
+
+#[test]
+fn a_restarted_daemon_cleans_up_registrations_of_another_token() {
+    let d = private_dir();
+    let mut st = Store::load(d.path(), &client());
+    st.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
+    let text = std::fs::read_to_string(d.path().join(store::FILE)).unwrap();
+    assert!(!text.contains(TOKEN), "the file never holds the token");
+    let new = store::client_fingerprint("rotated");
+    let mut again = Store::load(d.path(), &new);
+    assert_eq!((again.len(), again.clear_pending()), (0, true));
+    again.retry_clear();
+    assert!(!again.clear_pending());
+    assert_eq!(Store::load(d.path(), &new).len(), 0);
+    assert_eq!(Store::load(d.path(), &client()).len(), 0, "the file no longer lists the phone");
+    // New registrations carry the new token and load under it.
+    again.register("tablet", Device::new(PushPlatform::Ios, handle_for("tablet"), "2026-12-04T10:00:00.000Z".into())).unwrap();
+    assert_eq!(Store::load(d.path(), &new).len(), 1);
+}
+
+#[test]
+fn a_file_without_a_token_fingerprint_counts_as_another_token() {
+    let d = private_dir();
+    let old_format = valid_file(&handle_for("phone")).replace(&format!("\"client\":\"{}\",", client()), "");
+    assert!(!old_format.contains("client"));
+    write_raw(d.path(), &old_format, 0o600);
+    let s = Store::load(d.path(), &client());
+    assert_eq!((s.len(), s.degraded()), (0, None), "fail closed: devices register once more");
+    assert!(s.clear_pending());
+}
+
+#[test]
+fn an_empty_fingerprint_never_matches() {
+    // An unreadable client token gives "" (`client_of`); a file written with
+    // "" must not load under it.
+    let d = private_dir();
+    let mut st = Store::load(d.path(), "");
+    st.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
+    assert_eq!(Store::load(d.path(), "").len(), 0);
 }
 
 #[tokio::test]
 async fn a_new_registration_after_revocation_wakes_again() {
     let rig = Rig::new(NO_WINDOW).await;
     rig.enroll("phone").await;
-    rig.push.revoke_all().await;
-    rig.enroll("phone").await;
+    rig.push.revoke_all(TOKEN, 1).await;
+    let r = rig.register_at("phone", 1, &handle_for("phone")).await;
+    assert!(r.ok, "{:?}", r.error_code());
     rig.open(1);
     rig.relay.wait_hits(1).await;
 }
@@ -803,11 +995,11 @@ async fn a_new_registration_after_revocation_wakes_again() {
 #[test]
 fn the_offline_rotation_removes_push_json() {
     let d = private_dir();
-    let mut st = Store::load(d.path());
+    let mut st = Store::load(d.path(), &client());
     st.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
     assert!(d.path().join(super::store::FILE).exists());
     super::forget_registrations(d.path()).unwrap();
-    assert_eq!(Store::load(d.path()).len(), 0);
+    assert_eq!(Store::load(d.path(), &client()).len(), 0);
     super::forget_registrations(d.path()).unwrap(); // idempotent
 }
 
@@ -869,7 +1061,7 @@ async fn a_session_sees_and_changes_only_its_own_registration() {
 fn the_store_is_owner_only_and_holds_handles_but_no_push_address() {
     use std::os::unix::fs::PermissionsExt;
     let dir = private_dir();
-    let mut s = Store::load(dir.path());
+    let mut s = Store::load(dir.path(), &client());
     s.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
     let path = dir.path().join(store::FILE);
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
@@ -880,7 +1072,7 @@ fn the_store_is_owner_only_and_holds_handles_but_no_push_address() {
     keys.sort();
     assert_eq!(keys, ["expires_at", "failures", "handle", "last_wake_at", "platform", "retry_after", "status"]);
     // A reload gives the same devices.
-    let again = Store::load(dir.path());
+    let again = Store::load(dir.path(), &client());
     assert!(again.degraded().is_none());
     assert_eq!(again.get("phone").unwrap().device, s.get("phone").unwrap().device);
 }
@@ -907,7 +1099,8 @@ fn write_raw(dir: &std::path::Path, text: &str, mode: u32) {
 
 fn valid_file(handle: &str) -> String {
     format!(
-        r#"{{"version":1,"devices":{{"phone":{{"platform":"android","handle":"{handle}","expires_at":"2026-12-04T10:00:00.000Z","status":"ok","failures":0,"retry_after":0,"last_wake_at":null}}}}}}"#
+        r#"{{"version":1,"client":"{fp}","devices":{{"phone":{{"platform":"android","handle":"{handle}","expires_at":"2026-12-04T10:00:00.000Z","status":"ok","failures":0,"retry_after":0,"last_wake_at":null}}}}}}"#,
+        fp = client()
     )
 }
 
@@ -925,7 +1118,7 @@ fn an_unsafe_or_invalid_file_starts_empty_with_a_reason_and_is_left_alone() {
     for (name, text, mode) in cases {
         let dir = private_dir();
         write_raw(dir.path(), &text, mode);
-        let mut s = Store::load(dir.path());
+        let mut s = Store::load(dir.path(), &client());
         let why = s.degraded().unwrap_or_else(|| panic!("{name}: not degraded")).to_string();
         assert!(!why.contains(secret) && !why.contains("SECRET"), "{name}: reason quotes the file");
         assert_eq!(s.len(), 0, "{name}");
@@ -943,7 +1136,8 @@ fn two_entries(bad_key: &str, bad_handle: &str) -> String {
         )
     };
     format!(
-        r#"{{"version":1,"devices":{{"{bad_key}":{},"phone":{},"tablet":{}}}}}"#,
+        r#"{{"version":1,"client":"{}","devices":{{"{bad_key}":{},"phone":{},"tablet":{}}}}}"#,
+        client(),
         dev(&handle_for("a")),
         dev(&handle_for("b")),
         dev(bad_handle)
@@ -955,7 +1149,7 @@ fn one_bad_entry_is_skipped_and_the_others_survive() {
     for text in [two_entries("", "has space"), two_entries(&"k".repeat(129), "has space")] {
         let dir = private_dir();
         write_raw(dir.path(), &text, 0o600);
-        let s = Store::load(dir.path());
+        let s = Store::load(dir.path(), &client());
         assert!(s.degraded().is_none(), "{:?}", s.degraded());
         assert_eq!(s.len(), 1);
         assert!(s.get("phone").is_some());
@@ -965,14 +1159,14 @@ fn one_bad_entry_is_skipped_and_the_others_survive() {
 #[test]
 fn an_unusable_client_id_is_refused_before_anything_is_written() {
     let dir = private_dir();
-    let mut s = Store::load(dir.path());
+    let mut s = Store::load(dir.path(), &client());
     let dev = || Device::new(PushPlatform::Android, handle_for("x"), "x".into());
     assert_eq!(s.register("", dev()), Err(StoreError::BadId));
     assert_eq!(s.register(&"k".repeat(129), dev()), Err(StoreError::BadId));
     assert!(s.register(&"k".repeat(128), dev()).is_ok());
     assert!(!store::client_id_ok(""));
     // Whatever registration accepts, a restart loads.
-    assert_eq!(Store::load(dir.path()).len(), 1);
+    assert_eq!(Store::load(dir.path(), &client()).len(), 1);
 }
 
 #[tokio::test]
@@ -982,7 +1176,7 @@ async fn an_empty_client_id_cannot_poison_the_registrations_of_others() {
     let r = rig.register("", &handle_for("evil")).await;
     assert!(!r.ok);
     assert_eq!(r.error_code(), Some(ErrorCode::BadRequest));
-    let again = Store::load(rig.dir.path());
+    let again = Store::load(rig.dir.path(), &client());
     assert!(again.degraded().is_none());
     assert!(again.get("phone").is_some());
 }
@@ -993,7 +1187,7 @@ fn a_symlinked_file_is_not_followed() {
     let real = dir.path().join("real.json");
     std::fs::write(&real, valid_file(&handle_for("x"))).unwrap();
     std::os::unix::fs::symlink(&real, dir.path().join(store::FILE)).unwrap();
-    assert!(Store::load(dir.path()).degraded().is_some());
+    assert!(Store::load(dir.path(), &client()).degraded().is_some());
 }
 
 #[test]
@@ -1007,14 +1201,14 @@ fn too_many_devices_in_the_file_is_degraded() {
     };
     let all: Vec<String> = (0..=store::MAX_DEVICES).map(dev).collect();
     write_raw(dir.path(), &format!(r#"{{"version":1,"devices":{{{}}}}}"#, all.join(",")), 0o600);
-    assert!(Store::load(dir.path()).degraded().is_some());
+    assert!(Store::load(dir.path(), &client()).degraded().is_some());
 }
 
 #[test]
 fn a_corrupt_file_is_never_overwritten_by_a_registration() {
     let dir = private_dir();
     write_raw(dir.path(), "not json", 0o600);
-    let mut s = Store::load(dir.path());
+    let mut s = Store::load(dir.path(), &client());
     assert!(s.degraded().is_some());
     assert_eq!(
         s.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "x".into())),
@@ -1038,7 +1232,8 @@ fn mixed_file() -> String {
     let truncated = r#"{"platform":"ios","handle":"abc"}"#;
     let bad_id = dev_json(&handle_for("b"));
     format!(
-        r#"{{"version":1,"devices":{{"phone":{good},"badfield":{bad_field},"badhandle":{bad_handle},"truncated":{truncated},"":{bad_id}}}}}"#
+        r#"{{"version":1,"client":"{fp}","devices":{{"phone":{good},"badfield":{bad_field},"badhandle":{bad_handle},"truncated":{truncated},"":{bad_id}}}}}"#,
+        fp = client()
     )
 }
 
@@ -1046,7 +1241,7 @@ fn mixed_file() -> String {
 fn bad_entries_of_every_kind_leave_exactly_the_healthy_device() {
     let dir = private_dir();
     write_raw(dir.path(), &mixed_file(), 0o600);
-    let s = Store::load(dir.path());
+    let s = Store::load(dir.path(), &client());
     assert!(s.degraded().is_none(), "{:?}", s.degraded());
     assert_eq!(s.len(), 1);
     assert!(s.get("phone").is_some());
@@ -1060,7 +1255,7 @@ fn a_registration_keeps_the_skipped_entries_in_an_owner_only_quarantine() {
     use std::os::unix::fs::PermissionsExt;
     let dir = private_dir();
     write_raw(dir.path(), &mixed_file(), 0o600);
-    let mut s = Store::load(dir.path());
+    let mut s = Store::load(dir.path(), &client());
     s.register("tablet", Device::new(PushPlatform::Android, handle_for("t"), "x".into())).unwrap();
     let q = dir.path().join(store::QUARANTINE);
     assert_eq!(std::fs::metadata(&q).unwrap().permissions().mode() & 0o7777, 0o600);
@@ -1072,7 +1267,7 @@ fn a_registration_keeps_the_skipped_entries_in_an_owner_only_quarantine() {
     let bf = kept.as_array().unwrap().iter().find(|e| e["id"] == "badfield").unwrap();
     assert_eq!(bf["entry"]["failures"], "bad");
     // The main file now holds the healthy devices, and reloads without the bad ones.
-    let again = Store::load(dir.path());
+    let again = Store::load(dir.path(), &client());
     assert!(again.get("phone").is_some() && again.get("tablet").is_some());
     assert_eq!(again.skipped_ids().count(), 0);
     // A second registration keeps the quarantine as it was.
@@ -1088,7 +1283,7 @@ fn nothing_is_written_if_the_quarantine_cannot_be_kept() {
     write_raw(dir.path(), &text, 0o600);
     // A quarantine that is not valid cannot be extended, so the file stays.
     write_quarantine_raw(dir.path(), "garbage");
-    let mut s = Store::load(dir.path());
+    let mut s = Store::load(dir.path(), &client());
     assert_eq!(
         s.register("tablet", Device::new(PushPlatform::Android, handle_for("t"), "x".into())),
         Err(StoreError::Write)
@@ -1106,7 +1301,7 @@ fn write_quarantine_raw(dir: &std::path::Path, text: &str) {
 #[test]
 fn a_failed_write_changes_nothing_in_memory() {
     let dir = private_dir();
-    let mut s = Store::load(dir.path());
+    let mut s = Store::load(dir.path(), &client());
     s.register("a", Device::new(PushPlatform::Android, handle_for("a"), "x".into())).unwrap();
     // The directory is gone: the write fails and the registration is refused.
     let path = dir.path().to_path_buf();
@@ -1122,7 +1317,7 @@ fn a_failed_write_changes_nothing_in_memory() {
 #[test]
 fn a_wake_outcome_for_an_old_generation_is_ignored() {
     let dir = private_dir();
-    let mut s = Store::load(dir.path());
+    let mut s = Store::load(dir.path(), &client());
     s.register("p", Device::new(PushPlatform::Android, handle_for("old"), "x".into())).unwrap();
     let old = s.get("p").unwrap().generation;
     s.register("p", Device::new(PushPlatform::Android, handle_for("new"), "x".into())).unwrap();

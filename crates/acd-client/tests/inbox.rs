@@ -317,6 +317,97 @@ async fn reply_goes_through_the_undo() {
     assert_eq!(sent, 1);
 }
 
+fn idle_with_incarnation(incarnation: &str) -> Value {
+    let mut idle = pending_agent();
+    idle["state"] = Value::String("idle".into());
+    idle["pending"] = Value::Null;
+    idle["incarnation"] = Value::String(incarnation.into());
+    idle
+}
+
+#[tokio::test]
+async fn a_reply_carries_the_incarnation_the_user_saw() {
+    let (f, c, ib) = setup().await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":idle_with_incarnation("i1")}))
+        .await;
+    ib.set_show_idle(true);
+    view_until(&ib, "reply card", |v| {
+        v.cards.iter().any(|c| c.can_reply && c.agent.incarnation.as_deref() == Some("i1"))
+    })
+    .await;
+    ib.reply("m1/a1#i1", "next step".into()).unwrap();
+    view_until(&ib, "counting", |v| v.actions.len() == 1).await;
+    ib.expire_countdowns_for_test();
+    received_at_least(&f, "agent.send", 1).await;
+    let sent = frame_of_type(&f, "agent.send").await;
+    assert_eq!(sent["incarnation"], "i1");
+}
+
+/// The agent behind the id changes (a herdr pane is taken by another agent)
+/// while the reply counts down: the reply was written for the old one.
+#[tokio::test]
+async fn a_reply_is_not_sent_to_a_replaced_agent() {
+    let (f, c, ib) = setup().await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":idle_with_incarnation("i1")}))
+        .await;
+    ib.set_show_idle(true);
+    view_until(&ib, "reply card", |v| {
+        v.cards.iter().any(|c| c.can_reply && c.agent.incarnation.as_deref() == Some("i1"))
+    })
+    .await;
+    ib.reply("m1/a1#i1", "next step".into()).unwrap();
+    view_until(&ib, "counting", |v| v.actions.len() == 1).await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":idle_with_incarnation("i2")}))
+        .await;
+    view_until(&ib, "republished", |v| {
+        v.cards.iter().any(|c| c.agent.incarnation.as_deref() == Some("i2"))
+    })
+    .await;
+    expire_expecting_no_send(&ib).await;
+    assert!(!f.received().iter().any(|v| v["type"] == "agent.send"), "nothing was sent");
+}
+
+/// A draft is keyed by card key. The key carries the incarnation, so after a
+/// same-id replacement the old key names no card, and a reply or pick sent
+/// against it is refused without reaching the new agent.
+#[tokio::test]
+async fn a_card_key_of_a_replaced_agent_names_no_card() {
+    let (f, c, ib) = setup().await;
+    ib.set_show_idle(true);
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":idle_with_incarnation("i1")}))
+        .await;
+    view_until(&ib, "i1 card", |v| v.cards.iter().any(|c| c.key == "m1/a1#i1")).await;
+    // Same incarnation again: same key.
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":idle_with_incarnation("i1")}))
+        .await;
+    view_until(&ib, "still i1", |v| v.cards.iter().any(|c| c.key == "m1/a1#i1")).await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":4,"agent":idle_with_incarnation("i2")}))
+        .await;
+    view_until(&ib, "i2 card", |v| v.cards.iter().all(|c| c.key != "m1/a1#i1") && v.cards.iter().any(|c| c.key == "m1/a1#i2")).await;
+    assert_eq!(ib.reply("m1/a1#i1", "for the old one".into()), Err(PickError::UnknownCard));
+    assert_eq!(ib.pick("m1/a1#i1", "r1", "allow", 1), Err(PickError::UnknownCard));
+    assert_eq!(ib.reply("m1/a1", "no incarnation".into()), Err(PickError::UnknownCard));
+    assert!(!f.received().iter().any(|v| v["type"] == "agent.send"), "nothing was sent");
+    ib.reply("m1/a1#i2", "for the new one".into()).unwrap();
+}
+
+/// `a1#i1` with no incarnation and `a1` with incarnation `i1` share a card
+/// key; an ambiguous key names no card rather than either agent.
+#[tokio::test]
+async fn an_ambiguous_card_key_names_no_card() {
+    let (f, c, ib) = setup().await;
+    ib.set_show_idle(true);
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":idle_with_incarnation("i1")}))
+        .await;
+    let mut twin = idle_with_incarnation("i1");
+    twin["id"] = Value::String("a1#i1".into());
+    twin["incarnation"] = Value::Null;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":twin})).await;
+    view_until(&ib, "both cards", |v| v.cards.iter().filter(|c| c.key == "m1/a1#i1").count() == 2).await;
+    assert_eq!(ib.reply("m1/a1#i1", "which one?".into()), Err(PickError::UnknownCard));
+    assert!(!f.received().iter().any(|v| v["type"] == "agent.send"), "nothing was sent");
+}
+
 #[tokio::test]
 async fn import_pairing_stores_the_secret_and_never_reports_it() {
     let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
@@ -1263,7 +1354,7 @@ fn guard_for(ib: &Inbox, card: &str) -> Guard {
         .iter()
         .find(|c| c.key == card)
         .and_then(|c| c.agent.pending.as_ref().map(|r| (r.id.clone(), r.revision)));
-    Guard { conn: ib.conn_stamp(machine).unwrap(), agent_id: agent.into(), request, named_send_only: false }
+    Guard { conn: ib.conn_stamp(machine).unwrap(), agent_id: agent.into(), request, incarnation: None, named_send_only: false }
 }
 
 #[tokio::test]
@@ -1446,6 +1537,7 @@ async fn the_stamped_view_never_pairs_new_stamps_with_old_cards() {
         conn: held.stamps["m1"],
         agent_id: "a1".into(),
         request: Some((ANSWER_REQ.into(), 1)),
+        incarnation: None,
         named_send_only: false,
     };
     assert_eq!(ib.pick_guarded("m1/a1", "allow", &planned), Err(PickError::ConnectionChanged));
@@ -1545,7 +1637,7 @@ async fn a_guarded_send_reaches_a_hidden_idle_agent() {
     .expect("the hidden idle card");
     assert_eq!(ib.reply("m1/a3", "x".into()), Err(PickError::UnknownCard), "keyboard path unchanged");
     // Only a send that named it while it was out of view reaches it (D7).
-    let unnamed = Guard { conn: ib.conn_stamp("m1").unwrap(), agent_id: "a3".into(), request: None, named_send_only: false };
+    let unnamed = Guard { conn: ib.conn_stamp("m1").unwrap(), agent_id: "a3".into(), request: None, incarnation: None, named_send_only: false };
     assert_eq!(ib.reply_guarded("m1/a3", "rebase".into(), &unnamed), Err(PickError::Hidden));
     let guard = Guard { named_send_only: true, ..unnamed };
     ib.reply_guarded("m1/a3", "rebase".into(), &guard).unwrap();
@@ -1604,10 +1696,10 @@ fn debug_output_shows_text_lengths_only() {
     use acd_client::actions::{ActionKind, TextSemantics};
     use acd_client::commands::{Command, Outcome};
     let shown = [
-        format!("{:?}", Command::Send { agent_id: "a".into(), text: "SECRET-1".into() }),
+        format!("{:?}", Command::Send { agent_id: "a".into(), text: "SECRET-1".into(), incarnation: None }),
         format!("{:?}", Command::AnswerText { request_id: "r".into(), revision: 1, text: "SECRET-2".into() }),
         format!("{:?}", Outcome::Failed { code: acd_protocol::ErrorCode::BadRequest, message: "SECRET-3".into() }),
-        format!("{:?}", ActionKind::Reply { text: "SECRET-4".into() }),
+        format!("{:?}", ActionKind::Reply { text: "SECRET-4".into(), incarnation: None }),
     ];
     for s in shown {
         assert!(!s.contains("SECRET"), "{s}");

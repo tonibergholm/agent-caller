@@ -11,6 +11,13 @@
 //! rewritten the skipped entries' raw text is kept in `push.json.quarantine`
 //! (0600, never logged), so a rewrite never destroys them silently.
 //!
+//! The file also records which client token the registrations belong to, as a
+//! non-secret fingerprint. A rotation revokes them (spec 4.8); if the file
+//! could not be rewritten then, a restart sees another fingerprint and drops
+//! them. A file with no fingerprint (written before this field) counts as
+//! another token's: after an upgrade devices register once more, which is
+//! the cheap side of failing closed.
+//!
 //! Nothing here logs or prints a handle, and no error carries file content
 //! (serde errors can quote values, so they are never shown).
 
@@ -30,6 +37,16 @@ pub const MAX_DEVICES: usize = 8;
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 const VERSION: u32 = 1;
 const MAX_ID_BYTES: usize = 128;
+
+/// Stands in for the client token in `push.json`: a SHA-256 of the token
+/// under a fixed label, so the file never holds the token itself.
+pub fn client_fingerprint(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::new_with_prefix(b"acd push client token v1\0")
+        .chain_update(token.as_bytes())
+        .finalize();
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// Client id rule, shared by registration and `read_file`: what is stored
 /// must always be loadable.
@@ -153,6 +170,7 @@ impl Device {
 #[serde(deny_unknown_fields)]
 struct FileRepr {
     version: u32,
+    client: String,
     devices: BTreeMap<String, Device>,
 }
 
@@ -163,12 +181,17 @@ struct FileRepr {
 pub struct Entry {
     pub device: Device,
     pub generation: u64,
+    /// The client token generation of the session that registered it, in
+    /// memory only: a rotation keeps entries made under the new token.
+    pub auth: u64,
 }
 
 pub struct Store {
     path: PathBuf,
     devices: BTreeMap<String, Entry>,
     next_generation: u64,
+    /// Fingerprint of the client token these registrations belong to.
+    client: String,
     degraded: Option<String>,
     /// The file as a whole was unusable: nothing is ever written over it.
     locked: bool,
@@ -181,6 +204,7 @@ pub struct Store {
 }
 
 struct Loaded {
+    client: Option<String>,
     devices: BTreeMap<String, Device>,
     skipped: Vec<(String, serde_json::Value)>,
 }
@@ -192,16 +216,22 @@ pub enum StoreError {
     Write,
     /// `push.json` is corrupt as a whole; it is left untouched.
     Corrupt,
+    /// The client token rotated after the request was accepted.
+    Revoked,
 }
 
 impl Store {
     /// Never fails: an unusable file gives an empty store with a reason.
-    pub fn load(dir: &Path) -> Store {
+    /// `client` is the fingerprint of the current client token; registrations
+    /// written under another one are dropped, and their file is rewritten
+    /// by `retry_clear`.
+    pub fn load(dir: &Path, client: &str) -> Store {
         let path = dir.join(FILE);
         let mut store = Store {
             path,
             devices: BTreeMap::new(),
             next_generation: 1,
+            client: client.to_string(),
             degraded: None,
             locked: false,
             skipped: Vec::new(),
@@ -210,12 +240,18 @@ impl Store {
         };
         match read_file(&store.path) {
             Ok(None) => {}
-            Ok(Some(Loaded { devices, skipped })) => {
+            Ok(Some(Loaded { client: stored, devices, skipped })) => {
                 store.skipped = skipped;
+                // An empty fingerprint (unreadable token) never matches.
+                if (client.is_empty() || stored.as_deref() != Some(client)) && !devices.is_empty() {
+                    tracing::warn!(devices = devices.len(), "push.json belongs to another client token; registrations dropped");
+                    store.clear_pending = true;
+                    return store;
+                }
                 for (id, device) in devices {
                     let generation = store.next_generation;
                     store.next_generation += 1;
-                    store.devices.insert(id, Entry { device, generation });
+                    store.devices.insert(id, Entry { device, generation, auth: 0 });
                 }
             }
             Err(why) => {
@@ -249,16 +285,30 @@ impl Store {
     }
 
     /// Stores (or replaces) a registration with a fresh wake state.
+    #[cfg(test)]
     pub fn register(&mut self, client_id: &str, device: Device) -> Result<(), StoreError> {
+        self.register_at(client_id, device, 0)
+    }
+
+    /// `register` for a session authenticated under token generation `auth`.
+    pub fn register_at(&mut self, client_id: &str, device: Device, auth: u64) -> Result<(), StoreError> {
         if !client_id_ok(client_id) {
             return Err(StoreError::BadId);
         }
-        if !self.devices.contains_key(client_id) && self.devices.len() >= MAX_DEVICES {
+        // Token generations only rise on rotation. A newer entry means this
+        // write comes from a rotated-away token: it must not replace it.
+        if self.devices.values().any(|e| e.auth > auth) {
+            return Err(StoreError::Revoked);
+        }
+        // Older entries belong to a rotated-away token and are revoked anyway:
+        // drop them now, so they neither take a slot nor outlive this write.
+        let mut next = self.devices.clone();
+        next.retain(|_, e| e.auth >= auth);
+        if !next.contains_key(client_id) && next.len() >= MAX_DEVICES {
             return Err(StoreError::TooMany);
         }
         let generation = self.next_generation;
-        let mut next = self.devices.clone();
-        next.insert(client_id.to_string(), Entry { device, generation });
+        next.insert(client_id.to_string(), Entry { device, generation, auth });
         self.commit(next)?;
         self.next_generation += 1;
         Ok(())
@@ -274,11 +324,33 @@ impl Store {
         self.commit(next)
     }
 
+    /// Client token rotation: revokes every registration and makes `client`
+    /// (the new token's fingerprint) the generation the file is written under.
+    #[cfg(test)]
+    pub fn rotate_client(&mut self, client: &str) -> Result<(), StoreError> {
+        self.rotate_client_from(client, u64::MAX)
+    }
+
+    /// A rotation to token generation `min_auth`: entries registered under an
+    /// older generation are revoked, newer ones are kept, so a device that
+    /// registered with the new token before this ran keeps its wakes. If the
+    /// kept entries cannot be written, everything is revoked (fail closed).
+    pub fn rotate_client_from(&mut self, client: &str, min_auth: u64) -> Result<(), StoreError> {
+        self.client = client.to_string();
+        let kept: BTreeMap<String, Entry> =
+            self.devices.iter().filter(|(_, e)| e.auth >= min_auth).map(|(k, e)| (k.clone(), e.clone())).collect();
+        if kept.is_empty() {
+            return self.clear();
+        }
+        self.commit(kept).or_else(|_| self.clear())
+    }
+
     /// Revokes every registration (client token rotation, spec 4.8). Fails
     /// closed: the registrations are gone from memory even when the file
     /// cannot be rewritten, so no further wake uses them. If the rewrite
     /// fails the file is removed instead; if that fails too the revocation
-    /// stays pending (`retry_clear`); a restart before that succeeds loads the file again (documented in docs/push.md).
+    /// stays pending (`retry_clear`); a restart before that succeeds drops the
+    /// registrations again, because the file names the old client token.
     pub fn clear(&mut self) -> Result<(), StoreError> {
         if self.devices.is_empty() && !self.clear_pending {
             return Ok(());
@@ -368,6 +440,7 @@ impl Store {
         self.quarantine()?;
         let repr = FileRepr {
             version: VERSION,
+            client: self.client.clone(),
             devices: devices.iter().map(|(k, v)| (k.clone(), v.device.clone())).collect(),
         };
         let bytes = serde_json::to_vec_pretty(&repr).map_err(|_| StoreError::Write)?;
@@ -393,6 +466,10 @@ fn read_file(path: &Path) -> Result<Option<Loaded>, &'static str> {
     };
     let version = top.remove("version");
     let entries = top.remove("devices");
+    let client = match top.remove("client") {
+        Some(serde_json::Value::String(c)) => Some(c),
+        _ => None,
+    };
     if !top.is_empty() {
         return Err("push.json is not valid");
     }
@@ -415,5 +492,5 @@ fn read_file(path: &Path) -> Result<Option<Loaded>, &'static str> {
     if devices.len() > MAX_DEVICES {
         return Err("push.json lists too many devices");
     }
-    Ok(Some(Loaded { devices, skipped }))
+    Ok(Some(Loaded { client, devices, skipped }))
 }

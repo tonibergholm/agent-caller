@@ -24,22 +24,15 @@ marks a decision only the owner can make: those are not accepted residuals.
   unaffected. After #106 the post-upgrade pool reserves slots for sources
   holding none (a source already holding one connection can be refused its
   second when only a few slots are free), so four sources no longer suffice,
-  but five can (2+2+2+1+1): distributed exhaustion remains. No further fix
-  decided. A hostile process sharing a source IP with a paired client can take
-  that client's 2 slots.
+  but five can (2+2+2+1+1): distributed exhaustion remains. Since the
+  2026-11-20 audit every loopback address counts as one source in both pools
+  and loopback never takes the reserve, so one local account can no longer
+  fill the pool with 127.0.0.x aliases; five network sources still can. No
+  further fix decided. A hostile process sharing a source IP with a paired
+  client can take that client's 2 slots.
 - **Relay lock-screen content and handle revocation.** The relay spec's
   lock-screen content rule and stolen push address and handle revocation are
   open (see the spec's review status).
-- **T3 token, local F2.** The T3 bearer token goes to whoever holds the
-  loopback T3 port. The review's ticket fix does not close it: the ticket
-  request `POST /api/auth/websocket-ticket` itself needs `Authorization:
-  Bearer <t3.token>` over plain HTTP to the same port, so a squatter receives
-  the long-lived token there instead of on the upgrade. The endpoint is
-  confirmed (`docs/research/2026-10-08-t3-gate3.md` §1,
-  `tests/fixtures/t3/http_websocket_ticket_200.json`). A real fix has to prove
-  who holds the port first, for example the listener's owner uid from
-  `/proc/net/tcp` on Linux, or a narrower and shorter-lived T3 token.
-  Source: `docs/research/2026-11-03-security-review-local.md`.
 - **Show idle is not saved.** Persisting it changes shared client behaviour;
   decide for both clients (see Omarchy).
 - **Pairing a literal non-Tailscale address** says "That is not an acd pairing
@@ -103,17 +96,20 @@ marks a decision only the owner can make: those are not accepted residuals.
 ## Security review residuals (2026-11-03 reviews)
 
 Findings still open or partly open (`docs/research/2026-11-03-security-review-core.md`
-and `-local.md`). Core 1 to 8 and local F1, F3, F4 and F5 are fixed; local F2
-is open (see owner decisions).
+and `-local.md`). Core 1 to 8 and local F1 to F5 are fixed.
 
 - **Apps and voice review (#100).** The findings of
   `docs/research/2026-11-04-security-review-apps-voice.md` (F1 to F11: voice
-  path, Mac app, app-core, iOS shell, frontend) are open; none is fixed. They
-  include a hostile paired peer showing a label that contradicts its effect
-  (F11) and bidi text in peer-supplied cards (F10). The report's proposed fixes
-  are not implemented; six `#[ignore]`d tests in `crates/acd-voice/tests/findings.rs`
-  demonstrate them.
-- **F3 residual (hook listeners, #87).** A slow body after the token check is
+  path, Mac app, app-core, iOS shell, frontend): F1, F3, F7, F8, F9, F10 and
+  F11 are fixed by the 2026-11-20 audit. The voice findings V1 to V4 are open;
+  the `#[ignore]`d tests in `crates/acd-voice/tests/findings.rs` demonstrate
+  them. F1 depends on real layout: the HUD measures overflow after render, and
+  vitest mocks the measurements.
+- **F3 residual (hook listeners, #87).** Since the 2026-11-20 audit Claude
+  and Codex hooks use `hook.sock`, which has its own slot pool, so filling the
+  TCP slots only affects Claude HTTP hooks from older installs. acd keeps the
+  TCP `hook_port` bound for Claude sessions started before a reinstall: if it
+  dropped the port, another user could take it and receive their token. A slow body after the token check is
   bounded only by the 5 s `body_timeout`. There is no per-peer connection cap,
   so a peer can still fill the 128 slots for up to 10 s at a time by sending
   nothing, and the slot is taken before accept. How it works: the hook
@@ -206,9 +202,6 @@ is open (see owner decisions).
 - Codex in the shared managed daemon: `agent_session` is missing and the hook
   environment is wrong, so only a single Codex pane in a cwd can be bound.
   Upstream fix; restarting the managed daemon is unverified.
-- A command-hook shim for Claude, to remove the loopback port-squatting
-  exposure of the `http` hooks (ruling R7, post-v1). Needs gate 2 re-tested
-  for command hooks.
 - Free text in `AskUserQuestion` on the keys path, multi-select and
   multi-question answers (spec §11 item 1, §2).
 - Live checks 10–14 have been run ([P3 results](../../research/2026-10-09-p3-live.md)).
@@ -435,12 +428,28 @@ Seen failing on CI in 2026-11 (each passed on rerun; none reproduced alone):
 
 Residuals from the 2026-11 relay and review work, none blocking:
 
-- **Push revocation after a failed disk write (#109).** If the state directory
-  is not writable when the client token rotates, registrations are dropped from
-  memory and retried every 30 s, but a restart before a retry succeeds loads
-  the old `push.json` again (wake timing only, no content). The fix is to bind
-  registrations to the token generation; it changes the `push.json` schema and
-  every `Store::load` caller, so it was deferred. Documented in `docs/push.md`.
+- **2026-11-20 audit residuals.**
+  - Keyboard replies bind to the agent incarnation of the card on screen when
+    the reply is sent, not when typing started; a card that changed agent
+    while the user typed sends to the agent it now shows.
+  - The pre-auth integration tests that used 127.0.0.x aliases as separate
+    sources were removed, because loopback is now one source. Separate
+    network sources are covered by the `SourcePool` and `Admission` unit
+    tests only.
+  - `install.sh` verifies attestations with `--repo` only, without
+    `--signer-workflow` or `--source-ref`.
+  - Between the herdr `agent.get` check and `agent.prompt` there is a small
+    window, because herdr cannot target a terminal id.
+  - A push registration made with the new client token in the moment
+    between the auth rotation and the push store rewrite is acknowledged
+    while `push.json` still names the old token. A restart inside that
+    window drops it, and the device registers again. Wake timing only.
+  - The window-scope checks on Tauri commands are pinned by allow-list unit
+    tests, not by a call from a live HUD window.
+  - The Python reproducers in `tests/redteam/` send `request.answer` without
+    a revision, so they now get `bad_request` before the paths they once
+    exercised. The live E2E harness (`tests/e2e/inbox.py`) is updated; the
+    live Claude scenarios (40, 41) were not re-run with the shim hooks.
 - **Mutation tests (#101).** Some tests wait for indirect 5 s bounds, and the
   counts quoted in the mutation document are stale.
 - **Bug-hunt reproducers (#110).** `#[ignore]`d tests that fail today: B1
@@ -456,8 +465,8 @@ Residuals from the 2026-11 relay and review work, none blocking:
   `acd-client`.
 - **Relay red team (#107).** `tests/redteam-relay/` needs root, edits
   `/etc/hosts` and binds port 443: run it on a throwaway machine only (see
-  its README). The two `#[ignore]`d repros in `crates/acd-relay/tests/redteam.rs`
-  document open findings.
+  its README). The two repros in `crates/acd-relay/tests/redteam.rs` now pass:
+  the relay checks per-IP and per-address limits before the global one.
 - **CI QML job (#111).** The Omarchy QML checks run on Ubuntu with Qt 6.4
   from apt; `tests/qmllint.known` is the baseline for that Qt version and
   needs regeneration (`run-qml.sh --update`) when the runner image changes.
@@ -503,6 +512,21 @@ Checked in code on 2026-11-04.
   reconnects with the same request and asserts no second event.
 - Core 1 (#82), 2 and 6 (#81), 3, 7, 8 (#88), 4 and 5 (#90); local F1 (#80,
   #83), F3 (#87), F4 and F5 (#86).
+- The 2026-11-20 security audit (one PR, one commit per finding):
+  - Claude hooks run the `acd hook claude` shim over `hook.sock`, with no token
+    in settings files (ruling R7). Gate 2 was re-run for command hooks with
+    Claude Code 2.1.329: `-p` allow, deny and daemon-down runs, and an
+    interactive pty run in which a terminal answer and Esc behave as they do
+    with the http hooks.
+  - Local F2: acd proves that the server end of a T3 connection on this host
+    belongs to its own user before it sends the token.
+  - Push registrations are bound to a fingerprint of the client token (#109),
+    and the relay limiter order is fixed (#107).
+  - Answers must carry the request revision. Follow-up text must carry the
+    agent incarnation, and is refused while the screen shows a dialog.
+  - `acd token rotate hook --revoke`, release provenance attestations,
+    Dependabot for cargo and npm, and display escapes for default-ignorable
+    characters.
 - Idempotency table exhaustion by one paired client (red team finding 2,
   #106): refused commands release their reservation, `agent.mark_seen` takes no
   entry, entries are charged per source address and per client id with the
@@ -551,8 +575,6 @@ before 1.0.
 
 **After 1.0** (design work, upstream, or rare):
 
-- A command-hook shim for Claude to remove the loopback port-squatting
-  exposure of the `http` hooks (ruling R7).
 - Free text, multi-select and multi-question answers on the keys path.
 - Codex in a shared managed daemon, wrapped multi-row commands, narrow Codex
   panes, `AskUserQuestion` variants, T3 cursor retention and keepalive

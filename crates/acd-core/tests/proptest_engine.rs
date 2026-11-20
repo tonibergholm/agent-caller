@@ -316,6 +316,9 @@ enum Expect {
 
 impl Model {
     fn judge(&self, p: &Payload, fail: Fail) -> Expect {
+        if p.revision.is_none() {
+            return Expect::Refused(ErrorCode::BadRequest);
+        }
         let Some(r) = self.reqs.get(&p.request_id) else { return Expect::Refused(ErrorCode::RequestGone) };
         if r.answering {
             return Expect::Refused(ErrorCode::RequestBusy);
@@ -455,7 +458,7 @@ async fn run_ops(ops: Vec<Op>) -> Result<(), TestCaseError> {
                 let msg = ClientMessage::RequestAnswer {
                     id: "x".repeat(MAX_ID_BYTES + 1),
                     request_id: rid,
-                    revision: None,
+                    revision: Some(1),
                     option_id: Some("allow".into()),
                     text: None,
                 };

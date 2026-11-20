@@ -124,7 +124,8 @@ spec §9, "Hook endpoint trust", for details.
 Each pre-release ships `acd` for macOS (Apple silicon and Intel) and for
 Linux (x86_64 and arm64). The Linux archives also contain `acd-inbox`.
 The Mac app is a `.dmg` for Apple silicon. `scripts/install.sh` downloads
-the archive for your machine, checks its SHA-256 against `SHA256SUMS`, and
+the archive for your machine, checks its SHA-256 against `SHA256SUMS`, checks
+its build attestation with `gh attestation verify` when `gh` is installed, and
 installs the binaries into `~/.local/bin`:
 
 ```sh
@@ -367,6 +368,8 @@ Other commands:
 - `acd token rotate client` replaces the client token. Pair the apps again.
 - `acd token rotate hook` replaces the hook token. Running Claude
   sessions keep working with the old one until it is retired.
+  Add `--revoke` to drop the old one at once (after a leak); sessions
+  still using it lose acd until restarted.
 - `acd tls rotate` replaces the TLS certificate.
 
 ## Repository layout

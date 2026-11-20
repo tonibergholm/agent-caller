@@ -129,7 +129,8 @@ fn unknown_client_fields_are_ignored() {
         ClientMessage::AgentSend {
             id: "1".into(),
             agent_id: "a".into(),
-            text: "hi".into()
+            text: "hi".into(),
+            incarnation: None
         }
     );
 }

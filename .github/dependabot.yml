@@ -12,3 +12,20 @@ updates:
       actions:
         patterns:
           - "*"
+  # Reports vulnerable and outdated crates. One entry covers every directory
+  # that holds a Cargo.lock: the Tauri, iOS and Android shells, the fuzz
+  # targets and the load test are separate workspaces.
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /app/src-tauri
+      - /apps/ios/src-tauri
+      - /apps/android
+      - /fuzz
+      - /tools/loadtest
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /app
+    schedule:
+      interval: weekly

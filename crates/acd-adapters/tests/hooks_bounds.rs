@@ -578,13 +578,14 @@ async fn l1_rig() -> (Rig, String, String) {
 fn answering(r: &Rig, rid: &str) -> tokio::task::JoinHandle<acd_protocol::CommandResult> {
     let core = r.core.clone();
     let rid = rid.to_owned();
+    let revision = core.request(&rid).map_or(1, |q| q.revision);
     tokio::spawn(async move {
         core.handle(
             "c",
             ClientMessage::RequestAnswer {
                 id: "a1".into(),
                 request_id: rid,
-                revision: None,
+                revision: Some(revision),
                 option_id: Some("allow".into()),
                 text: None,
             },

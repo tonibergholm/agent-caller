@@ -99,6 +99,12 @@ impl RequestObs {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Observation {
     AgentUpsert(AgentObs),
+    /// The agent's `incarnation` (PROTOCOL.md). Send it before the upsert of
+    /// a new agent, so the agent is first published with it.
+    AgentIncarnation {
+        agent_id: String,
+        incarnation: String,
+    },
     AgentGone {
         agent_id: String,
     },
@@ -161,6 +167,8 @@ pub enum Observation {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+// `Agent` carries a whole request; boxing it would change every consumer's pattern.
+#[allow(clippy::large_enum_variant)]
 pub enum Change {
     AgentUpdated(Agent),
     AgentRemoved(String),
@@ -216,6 +224,10 @@ pub struct Registry {
     retired: VecDeque<(String, CorrelationKey, u64)>,
     next_tomb: u64,
     next_id: u64,
+    /// Opaque incarnation per agent id, set by `Observation::AgentIncarnation`
+    /// and published on the agent. Kept apart from `AgentObs`, which every
+    /// source builds.
+    incarnations: HashMap<String, String>,
 }
 
 impl Registry {
@@ -229,6 +241,7 @@ impl Registry {
             retired: VecDeque::new(),
             next_tomb: 0,
             next_id: 0,
+            incarnations: HashMap::new(),
         }
     }
 
@@ -253,6 +266,16 @@ impl Registry {
     pub fn apply(&mut self, obs: Observation) -> Vec<Change> {
         match obs {
             Observation::AgentUpsert(o) => self.upsert_agent(o),
+            Observation::AgentIncarnation { agent_id, incarnation } => {
+                self.incarnations.insert(agent_id.clone(), incarnation.clone());
+                match self.agents.get_mut(&agent_id) {
+                    Some(a) if a.incarnation.as_deref() != Some(&incarnation) => {
+                        a.incarnation = Some(incarnation);
+                        vec![Change::AgentUpdated(a.clone())]
+                    }
+                    _ => vec![],
+                }
+            }
             Observation::AgentGone { agent_id } => self.agent_gone(&agent_id),
             Observation::AgentMigrated { from, to } => self.migrate(&from, &to),
             Observation::RequestSeen(o) => self.request_seen(o),
@@ -623,6 +646,7 @@ impl Registry {
             can_send: o.can_send,
             role: o.role,
             parent_title: o.parent_title,
+            incarnation: self.incarnations.get(&o.id).cloned(),
         };
         if self.agents.get(&o.id) == Some(&agent) {
             return vec![];
@@ -649,6 +673,7 @@ impl Registry {
             );
         }
         self.agents.remove(agent_id);
+        self.incarnations.remove(agent_id);
         self.keys.retain(|_, k| k.agent_id != agent_id);
         self.retired.retain(|(a, _, _)| a != agent_id);
         self.seen.remove(agent_id);
@@ -874,8 +899,18 @@ impl Registry {
         self.sync_pending(request_id).into_iter().collect()
     }
 
-    pub fn check_send(&self, agent_id: &str, text: &str) -> Result<Agent, ErrorCode> {
+    /// `incarnation` is the one the client last saw. An agent that has one
+    /// takes only a send that carries it: the id may now name another agent.
+    pub fn check_send(
+        &self,
+        agent_id: &str,
+        text: &str,
+        incarnation: Option<&str>,
+    ) -> Result<Agent, ErrorCode> {
         let a = self.agents.get(agent_id).ok_or(ErrorCode::AgentGone)?;
+        if a.incarnation.is_some() && a.incarnation.as_deref() != incarnation {
+            return Err(ErrorCode::AgentGone);
+        }
         if !a.can_send {
             return Err(ErrorCode::NotSupported);
         }

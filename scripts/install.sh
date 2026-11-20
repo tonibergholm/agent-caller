@@ -5,11 +5,16 @@
 #   scripts/install.sh --tag v0.1.0 [--bin-dir DIR]
 #       Downloads the tarball and SHA256SUMS from the GitHub release.
 #   scripts/install.sh --version 0.1.0 --from-dir DIR [--bin-dir DIR]
-#       Uses DIR/acd-<version>-<target>.tar.gz and DIR/SHA256SUMS. No network.
+#       Uses DIR/acd-<version>-<target>.tar.gz and DIR/SHA256SUMS. No download;
+#       the provenance check below still asks GitHub when gh is signed in.
 #
 # The default bin directory is $HOME/.local/bin. The script never uses sudo.
 # It checks the SHA-256 of the tarball against SHA256SUMS before it extracts
-# anything, and it installs nothing when the check fails.
+# anything, and it installs nothing when the check fails. When gh is installed
+# and signed in, it also runs `gh attestation verify` (build provenance) and
+# installs nothing when that fails; otherwise it says the provenance was not
+# checked. ACD_INSTALL_SKIP_PROVENANCE=1 skips the check, for an archive you
+# built yourself or a release made before attestations (0.9.0 and older).
 set -eu
 
 REPO="tonibergholm/agent-caller"
@@ -135,6 +140,23 @@ if [ "$actual" != "$expected" ]; then
 	die "checksum mismatch for $archive (expected $expected, got $actual); nothing installed"
 fi
 echo "Checksum OK: $archive"
+
+# SHA256SUMS comes from the same release as the tarball, so it proves nothing
+# about who built it. The GitHub build attestation does. ACD_INSTALL_GH names
+# the gh command (the tests use it).
+gh_cmd=${ACD_INSTALL_GH:-gh}
+if [ "${ACD_INSTALL_SKIP_PROVENANCE:-}" = 1 ]; then
+	echo "Provenance not checked: skipped by ACD_INSTALL_SKIP_PROVENANCE."
+elif ! command -v "$gh_cmd" >/dev/null 2>&1; then
+	echo "Provenance not checked: gh is not installed. To check it, install gh, sign in, and run: gh attestation verify $archive --repo $REPO"
+elif ! "$gh_cmd" auth status >/dev/null 2>&1; then
+	# A signed-out gh cannot verify anything; treat it like no gh.
+	echo "Provenance not checked: gh is not signed in. To check it, run gh auth login, then: gh attestation verify $archive --repo $REPO"
+else
+	"$gh_cmd" attestation verify "$tarball" --repo "$REPO" >/dev/null ||
+		die "provenance check failed for $archive; nothing installed"
+	echo "Provenance OK: $archive"
+fi
 
 # Refuse absolute paths and parent-directory entries before extracting.
 if tar -tzf "$tarball" | awk '/^\// || /(^|\/)\.\.(\/|$)/ { bad = 1 } END { exit bad }'; then

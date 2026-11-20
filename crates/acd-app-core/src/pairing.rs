@@ -1,9 +1,85 @@
 //! Pairing from clipboard text: the `acd pair` line becomes a remote machine.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use acd_client::{inbox::Inbox, view::MachineEntryView};
+use acd_client::{
+    endpoint,
+    inbox::{Inbox, MachineError},
+    view::MachineEntryView,
+};
+use acd_protocol::pairing::Pairing;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
+
+/// What a pairing line says about the machine it would add: no token. Shown
+/// to the user before anything is saved (security review F9).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingPreview {
+    pub host: String,
+    pub port: u16,
+    pub pin: String,
+}
+
+/// Parses the clipboard text without saving anything. The error text never
+/// echoes the clipboard.
+pub fn preview_text(clip: Option<&str>) -> Result<PairingPreview, String> {
+    let text = clip
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| "The clipboard does not hold an acd pairing line.".to_owned())?;
+    let pairing = Pairing::parse(text).map_err(|_| MachineError::BadPairing.to_string())?;
+    if endpoint::refuses_literal(&pairing.host) {
+        return Err(MachineError::NotTailscale.to_string());
+    }
+    Ok(PairingPreview { host: pairing.host, port: pairing.port, pin: pairing.pin })
+}
+
+/// Digest of the whole pairing line the user was last shown, token included.
+/// It lives in Rust state, never in the webview: the preview payload carries no
+/// token, so a clipboard that keeps host, port and pin but swaps the token
+/// still has to fail the confirm.
+#[derive(Default)]
+pub struct PendingPairing(Mutex<Option<String>>);
+
+/// `spki_pin` is a plain SHA-256 over the bytes it is given, so it serves as
+/// the digest here without a new dependency.
+fn line_digest(clip: Option<&str>) -> Option<String> {
+    let pairing = Pairing::parse(clip?).ok()?;
+    Some(acd_protocol::pairing::spki_pin(pairing.to_line().as_bytes()))
+}
+
+impl PendingPairing {
+    /// [`preview_text`], remembering the digest of what it showed. A failed
+    /// preview forgets the old one.
+    pub fn preview(&self, clip: Option<&str>) -> Result<PairingPreview, String> {
+        let preview = preview_text(clip);
+        *self.0.lock().unwrap() = preview.as_ref().ok().and_then(|_| line_digest(clip));
+        preview
+    }
+}
+
+/// [`import_and_clear`], but only when the clipboard still holds the line the
+/// user was shown: the same host, port and pin (`shown`) and the same digest
+/// of the whole line (`pending`). A clipboard rewritten after the preview,
+/// the token included, imports nothing and is left alone.
+pub fn import_previewed_and_clear(
+    inbox: &Arc<Inbox>,
+    runtime: &Handle,
+    clip: Option<String>,
+    shown: &PairingPreview,
+    pending: &PendingPairing,
+    clear: impl FnOnce(),
+) -> Result<MachineEntryView, String> {
+    let digest = line_digest(clip.as_deref());
+    let same = preview_text(clip.as_deref())? == *shown
+        && digest.is_some()
+        && *pending.0.lock().unwrap() == digest;
+    if !same {
+        return Err("The clipboard changed after it was shown. Nothing was added.".to_owned());
+    }
+    let imported = import_and_clear(inbox, runtime, clip, clear)?;
+    *pending.0.lock().unwrap() = None;
+    Ok(imported)
+}
 
 /// Imports the clipboard text as a pairing line. `runtime` is entered for the
 /// import: shells call this from synchronous commands, outside Tokio. The
@@ -78,6 +154,76 @@ mod tests {
         let _guard = runtime.enter();
         inbox.start();
         inbox
+    }
+
+    #[test]
+    fn a_preview_saves_nothing_and_carries_no_token() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let inbox = inbox(&runtime);
+        let pin = acd_protocol::pairing::spki_pin(b"test certificate");
+        let line = format!("acd://example.test:47800?pin={pin}#{TOKEN}");
+        let preview = preview_text(Some(&line)).unwrap();
+        assert_eq!(preview, PairingPreview { host: "example.test".into(), port: 47800, pin });
+        assert!(!format!("{preview:?}").contains(TOKEN));
+        assert!(inbox.machines().is_empty(), "a preview must not save");
+        for bad in [None, Some("  "), Some("hello #tok")] {
+            let err = preview_text(bad).unwrap_err();
+            assert!(!err.contains("tok"), "{err}");
+        }
+        let lan = format!("acd://192.168.1.10:47800?pin={}#{TOKEN}", preview.pin);
+        assert!(preview_text(Some(&lan)).unwrap_err().contains("Tailscale"));
+    }
+
+    #[test]
+    fn a_changed_clipboard_is_not_imported_after_the_preview() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let inbox = inbox(&runtime);
+        let pin = acd_protocol::pairing::spki_pin(b"test certificate");
+        let line = format!("acd://example.test:47800?pin={pin}#{TOKEN}");
+        let pending = PendingPairing::default();
+        let shown = pending.preview(Some(&line)).unwrap();
+        let swapped = format!("acd://evil.test:47800?pin={pin}#{TOKEN}");
+        let mut cleared = 0;
+        let err = import_previewed_and_clear(&inbox, runtime.handle(), Some(swapped), &shown, &pending, || cleared += 1)
+            .unwrap_err();
+        assert!(err.contains("changed"), "{err}");
+        assert!(inbox.machines().is_empty());
+        assert_eq!(cleared, 0);
+        import_previewed_and_clear(&inbox, runtime.handle(), Some(line), &shown, &pending, || cleared += 1).unwrap();
+        assert_eq!((inbox.machines().len(), cleared), (1, 1));
+    }
+
+    /// The preview payload has no token, so only the Rust-side digest can tell
+    /// a clipboard that swapped just the token (finding 19).
+    #[test]
+    fn a_clipboard_with_only_the_token_changed_is_not_imported() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let inbox = inbox(&runtime);
+        let pin = acd_protocol::pairing::spki_pin(b"test certificate");
+        let pending = PendingPairing::default();
+        let shown = pending.preview(Some(&format!("acd://example.test:47800?pin={pin}#{TOKEN}"))).unwrap();
+        let other_token = format!("B{}", &TOKEN[1..]);
+        let swapped = format!("acd://example.test:47800?pin={pin}#{other_token}");
+        let mut cleared = 0;
+        let err = import_previewed_and_clear(&inbox, runtime.handle(), Some(swapped), &shown, &pending, || cleared += 1)
+            .unwrap_err();
+        assert!(err.contains("changed"), "{err}");
+        assert!(!err.contains(&other_token), "the error names the token ({} bytes)", err.len());
+        assert!(inbox.machines().is_empty());
+        assert_eq!(cleared, 0);
+    }
+
+    #[test]
+    fn a_confirm_without_a_preview_imports_nothing() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let inbox = inbox(&runtime);
+        let pin = acd_protocol::pairing::spki_pin(b"test certificate");
+        let line = format!("acd://example.test:47800?pin={pin}#{TOKEN}");
+        let shown = preview_text(Some(&line)).unwrap();
+        let err = import_previewed_and_clear(&inbox, runtime.handle(), Some(line), &shown, &PendingPairing::default(), || {})
+            .unwrap_err();
+        assert!(err.contains("changed"), "{err}");
+        assert!(inbox.machines().is_empty());
     }
 
     #[test]

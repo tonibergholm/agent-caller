@@ -142,6 +142,11 @@ enum TokenCmd {
         allow_unknown_git: bool,
         #[arg(long)]
         force: bool,
+        /// Hook token only: stop accepting the old token at once instead of
+        /// retaining it. Use when it may have leaked. Claude sessions that
+        /// still use it lose acd until restarted.
+        #[arg(long)]
+        revoke: bool,
     },
 }
 
@@ -168,8 +173,8 @@ fn below_frame_logging(meta: &tracing::Metadata<'_>) -> bool {
 }
 
 fn main() {
-    // The Codex shim runs before logging starts, so it never writes log
-    // lines to Codex's stderr.
+    // The hook shim runs before logging starts, so it never writes log
+    // lines to the agent's stderr.
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "hook") {
         std::process::exit(hook_shim::main(&args[2..]));
@@ -200,14 +205,25 @@ fn real_main() -> Result<()> {
                     allow_tracked,
                     allow_unknown_git,
                     force,
+                    revoke,
                 },
         } => {
             if !dir.is_dir() {
                 bail!("{} not initialized; run `acd init`", dir.display());
             }
-            preflight(&dir)?;
+            // A hook revocation answers a leaked token: only the store it saves
+            // is checked first. `hook_token::rotate` runs the full preflight
+            // after the save, so a loose journal cannot keep the old token alive.
+            if revoke && matches!(which, TokenKind::Hook) {
+                preflight_hook_store(&dir)?;
+            } else {
+                preflight(&dir)?;
+            }
             match which {
                 TokenKind::Client => {
+                    if revoke {
+                        bail!("--revoke applies to the hook token only; a client rotation already drops the old token");
+                    }
                     let token = secrets::new_token();
                     secrets::write_secret(&dir.join("client.token"), &token)?;
                     // Spec 4.8: registrations go with the token, also while no daemon runs.
@@ -216,16 +232,17 @@ fn real_main() -> Result<()> {
                     Ok(())
                 }
                 TokenKind::Hook => {
-                    let ctx = hooks_install::Ctx::from_env(&dir)?;
                     let flags = hooks_install::Flags {
                         allow_tracked,
                         allow_unknown_git,
                     };
+                    // Built lazily: a revocation saves the store before it reads the config.
                     let (store, report) = hook_token::rotate(
                         &dir,
-                        &ctx,
+                        || hooks_install::Ctx::from_env(&dir),
                         flags,
                         force,
+                        revoke,
                         chrono::Utc::now().timestamp_millis(),
                     )?;
                     for path in &report.updated {
@@ -235,9 +252,21 @@ fn real_main() -> Result<()> {
                         for (path, why) in &report.failed {
                             eprintln!("could not update {}: {why}", path.display());
                         }
+                        if revoke {
+                            bail!(
+                                "the old hook token is revoked (a running daemon stops accepting it within about 2 s), but the Claude settings above were not updated: fix the file(s) and run `acd hooks install claude`"
+                            );
+                        }
                         bail!(
                             "hook token rotation incomplete: fix the file(s) and run `acd hooks install claude`"
                         );
+                    }
+                    if revoke {
+                        println!(
+                            "Hook token rotated to generation {} and the old token revoked; a running daemon stops accepting it within about 2 s. Running Claude sessions that use the old token lose acd until restarted.",
+                            store.generation
+                        );
+                        return Ok(());
                     }
                     println!(
                         "Hook token rotated to generation {}. The previous token stays valid until every Claude session started before now has exited or used the new token, at most 30 days.",
@@ -288,6 +317,9 @@ fn real_main() -> Result<()> {
                     allow_tracked,
                     allow_unknown_git,
                 } => {
+                    // The token sat in a settings file: say to rotate it after the migration.
+                    let had_legacy = matches!(target, hooks_install::Target::Claude)
+                        && !hooks_install::legacy_warnings(&dir).is_empty();
                     let r = hooks_install::install(
                         &ctx,
                         target,
@@ -316,9 +348,18 @@ fn real_main() -> Result<()> {
                                 "Claude reads hooks when a session starts: restart running sessions or run /clear in them."
                             );
                             println!(
-                                "Trust note: Claude sends its hooks, with the hook token, to 127.0.0.1:{}. While acd is not running, another local user or process can take that port, read the token and payloads, and approve Claude permission prompts. Use acd v1 on personal, trusted hosts only.",
-                                ctx.hook_port
+                                "Claude's hooks run `acd hook claude`, which talks to acd over the owner-only socket {}. No token is stored in the settings file. When acd is not running, the hook prints nothing and Claude shows its own prompt.",
+                                ctx.config_dir.join("hook.sock").display()
                             );
+                            // Other recorded destinations may still hold the legacy http hook.
+                            for w in hooks_install::legacy_warnings(&dir) {
+                                eprintln!("warning: {w}");
+                            }
+                            if had_legacy {
+                                println!(
+                                    "The old http hook stored the hook token in a settings file. Once your Claude sessions have restarted, run `acd token rotate hook --revoke` so that copy stops working (without --revoke it stays valid for up to 30 days)."
+                                );
+                            }
                         }
                         hooks_install::Target::Codex => println!(
                             "Codex may ask you to review these hooks the first time it runs them. Codex sessions that share Codex's background app-server can be answered from the inbox only when acd can tell which herdr pane they run in; otherwise their prompts are shown read-only."
@@ -386,6 +427,19 @@ fn real_main() -> Result<()> {
 pub(crate) fn preflight(dir: &Path) -> Result<()> {
     preflight_prerequisites(dir)?;
     tls::load(dir).context("TLS bundle is invalid or unsafe; run `acd init` to repair it")?;
+    Ok(())
+}
+
+/// What `hook_token::load` and `save` need: the directory and the store (or
+/// the legacy token file it migrates from), owner-only.
+fn preflight_hook_store(dir: &Path) -> Result<()> {
+    secrets::check_mode(dir, 0o700)?;
+    for f in [hook_token::STORE_FILE, hook_token::LEGACY_FILE] {
+        let p = dir.join(f);
+        if p.symlink_metadata().is_ok() {
+            secrets::check_mode(&p, 0o600)?;
+        }
+    }
     Ok(())
 }
 

@@ -84,7 +84,9 @@ async fn initial_list_builds_agents_and_ignores_plain_shells() {
     })
     .await;
     assert_eq!(r.panes.read().unwrap().len(), 2);
-    assert_eq!(*r.handle.health().borrow(), Health::Connected);
+    // Agents are published by the list, before the resubscribe that ends in
+    // Connected: wait for it rather than race it under load.
+    until("connected", || (*r.handle.health().borrow() == Health::Connected).then_some(())).await;
 }
 
 #[tokio::test]
@@ -589,7 +591,7 @@ async fn blocked_pane_gets_a_read_only_request_then_terminal() {
             ClientMessage::RequestAnswer {
                 id: "a1".into(),
                 request_id: req.id.clone(),
-                revision: None,
+                revision: Some(1),
                 option_id: Some("x".into()),
                 text: None,
             },

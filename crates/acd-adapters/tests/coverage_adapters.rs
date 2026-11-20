@@ -2,11 +2,11 @@
 //! the thread-local log subscriber so call-site interest cannot race.
 use std::sync::{Arc, Mutex};
 
-use acd_adapters::hooks::mapping::payload_for_log;
+use acd_adapters::hooks::mapping::log_payload;
+use acd_adapters::hooks::wire::{HookAgent, HookName};
 use acd_adapters::t3::conn::CallError;
 use acd_adapters::t3::outcome::{classify, Outcome, DEFECT, INTERRUPTED, MIXED, NO_REPLY, REFUSED};
 use acd_adapters::t3::wire::{Cause, Failure};
-use acd_adapters::text::{redact_log, LOG_BYTES};
 use acd_protocol::ErrorCode;
 use serde_json::json;
 
@@ -24,7 +24,7 @@ impl std::io::Write for Buffer {
 
 /// Every failed dispatch is classified, never read as "nothing happened"
 /// unless T3 proved it, and the debug log carries tags and fingerprints, not
-/// the server's text.
+/// the server's text. Hook payload logs are checked here too.
 #[test]
 fn failed_dispatches_classify_conservatively_and_never_log_server_text() {
     let buffer = Buffer::default();
@@ -80,16 +80,18 @@ fn failed_dispatches_classify_conservatively_and_never_log_server_text() {
     let logged = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
     assert!(logged.contains("T3 dispatch failed"), "the debug line was not captured: {logged}");
     assert!(!logged.contains(secret), "server text reached the log: {logged}");
-}
 
-#[test]
-fn hook_payload_logs_redact_secrets_and_are_capped() {
-    let raw = br#"{"authorization":"Bearer abcdef.ghi","note":"ok"}"#;
-    let logged = payload_for_log(raw);
-    assert!(!logged.contains("abcdef"), "{logged}");
-    assert!(logged.contains("[REDACTED]"));
-    // Invalid UTF-8 is lossy-decoded, not an error.
-    assert!(payload_for_log(&[0xff, b'a']).contains('a'));
-    let big = "x".repeat(LOG_BYTES * 3);
-    assert!(redact_log(&big).len() <= LOG_BYTES + 64);
+    // Message text never reaches logs (CLAUDE.md): a hook payload is logged
+    // as its hook name, byte length and hash. Same subscriber, so call-site
+    // interest cannot race.
+    buffer.0.lock().unwrap().clear();
+    let raw = br#"{"authorization":"Bearer abcdef.ghi","command":"rm -rf PLAIN-PAYLOAD-TEXT"}"#;
+    log_payload(HookAgent::Claude, &HookName::PermissionRequest, raw);
+    log_payload(HookAgent::Codex, &HookName::Stop, &[0xff, b'a']);
+    let logged = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert!(logged.contains("hook payload"), "the debug line was not captured: {logged}");
+    assert!(logged.contains(&format!("len={}", raw.len())), "{logged}");
+    for text in ["abcdef", "PLAIN-PAYLOAD-TEXT", "rm -rf", "authorization"] {
+        assert!(!logged.contains(text), "payload text reached the log: {logged}");
+    }
 }

@@ -72,10 +72,26 @@ fn a_typed_answer_needs_free_text_an_answerable_request_and_the_same_text() {
     assert_eq!(check_reason(&a, &state_with(other, true)), Err(NotSentReason::Changed));
 }
 
+/// A reply armed for one incarnation is not sent to another.
+#[test]
+fn a_reply_needs_the_incarnation_it_was_armed_for() {
+    let armed = |inc: Option<&str>| action(ActionKind::Reply { text: "hi".into(), incarnation: inc.map(Into::into) });
+    let state = |inc: Option<&str>| {
+        let mut s = state_with(req(), true);
+        s.session.agents.get_mut("a").unwrap().incarnation = inc.map(Into::into);
+        s
+    };
+    assert_eq!(check_reason(&armed(Some("i1")), &state(Some("i1"))), Ok(()));
+    assert_eq!(check_reason(&armed(Some("i1")), &state(Some("i2"))), Err(NotSentReason::AgentGone));
+    assert_eq!(check_reason(&armed(Some("i1")), &state(None)), Err(NotSentReason::AgentGone));
+    assert_eq!(check_reason(&armed(None), &state(Some("i2"))), Err(NotSentReason::AgentGone));
+    assert_eq!(check_reason(&armed(None), &state(None)), Ok(()));
+}
+
 /// `check_reason` match guard `!agent.can_send` (line 289): a reply to an agent that cannot take one is refused.
 #[test]
 fn a_reply_needs_an_agent_that_can_take_it() {
-    let a = action(ActionKind::Reply { text: "hi".into() });
+    let a = action(ActionKind::Reply { text: "hi".into(), incarnation: None });
     assert_eq!(check_reason(&a, &state_with(req(), true)), Ok(()));
     assert_eq!(check_reason(&a, &state_with(req(), false)), Err(NotSentReason::AgentBusy));
 }
@@ -92,7 +108,7 @@ fn debug_output_never_shows_request_or_typed_text() {
         format!("{text:?}"),
         format!("{:?}", ActionKind::Answer(sem.clone())),
         format!("{:?}", ActionKind::AnswerText(text.clone())),
-        format!("{:?}", ActionKind::Reply { text: "SECRET-TYPED".into() }),
+        format!("{:?}", ActionKind::Reply { text: "SECRET-TYPED".into(), incarnation: None }),
     ] {
         assert!(!shown.contains("SECRET-"), "{shown}");
         assert!(!shown.is_empty());
@@ -101,7 +117,7 @@ fn debug_output_never_shows_request_or_typed_text() {
     assert!(format!("{text:?}").contains("TextSemantics") && format!("{text:?}").contains("text_bytes"));
     assert!(format!("{:?}", ActionKind::Answer(sem)).starts_with("Answer("));
     assert!(format!("{:?}", ActionKind::AnswerText(text)).starts_with("AnswerText("));
-    assert!(format!("{:?}", ActionKind::Reply { text: "x".into() }).contains("text_bytes"));
+    assert!(format!("{:?}", ActionKind::Reply { text: "x".into(), incarnation: None }).contains("text_bytes"));
 }
 
 /// `check_reason` `||` -> `&&` on the typed-answer branch (line 282): another

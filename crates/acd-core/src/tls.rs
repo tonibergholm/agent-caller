@@ -190,6 +190,18 @@ pub fn server_config(files: &KeyFiles) -> Result<Arc<ServerConfig>, TlsError> {
 /// than this many of the daemon-wide slots.
 pub const MAX_UNAUTHENTICATED_PER_SOURCE: usize = 2;
 
+/// The key a peer's pre-auth slots are counted under. Any local account can
+/// bind any 127.x.y.z (or ::1), so every loopback address is one source:
+/// otherwise one account could fill both pools from addresses of its own.
+pub(crate) fn source_key(ip: IpAddr) -> IpAddr {
+    let ip = ip.to_canonical();
+    if ip.is_loopback() {
+        IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    } else {
+        ip
+    }
+}
+
 type SourceCounts = Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, usize>>>;
 
 #[derive(Clone)]
@@ -213,7 +225,7 @@ impl Admission {
     /// `source` already holds its share. The source check comes first so a
     /// refused source takes nothing from the pool.
     fn try_acquire(&self, source: IpAddr) -> Option<Held> {
-        let source = source.to_canonical();
+        let source = source_key(source);
         let mut counts = self.sources.lock().unwrap();
         let held = counts.entry(source).or_insert(0);
         if *held >= self.per_source {
@@ -569,6 +581,20 @@ mod io_tests {
         let _held = a.try_acquire("100.64.0.1".parse().unwrap()).unwrap();
         assert!(a.try_acquire("100.64.0.2".parse().unwrap()).is_none());
         assert_eq!(a.sources.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn every_loopback_address_is_one_source() {
+        let a = Admission::with_per_source(8, 2);
+        let aliases = ["127.0.0.1", "127.0.0.2", "127.9.9.9", "::1", "::ffff:127.0.0.4"];
+        let held: Vec<_> = aliases
+            .iter()
+            .filter_map(|x| a.try_acquire(x.parse().unwrap()))
+            .collect();
+        assert_eq!(held.len(), 2, "five loopback addresses hold two slots in all");
+        let tailnet = a.try_acquire("100.64.0.1".parse().unwrap());
+        assert!(tailnet.is_some(), "a tailnet peer is not locked out");
+        assert_eq!(a.sources.lock().unwrap().len(), 2, "loopback is one entry");
     }
 
     #[test]

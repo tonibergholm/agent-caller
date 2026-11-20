@@ -41,7 +41,7 @@ fn answer_opt(id: &str, request_id: &str, revision: Option<u64>) -> ClientMessag
 }
 
 fn send_msg(id: &str, agent_id: &str, text: &str) -> ClientMessage {
-    ClientMessage::AgentSend { id: id.into(), agent_id: agent_id.into(), text: text.into() }
+    ClientMessage::AgentSend { id: id.into(), agent_id: agent_id.into(), text: text.into(), incarnation: None }
 }
 
 fn core_with_request(free_text: bool) -> (Arc<Core>, Arc<FakeAdapter>, String) {
@@ -137,7 +137,7 @@ fn a_source_status_change_is_stored_and_published_once() {
 #[tokio::test]
 async fn a_text_answer_is_delivered_as_text() {
     let (core, fake, rid) = core_with_request(true);
-    assert_eq!(core.handle("cl", answer_text("c1", &rid, "go ahead", None)).await, CommandResult::delivered("c1"));
+    assert_eq!(core.handle("cl", answer_text("c1", &rid, "go ahead", Some(1))).await, CommandResult::delivered("c1"));
     assert_eq!(fake.delivered(), vec![(rid, Answer::Text("go ahead".into()))]);
 }
 
@@ -146,11 +146,11 @@ async fn a_text_answer_is_delivered_as_text() {
 async fn an_answer_needs_exactly_one_of_option_and_text() {
     let (core, fake, rid) = core_with_request(true);
     let both = ClientMessage::RequestAnswer {
-        id: "b".into(), request_id: rid.clone(), revision: None,
+        id: "b".into(), request_id: rid.clone(), revision: Some(1),
         option_id: Some("allow".into()), text: Some("x".into()),
     };
     let neither = ClientMessage::RequestAnswer {
-        id: "n".into(), request_id: rid, revision: None, option_id: None, text: None,
+        id: "n".into(), request_id: rid, revision: Some(1), option_id: None, text: None,
     };
     assert_eq!(core.handle("cl", both).await.error_code(), Some(ErrorCode::BadRequest));
     assert_eq!(core.handle("cl", neither).await.error_code(), Some(ErrorCode::BadRequest));

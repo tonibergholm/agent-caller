@@ -73,6 +73,9 @@ pub struct Guard {
     pub conn: ConnStamp,
     pub agent_id: String,
     pub request: Option<(String, u64)>,
+    /// The agent's incarnation as the user saw it (PROTOCOL.md §4). A reply
+    /// carries this value, and is refused if the live agent has another.
+    pub incarnation: Option<String>,
     /// A send to an agent the transcript named while it was out of view
     /// (D7). Only such a send may reach an idle agent the panel hides.
     pub named_send_only: bool,

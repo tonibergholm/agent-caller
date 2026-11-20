@@ -1,1 +1,1 @@
-{"type":"agent.send","id":"c-2","agent_id":"herdr:abc:w1:p1","text":"now run the tests"}
+{"type":"agent.send","id":"c-2","agent_id":"herdr:abc:w1:p1","text":"now run the tests","incarnation":"3.9f2c1a0b4d5e"}

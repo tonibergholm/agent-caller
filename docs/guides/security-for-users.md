@@ -17,8 +17,8 @@ things to protect are the credentials that let a client answer.
 | Pairing line (`acd://...#token`) | Printed by `acd pair`; clipboard | The client token plus the pin. Treat it as the token. |
 | Pin (`?pin=sha256:...`) | In the pairing line; derived from `tls.pem` | Tells the client which server certificate to accept. A client refuses any other certificate. The pin is not a secret, but it only helps when you got it from the right machine. |
 | TLS key (`tls.pem`) | `~/.config/acd/`, mode 0600 | The daemon's identity. Whoever holds it can pose as that daemon. |
-| Hook token (`hook-tokens.json`, and the `X-Acd-Token` header in `~/.claude/settings.json`) | Local machine | The Claude hook endpoint on `127.0.0.1`. |
-| T3 token (`t3.token`) | `~/.config/acd/`, mode 0600 | acd's access to your T3 server. It travels over plain `ws://` to `localhost`, loopback or a Tailscale IP. |
+| Hook token (`hook-tokens.json`; older installs also put it in the `X-Acd-Token` header in `~/.claude/settings.json`) | `~/.config/acd/`, mode 0600 | The hook endpoint. The `acd hook` shim reads it and sends it over `hook.sock`. |
+| T3 token (`t3.token`) | `~/.config/acd/`, mode 0600 | acd's access to your T3 server. It travels over plain `ws://` to `localhost`, loopback or a Tailscale IP. For a T3 server on this machine, acd first checks that the server runs as your user. |
 
 `acd` listens only on loopback and its own Tailscale addresses. TCP uses
 TLS 1.3. Tokens and keys never go to the logs. `acd.sock` is mode 0600. A
@@ -54,22 +54,17 @@ changes, so rotating first revokes nothing.
 
 ```sh
 git rm --cached <path-to-settings.json>
-acd token rotate hook
+acd token rotate hook --revoke
 ```
 
-One rotation does not revoke the leaked token. The daemon keeps the previous
-token valid for Claude sessions that started before the rotation, until they
-exit or use the new token, at most 30 days. To cut the leaked token off now,
-rotate a second time, which drops it:
-
-```sh
-acd token rotate hook --force
-```
-
-If the first rotation reports that it could not update every settings file,
-fix that before the second rotation. The running daemon picks up the change on
-its next refresh, normally within about two seconds. Restart or `/clear`
-Claude sessions that still fail with a retired token. Then remove the leaked
+Without `--revoke`, a rotation does not revoke the leaked token: the daemon
+keeps the previous token valid for Claude sessions that started before the
+rotation, until they exit or use the new token, at most 30 days. `--revoke`
+keeps no previous token, so the leaked one stops working at once. Claude
+sessions that still use it lose acd until you restart them (or `/clear` them).
+If the rotation reports that it could not update every settings file, fix that
+and run `acd hooks install claude`. The running daemon picks up the change on
+its next refresh, normally within about two seconds. Then remove the leaked
 file from the repository history. See
 [hooks-claude-code-and-codex.md](hooks-claude-code-and-codex.md).
 
@@ -91,37 +86,42 @@ and not backed up, but rotating is the sure fix.
 
 ## Known limits
 
-- Claude's HTTP hooks cannot authenticate the daemon. While `acd` is not
-  running, another local user or process can bind the hook port, read the hook
-  token and payloads, and approve Claude permission prompts. Use acd on
-  machines where only you log in.
-- A same-user process can fill the local pre-auth slots, four source IPs can
-  fill the network pool, and one paired client can fill the idempotency
-  table. These are open: see the [known gaps](../superpowers/plans/2026-10-07-p1-followups.md).
+- Older installs used Claude HTTP hooks, which cannot authenticate the
+  daemon: while `acd` is not running, another local user can bind the hook
+  port, read the hook token and approve Claude permission prompts. `acd
+  status` warns while such entries remain. Run `acd hooks install claude` to
+  replace them with the shim, restart your Claude sessions, and run `acd
+  token rotate hook --revoke` if the settings file was readable by others.
+- A same-user process can fill the local pre-auth slots, and five network
+  source IPs can fill the network pool. These are open: see the
+  [known gaps](../superpowers/plans/2026-10-07-p1-followups.md).
 - A compromised machine, account or tailnet is out of scope.
 - If acd is down, the agent's own dialog still works. If acd cannot prove which
   agent and screen an answer belongs to, it does not deliver it.
 
-## The relay (not built)
+## The relay (optional, off by default)
 
-There is no relay or push today. The iOS and Android apps show requests only
-while open. The design in the
-[relay spec](../superpowers/specs/2026-11-03-relay-push-design.md) is a draft
-reviewed once, not on main. Per that draft:
+`acd` can wake devices through a push relay, but only when you set
+`[push] relay` in `config.toml`. The relay server (`crates/acd-relay`) is
+built from source; releases do not ship it. No first-party client registers
+for push yet, so the iOS and Android apps still show requests only while
+open. See [docs/push.md](../push.md) and the
+[relay spec](../superpowers/specs/2026-11-03-relay-push-design.md).
 
-- The relay would carry a content-free wake-up. It would not see request
-  content: no agent, machine, project, path, command, title, option, answer
-  or count.
-- It could not answer, approve or send anything. Every action still needs the
+- A wake carries a sealed device handle and a version number. The relay never
+  sees request content: no agent, machine, project, path, command, title,
+  option, answer or count.
+- It cannot answer, approve or send anything. Every action still needs the
   client token over pinned TLS to `acd`, which the relay never has.
-- It would see metadata: the public IP of each `acd`, the time, the push
-  handle, and, once it opens the handle, the push address and platform. Over time that reveals how many devices you have, how many
-  machines wake them, and when your agents ask for input. It could drop wakes.
-- Push would be off unless you set a relay URL in `config.toml`. You could
-  run the relay yourself. Apple or Google would be involved for push delivery
-  and would learn push addresses and timing, not content.
-
-Treat this as a plan, not a promise, until it ships.
+- It sees metadata: the public IP of each `acd`, the time, the push handle,
+  and, once it opens the handle, the push address and platform. Over time
+  that reveals how many devices you have, how many machines wake them, and
+  when your agents ask for input. It can drop wakes, and an answer of
+  `invalid_handle` or `gone` stops a device's wakes until it registers again.
+- Registrations are bound to the client token. Rotating it drops them, also
+  across a restart.
+- Apple or Google deliver the push and learn push addresses and timing, not
+  content.
 
 ## Report a problem
 

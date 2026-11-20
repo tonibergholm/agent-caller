@@ -21,6 +21,42 @@ fn settings_token(home: &std::path::Path) -> serde_json::Value {
     json_of(&home.join(".claude/settings.json"))["hooks"]["Stop"][0]["hooks"][0]["headers"]["X-Acd-Token"].clone()
 }
 
+/// Rewrites every acd entry of a Claude settings file that `acd hooks install
+/// claude` just wrote into the http form earlier versions wrote (token in the
+/// headers), as a file from before the shim hooks. The install record stays.
+fn make_legacy(settings: &std::path::Path, dir: &std::path::Path) {
+    let token = hook_token_of(dir);
+    let mut v = json_of(settings);
+    for (event, groups) in v["hooks"].as_object_mut().unwrap() {
+        for g in groups.as_array_mut().unwrap() {
+            for e in g["hooks"].as_array_mut().unwrap() {
+                if e.to_string().contains("acd-managed:v1") {
+                    let timeout = e["timeout"].clone();
+                    *e = serde_json::json!({
+                        "type": "http",
+                        "url": format!("http://127.0.0.1:47999/hook/claude/{event}?marker=acd-managed:v1"),
+                        "timeout": timeout,
+                        "headers": {
+                            "X-Acd-Token": token,
+                            "X-Herdr-Pane": "$HERDR_PANE_ID",
+                            "X-Herdr-Socket": "$HERDR_SOCKET_PATH",
+                            "X-Claude-Entrypoint": "$CLAUDE_CODE_ENTRYPOINT"
+                        },
+                        "allowedEnvVars": ["HERDR_PANE_ID", "HERDR_SOCKET_PATH", "CLAUDE_CODE_ENTRYPOINT"]
+                    });
+                }
+            }
+        }
+    }
+    std::fs::write(settings, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+}
+
+/// `acd hooks install claude`, then the file as a pre-shim install left it.
+fn install_legacy(dir: &std::path::Path, home: &std::path::Path) {
+    assert!(install(dir, home, "claude", &[]).status.success());
+    make_legacy(&home.join(".claude/settings.json"), dir);
+}
+
 fn home_with_acd() -> (tempfile::TempDir, std::path::PathBuf) {
     let home = tempfile::tempdir().unwrap();
     let dir = init_dir(home.path());
@@ -43,7 +79,7 @@ fn init_creates_a_private_store_and_no_hook_token_file() {
 #[test]
 fn rotation_commits_the_store_then_rewrites_the_headers() {
     let (home, dir) = home_with_acd();
-    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    install_legacy(&dir, home.path());
     let old = hook_token_of(&dir);
     let out = rotate(&dir, home.path(), &[]);
     assert!(
@@ -96,7 +132,7 @@ fn rotation_refuses_a_journal_conflict_without_changing_the_store() {
 #[test]
 fn a_record_save_failure_stops_rewrite_and_install_recovers_both_destinations() {
     let (home, dir) = home_with_acd();
-    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    install_legacy(&dir, home.path());
     let second_home = home.path().join("other-home");
     std::fs::create_dir(&second_home).unwrap();
     let second_settings = second_home.join(".claude/settings.json");
@@ -110,6 +146,7 @@ fn a_record_save_failure_stops_rewrite_and_install_recovers_both_destinations() 
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    make_legacy(&second_settings, &dir);
 
     let out = acd_home(&dir, home.path())
         .env("ACD_TEST_FAIL_AT", "record-write")
@@ -142,7 +179,15 @@ fn a_record_save_failure_stops_rewrite_and_install_recovers_both_destinations() 
     );
     assert!(!dir.join("hooks-journal.json").exists());
     let current = hook_token_of(&dir);
-    assert_eq!(settings_token(home.path()), current.as_str());
+    // The reinstalled destination now runs the shim: no token in the file.
+    assert!(settings_token(home.path()).is_null(), "the file still holds a token");
+    assert!(
+        !std::fs::read_to_string(home.path().join(".claude/settings.json"))
+            .unwrap()
+            .contains(&current),
+        "the file still holds the token"
+    );
+    // The other legacy destination is repaired by the header rewrite.
     let other_value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(second_settings).unwrap()).unwrap();
     assert_eq!(
@@ -158,7 +203,7 @@ fn a_record_save_failure_stops_rewrite_and_install_recovers_both_destinations() 
 fn a_crash_after_the_store_commit_is_repaired_by_install() {
     for stage in ["after-store", "before-headers-state"] {
         let (home, dir) = home_with_acd();
-        assert!(install(&dir, home.path(), "claude", &[]).status.success());
+        install_legacy(&dir, home.path());
         let out = acd_home(&dir, home.path())
             .env("ACD_TEST_FAIL_AT", stage)
             .args(["token", "rotate", "hook"])
@@ -177,7 +222,10 @@ fn a_crash_after_the_store_commit_is_repaired_by_install() {
         assert_eq!(store_of(&dir)["generation"], 2);
         assert!(install(&dir, home.path(), "claude", &[]).status.success());
         assert_eq!(store_of(&dir)["headers"]["state"], "done");
-        assert_eq!(settings_token(home.path()), hook_token_of(&dir).as_str());
+        assert!(
+            settings_token(home.path()).is_null(),
+            "the reinstall replaced the legacy entry"
+        );
     }
 }
 
@@ -236,11 +284,7 @@ fn install_restores_0600_on_an_unchanged_but_loosened_settings_file() {
 #[test]
 fn a_failed_header_write_fails_rotation_until_install_succeeds() {
     let (home, dir) = home_with_acd();
-    assert!(
-        install(&dir, home.path(), "claude", &["--allow-unknown-git"])
-            .status
-            .success()
-    );
+    install_legacy(&dir, home.path());
     let out = acd_home(&dir, home.path())
         .env("ACD_TEST_FAIL_AT", "settings-write")
         .args(["token", "rotate", "hook", "--allow-unknown-git"])
@@ -265,7 +309,7 @@ fn a_failed_header_write_fails_rotation_until_install_succeeds() {
             .success()
     );
     assert_eq!(store_of(&dir)["headers"]["state"], "done");
-    assert_eq!(settings_token(home.path()), hook_token_of(&dir).as_str());
+    assert!(settings_token(home.path()).is_null(), "the file still holds a token");
 }
 
 #[cfg(debug_assertions)]
@@ -445,6 +489,9 @@ enum Reply {
     NoRead,
     /// Sends this raw reply, then closes.
     Raw(&'static str),
+    /// Waits this many milliseconds after the request, then replies normally
+    /// (a held permission request that is answered late).
+    Delay(u64),
 }
 
 fn set_mode(p: &std::path::Path, m: u32) {
@@ -495,6 +542,9 @@ fn one_shot(
             }
         }
         let _ = tx.send(String::from_utf8_lossy(&req).into_owned());
+        if let Reply::Delay(ms) = reply {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
         if reply == Reply::Stall {
             std::thread::sleep(Duration::from_secs(5));
             return;
@@ -529,12 +579,22 @@ fn run_shim(
     stdin: &[u8],
     env: &[(&str, &str)],
 ) -> (std::process::Output, Duration) {
+    run_agent_shim(dir, "codex", event, stdin, env)
+}
+
+fn run_agent_shim(
+    dir: &std::path::Path,
+    agent: &str,
+    event: &str,
+    stdin: &[u8],
+    env: &[(&str, &str)],
+) -> (std::process::Output, Duration) {
     let mut cmd = acd(dir);
     for (k, v) in env {
         cmd.env(k, v);
     }
     let mut child = cmd
-        .args(["hook", "codex", event, "acd-managed:v1"])
+        .args(["hook", agent, event, "acd-managed:v1"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -571,7 +631,7 @@ fn the_shim_forwards_the_hook_and_prints_the_reply() {
     let req = rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(
         req.starts_with("POST /hook/codex/PermissionRequest HTTP/1.1\r\n"),
-        "{req}"
+        "the request line differs"
     );
     assert!(req.contains(&format!("X-Acd-Token: {token}\r\n")));
     assert!(req.contains("X-Herdr-Pane: w1:p2\r\n"));
@@ -584,6 +644,120 @@ fn the_shim_forwards_the_hook_and_prints_the_reply() {
         !String::from_utf8_lossy(&out.stdout).contains(&token)
             && !String::from_utf8_lossy(&out.stderr).contains(&token)
     );
+}
+
+fn claude_payload(name: &str) -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/../../tests/fixtures/hooks/claude/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+#[test]
+fn the_claude_shim_forwards_the_event_with_the_environment_headers() {
+    let (_tmp, dir) = shim_dir();
+    let reply = r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#;
+    let rx = one_shot(&dir, 200, reply, Reply::Normal);
+    let token = hook_token_of(&dir);
+    let body = claude_payload("payload-PermissionRequest-Bash.json");
+    let (out, _) = run_agent_shim(
+        &dir,
+        "claude",
+        "PermissionRequest",
+        &body,
+        &[
+            ("HERDR_PANE_ID", "w1:p2"),
+            ("HERDR_SOCKET_PATH", "/run/herdr.sock"),
+            ("CLAUDE_CODE_ENTRYPOINT", "cli"),
+        ],
+    );
+    assert!(out.status.success() && out.stderr.is_empty());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), reply);
+    let req = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    // The request carries the token: no assert message prints it.
+    assert!(
+        req.starts_with("POST /hook/claude/PermissionRequest HTTP/1.1\r\n"),
+        "the request line differs"
+    );
+    assert!(req.contains(&format!("X-Acd-Token: {token}\r\n")), "the token header differs");
+    for header in [
+        "X-Herdr-Pane: w1:p2\r\n",
+        "X-Herdr-Socket: /run/herdr.sock\r\n",
+        "X-Claude-Entrypoint: cli\r\n",
+    ] {
+        assert!(req.contains(header), "missing {header}");
+    }
+    assert!(req.ends_with(std::str::from_utf8(&body).unwrap()));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains(&token));
+}
+
+#[test]
+fn the_codex_shim_does_not_send_the_claude_entrypoint() {
+    let (_tmp, dir) = shim_dir();
+    let rx = one_shot(&dir, 200, "", Reply::Normal);
+    let (out, _) = run_shim(&dir, "Stop", b"{}", &[("CLAUDE_CODE_ENTRYPOINT", "cli")]);
+    assert!(out.status.success());
+    let req = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(!req.contains("X-Claude-Entrypoint"), "the codex shim sent the Claude entrypoint header");
+}
+
+#[test]
+fn a_held_claude_permission_request_waits_past_codexs_budget() {
+    let (_tmp, dir) = shim_dir();
+    // Longer than Codex's 800 ms budget for the same event.
+    let _rx = one_shot(&dir, 200, r#"{"ok":3}"#, Reply::Delay(1500));
+    let (out, took) = run_agent_shim(&dir, "claude", "PermissionRequest", b"{}", &[]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), r#"{"ok":3}"#);
+    assert!(took >= Duration::from_millis(1400), "{took:?}");
+}
+
+#[test]
+fn a_stalled_acd_adds_at_most_1_s_to_a_claude_lifecycle_hook() {
+    let (_tmp, dir) = shim_dir();
+    let _rx = one_shot(&dir, 200, "", Reply::Stall);
+    let (out, took) = run_agent_shim(&dir, "claude", "Stop", br#"{"session_id":"s"}"#, &[]);
+    assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty());
+    assert!(
+        took < Duration::from_secs(1),
+        "Claude's hook timeout is 1 s: {took:?}"
+    );
+}
+
+#[test]
+fn the_claude_shim_fails_open_without_printing_an_answer() {
+    let (_tmp, dir) = shim_dir(); // no hook.sock: acd is down
+    let (out, took) = run_agent_shim(
+        &dir,
+        "claude",
+        "PermissionRequest",
+        &claude_payload("payload-PermissionRequest-Bash.json"),
+        &[],
+    );
+    assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty());
+    assert!(took < Duration::from_millis(500), "{took:?}");
+    // A 401 from acd prints nothing either.
+    let (_tmp, dir) = shim_dir();
+    let _rx = one_shot(&dir, 401, r#"{"no":1}"#, Reply::Normal);
+    let (out, _) = run_agent_shim(&dir, "claude", "PermissionRequest", b"{}", &[]);
+    assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty());
+}
+
+#[test]
+fn the_claude_shim_reaches_a_running_daemon_over_hook_sock() {
+    let (_home, dir) = home_with_acd();
+    let _started = start_daemon(&dir, None, "", &[]);
+    let (out, _) = run_agent_shim(
+        &dir,
+        "claude",
+        "UserPromptSubmit",
+        &claude_payload("payload-UserPromptSubmit.json"),
+        &[("CLAUDE_CODE_ENTRYPOINT", "cli")],
+    );
+    assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty());
+    wait_until("the hooks-only session appears", || {
+        status_text(&dir).contains("Working Claude")
+    });
 }
 
 #[test]
@@ -861,9 +1035,8 @@ const FOREIGN_CLAUDE: &str = r#"{
  "model": "opus"
 }"#;
 #[test]
-fn claude_install_writes_owned_entries_with_the_token_at_mode_0600() {
+fn claude_install_writes_shim_commands_without_the_token_at_mode_0600() {
     let (home, dir) = home_with_acd();
-    std::fs::write(dir.join("config.toml"), "hook_port = 47999\n").unwrap();
     let out = install(&dir, home.path(), "claude", &[]);
     assert!(
         out.status.success(),
@@ -874,45 +1047,49 @@ fn claude_install_writes_owned_entries_with_the_token_at_mode_0600() {
     assert_eq!(mode(&p), 0o600);
     let v = json_of(&p);
     let token = hook_token_of(&dir);
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_acd")).unwrap();
+    let config_dir = std::fs::canonicalize(&dir).unwrap();
     for (event, timeout) in [
         ("UserPromptSubmit", 1),
         ("PermissionRequest", 3610),
         ("PreToolUse", 1),
         ("PostToolUse", 1),
+        ("PostToolUseFailure", 1),
         ("Stop", 1),
         ("SessionEnd", 1),
     ] {
-        let e = &v["hooks"][event][0]["hooks"][0];
-        assert_eq!(e["type"], "http", "{event}");
-        assert_eq!(e["timeout"], timeout, "{event}");
         assert_eq!(
-            e["url"],
-            format!("http://127.0.0.1:47999/hook/claude/{event}?marker=acd-managed:v1")
-        );
-        assert_eq!(e["headers"]["X-Acd-Token"], token.as_str());
-        assert_eq!(e["headers"]["X-Herdr-Pane"], "$HERDR_PANE_ID");
-        assert_eq!(
-            e["allowedEnvVars"],
-            serde_json::json!([
-                "HERDR_PANE_ID",
-                "HERDR_SOCKET_PATH",
-                "CLAUDE_CODE_ENTRYPOINT"
-            ])
+            v["hooks"][event][0]["hooks"][0],
+            serde_json::json!({
+                "type": "command",
+                "command": format!(
+                    "'{}' hook claude {event} --config-dir '{}' acd-managed:v1",
+                    exe.display(),
+                    config_dir.display()
+                ),
+                "timeout": timeout
+            }),
+            "{event}"
         );
     }
     assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "AskUserQuestion");
     assert!(v["hooks"].get("SessionStart").is_none());
     assert_eq!(mode(&dir.join("hooks-installed.json")), 0o600);
+    // Findings 1 and 2: the settings file holds no token and no loopback URL.
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(
+        !text.contains(&token) && !text.contains("X-Acd-Token") && !text.contains("http"),
+        "the settings file holds a token header or a URL ({} bytes)",
+        text.len()
+    );
     for o in [&out.stdout, &out.stderr] {
         assert!(!String::from_utf8_lossy(o).contains(&token));
     }
-    // Amendment A1: the residual risk of loopback http hooks.
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("Trust note") && stdout.contains("127.0.0.1:47999"),
+        stdout.contains("hook.sock") && !stdout.contains("127.0.0.1"),
         "{stdout}"
     );
-    assert!(stdout.contains("trusted hosts"), "{stdout}");
 }
 #[test]
 fn install_twice_then_uninstall_is_identity() {
@@ -945,6 +1122,104 @@ fn install_twice_then_uninstall_is_identity() {
             serde_json::from_str::<serde_json::Value>(original).unwrap()
         );
     }
+}
+/// A Claude settings file as a pre-shim install left it: foreign entries plus
+/// acd's http entries (token in the headers) at mode 0644.
+fn legacy_claude_home() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let (home, dir) = home_with_acd();
+    let p = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, FOREIGN_CLAUDE).unwrap();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    make_legacy(&p, &dir);
+    (home, dir, p)
+}
+#[test]
+fn status_and_hooks_status_warn_about_a_legacy_http_entry_and_its_file_mode() {
+    let (home, dir, p) = legacy_claude_home();
+    let token = hook_token_of(&dir);
+    let warns = |text: &str| {
+        text.contains("still has the Claude http hook")
+            && text.contains("acd hooks install claude")
+            && text.contains(&p.display().to_string())
+    };
+    set_mode(&p, 0o600);
+    let hooks = hooks_status(&dir, home.path());
+    let stdout = String::from_utf8_lossy(&hooks.stdout);
+    assert!(warns(&stdout), "{stdout}");
+    assert!(
+        !stdout.contains("readable by group or others"),
+        "a private file has no mode warning: {stdout}"
+    );
+    set_mode(&p, 0o644);
+    let stdout = String::from_utf8_lossy(&hooks_status(&dir, home.path()).stdout).into_owned();
+    assert!(
+        warns(&stdout) && stdout.contains("readable by group or others (mode 0644)") && stdout.contains("--revoke"),
+        "{stdout}"
+    );
+    // `acd status` prints it before it connects, so no daemon is needed.
+    let out = acd_home(&dir, home.path()).arg("status").output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(warns(&err) && err.contains("mode 0644"), "{err}");
+    for o in [&hooks.stdout, &hooks.stderr, &out.stdout, &out.stderr] {
+        assert!(!String::from_utf8_lossy(o).contains(&token));
+    }
+}
+#[test]
+fn reinstalling_replaces_the_legacy_http_entries_with_shim_commands() {
+    let (home, dir, p) = legacy_claude_home();
+    set_mode(&p, 0o644);
+    let token = hook_token_of(&dir);
+    assert!(std::fs::read_to_string(&p).unwrap().contains(&token));
+    let out = install(&dir, home.path(), "claude", &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The token was in the file, so the user is told to revoke it.
+    assert!(String::from_utf8_lossy(&out.stdout).contains("acd token rotate hook --revoke"));
+    let again = install(&dir, home.path(), "claude", &[]);
+    assert!(!String::from_utf8_lossy(&again.stdout).contains("rotate"), "no advice without a legacy entry");
+    // The legacy file is replaced, not appended to: the token is gone, the
+    // mode is private and nothing warns any more.
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(
+        !text.contains(&token) && !text.contains("http"),
+        "the reinstalled file holds a token or a URL ({} bytes)",
+        text.len()
+    );
+    let v = json_of(&p);
+    assert_eq!(owned_count(&v), 7);
+    assert_eq!(
+        v["hooks"]["Stop"][0]["hooks"][0]["command"], "say done",
+        "the foreign Stop entry keeps its place"
+    );
+    assert!(
+        v["hooks"]["Stop"][1]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(" hook claude Stop ")
+    );
+    assert_eq!(mode(&p), 0o600);
+    let status = hooks_status(&dir, home.path());
+    assert!(!String::from_utf8_lossy(&status.stdout).contains("warning"));
+    assert!(!String::from_utf8_lossy(&install(&dir, home.path(), "claude", &[]).stderr)
+        .contains("warning"));
+    assert!(uninstall(&dir, home.path(), "claude").status.success());
+    assert_eq!(
+        json_of(&p),
+        serde_json::from_str::<serde_json::Value>(FOREIGN_CLAUDE).unwrap()
+    );
+}
+#[test]
+fn uninstall_removes_the_legacy_http_entries() {
+    let (home, dir, p) = legacy_claude_home();
+    assert!(uninstall(&dir, home.path(), "claude").status.success());
+    assert_eq!(
+        json_of(&p),
+        serde_json::from_str::<serde_json::Value>(FOREIGN_CLAUDE).unwrap()
+    );
 }
 #[test]
 fn refuses_symlink_and_tracked_settings() {
@@ -2644,6 +2919,146 @@ fn a_previous_token_is_rejected_as_soon_as_it_expires() {
         401
     );
     assert!(store_of(&dir)["previous"].is_object());
+}
+
+#[test]
+fn rotate_without_revoke_still_accepts_the_old_token() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let old = store_token(&dir);
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let body = claude_fixture("payload-Stop.json");
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0,
+        200
+    );
+}
+
+#[test]
+fn rotate_revoke_drops_the_old_token_at_once_even_while_one_is_retained() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    // A legacy http install holds the token, so the rotation rewrites it.
+    make_legacy(&home.path().join(".claude/settings.json"), &dir);
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    let leaked = store_token(&dir);
+    // Without --revoke a second rotation is refused while a previous token is retained.
+    let out = rotate(&dir, home.path(), &["--revoke"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("lose acd until restarted"));
+    let store = store_of(&dir);
+    assert!(store["previous"].is_null());
+    assert_eq!(store["headers"]["state"], "done");
+    let new = store_token(&dir);
+    // No token values in failure messages.
+    assert!(leaked != new, "revoke did not change the token");
+    assert!(
+        settings_token(home.path()) == new.as_str(),
+        "the legacy settings entry does not hold the new token"
+    );
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let body = claude_fixture("payload-Stop.json");
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &leaked, &[], &body).0,
+        401
+    );
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0,
+        200
+    );
+}
+
+/// A settings file that cannot be rewritten must not keep the old token
+/// alive: the store is saved first, and the rewrite failure is reported after.
+#[test]
+fn rotate_revoke_saves_the_store_before_a_settings_rewrite_can_fail() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let old = store_token(&dir);
+    // The recorded destination is no longer valid JSON.
+    std::fs::write(home.path().join(".claude/settings.json"), "{ not json").unwrap();
+    let out = rotate(&dir, home.path(), &["--revoke"]);
+    assert!(!out.status.success(), "the rewrite failure must exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains(&old) && !String::from_utf8_lossy(&out.stdout).contains(&old));
+    assert!(stderr.contains("the old hook token is revoked"), "{stderr}");
+    let store = store_of(&dir);
+    assert!(store["previous"].is_null());
+    assert_eq!(store["generation"], 2);
+    assert_eq!(store["headers"]["state"], "failed");
+    let new = store_token(&dir);
+    assert!(old != new, "revoke did not change the token");
+    // The headers are not done, yet a second revocation still goes through.
+    let again = rotate(&dir, home.path(), &["--revoke"]);
+    assert!(!again.status.success());
+    assert_eq!(store_of(&dir)["generation"], 3);
+    let newest = store_token(&dir);
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let body = claude_fixture("payload-Stop.json");
+    for stale in [&old, &new] {
+        assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", stale, &[], &body).0, 401);
+    }
+    assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &newest, &[], &body).0, 200);
+}
+
+/// A journal or install record the installer preflight refuses must not keep
+/// the old token alive: the store is saved first, and the problem is
+/// reported after.
+#[test]
+fn rotate_revoke_saves_the_store_before_the_installer_preflight_can_fail() {
+    for file in ["hooks-journal.json", "hooks-installed.json"] {
+        let (home, dir) = home_with_acd();
+        assert!(install(&dir, home.path(), "claude", &[]).status.success());
+        let old = store_token(&dir);
+        let path = dir.join(file);
+        if !path.exists() {
+            std::fs::write(&path, "{}").unwrap();
+        }
+        set_mode(&path, 0o644);
+        let out = rotate(&dir, home.path(), &["--revoke"]);
+        assert!(!out.status.success(), "{file}: the preflight failure must exit non-zero");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // The token check first, so the messages below never print a token.
+        assert!(!stderr.contains(&old) && !String::from_utf8_lossy(&out.stdout).contains(&old));
+        assert!(stderr.contains("the old hook token is revoked"), "{file}: {stderr}");
+        assert!(stderr.contains(file), "{file}: the problem is not named: {stderr}");
+        let store = store_of(&dir);
+        assert!(store["previous"].is_null(), "{file}");
+        assert_eq!(store["generation"], 2, "{file}");
+        let new = store_token(&dir);
+        assert!(old != new, "{file}: revoke did not change the token");
+        // The daemon refuses to start on the loose file, as it does for every command.
+        set_mode(&path, 0o600);
+        let started = start_daemon(&dir, None, "", &home_env(home.path()));
+        let body = claude_fixture("payload-Stop.json");
+        assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0, 401, "{file}");
+        assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0, 200, "{file}");
+    }
+}
+
+#[test]
+fn rotate_revoke_saves_the_store_before_the_config_is_read() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let old = store_token(&dir);
+    let config = dir.join("config.toml");
+    let saved = std::fs::read(&config).unwrap();
+    std::fs::write(&config, "this is = = not toml").unwrap();
+    let out = rotate(&dir, home.path(), &["--revoke"]);
+    assert!(!out.status.success(), "an unreadable config must exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("the old hook token is revoked"), "{} bytes of stderr", stderr.len());
+    assert!(!stderr.contains(&old) && !String::from_utf8_lossy(&out.stdout).contains(&old));
+    let store = store_of(&dir);
+    assert!(store["previous"].is_null());
+    let new = store_token(&dir);
+    assert!(old != new, "revoke did not change the token");
+    std::fs::write(&config, saved).unwrap();
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let body = claude_fixture("payload-Stop.json");
+    assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0, 401);
+    assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0, 200);
 }
 
 /// A well-formed token (43 base64url characters, 32 bytes) for hand-written stores.

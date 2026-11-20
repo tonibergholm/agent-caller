@@ -129,6 +129,14 @@ pub struct Push {
     handled: watch::Sender<u64>,
     /// Bumped by every revocation. A send in flight is cancelled when it moves.
     revoked: watch::Sender<u64>,
+    /// The lowest token generation that may register or be woken: the one a
+    /// rotation moved to. `revoke_all` raises it before it takes the store
+    /// lock, and `register` reads it under that lock, so a check and the
+    /// write it guards cannot be split by a rotation.
+    min_generation: Arc<AtomicU64>,
+    /// Test hook: `register` waits here twice once it is accepted.
+    #[cfg(test)]
+    accepted: Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl Push {
@@ -142,6 +150,9 @@ impl Push {
             wake: Notify::new(),
             handled: watch::channel(0).0,
             revoked: watch::channel(0).0,
+            min_generation: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            accepted: Mutex::new(None),
         })
     }
 
@@ -174,15 +185,20 @@ impl Push {
 
     /// Client token rotation: deletes every registration, persisted and in
     /// memory (spec 4.8). Devices with the new token register again.
-    pub async fn revoke_all(&self) {
-        if self.blocking(|s| s.clear()).await != Some(Ok(())) {
+    /// `generation` is the token generation the rotation moved to: a session
+    /// of any older one can no longer register.
+    pub async fn revoke_all(&self, new_token: &str, generation: u64) {
+        let client = store::client_fingerprint(new_token);
+        // Before any disk work: no send picks an older registration from here
+        // on, and sends already in flight are cancelled.
+        self.min_generation.fetch_max(generation, Ordering::SeqCst);
+        self.revoked.send_modify(|n| *n += 1);
+        let rotated = self.blocking(move |s| s.rotate_client_from(&client, generation)).await;
+        if rotated != Some(Ok(())) {
             tracing::error!("push registrations revoked in memory; push.json could not be rewritten");
         } else {
             tracing::info!("push registrations revoked");
         }
-        // After the store is cleared: a send past its generation check is
-        // cancelled here instead of reaching the relay with a revoked handle.
-        self.revoked.send_modify(|n| *n += 1);
         self.wake.notify_one();
     }
 
@@ -223,9 +239,12 @@ impl Push {
         self.blocking(|s| s.retry_clear()).await;
         let now = Instant::now();
         let min = self.settings.min_interval;
+        let cutoff = self.min_generation.load(Ordering::SeqCst);
         let targets: Vec<_> = self
             .store()
             .iter()
+            // Registrations of a rotated-away token wait only for their clear.
+            .filter(|(_, e)| e.auth >= cutoff)
             .map(|(id, e)| (id.clone(), e.generation, e.device.handle().to_string(), e.device.wake_state()))
             .collect();
         gates.retain(|id, _| targets.iter().any(|t| &t.0 == id));
@@ -243,7 +262,8 @@ impl Push {
                 let _permit = permits.acquire_owned().await;
                 // A send that waited for a permit must not use a registration
                 // revoked (or replaced) meanwhile.
-                if this.store().get(&id).map(|e| e.generation) != Some(generation) {
+                let cutoff = this.min_generation.load(Ordering::SeqCst);
+                if this.store().get(&id).filter(|e| e.auth >= cutoff).map(|e| e.generation) != Some(generation) {
                     return (id, generation, state, Outcome::Skipped, Instant::now());
                 }
                 // The debounce window starts when the send does, not when the
@@ -295,6 +315,7 @@ impl PushControl for Push {
     async fn register(
         &self,
         client_id: &str,
+        generation: u64,
         reg: PushRegistration,
     ) -> Result<(), PushFailure> {
         let bad = |message| Err(PushFailure { code: ErrorCode::BadRequest, message });
@@ -311,7 +332,29 @@ impl PushControl for Push {
             reg.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         );
         let id = client_id.to_string();
-        let stored = self.blocking(move |s| s.register(&id, device)).await;
+        // The session's token generation, compared under the store lock below.
+        // A write queued before a rotation can run after it (a blocking task
+        // outlives the dropped future), and a command can begin after it
+        // carrying the old generation: both are refused, so a revoked
+        // session's handle is never persisted.
+        let min = self.min_generation.clone();
+        #[cfg(test)]
+        {
+            let hook = self.accepted.lock().unwrap().clone();
+            if let Some(b) = hook {
+                b.wait().await;
+                b.wait().await;
+            }
+        }
+        let stored = self
+            .blocking(move |s| {
+                if generation < min.load(Ordering::SeqCst) {
+                    Err(StoreError::Revoked)
+                } else {
+                    s.register_at(&id, device, generation)
+                }
+            })
+            .await;
         match stored {
             Some(Ok(())) => {
                 tracing::info!(client = %client_tag(client_id), "push device registered");
@@ -319,6 +362,10 @@ impl PushControl for Push {
             }
             Some(Err(StoreError::TooMany)) => bad("too many push devices"),
             Some(Err(StoreError::BadId)) => bad("invalid client id"),
+            Some(Err(StoreError::Revoked)) => Err(PushFailure {
+                code: ErrorCode::Unauthorized,
+                message: "the client token was rotated",
+            }),
             Some(Err(StoreError::Corrupt)) => Err(PushFailure {
                 code: ErrorCode::SourceUnavailable,
                 message: "push.json is corrupt; repair or remove it",
@@ -357,6 +404,15 @@ impl PushControl for Push {
     }
 }
 
+/// The daemon's client token rotation. The old token stops first, before
+/// any push file I/O can delay it; then push revokes the old holders.
+pub async fn rotate_client_token(auth: &acd_core::server::Auth, push: Option<&Arc<Push>>, token: String) {
+    auth.rotate(token.clone());
+    if let Some(p) = push {
+        p.revoke_all(&token, auth.generation()).await;
+    }
+}
+
 /// Turns push on for a starting daemon: the engine, if `[push]` resolves.
 /// Called inside the runtime, before the daemon serves.
 pub fn enable(dir: &Path, cfg: &crate::config::Config, core: &acd_core::Core) -> Option<Arc<Push>> {
@@ -367,7 +423,7 @@ pub fn enable(dir: &Path, cfg: &crate::config::Config, core: &acd_core::Core) ->
             None
         }
         Resolved::On { relay, sender } => {
-            let store = Store::load(dir);
+            let store = Store::load(dir, &client_of(dir));
             if let Some(why) = store.degraded() {
                 tracing::warn!(reason = %why, "push is degraded: starting with no registrations; push.json is left untouched and registering fails until it is repaired or removed");
             }
@@ -392,7 +448,7 @@ pub fn report(dir: &Path, cfg: &crate::config::Config) -> String {
         Resolved::Off(None) => "push: off".into(),
         Resolved::Off(Some(why)) => format!("push: off ({why})"),
         Resolved::On { .. } => {
-            let store = Store::load(dir);
+            let store = Store::load(dir, &client_of(dir));
             match store.degraded() {
                 Some(why) => format!("push: degraded ({why})"),
                 None => format!("push: on, {} device(s)", store.len()),
@@ -405,7 +461,7 @@ pub fn report(dir: &Path, cfg: &crate::config::Config) -> String {
 /// Handles are never printed.
 pub fn list(dir: &Path, cfg: &crate::config::Config, out: &mut impl std::io::Write) -> std::io::Result<()> {
     writeln!(out, "{}", report(dir, cfg))?;
-    let store = Store::load(dir);
+    let store = Store::load(dir, &client_of(dir));
     for (id, e) in store.iter() {
         let last = e
             .device
@@ -421,6 +477,14 @@ pub fn list(dir: &Path, cfg: &crate::config::Config, out: &mut impl std::io::Wri
         )?;
     }
     Ok(())
+}
+
+/// Fingerprint of the client token on disk. An unreadable token gives one
+/// nothing matches, so no registration counts as current (fail closed).
+fn client_of(dir: &Path) -> String {
+    crate::secrets::read_secret(&dir.join("client.token"))
+        .and_then(|t| crate::secrets::parse_token(&t))
+        .map_or_else(|_| String::new(), |t| store::client_fingerprint(&t))
 }
 
 /// Deletes `push.json` (the registrations) without a running daemon.

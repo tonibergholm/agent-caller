@@ -178,6 +178,9 @@ export const wantsKey = (h: Hud): boolean =>
   h.state === "which_one" ||
   h.state === "countdown";
 
+/** The tallest the HUD panel gets, in CSS px. Mirrors `MAX_HEIGHT` in app/src-tauri/src/voice/hud.rs. */
+export const MAX_HUD_HEIGHT = 420;
+
 /** The proposal the HUD must acknowledge once it is on screen (D22). */
 export function awaitingDisplay(h: Hud): number | null {
   if (h.state === "confirm") return h.proposal_id;

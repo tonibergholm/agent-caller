@@ -30,6 +30,7 @@ fn guard_of(c: &CardSnap) -> Guard {
         conn: c.conn.unwrap(),
         agent_id: c.agent_id.clone(),
         request: c.pending.as_ref().map(|r| (r.id.clone(), r.revision)),
+        incarnation: c.incarnation.clone(),
         named_send_only: false,
     }
 }
@@ -110,6 +111,7 @@ fn pick(card: &str, request: &str, option: &str) -> Enqueue {
             conn: ConnStamp { instance: 1, conn_gen: 1 },
             agent_id: card.split_once('/').unwrap().1.into(),
             request: Some((request.into(), 1)),
+            incarnation: None,
             named_send_only: false,
         },
     }
@@ -238,6 +240,29 @@ fn a_send_is_guarded_by_the_absence_of_a_request() {
     port.edit("m/w", |g| g.request = Some(("r-new".into(), 1)));
     assert_eq!(exec.confirm(&port, Some(id)).unwrap().hud, error(Refusal::SnapshotChanged));
     assert!(port.enqueued().is_empty());
+}
+
+/// A follow-up is guarded by the incarnation of the card the HUD showed.
+#[test]
+fn a_send_carries_the_incarnation_of_the_frozen_card() {
+    let mut w = working("m", "w");
+    w.incarnation = Some("i1".into());
+    let s = select(snapshot(vec![w.clone()]), "m/w");
+    let port = FakePort::with(&[&w]);
+    let mut exec = Executor::new();
+    let (n, _) = exec.begin(&port, s, VoiceText::new("tell it to go on"), Locale::En).unwrap();
+    let send = Routed::Proposal(Proposal {
+        step: Step::Send { card: "m/w".into(), text: VoiceText::new("go on") },
+        origin: Origin::Model,
+        provenance: Some(Provenance::Selected),
+        off_screen: false,
+        level: Level::Confirm,
+    });
+    let id = exec.routed(n, send).unwrap().hud.awaiting_display().unwrap();
+    exec.shown(&port, id);
+    exec.confirm(&port, Some(id)).unwrap();
+    let [Enqueue::Reply { guard, .. }] = &port.enqueued()[..] else { panic!("one reply expected") };
+    assert_eq!(guard.incarnation.as_deref(), Some("i1"));
 }
 
 #[tokio::test]

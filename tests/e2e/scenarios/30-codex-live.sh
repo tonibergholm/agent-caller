@@ -67,12 +67,12 @@ wait_idle
 
 log "3. Answered in the terminal first (spec 14.4, keys request)"
 ask_touch x-cx-term.txt
-req=$(inbox wait-open --agent "$AID" --timeout 90 --ready); RID=$(echo "$req" | jq -r .id)
+req=$(inbox wait-open --agent "$AID" --timeout 90 --ready); RID=$(echo "$req" | jq -r .id); REV=$(echo "$req" | jq -r .revision)
 T_KEY=$(epoch_now); hd pane send-keys $P y; sleep 3
 res=$(jl "select(.t>$T_KEY and .msg.type==\"request.resolved\" and .msg.request_id==\"$RID\") | {by:.msg.by,t}" | head -1); note "resolved: $res"
 by=$(echo "$res" | jq -r .by 2>/dev/null); rt=$(echo "$res" | jq -r .t 2>/dev/null)
 [ "$by" = terminal ] && pass "3a terminal answer resolved the card by=terminal $(ms $T_KEY $rt) ms after the key (spec: within 2 s)" || fail "3a $res"
-late=$(inbox answer "$RID" deny); note "late answer: $late"
+late=$(inbox answer "$RID" deny --revision "$REV"); note "late answer: $late"
 echo "$late" | jq -e '.ok==false and (.error.code=="request_gone" or .error.code=="screen_mismatch")' >/dev/null && pass "3b late inbox answer refused: $(echo "$late" | jq -r .error.code)" || fail "3b $late"
 [ -e /tmp/ace2e/x-cx-term.txt ] && pass "3c the terminal's Yes was the one applied (file exists, deny never sent)" || fail "3c file missing"
 wait_idle

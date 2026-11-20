@@ -115,7 +115,7 @@ fn a_not_ready_retry_needs_its_capability_on_reconnect() {
 fn debug_output_never_shows_typed_text_or_daemon_messages() {
     let shown = [
         format!("{:?}", Command::AnswerText { request_id: "r".into(), revision: 1, text: "SECRET-TEXT".into() }),
-        format!("{:?}", Command::Send { agent_id: "a".into(), text: "SECRET-TEXT".into() }),
+        format!("{:?}", Command::Send { agent_id: "a".into(), text: "SECRET-TEXT".into(), incarnation: None }),
         format!("{:?}", Outcome::Failed { code: ErrorCode::BadRequest, message: "SECRET-MESSAGE".into() }),
     ];
     for s in &shown {

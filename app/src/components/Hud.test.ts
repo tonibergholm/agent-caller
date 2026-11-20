@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { flushSync, tick } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
@@ -53,8 +53,12 @@ async function show(state: HudState, v: InboxView = view()) {
   api.hud!({ seq: ++seq, id: inputId(state), hud: state });
   await tick();
   await tick();
+  await frames();
   return api;
 }
+
+// The acknowledgement waits for the fit call and a frame (S4).
+const frames = () => new Promise((r) => setTimeout(r, 60));
 
 const others = (calls: unknown[][]) => calls.filter((c) => c[0] !== "voiceShown");
 
@@ -75,6 +79,133 @@ test("a rendered proposal is acknowledged with its id; other states are not", as
   expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
 });
 
+// jsdom has no layout: give each element a scroll and client height.
+function withHeights(heights: (el: Element) => [number, number]) {
+  const proto = Element.prototype;
+  const orig = { s: Object.getOwnPropertyDescriptor(proto, "scrollHeight")!, c: Object.getOwnPropertyDescriptor(proto, "clientHeight")! };
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get(this: Element) { return heights(this)[0]; } });
+  Object.defineProperty(proto, "clientHeight", { configurable: true, get(this: Element) { return heights(this)[1]; } });
+  return () => {
+    Object.defineProperty(proto, "scrollHeight", orig.s);
+    Object.defineProperty(proto, "clientHeight", orig.c);
+  };
+}
+
+test("a block that is cut off is never acknowledged and cannot be confirmed (F1)", async () => {
+  const restore = withHeights(() => [130, 96]);
+  try {
+    const api = await show({ state: "confirm", proposal: proposal({ question: "a\n".repeat(7) }), proposal_id: 70 });
+    expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+    expect(screen.getByText(/Too long to show here/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Confirm/ }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.keyboard("{Enter}");
+    expect(api.calls.some((c) => c[0] === "voiceConfirm")).toBe(false);
+    cleanup();
+    const api2 = await show({ state: "countdown", proposal: proposal({ level: "countdown" }), proposal_id: 71, action_id: null });
+    expect(api2.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+  } finally {
+    restore();
+  }
+  cleanup();
+  const fits = await show({ state: "confirm", proposal: proposal(), proposal_id: 72 });
+  expect(fits.calls).toContainEqual(["voiceShown", 72]);
+});
+
+// jsdom has no layout: give each element a scroll and client width.
+function withWidths(widths: (el: Element) => [number, number]) {
+  const proto = Element.prototype;
+  const orig = { s: Object.getOwnPropertyDescriptor(proto, "scrollWidth")!, c: Object.getOwnPropertyDescriptor(proto, "clientWidth")! };
+  Object.defineProperty(proto, "scrollWidth", { configurable: true, get(this: Element) { return widths(this)[0]; } });
+  Object.defineProperty(proto, "clientWidth", { configurable: true, get(this: Element) { return widths(this)[1]; } });
+  return () => {
+    Object.defineProperty(proto, "scrollWidth", orig.s);
+    Object.defineProperty(proto, "clientWidth", orig.c);
+  };
+}
+
+test("a label wider than the panel is never acknowledged and cannot be confirmed", async () => {
+  const restore = withWidths((el) => (el.classList.contains("what") ? [300, 100] : [100, 100]));
+  try {
+    const api = await show({ state: "confirm", proposal: proposal({ action: "answer", option: "x".repeat(200) }), proposal_id: 75 });
+    expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+    expect(screen.getByText(/Too long to show here/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Confirm/ }) as HTMLButtonElement).disabled).toBe(true);
+  } finally {
+    restore();
+  }
+  cleanup();
+  const fits = await show({ state: "confirm", proposal: proposal(), proposal_id: 76 });
+  expect(fits.calls).toContainEqual(["voiceShown", 76]);
+});
+
+test("content taller than the panel can be is not acknowledged either (F1)", async () => {
+  // No block overflows, but the content needs 600 - 200 + 300 = 700 px > 420.
+  const restore = withHeights((el) => (el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [300, 200] : el.classList.contains("hud") ? [600, 600] : [0, 0]));
+  try {
+    const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 73 });
+    expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+    expect(screen.getByText(/Too long to show here/)).toBeTruthy();
+    cleanup();
+    // The same blocks with content that fits (160 - 120 + 120 = 160 px, body not scrolling) are acknowledged.
+    const restoreFit = withHeights((el) => (el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [120, 120] : el.classList.contains("hud") ? [160, 160] : [0, 0]));
+    try {
+      const ok = await show({ state: "confirm", proposal: proposal(), proposal_id: 74 });
+      expect(ok.calls).toContainEqual(["voiceShown", 74]);
+    } finally {
+      restoreFit();
+    }
+  } finally {
+    restore();
+  }
+});
+
+// S4: the panel starts at 260 px and grows after the fit call, so a proposal
+// that only fits after the resize is acknowledged after it, not before.
+test("content that fits only after the resize is acknowledged after the resize", async () => {
+  let resized = false;
+  const restore = withHeights((el) =>
+    el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [200, resized ? 200 : 100] : el.classList.contains("hud") ? [300, 300] : [0, 0],
+  );
+  try {
+    const api = fakeApi();
+    let shownBeforeResize: boolean | null = null;
+    api.voiceHudFit = async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      shownBeforeResize = api.calls.some((c) => c[0] === "voiceShown");
+      resized = true;
+    };
+    render(Hud, { api, view: view() });
+    await tick();
+    api.hud!({ seq: ++seq, id: 90, hud: { state: "confirm", proposal: proposal(), proposal_id: 90 } });
+    await vi.waitFor(() => expect(api.calls).toContainEqual(["voiceShown", 90]));
+    expect(shownBeforeResize).toBe(false);
+    expect(screen.queryByText(/Too long to show here/)).toBeNull();
+  } finally {
+    restore();
+  }
+});
+
+test("content still clipped after the resize is not acknowledged and cannot be confirmed", async () => {
+  // The resize never takes effect (it failed): body still scrolls.
+  const restore = withHeights((el) =>
+    el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [200, 100] : el.classList.contains("hud") ? [300, 300] : [0, 0],
+  );
+  try {
+    const api = fakeApi();
+    api.voiceHudFit = async () => {
+      throw new Error("resize failed");
+    };
+    render(Hud, { api, view: view() });
+    await tick();
+    api.hud!({ seq: ++seq, id: 91, hud: { state: "confirm", proposal: proposal(), proposal_id: 91 } });
+    await vi.waitFor(() => expect(screen.getByText(/Too long to show here/)).toBeTruthy());
+    expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+    expect((screen.getByRole("button", { name: /Confirm/ }) as HTMLButtonElement).disabled).toBe(true);
+  } finally {
+    restore();
+  }
+});
+
 test("a proposal replaced before the DOM flush is never acknowledged", async () => {
   const api = fakeApi();
   render(Hud, { api, view: view() });
@@ -84,6 +215,7 @@ test("a proposal replaced before the DOM flush is never acknowledged", async () 
   api.hud!({ seq: ++seq, id: 21, hud: { state: "confirm", proposal: proposal({ option: "Yes" }), proposal_id: 21 } });
   await tick();
   await tick();
+  await frames();
   expect(api.calls.filter((c) => c[0] === "voiceShown")).toEqual([["voiceShown", 21]]);
   api.hud!({ seq: ++seq, id: 22, hud: { state: "countdown", proposal: proposal({ level: "countdown" }), proposal_id: 22, action_id: null } });
   api.hud!({ seq: ++seq, id: null, hud: { state: "speaking", text: "Nothing needs you.", audio: false } });
@@ -118,6 +250,30 @@ test("confirm shows target, action and the whole payload; Enter confirms its id,
   await userEvent.keyboard("{Enter}");
   await userEvent.keyboard("{Escape}");
   expect(others(api.calls)).toEqual([["voiceConfirm", 3], ["voiceCancel", 3]]);
+});
+
+test("a held Enter or digit key does not confirm or pick; a fresh press does (F3)", async () => {
+  const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 80 });
+  await fireEvent.keyDown(window, { key: "Enter", repeat: true });
+  expect(others(api.calls)).toEqual([]);
+  await fireEvent.keyDown(window, { key: "Enter" });
+  expect(others(api.calls)).toEqual([["voiceConfirm", 80]]);
+  cleanup();
+  const pick = await show({ state: "which_one", transcript: "x", choice_id: 81, candidates: [target, { ...target, card: "minos/b", title: "Write docs" }] });
+  await fireEvent.keyDown(window, { key: "2", repeat: true });
+  expect(pick.calls).toEqual([]);
+  await fireEvent.keyDown(window, { key: "2" });
+  expect(pick.calls).toEqual([["voiceChoose", 81, 1]]);
+});
+
+test("a held Enter does not activate a focused Confirm button (S7)", async () => {
+  const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 82 });
+  const confirm = screen.getByRole("button", { name: /Confirm/ });
+  confirm.focus();
+  // The native activation is the default action: it must be cancelled.
+  expect(await fireEvent.keyDown(confirm, { key: "Enter", repeat: true })).toBe(false);
+  expect(await fireEvent.keyDown(window, { key: "2", repeat: true })).toBe(false);
+  expect(others(api.calls)).toEqual([]);
 });
 
 test("confirm and cancel have buttons too", async () => {
@@ -290,6 +446,7 @@ test("the proposal is in the DOM when the acknowledgement fires", async () => {
   api.hud!({ seq: ++seq, id: 65, hud: { state: "confirm", proposal: proposal(), proposal_id: 65 } });
   await tick();
   await tick();
+  await frames();
   expect(seen).toBe(true);
 });
 

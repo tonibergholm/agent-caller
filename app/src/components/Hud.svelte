@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import type { InboxView } from "../lib/bindings/InboxView";
-  import { awaitingDisplay, outcomeText, privacyPane, refusalText, wantsKey, type Hud, type ProposalView } from "../lib/hud";
+  import { MAX_HUD_HEIGHT, awaitingDisplay, outcomeText, privacyPane, refusalText, wantsKey, type Hud, type ProposalView } from "../lib/hud";
   import type { Api } from "../lib/ipc";
 
   /** acd-client's undo window (spec §8): the bar's full width. */
@@ -18,6 +18,10 @@
   // Listening keeps a step that waits on screen, read-only (plan S7).
   const under = $derived<Hud>(hud.state === "listening" && hud.over ? hud.over : hud);
   const listening = $derived(hud.state === "listening");
+  // A block that scrolls, or content taller than the panel can be, hides part
+  // of what a "yes" would approve (F1): such a step is not acknowledged, so the
+  // app refuses it after its display timeout.
+  let tooLong = $state(false);
 
   // Rejections are dropped silently: the console never sees voice text.
   const quiet = (p: Promise<unknown>) => void p.catch(() => {});
@@ -32,16 +36,7 @@
         seen.seq = e.seq;
         hud = e.hud;
         shownId = e.id;
-        const id = awaitingDisplay(e.hud);
-        if (id === null) return;
-        // Acknowledge only after the DOM shows it, and only if it is still
-        // the state on screen: two events before one flush must not
-        // acknowledge a proposal that never rendered (D22).
-        quiet(
-          tick().then(() => {
-            if (seen.seq === e.seq && awaitingDisplay(hud) === id) return api.voiceShown(id);
-          }),
-        );
+        tooLong = false;
       })
       .then(keep, () => {});
     api
@@ -73,12 +68,47 @@
   // body's visible part, plus all of the body's content.
   let main = $state<HTMLElement | null>(null);
   let body = $state<HTMLElement | null>(null);
+  const neededHeight = () => (main && body ? main.scrollHeight - body.clientHeight + body.scrollHeight : 0);
+  // How long after the resize the viewport may take to show the new size. The
+  // app refuses an unacknowledged step after its 1 s display timeout.
+  const FIT_WAIT_MS = 400;
+  const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+  // Everything the user would approve is on screen: the body does not scroll
+  // and no block is cut off.
+  const showsAll = () =>
+    !!body && body.scrollHeight <= body.clientHeight && ![...(main?.querySelectorAll<HTMLElement>(".block") ?? [])].some((b) => b.scrollHeight > b.clientHeight) && !cutSideways();
+  // A word that does not wrap runs past the edge: the body and blocks clip it
+  // and an option label (`.what`) overflows. Not visible, so not shown.
+  const cutSideways = () => [body, ...(main?.querySelectorAll<HTMLElement>(".block, .what") ?? [])].some((e) => !!e && e.scrollWidth > e.clientWidth);
+
   $effect(() => {
     void hud;
     const seq = seen.seq;
-    void tick().then(() => {
+    // A step that waits for input is acknowledged (D22), but only once the
+    // whole of it is visible: after the resize took effect, in the real
+    // viewport. Two events before one flush acknowledge only the last.
+    const id = awaitingDisplay(hud);
+    void tick().then(async () => {
       if (!main || !body || seen.seq !== seq) return;
-      quiet(api.voiceHudFit(seq, main.scrollHeight - body.clientHeight + body.scrollHeight));
+      const needed = neededHeight();
+      // A failed resize shows up below as a clipped viewport.
+      const fitted = api.voiceHudFit(seq, needed).catch(() => {});
+      if (id === null) return;
+      if (needed > MAX_HUD_HEIGHT || ![...main.querySelectorAll<HTMLElement>(".block")].every((b) => b.scrollHeight <= b.clientHeight) || cutSideways()) {
+        tooLong = true;
+        return;
+      }
+      await fitted;
+      const end = Date.now() + FIT_WAIT_MS;
+      for (;;) {
+        await nextFrame();
+        if (seen.seq !== seq || awaitingDisplay(hud) !== id) return;
+        if (showsAll()) return void quiet(api.voiceShown(id));
+        if (Date.now() >= end) {
+          tooLong = true;
+          return;
+        }
+      }
     });
   });
 
@@ -116,6 +146,9 @@
   }
 
   function key(e: KeyboardEvent) {
+    // A held key must not act: only a fresh press confirms or picks (F3).
+    // preventDefault too: a focused button would still activate natively.
+    if (e.repeat && (e.key === "Enter" || /^[1-9]$/.test(e.key))) return e.preventDefault();
     // Enter on a focused button activates that button natively (Cancel must not confirm).
     if (e.key === "Enter" && e.target instanceof HTMLElement && e.target.closest("button")) return;
     if (!wantsKey(hud) || e.isComposing || e.keyCode === 229 || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -127,7 +160,7 @@
     if (e.key === "Escape") {
       e.preventDefault();
       cancel();
-    } else if (e.key === "Enter" && hud.state === "confirm") {
+    } else if (e.key === "Enter" && hud.state === "confirm" && !tooLong) {
       e.preventDefault();
       confirmStep(hud.proposal_id);
     } else if (hud.state === "which_one" && /^[1-9]$/.test(e.key)) {
@@ -165,6 +198,7 @@
         {#if p.question}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block" tabindex="0" aria-label="Request">{p.question}</pre>{/if}
         {#if p.rule}<p class="label">Always allow, from now on:</p><!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block rule" tabindex="0" aria-label="Rule to remember">{p.rule}</pre>{/if}
         {#if p.text}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block payload" tabindex="0" aria-label="Text to send">{p.text}</pre>{/if}
+        {#if tooLong}<p class="status error">Too long to show here. Nothing is sent. Answer in the panel.</p>{/if}
         {#if under.state === "sending"}
           <p class="status">{under.too_late_to_cancel ? "Already sent. It can't be undone." : "Sent. Waiting for the result."}</p>
         {/if}
@@ -199,7 +233,7 @@
     {#if hud.state === "confirm"}
       {@const id = hud.proposal_id}
       <div class="buttons">
-        <button class="primary" onclick={() => confirmStep(id)}>Confirm <kbd>⏎</kbd></button>
+        <button class="primary" disabled={tooLong} onclick={() => confirmStep(id)}>Confirm <kbd>⏎</kbd></button>
         <button onclick={cancel}>Cancel <kbd>Esc</kbd></button>
       </div>
     {:else if hud.state === "countdown"}
@@ -288,13 +322,17 @@
     color: var(--text-muted);
   }
   .what {
+    min-width: 0;
     margin: 0;
+    overflow-wrap: anywhere;
     font-size: 15px;
     font-weight: 600;
     letter-spacing: -0.015em;
   }
   .label {
+    min-width: 0;
     margin: 0;
+    overflow-wrap: anywhere;
     font-size: 11px;
     color: var(--amber-text);
   }

@@ -26,8 +26,37 @@ test("adding a machine never touches a secret in the webview", async () => {
   expect(screen.getByText("devbox.ts.net:47800")).toBeTruthy();
   expect(container.querySelector("input[type=password]")).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: /add from clipboard/i }));
-  expect(api.calls).toContainEqual(["importPairingFromClipboard"]);
+  expect(api.calls).toContainEqual(["previewPairingFromClipboard"]);
   expect(screen.getByText(/acd pair/)).toBeTruthy();
+});
+
+test("Add from clipboard shows the host and pin first and saves only on Add machine (F9)", async () => {
+  const api = fakeApi();
+  render(Settings, { api });
+  await userEvent.click(await screen.findByRole("button", { name: /add from clipboard/i }));
+  expect(await screen.findByText("devbox.ts.net:47800")).toBeTruthy();
+  expect(screen.getByText("sha256:AbCdEfGh…")).toBeTruthy();
+  expect(api.calls.some((c) => c[0] === "importPairingFromClipboard")).toBe(false);
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(api.calls.some((c) => c[0] === "importPairingFromClipboard")).toBe(false);
+  await userEvent.click(screen.getByRole("button", { name: /add from clipboard/i }));
+  await userEvent.click(await screen.findByRole("button", { name: "Add machine" }));
+  expect(api.calls).toContainEqual([
+    "importPairingFromClipboard",
+    { host: "devbox.ts.net", port: 47800, pin: "sha256:AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE" },
+  ]);
+  expect(await screen.findByText("Added This Mac")).toBeTruthy();
+});
+
+test("a rejected import after the preview is shown", async () => {
+  const api = fakeApi();
+  api.importPairingFromClipboard = async () => {
+    throw "The clipboard changed";
+  };
+  render(Settings, { api });
+  await userEvent.click(await screen.findByRole("button", { name: /add from clipboard/i }));
+  await userEvent.click(await screen.findByRole("button", { name: "Add machine" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("The clipboard changed");
 });
 
 test("rename and remove", async () => {
@@ -213,7 +242,7 @@ test("rejected rename, remove, retry, import and show-idle are each shown", asyn
     ["renameMachine", "Rename", "name taken"],
     ["removeMachine", "Remove", "locked"],
     ["retryMachine", "Retry", "no such machine"],
-    ["importPairingFromClipboard", /add from clipboard/i, "clipboard empty"],
+    ["previewPairingFromClipboard", /add from clipboard/i, "clipboard empty"],
   ];
   for (const [method, button, reason] of cases) {
     const api = fakeApi({ machines: [devbox()] });
@@ -289,6 +318,7 @@ test("a successful import names the new machine and clears a previous error", as
   const api = fakeApi();
   render(Settings, { api });
   await userEvent.click(await screen.findByRole("button", { name: /add from clipboard/i }));
+  await userEvent.click(await screen.findByRole("button", { name: "Add machine" }));
   expect(await screen.findByText("Added This Mac")).toBeTruthy();
 });
 

@@ -42,7 +42,14 @@ pub trait PushControl: Send + Sync {
     /// block, and it takes no argument on purpose: nothing about the request
     /// can reach the sender through it.
     fn request_opened(&self);
-    async fn register(&self, client_id: &str, reg: PushRegistration) -> Result<(), PushFailure>;
+    /// `generation` is the token generation the commanding session
+    /// authenticated under: a registration from a revoked one is refused.
+    async fn register(
+        &self,
+        client_id: &str,
+        generation: u64,
+        reg: PushRegistration,
+    ) -> Result<(), PushFailure>;
     async fn unregister(&self, client_id: &str) -> Result<(), PushFailure>;
     async fn status(&self, client_id: &str) -> PushInfo;
 }

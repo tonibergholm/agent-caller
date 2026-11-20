@@ -592,12 +592,10 @@ mod tests {
         assert_eq!(obs.answer_path, AnswerPath::T3);
     }
 
-    /// Accepted residual (follow-ups, 2026-11-03): U+034F and similar pass
-    /// the escaper unchanged. Pinned so a change shows.
     #[test]
-    fn a_combining_grapheme_joiner_in_a_command_passes_unchanged() {
-        let (shown, cut) = command_detail("ls\u{34f}x");
-        assert_eq!((shown.as_str(), cut), ("ls\u{34f}x", false));
+    fn a_combining_grapheme_joiner_in_a_command_is_escaped() {
+        let (shown, cut) = command_detail("ls\u{34f}x\u{3164}y");
+        assert_eq!((shown.as_str(), cut), ("ls\\u{34f}x\\u{3164}y", false));
     }
 
     #[test]

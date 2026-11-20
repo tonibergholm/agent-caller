@@ -171,7 +171,7 @@ impl Chain {
 
     fn with(relay: RealRelay, url: RelayUrl, sender: WakeSender) -> Chain {
         let dir = private_dir();
-        let push = Push::new(&url, sender, Store::load(dir.path()), Settings { min_interval: Duration::ZERO, ..Settings::default() });
+        let push = Push::new(&url, sender, Store::load(dir.path(), &super::store::client_fingerprint("e2e-token")), Settings { min_interval: Duration::ZERO, ..Settings::default() });
         let core = Core::new(test_machine(), vec![]);
         assert!(core.set_push(push.clone()));
         push.spawn();

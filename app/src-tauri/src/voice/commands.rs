@@ -12,10 +12,14 @@ pub fn voice_get_settings(voice: State<'_, VoiceState>) -> VoiceSettings {
 
 #[tauri::command]
 pub fn voice_set_settings(
+    window: WebviewWindow,
     app: AppHandle,
     voice: State<'_, VoiceState>,
     settings: VoiceSettings,
 ) -> Result<VoiceSettings, String> {
+    if window.label() != "settings" {
+        return Err("Not available from this window.".into());
+    }
     if !settings.speech_voice_is_valid() {
         return Err("Unknown voice".into());
     }
@@ -73,14 +77,20 @@ pub fn voice_set_settings(
 }
 
 #[tauri::command]
-pub fn voice_publish_presentation(voice: State<'_, VoiceState>, presentation: Presentation) {
+pub fn voice_publish_presentation(window: WebviewWindow, voice: State<'_, VoiceState>, presentation: Presentation) {
+    if window.label() != "panel" {
+        return;
+    }
     voice.controller.publish(presentation);
 }
 
 /// The step-1 trigger: typed text routed as a transcript. Errors are
 /// static strings; the text never appears in one.
 #[tauri::command]
-pub async fn voice_text_input(voice: State<'_, VoiceState>, text: String) -> Result<(), String> {
+pub async fn voice_text_input(window: WebviewWindow, voice: State<'_, VoiceState>, text: String) -> Result<(), String> {
+    if window.label() != "panel" {
+        return Err("Not available from this window.".into());
+    }
     let controller = voice.controller.clone();
     controller
         .text_input(text, crate::panel::is_visible())

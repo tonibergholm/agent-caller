@@ -114,7 +114,7 @@ start_logger() {
 stop_logger() { kill_pidfile "$E2E_ROOT/logger.pid" "$LOGGER_RE"; }
 epoch_now() { python3 -c 'import time;print(time.time())'; }
 # hookpost: a synthetic Claude http hook (see hookpost.py); clearly not a live Claude.
-hp() { python3 "$E2E_DIR/hookpost.py" --settings "$CLAUDE_CFG/settings.json" --port "$HOOK_PORT" "$@"; }
+hp() { python3 "$E2E_DIR/hookpost.py" --config-dir "$ACD_CONFIG_DIR" --port "$HOOK_PORT" "$@"; }
 # jq over the inbox log: jl '<filter>' prints matching server messages as compact lines.
 jl() { jq -c "select(.dir==\"in\" and .who==\"logger\") | $1" "$INBOX_LOG"; }
 # The user's own acd, read-only status.  ACD_CONFIG_DIR is exported for the scratch daemon, so unset it.

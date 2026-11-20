@@ -46,6 +46,9 @@ pub struct Guard {
     pub conn: ConnStamp,
     pub agent_id: String,
     pub request: Option<(String, u64)>,
+    /// The agent's incarnation as the user saw it. A follow-up is refused
+    /// if another agent has taken the id since.
+    pub incarnation: Option<String>,
     /// A send whose target the transcript named while it was send-only
     /// (D7): it may still reach an idle agent the panel hides.
     pub named_send_only: bool,
@@ -558,6 +561,7 @@ fn operation(snapshot: &Snapshot, p: &Proposal) -> Option<Enqueue> {
         conn: frozen.conn?,
         agent_id: frozen.agent_id.clone(),
         request: frozen.pending.as_ref().map(|r| (r.id.clone(), r.revision)),
+        incarnation: frozen.incarnation.clone(),
         named_send_only: matches!(p.step, Step::Send { .. })
             && p.provenance == Some(Provenance::Named)
             && snapshot.visibility(frozen) == Visibility::SendOnly,

@@ -36,6 +36,7 @@ pub fn run() {
             commands::set_show_subagents,
             commands::set_show_hook_only,
             commands::list_machines,
+            commands::preview_pairing_from_clipboard,
             commands::import_pairing_from_clipboard,
             commands::rename_machine,
             commands::remove_machine,
@@ -61,6 +62,7 @@ pub fn run() {
             import_dev_pairing(&inbox);
             app.manage(AppState {
                 inbox: inbox.clone(),
+                pairing: Default::default(),
             });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

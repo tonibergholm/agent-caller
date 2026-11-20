@@ -226,12 +226,16 @@ pub fn machine_entry_views(
         .collect()
 }
 
-pub fn card_key(machine_key: &str, agent_id: &str) -> String {
-    format!("{machine_key}/{agent_id}")
-}
-
-pub fn split_card_key(key: &str) -> Option<(&str, &str)> {
-    key.split_once('/')
+/// The key of one agent's card. The incarnation is part of it: a replacement
+/// under the same id is a new card, so a draft keyed by card key (a reply
+/// being typed) can never reach the agent that took the old one's place.
+/// Clients treat the key as opaque; only `Inbox::find_card` reads the
+/// machine part, and it resolves the agent by rebuilding the key.
+pub fn card_key(machine_key: &str, agent_id: &str, incarnation: Option<&str>) -> String {
+    match incarnation {
+        Some(i) => format!("{machine_key}/{agent_id}#{i}"),
+        None => format!("{machine_key}/{agent_id}"),
+    }
 }
 
 /// The card notice for a daemon error. Classified by code only: the
@@ -391,7 +395,7 @@ pub fn build_view(input: &ViewInput<'_>) -> InboxView {
             if !input.show_subagents && agent.role == acd_protocol::AgentRole::Subagent {
                 continue;
             }
-            let key = card_key(&entry.key, &agent.id);
+            let key = card_key(&entry.key, &agent.id, agent.incarnation.as_deref());
             let action = input.actions.iter().find(|a| a.card_key == key).cloned();
             // A hook-only agent without a request is noise, unless a
             // countdown runs on it (same rule as an idle card).
@@ -955,10 +959,12 @@ mod tests {
         assert_eq!(c.offline_since_ms, None);
     }
     #[test]
-    fn card_keys_split_at_the_first_slash() {
-        let k = card_key("m1", "herdr:abc:w1:p2");
-        assert_eq!(split_card_key(&k), Some(("m1", "herdr:abc:w1:p2")));
-        assert_eq!(split_card_key("noslash"), None);
+    fn card_key_follows_the_incarnation() {
+        let k = card_key("m1", "herdr:abc:w1:p2", Some("7"));
+        assert_ne!(k, card_key("m1", "herdr:abc:w1:p2", Some("8")));
+        assert_ne!(k, card_key("m1", "herdr:abc:w1:p2", None));
+        assert_eq!(k, card_key("m1", "herdr:abc:w1:p2", Some("7")));
+        assert_eq!(card_key("m1", "a", None), "m1/a");
     }
     /// Final review B3: a daemon's message text never reaches a notice;
     /// the fallback is classified by code.

@@ -457,6 +457,7 @@ async fn lost_result_is_resent_identically() {
             acd_client::commands::Command::Send {
                 agent_id: "a".into(),
                 text: "hi".into(),
+                incarnation: None,
             },
             None,
         )
@@ -638,6 +639,7 @@ async fn cancellation_interrupts_backpressured_socket_writes() {
                 acd_client::commands::Command::Send {
                     agent_id: "a".into(),
                     text: "x".repeat(256 * 1024),
+                    incarnation: None,
                 },
                 None,
             )

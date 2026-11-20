@@ -57,6 +57,7 @@ impl Txn<'_> {
 fn apply_bounded(registry: &mut Registry, obs: Observation) -> Vec<Change> {
     let published = match &obs {
         Observation::AgentUpsert(a) => Some(&a.id),
+        Observation::AgentIncarnation { agent_id, .. } => Some(agent_id),
         Observation::RequestSeen(r) => Some(&r.agent_id),
         Observation::AgentMigrated { to, .. } => Some(to),
         _ => None,
@@ -224,14 +225,23 @@ impl Core {
         (initial, rx)
     }
 
-    /// `handle_from` for a command that came in on the local socket.
+    /// `handle_from` for a command that came in on the local socket, from a
+    /// session of token generation 0.
     pub async fn handle(&self, client_id: &str, msg: ClientMessage) -> CommandResult {
-        self.handle_from(client_id, Origin::Local, msg).await
+        self.handle_from(client_id, Origin::Local, 0, msg).await
     }
 
     /// Runs one command. `origin` is the connection's source, which the
     /// idempotency table charges alongside `client_id` (the peer chooses that).
-    pub async fn handle_from(&self, client_id: &str, origin: Origin, msg: ClientMessage) -> CommandResult {
+    /// `generation` is the token generation the session authenticated under;
+    /// `push.register` carries it to the store, which refuses a revoked one.
+    pub async fn handle_from(
+        &self,
+        client_id: &str,
+        origin: Origin,
+        generation: u64,
+        msg: ClientMessage,
+    ) -> CommandResult {
         if let ClientMessage::Hello { .. } | ClientMessage::Ping { .. } = msg {
             let id = msg.command_id().unwrap_or("");
             return CommandResult::err(id, ErrorCode::BadRequest, "not a command");
@@ -260,7 +270,7 @@ impl Core {
                 );
             }
             let phase = Mutex::new(Phase::Start);
-            return self.execute(client_id, &id, msg, &phase).await.0;
+            return self.execute(client_id, generation, &id, msg, &phase).await.0;
         }
         let begin = self
             .inner
@@ -305,7 +315,7 @@ impl Core {
             phase: Mutex::new(Phase::Start),
             armed: true,
         };
-        let (result, delivery) = self.execute(client_id, &id, msg, &guard.phase).await;
+        let (result, delivery) = self.execute(client_id, generation, &id, msg, &guard.phase).await;
         guard.armed = false;
         // Only a command that reached the agent is cached (exactly-once). Any
         // refusal changed no state and is cheap to recompute, so it releases
@@ -324,6 +334,7 @@ impl Core {
     async fn execute(
         &self,
         client_id: &str,
+        generation: u64,
         id: &str,
         msg: ClientMessage,
         phase: &Mutex<Phase>,
@@ -349,6 +360,14 @@ impl Core {
                             Delivery::Attempted,
                         );
                     }
+                };
+                // The daemon always advertises `answer.revision`: an answer that
+                // omits it would skip the changed-content check (PROTOCOL.md §4).
+                let Some(revision) = revision else {
+                    return (
+                        CommandResult::err(id, ErrorCode::BadRequest, ErrorCode::BadRequest.describe()),
+                        Delivery::Attempted,
+                    );
                 };
                 // Route first, outside the lock: adapter callbacks may panic, and a
                 // panic here (Phase::Start) must leave nothing claimed.
@@ -376,7 +395,7 @@ impl Core {
                     .cloned();
                 let request = {
                     let mut st = self.inner.lock().unwrap();
-                    match st.registry.claim(&request_id, answer.clone(), revision) {
+                    match st.registry.claim(&request_id, answer.clone(), Some(revision)) {
                         Ok((req, changes)) => {
                             if adapter.is_none() || req.answer_path != path {
                                 // Undo without publishing: clients never see answering -> open churn.
@@ -424,13 +443,13 @@ impl Core {
                     }
                 }
             }
-            ClientMessage::AgentSend { agent_id, text, .. } => {
+            ClientMessage::AgentSend { agent_id, text, incarnation, .. } => {
                 let agent = match self
                     .inner
                     .lock()
                     .unwrap()
                     .registry
-                    .check_send(&agent_id, &text)
+                    .check_send(&agent_id, &text, incarnation.as_deref())
                 {
                     Ok(a) => a,
                     Err(code) => {
@@ -505,7 +524,7 @@ impl Core {
                         platform,
                         expires_at,
                     };
-                    match push.register(client_id, reg).await {
+                    match push.register(client_id, generation, reg).await {
                         Ok(()) => CommandResult::ok(id),
                         Err(f) => CommandResult::err(id, f.code, f.message),
                     }
@@ -566,7 +585,7 @@ fn check_limits(msg: &ClientMessage) -> Result<(), &'static str> {
             text,
             ..
         } => (vec![id, request_id], text.as_deref()),
-        ClientMessage::AgentSend { id, agent_id, text } => (vec![id, agent_id], Some(text)),
+        ClientMessage::AgentSend { id, agent_id, text, .. } => (vec![id, agent_id], Some(text)),
         ClientMessage::AgentMarkSeen { id, agent_id } => (vec![id, agent_id], None),
         ClientMessage::PushRegister {
             id, relay, handle, ..

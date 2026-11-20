@@ -246,14 +246,16 @@ impl SourcePool {
     }
 
     fn try_acquire(self: &Arc<Self>, source: std::net::IpAddr) -> Option<SourceSlot> {
-        let source = source.to_canonical();
+        let source = crate::tls::source_key(source);
         let mut held = self.held.lock().unwrap();
         let total: usize = held.values().sum();
         let mine = held.get(&source).copied().unwrap_or(0);
         let reserve = PREAUTH_RESERVE.min(self.capacity.saturating_sub(1));
+        // Loopback is never "a source holding none": the reserve is for peers
+        // a local account cannot impersonate.
         if mine >= crate::tls::MAX_UNAUTHENTICATED_PER_SOURCE
             || total >= self.capacity
-            || (mine > 0 && total >= self.capacity - reserve)
+            || ((mine > 0 || source.is_loopback()) && total >= self.capacity - reserve)
         {
             return None;
         }
@@ -597,7 +599,7 @@ async fn run_command<P: Send>(
         // ready in the same instant as a rotation is dropped, not completed.
         biased;
         () = revoked(&mut gen_rx, generation) => {}
-        result = core.handle_from(&client, origin, command) => {
+        result = core.handle_from(&client, origin, generation, command) => {
             drop(permits);
             let _ = reply(&out, &ServerMessage::Result(result)).await;
         }
@@ -649,6 +651,29 @@ mod source_pool_tests {
         assert!(pool.try_acquire(ip(7)).is_some(), "a source holding none is admitted");
         held.clear();
         assert!(pool.try_acquire(ip(1)).is_some());
+    }
+
+    /// Any local account can bind any 127.x.y.z: all of loopback is one source.
+    #[test]
+    fn every_loopback_address_is_one_source() {
+        let pool = Arc::new(SourcePool::new(8));
+        let aliases: Vec<IpAddr> = ["127.0.0.1", "127.0.0.2", "127.7.8.9", "::1", "::ffff:127.0.0.3"]
+            .iter()
+            .map(|a| a.parse().unwrap())
+            .collect();
+        let held: Vec<_> = aliases.iter().filter_map(|a| pool.try_acquire(*a)).collect();
+        assert_eq!(held.len(), 2, "five loopback addresses hold two slots in all");
+        assert!(pool.try_acquire(ip(1)).is_some(), "a network source is not locked out");
+    }
+
+    /// The reserve is for sources a local account cannot impersonate.
+    #[test]
+    fn loopback_does_not_take_the_reserve() {
+        let pool = Arc::new(SourcePool::new(8));
+        let _others: Vec<_> = (1..=6).filter_map(|n| pool.try_acquire(ip(n))).collect();
+        assert!(pool.try_acquire("127.0.0.1".parse().unwrap()).is_none(), "pool at 6/8: loopback holds none, still refused");
+        assert!(pool.try_acquire(ip(7)).is_some(), "a network source holding none takes the reserve");
+        assert!(pool.try_acquire(ip(8)).is_some());
     }
 
     #[test]
@@ -704,7 +729,7 @@ mod revocation_tests {
         let cmd = ClientMessage::RequestAnswer {
             id: "c".into(),
             request_id: rid,
-            revision: None,
+            revision: Some(1),
             option_id: Some("allow".into()),
             text: None,
         };

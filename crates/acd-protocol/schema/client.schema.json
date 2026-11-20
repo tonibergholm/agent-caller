@@ -161,6 +161,13 @@
         "id": {
           "type": "string"
         },
+        "incarnation": {
+          "description": "The `incarnation` of the agent as the client last saw it. Required\nwhen the agent publishes one; a mismatch or a missing value is\n`agent_gone`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "text": {
           "type": "string"
         },

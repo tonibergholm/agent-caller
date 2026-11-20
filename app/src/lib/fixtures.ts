@@ -151,6 +151,11 @@ export function fakeApi(
     hide: rec("hide", undefined),
     openSettings: rec("openSettings", undefined),
     listMachines: rec("listMachines", opts.machines ?? []),
+    previewPairingFromClipboard: rec("previewPairingFromClipboard", {
+      host: "devbox.ts.net",
+      port: 47800,
+      pin: "sha256:AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE",
+    }),
     importPairingFromClipboard: rec("importPairingFromClipboard", machine),
     renameMachine: rec("renameMachine", undefined),
     removeMachine: rec("removeMachine", undefined),

@@ -293,68 +293,31 @@ async fn one_source_cannot_lock_the_local_socket_out() {
     assert!(hello_ok(&mut local).await);
 }
 
-/// Saturates the whole network pool (8 slots) from eight sources, so the
-/// per-source cap cannot be what protects the local socket. Fails if the
-/// local socket shares the network pool.
+/// On Linux any local account can bind any 127.x.y.z. Eight loopback
+/// aliases are one source: they hold two slots in all, so they can neither
+/// fill the network pool nor lock the local socket out. Fails if the pools
+/// count each alias as a source of its own.
 #[tokio::test]
-async fn a_saturated_network_pool_leaves_the_local_socket_usable() {
+async fn loopback_aliases_are_one_source_and_cannot_fill_the_network_pool() {
     let sources: Vec<String> = (2..10).map(|i| format!("127.0.0.{i}")).collect();
-    let all: Vec<&str> = sources.iter().map(String::as_str).chain(["127.0.0.10"]).collect();
+    let all: Vec<&str> = sources.iter().map(String::as_str).collect();
     if !can_bind(&all) {
         return;
     }
     let s = serve().await;
     let mut held = Vec::new();
     for src in &sources {
-        let h = idle_tls(s.tcp, src, 1).await;
-        assert_eq!(h.len(), 1, "{src} holds one slot");
-        held.extend(h);
+        held.extend(idle_tls(s.tcp, src, 1).await);
     }
-    assert_eq!(held.len(), 8);
-    // Saturated now: a fresh source (under its own cap) gets HTTP 503.
-    assert_eq!(
-        open_tls_result(s.tcp, "127.0.0.10").await.err().map(|r| format!("{r:?}")),
-        Some("Http(503)".to_string()),
-        "a full network pool answers the upgrade with HTTP 503"
+    assert_eq!(held.len(), 2, "eight loopback aliases hold two slots in all");
+    assert!(
+        matches!(open_tls_result(s.tcp, "127.0.0.9").await, Err(Refused::Connection(_))),
+        "another alias is the same source: refused before TLS"
     );
     let mut local = open_unix(&s.unix)
         .await
-        .expect("local upgrade is not refused while the network pool is full");
+        .expect("local upgrade is not refused");
     assert!(hello_ok(&mut local).await);
-}
-
-/// Four sources holding two slots each used to take all 8 post-upgrade slots
-/// and lock out every new client. The last two slots are reserved for sources
-/// holding none, so a fifth source still gets in. Fails if the router goes
-/// back to a plain semaphore for the network pool.
-///
-/// Event-driven: the hello gate is never opened, so no hello timeout runs,
-/// and the other deadlines are a day, so nothing is released by time. Each
-/// step awaits its upgrade result directly.
-#[tokio::test]
-async fn four_sources_at_their_cap_cannot_lock_a_fifth_source_out() {
-    let sources = ["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5"];
-    if !can_bind(&["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5", "127.0.0.6"]) {
-        return;
-    }
-    const NEVER: Duration = Duration::from_secs(24 * 60 * 60);
-    let (_gate_stays_closed, gate) = watch::channel(false);
-    let s = serve_opts(NEVER, NEVER, NEVER, Some(gate)).await;
-    let mut held = Vec::new();
-    for src in sources {
-        held.push(open_tls_inner(s.tcp, src).await.expect("first slot"));
-        match open_tls_inner(s.tcp, src).await {
-            Ok(ws) => held.push(ws),
-            Err(r) => assert!(
-                src == "127.0.0.5" && matches!(r, Refused::Http(503)),
-                "only the fourth source's second connection is refused, with 503: {src} {r:?}"
-            ),
-        }
-    }
-    assert_eq!(held.len(), 7, "the fourth source cannot take a reserved slot for its second connection");
-    open_tls_inner(s.tcp, "127.0.0.6")
-        .await
-        .expect("a source with nothing outstanding takes a reserved slot");
 }
 
 #[tokio::test]
@@ -368,36 +331,6 @@ async fn one_source_holds_at_most_two_pre_auth_connections() {
         Err(Refused::Connection(_)) => {}
         other => panic!("expected a pre-TLS connection failure, got {:?}", other.map(|_| "ws")),
     }
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn one_source_cannot_lock_another_source_out() {
-    let s = serve().await;
-    let held = idle_tls(s.tcp, "127.0.0.1", 8).await;
-    assert_eq!(held.len(), 2, "the attack is holding its slots");
-    let mut other = open_tls(s.tcp, "127.0.0.2")
-        .await
-        .expect("another source is not refused");
-    assert!(hello_ok(&mut other).await);
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn idle_raw_tcp_from_one_source_does_not_block_another_tls_handshake() {
-    let s = serve().await;
-    let mut raw = Vec::new();
-    for _ in 0..32 {
-        let sock = TcpSocket::new_v4().unwrap();
-        sock.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        if let Ok(c) = within("raw connect", sock.connect(s.tcp)).await {
-            raw.push(c);
-        }
-    }
-    let mut other = open_tls(s.tcp, "127.0.0.2")
-        .await
-        .expect("another source's handshake is not starved");
-    assert!(hello_ok(&mut other).await);
 }
 
 /// The slots come back when the server cuts the idle connections at the

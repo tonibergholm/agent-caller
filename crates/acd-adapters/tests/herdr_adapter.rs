@@ -46,6 +46,17 @@ async fn rig_with_timing(agents: &[(&str, &str, &str)], poll: Duration) -> Rig {
 }
 
 async fn rig_with_keys(agents: &[(&str, &str, &str)], poll: Duration, keys: KeysTiming) -> Rig {
+    let timing = Timing {
+        list_idle: Duration::from_millis(300),
+        list_blocked: Duration::from_millis(100),
+        backoff_max: Duration::from_millis(200),
+        fallback_after: Duration::from_millis(200),
+        poll,
+    };
+    rig_with(agents, timing, keys).await
+}
+
+async fn rig_with(agents: &[(&str, &str, &str)], timing: Timing, keys: KeysTiming) -> Rig {
     let home = tempfile::Builder::new()
         .prefix("acd")
         .tempdir_in("/tmp")
@@ -56,13 +67,6 @@ async fn rig_with_keys(agents: &[(&str, &str, &str)], poll: Duration, keys: Keys
     for (p, a, s) in agents {
         fake.set_agent(fake_agent(p, a, s));
     }
-    let timing = Timing {
-        list_idle: Duration::from_millis(300),
-        list_blocked: Duration::from_millis(100),
-        backoff_max: Duration::from_millis(200),
-        fallback_after: Duration::from_millis(200),
-        poll,
-    };
     let cfg = HerdrConfig {
         enabled: true,
         home: home.path().into(),
@@ -130,6 +134,239 @@ async fn follow_up_errors_map_to_not_delivered() {
         r.adapter.send(&gone, "hi").await,
         Err(DeliverError::NotDelivered(ErrorCode::AgentGone))
     ));
+    assert!(r.fake.prompts().is_empty());
+}
+
+/// A reconciler that never looks again on its own: the test decides what it sees.
+async fn quiet_rig(agents: &[(&str, &str, &str)]) -> Rig {
+    let hour = Duration::from_secs(3600);
+    let timing = Timing {
+        list_idle: hour,
+        list_blocked: hour,
+        backoff_max: hour,
+        fallback_after: hour,
+        poll: hour,
+    };
+    rig_with(agents, timing, KeysTiming::default()).await
+}
+
+#[tokio::test]
+async fn follow_up_never_reaches_another_agent_in_the_same_pane() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    // Claude exits and Codex starts in pane w1:p1 before the reconciler looks.
+    let mut codex = fake_agent("w1:p1", "codex", "idle");
+    codex["terminal_id"] = "term_other".into();
+    r.fake.set_agent(codex);
+    let res = r.adapter.send(&a, "run the tests").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty(), "the reply reached the new agent");
+    // The reconciler is asked to look, so clients see the replacement.
+    until("agent republished", || {
+        (r.adapter.panes().read().unwrap()[&a.id].kind == AgentKind::Codex).then_some(())
+    })
+    .await;
+}
+
+/// The original finding: Claude exits, Codex starts in the same pane, the
+/// reconciler republishes under the same id, and a reply composed for Claude
+/// must not reach Codex.
+#[tokio::test]
+async fn a_reply_for_the_old_agent_is_refused_after_a_republish_under_the_same_id() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let old = agent(&r);
+    let seen = old.incarnation.clone().expect("a herdr agent publishes its incarnation");
+    let mut codex = fake_agent("w1:p1", "codex", "idle");
+    codex["terminal_id"] = "term_other".into();
+    r.fake.set_agent(codex);
+    let pane = r.adapter.panes().read().unwrap()[&old.id].clone();
+    pane.hints
+        .try_send(acd_adapters::herdr::reconciler::Hint::Pane("w1:p1".into()))
+        .unwrap();
+    let new = until("republished", || {
+        let a = agent(&r);
+        (a.kind == AgentKind::Codex).then_some(a)
+    })
+    .await;
+    assert_eq!(new.id, old.id, "the id is the pane's");
+    assert_ne!(new.incarnation.as_ref(), Some(&seen), "the incarnation tells them apart");
+    let send = |id: &str, incarnation: Option<String>| ClientMessage::AgentSend {
+        id: id.into(),
+        agent_id: old.id.clone(),
+        text: "run the tests".into(),
+        incarnation,
+    };
+    // Through the core: the stale value and a missing one are refused.
+    for (id, inc) in [("s1", Some(seen.clone())), ("s2", None)] {
+        let res = r.core.handle("c", send(id, inc)).await;
+        assert_eq!(res.error_code(), Some(ErrorCode::AgentGone), "{res:?}");
+    }
+    // Through the adapter alone, with the Agent the client last saw.
+    let res = r.adapter.send(&old, "run the tests").await;
+    assert!(matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))), "{res:?}");
+    assert!(r.fake.prompts().is_empty(), "nothing was typed into the new agent");
+    // The current incarnation is accepted.
+    let res = r.core.handle("c", send("s3", new.incarnation.clone())).await;
+    assert!(res.ok, "{res:?}");
+    assert_eq!(r.fake.prompts().len(), 1);
+}
+
+/// The reconciler replaces the pane while the send's screen read is in
+/// flight: the checks before the read passed for the old agent, so the prompt
+/// must be refused at the last look at the pane map.
+#[tokio::test]
+async fn a_pane_replaced_during_the_screen_read_gets_no_prompt() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let old = agent(&r);
+    let gate = r.fake.block_next("agent.read");
+    let send = tokio::spawn({
+        let adapter = r.adapter.clone();
+        let old = old.clone();
+        async move { adapter.send(&old, "run the tests").await }
+    });
+    gate.arrived().await; // the screen read is held
+    r.adapter.panes().write().unwrap().get_mut(&old.id).unwrap().incarnation += 1;
+    gate.release();
+    let res = send.await.unwrap();
+    assert!(matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))), "{res:?}");
+    assert!(r.fake.prompts().is_empty(), "nothing was typed into the replacement");
+}
+
+/// herdr replaces the agent while the send's screen read is in flight and the
+/// reconciler has not updated the pane map: only a live check made after the
+/// read sees it.
+#[tokio::test]
+async fn an_agent_replaced_during_the_screen_read_gets_no_prompt() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let old = agent(&r);
+    let gate = r.fake.block_next("agent.read");
+    let send = tokio::spawn({
+        let adapter = r.adapter.clone();
+        let old = old.clone();
+        async move { adapter.send(&old, "run the tests").await }
+    });
+    gate.arrived().await; // the screen read is held
+    let mut codex = fake_agent("w1:p1", "codex", "idle");
+    codex["terminal_id"] = "term_other".into();
+    r.fake.set_agent(codex);
+    gate.release();
+    let res = send.await.unwrap();
+    assert!(matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))), "{res:?}");
+    assert!(r.fake.prompts().is_empty(), "nothing was typed into the replacement");
+    assert!(r.fake.calls().iter().all(|(m, _)| m != "agent.prompt"));
+}
+
+#[tokio::test]
+async fn a_replacement_showing_a_dialog_reports_the_old_agent_gone_not_busy() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let old = agent(&r);
+    let mut codex = fake_agent("w1:p1", "codex", "idle");
+    codex["terminal_id"] = "term_other".into();
+    r.fake.set_agent(codex);
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("claude-permission-bash.txt"));
+    let res = r.adapter.send(&old, "1").await;
+    assert!(matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))), "{res:?}");
+    assert!(r.fake.prompts().is_empty());
+}
+
+#[tokio::test]
+async fn follow_up_to_a_pane_that_lost_its_agent_is_gone() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    r.fake.remove_agent("w1:p1");
+    let res = r.adapter.send(&a, "hi").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty());
+}
+
+#[tokio::test]
+async fn follow_up_never_answers_a_dialog_the_registry_has_not_seen() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    // The dialog opened after the last poll; the status still says idle.
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("claude-permission-bash.txt"));
+    let res = r.adapter.send(&a, "1").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentBusy))),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty(), "text answered the dialog");
+}
+
+/// A dialog the screen parser cannot read still counts: herdr reports the
+/// pane `blocked`, and "1" typed into it would pick an option.
+#[tokio::test]
+async fn follow_up_is_refused_while_herdr_says_blocked_on_a_screen_nothing_parses() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    let unparsed = "Some new dialog\nPress a key to continue\n";
+    assert!(acd_adapters::herdr::screen::find_dialog(unparsed).is_none());
+    r.fake.set_screen("w1:p1", "detection", unparsed);
+    r.fake.set_agent(fake_agent("w1:p1", "claude", "blocked"));
+    let res = r.adapter.send(&a, "1").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentBusy))),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty(), "text went into the dialog");
+    // The fake refuses a prompt to a blocked pane, as herdr does; the
+    // adapter must not depend on that.
+    assert!(r.fake.calls().iter().all(|(m, _)| m != "agent.prompt"), "the prompt was attempted");
+}
+
+#[tokio::test]
+async fn follow_up_needs_a_whole_screen_read() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("claude-idle-detection.txt"));
+    r.fake.set_truncated("w1:p1", "detection", true);
+    let res = r.adapter.send(&a, "hi").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::SourceUnavailable))),
+        "{res:?}"
+    );
+    r.fake.set_truncated("w1:p1", "detection", false);
+    r.fake.set_read_failing("w1:p1", "detection", true);
+    let res = r.adapter.send(&a, "hi").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::SourceUnavailable))),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty());
+    r.fake.set_read_failing("w1:p1", "detection", false);
+    r.adapter.send(&a, "hi").await.unwrap();
+    assert_eq!(r.fake.prompts().len(), 1, "an idle screen is let through");
+}
+
+#[tokio::test]
+async fn follow_up_waits_for_the_agent_lock_then_rechecks_the_screen() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    let guard = r.adapter.agent_locks().lock(&a.id).await;
+    let adapter = r.adapter.clone();
+    let task = tokio::spawn({
+        let a = a.clone();
+        async move { adapter.send(&a, "1").await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!task.is_finished(), "send shares the keys path's agent lock");
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("claude-permission-bash.txt"));
+    drop(guard);
+    let res = task.await.unwrap();
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentBusy))),
+        "{res:?}"
+    );
     assert!(r.fake.prompts().is_empty());
 }
 
@@ -384,7 +621,7 @@ async fn answer(r: &Rig, cmd: &str, rid: &str, option: &str) -> CommandResult {
             ClientMessage::RequestAnswer {
                 id: cmd.into(),
                 request_id: rid.into(),
-                revision: None,
+                revision: Some(1),
                 option_id: Some(option.into()),
                 text: None,
             },
@@ -550,7 +787,7 @@ async fn superseded_during_the_guard_read_sends_nothing() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
-                    revision: None,
+                    revision: Some(1),
                     option_id: Some("allow".into()),
                     text: None,
                 },
@@ -586,7 +823,7 @@ async fn cancelled_during_the_guard_read_never_sends_later() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
-                    revision: None,
+                    revision: Some(1),
                     option_id: Some("allow".into()),
                     text: None,
                 },
@@ -724,7 +961,7 @@ async fn late_refusal_publishes_nothing_even_if_the_dialog_closed() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
-                    revision: None,
+                    revision: Some(1),
                     option_id: Some("allow".into()),
                     text: None,
                 },
@@ -794,7 +1031,7 @@ async fn no_target_is_not_ready_and_text_sends_nothing() {
             ClientMessage::RequestAnswer {
                 id: "t1".into(),
                 request_id: rid.clone(),
-                revision: None,
+                revision: Some(1),
                 option_id: None,
                 text: Some("hi".into()),
             },
@@ -1022,7 +1259,7 @@ async fn a_target_cannot_be_replaced_mid_delivery() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
-                    revision: None,
+                    revision: Some(1),
                     option_id: Some("allow".into()),
                     text: None,
                 },
@@ -1061,7 +1298,7 @@ async fn a_held_agent_lock_delays_the_key() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
-                    revision: None,
+                    revision: Some(1),
                     option_id: Some("allow".into()),
                     text: None,
                 },
@@ -1097,7 +1334,7 @@ async fn a_dialog_change_while_waiting_for_the_lock_sends_nothing() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
-                    revision: None,
+                    revision: Some(1),
                     option_id: Some("allow".into()),
                     text: None,
                 },
@@ -1226,6 +1463,58 @@ async fn a_herdr_error_message_never_reaches_the_logs() {
     assert!(!logs.contains("SECRET"), "{logs}");
 }
 
+/// herdr's error text and serde's decode text can echo the screen or a title:
+/// the reconciler's debug logs carry a classification, never that text.
+#[tokio::test(flavor = "current_thread")]
+async fn herdr_error_text_never_reaches_the_reconciler_logs() {
+    use acd_adapters::herdr::reconciler::Hint;
+    use std::sync::Mutex as StdMutex;
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<StdMutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let pane = r.adapter.panes().read().unwrap().values().next().unwrap().clone();
+    // A server error on agent.get, one on agent.list, and a list entry that
+    // does not decode (its bad field echoes in serde's message).
+    let mut bad = fake_agent("w1:p2", "claude", "idle");
+    bad["revision"] = "SECRET-DECODE".into();
+    r.fake.set_agent(bad);
+    r.fake
+        .fail_next_with_message("agent.get", "internal_error", "SECRET-GET echo of the screen");
+    r.fake
+        .fail_next_with_message("agent.list", "internal_error", "SECRET-LIST echo of the screen");
+    pane.hints.try_send(Hint::Pane(pane.pane_id.clone())).unwrap();
+    pane.hints.try_send(Hint::Resync).unwrap();
+    let logs = || String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    until("the failures are logged", || {
+        let l = logs();
+        (l.contains("agent.get failed") && l.contains("agent.list failed")).then_some(())
+    })
+    .await;
+    // A later resync reads the list again and meets the undecodable entry.
+    pane.hints.try_send(Hint::Resync).unwrap();
+    until("the skipped entry is logged", || logs().contains("entry skipped").then_some(())).await;
+    let l = logs();
+    assert!(l.contains("internal_error"), "the code is kept: {l}");
+    assert!(!l.contains("SECRET"), "{l}");
+}
+
 #[tokio::test]
 async fn a_target_for_the_current_incarnation_works() {
     let (r, rid) = bound_keys_rig(0).await;
@@ -1259,7 +1548,7 @@ async fn a_pane_replaced_during_the_guard_read_gets_no_key() {
                 ClientMessage::RequestAnswer {
                     id: "a1".into(),
                     request_id: rid,
-                    revision: None,
+                    revision: Some(1),
                     option_id: Some("allow".into()),
                     text: None,
                 },

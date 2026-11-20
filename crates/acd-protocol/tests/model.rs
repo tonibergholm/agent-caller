@@ -270,6 +270,7 @@ fn agent_serializes_to_wire_shape() {
         can_send: true,
         role: AgentRole::Subagent,
         parent_title: Some("Plan the rollout".into()),
+        incarnation: Some("4.ab12".into()),
     };
     let v = serde_json::to_value(&a).unwrap();
     assert_eq!(
@@ -278,10 +279,24 @@ fn agent_serializes_to_wire_shape() {
             "id": "t3:th_1", "machine_id": "m", "source": "t3", "kind": "codex", "title": "fix bug",
             "cwd": null, "project": "app", "state": "needs_you", "state_since": "2026-10-07T12:00:00.000Z",
             "failed": false, "last_message": "done?", "pending": serde_json::to_value(permission()).unwrap(),
-            "can_send": true, "role": "subagent", "parent_title": "Plan the rollout"
+            "can_send": true, "role": "subagent", "parent_title": "Plan the rollout", "incarnation": "4.ab12"
         })
     );
     assert_eq!(serde_json::from_value::<Agent>(v).unwrap(), a);
+}
+
+#[test]
+fn an_agent_without_an_incarnation_omits_it_and_old_json_decodes() {
+    let mut a = serde_json::from_value::<Agent>(json!({
+        "id": "a", "machine_id": "m", "source": "herdr", "kind": "claude", "title": "t",
+        "cwd": null, "project": null, "state": "idle", "state_since": "2026-10-07T12:00:00.000Z",
+        "failed": false, "last_message": null, "pending": null, "can_send": true
+    }))
+    .unwrap();
+    assert_eq!(a.incarnation, None);
+    assert!(serde_json::to_value(&a).unwrap().get("incarnation").is_none());
+    a.incarnation = Some("1.ab".into());
+    assert_eq!(serde_json::to_value(&a).unwrap()["incarnation"], "1.ab");
 }
 
 #[test]
@@ -302,6 +317,7 @@ fn an_agent_without_role_fields_is_a_main_agent() {
         can_send: false,
         role: AgentRole::Main,
         parent_title: None,
+        incarnation: None,
     })
     .unwrap();
     // An older server sends neither field; a newer one may send a role this build does not know.
