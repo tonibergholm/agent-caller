@@ -168,8 +168,8 @@ fn below_frame_logging(meta: &tracing::Metadata<'_>) -> bool {
 }
 
 fn main() {
-    // The Codex shim runs before logging starts, so it never writes log
-    // lines to Codex's stderr.
+    // The hook shim runs before logging starts, so it never writes log
+    // lines to the agent's stderr.
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "hook") {
         std::process::exit(hook_shim::main(&args[2..]));
@@ -316,9 +316,13 @@ fn real_main() -> Result<()> {
                                 "Claude reads hooks when a session starts: restart running sessions or run /clear in them."
                             );
                             println!(
-                                "Trust note: Claude sends its hooks, with the hook token, to 127.0.0.1:{}. While acd is not running, another local user or process can take that port, read the token and payloads, and approve Claude permission prompts. Use acd v1 on personal, trusted hosts only.",
-                                ctx.hook_port
+                                "Claude's hooks run `acd hook claude`, which talks to acd over the owner-only socket {}. No token is stored in the settings file. When acd is not running, the hook prints nothing and Claude shows its own prompt.",
+                                ctx.config_dir.join("hook.sock").display()
                             );
+                            // Other recorded destinations may still hold the legacy http hook.
+                            for w in hooks_install::legacy_warnings(&dir) {
+                                eprintln!("warning: {w}");
+                            }
                         }
                         hooks_install::Target::Codex => println!(
                             "Codex may ask you to review these hooks the first time it runs them. Codex sessions that share Codex's background app-server can be answered from the inbox only when acd can tell which herdr pane they run in; otherwise their prompts are shown read-only."

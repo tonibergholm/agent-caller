@@ -1,8 +1,9 @@
-//! `acd hook codex <event>` (spec §6.1, amendment A1): Codex's command hook.
-//! Reads the payload on stdin, forwards it over the owner-only Unix socket
-//! `<config_dir>/hook.sock` (never TCP), prints the reply body and exits 0.
-//! Any failure prints nothing and still exits 0, so Codex shows its own
-//! dialog. It never logs and never prints the token.
+//! `acd hook <claude|codex> <event>` (spec §6.1, amendment A1): the command
+//! hook of Claude Code and Codex. Reads the payload on stdin, forwards it over
+//! the owner-only Unix socket `<config_dir>/hook.sock` (never TCP), prints the
+//! reply body and exits 0. Any failure prints nothing and still exits 0, so
+//! the agent shows its own dialog and never gets an answer from here. It never
+//! logs and never prints the token.
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -28,14 +29,22 @@ pub fn main(args: &[OsString]) -> i32 {
     0
 }
 
-/// Inside Codex's own timeouts (§6.3: 1 s for PermissionRequest, 2 s else)
-/// and §14.6: a stalled acd adds at most 1 s to each lifecycle hook;
-/// 750 ms leaves about 250 ms for process start.
-fn budget(event: &str) -> Duration {
-    if event == "PermissionRequest" {
-        Duration::from_millis(800)
-    } else {
-        Duration::from_millis(750)
+/// How long a held Claude `PermissionRequest` may wait. Only a ceiling: acd
+/// ends the hold after `claude.permission_hold` (3600 s by default) and Claude
+/// stops the shim at the hook timeout the installer wrote (`permission_hold`
+/// plus 10 s). The shim must not give up before either, as the http hook did
+/// not.
+const CLAUDE_HOLD_CEILING: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// Inside the agent's own timeouts and §14.6: a stalled acd adds at most 1 s to
+/// each lifecycle hook; 750 ms leaves about 250 ms for process start. Codex
+/// (§6.3) allows 1 s for PermissionRequest and 2 s else; Claude's lifecycle
+/// hooks have 1 s (`hooks_install::entries::claude_events`).
+fn budget(agent: &str, event: &str) -> Duration {
+    match (agent, event) {
+        ("claude", "PermissionRequest") => CLAUDE_HOLD_CEILING,
+        (_, "PermissionRequest") => Duration::from_millis(800),
+        _ => Duration::from_millis(750),
     }
 }
 
@@ -43,11 +52,31 @@ fn header_safe(v: &str) -> bool {
     !v.is_empty() && v.len() <= 1024 && !v.chars().any(char::is_control)
 }
 
+/// The headers the http hook of earlier versions sent from its
+/// `allowedEnvVars`, so the endpoint maps both the same way. Only Claude sends
+/// its entrypoint.
+fn hint_headers(agent: &str, env: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    let mut pairs = vec![
+        ("HERDR_PANE_ID", "X-Herdr-Pane"),
+        ("HERDR_SOCKET_PATH", "X-Herdr-Socket"),
+    ];
+    if agent == "claude" {
+        pairs.push(("CLAUDE_CODE_ENTRYPOINT", "X-Claude-Entrypoint"));
+    }
+    pairs
+        .into_iter()
+        .filter_map(|(name, header)| {
+            let v = env(name).filter(|v| header_safe(v))?;
+            Some((header.to_string(), v))
+        })
+        .collect()
+}
+
 fn run(args: &[OsString]) -> Option<String> {
     let mut it = args.iter().map(|a| a.to_str());
     let agent = it.next()??;
     let event = it.next()??;
-    if agent != "codex"
+    if !matches!(agent, "claude" | "codex")
         || event.is_empty()
         || event.len() > 64
         || !event.chars().all(|c| c.is_ascii_alphanumeric())
@@ -62,8 +91,8 @@ fn run(args: &[OsString]) -> Option<String> {
             _ => return None,
         }
     }
-    let deadline = Instant::now() + budget(event);
-    let event = event.to_owned();
+    let deadline = Instant::now() + budget(agent, event);
+    let (agent, event) = (agent.to_owned(), event.to_owned());
     // stdin is read concurrently with the filesystem checks; everything runs
     // inside the deadline.
     let (stdin_tx, stdin_rx) = mpsc::channel();
@@ -87,16 +116,7 @@ fn run(args: &[OsString]) -> Option<String> {
         let token = crate::hook_token::load(&dir).ok()?.current;
         let mut headers = vec![("X-Acd-Token".to_string(), token)];
         // Hints only (D17): acd never binds Codex with them.
-        for (env, header) in [
-            ("HERDR_PANE_ID", "X-Herdr-Pane"),
-            ("HERDR_SOCKET_PATH", "X-Herdr-Socket"),
-        ] {
-            if let Ok(v) = std::env::var(env)
-                && header_safe(&v)
-            {
-                headers.push((header.to_string(), v));
-            }
-        }
+        headers.extend(hint_headers(&agent, |k| std::env::var(k).ok()));
         let body = stdin_rx
             .recv_timeout(deadline.checked_duration_since(Instant::now())?)
             .ok()??;
@@ -105,7 +125,7 @@ fn run(args: &[OsString]) -> Option<String> {
         }
         post(
             &sock,
-            &format!("/hook/codex/{event}"),
+            &format!("/hook/{agent}/{event}"),
             &headers,
             &body,
             deadline,
@@ -438,8 +458,42 @@ mod tests {
     #[test]
     fn unexpected_arguments_send_nothing() {
         let a = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
-        assert!(run(&a(&["claude", "Stop"])).is_none());
+        // Every case is refused before the shim reads stdin or the config dir.
+        assert!(run(&a(&["aider", "Stop"])).is_none());
+        assert!(run(&a(&["claude", "Stop;rm"])).is_none());
+        assert!(run(&a(&["claude", "Stop", "--surprise"])).is_none());
         assert!(run(&a(&["codex", "Stop;rm"])).is_none());
         assert!(run(&a(&["codex", "Stop", "--surprise"])).is_none());
+    }
+
+    #[test]
+    fn a_held_claude_permission_request_outlasts_the_hold_and_lifecycle_hooks_stay_short() {
+        // The installer's Claude timeout is `permission_hold + 10 s`.
+        assert!(budget("claude", "PermissionRequest") > Duration::from_secs(3610));
+        assert_eq!(
+            budget("codex", "PermissionRequest"),
+            Duration::from_millis(800)
+        );
+        for agent in ["claude", "codex"] {
+            assert_eq!(budget(agent, "Stop"), Duration::from_millis(750), "{agent}");
+        }
+    }
+
+    #[test]
+    fn hints_come_from_the_environment_and_only_claude_sends_its_entrypoint() {
+        let env = |k: &str| match k {
+            "HERDR_PANE_ID" => Some("w1:p2".to_string()),
+            "HERDR_SOCKET_PATH" => Some("/run/herdr\r\nX-Acd-Token: x".to_string()),
+            "CLAUDE_CODE_ENTRYPOINT" => Some("cli".to_string()),
+            _ => None,
+        };
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert_eq!(
+            hint_headers("claude", env),
+            [pair("X-Herdr-Pane", "w1:p2"), pair("X-Claude-Entrypoint", "cli")],
+            "an unsafe value is dropped, not sent"
+        );
+        assert_eq!(hint_headers("codex", env), [pair("X-Herdr-Pane", "w1:p2")]);
+        assert!(hint_headers("claude", |_| Some(String::new())).is_empty());
     }
 }

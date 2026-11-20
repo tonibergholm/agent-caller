@@ -542,6 +542,10 @@ pub async fn run(dir: &Path) -> Result<()> {
     // D13: the hook endpoint binds first, so a taken hook port fails startup
     // before any socket file exists. The Unix router is the TCP router plus
     // the producer routes, so both share the hold cap and hold ids.
+    // The TCP listener now serves only the http hooks of Claude installs from
+    // before the shim. It stays bound unconditionally: a Claude session that
+    // started before the reinstall keeps those hooks, and its token stays
+    // valid, so a free port would hand both to another local user.
     let hook_creds = Arc::new(HookCredentials::new(dir, &store));
     let hook_addr = SocketAddr::from(([127, 0, 0, 1], cfg.hook_port));
     let hook_listener = tokio::net::TcpListener::bind(hook_addr)

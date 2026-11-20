@@ -14,6 +14,9 @@ use crate::{daemon::socket_path, secrets};
 pub async fn status(dir: &Path) -> Result<()> {
     crate::preflight(dir)?;
     let token = secrets::read_secret(&dir.join("client.token"))?;
+    for w in crate::hooks_install::legacy_warnings(dir) {
+        eprintln!("warning: {w}");
+    }
     let sock = socket_path(dir);
     let connected = tokio::time::timeout(
         Duration::from_secs(3),
@@ -74,7 +77,8 @@ fn finish(stdout: &mut impl std::io::Write, report: &[u8]) -> Result<()> {
 }
 
 /// Best effort (amendment A1): when acd is not running but something holds
-/// the hook port, Claude would send that process its hooks and the token.
+/// the hook port, a Claude session that still runs the legacy http hook would
+/// send that process its hooks and the token. The shim hook never uses the port.
 /// Connects and test-binds the port; never sends a byte. Every probe is
 /// bounded, so a saturated `acd.sock` cannot hang the caller.
 pub fn hook_port_warning(dir: &Path, hook_port: u16) -> Option<String> {
@@ -93,7 +97,7 @@ pub fn hook_port_warning(dir: &Path, hook_port: u16) -> Option<String> {
             .is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse);
     held.then(|| {
         format!(
-            "{addr} (hook_port) is held by another process while acd is not running; Claude hooks would send it the hook token and payloads, and it could answer Claude permission prompts. Stop that process, then start acd."
+            "{addr} (hook_port) is held by another process while acd is not running; a Claude session that still runs the legacy http hook (see `acd hooks status`) would send it the hook token and payloads, and it could answer Claude permission prompts. Stop that process, then start acd."
         )
     })
 }

@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use super::{Ctx, MARKER};
 
 /// Claude: `(event, matcher, timeout seconds)`. Claude never sends
-/// `SessionStart` over its HTTP hook.
+/// `SessionStart` to acd.
 pub fn claude_events(permission_hold: u64) -> Vec<(&'static str, Option<&'static str>, u64)> {
     vec![
         ("UserPromptSubmit", None, 1),
@@ -25,8 +25,30 @@ pub const CODEX_EVENTS: [(&str, u64); 5] = [
     ("Stop", 2),
 ];
 
-pub fn claude_group(
-    ctx: &Ctx,
+/// The command hook for `agent` (`acd hook <agent> <event>`, the shim over
+/// `hook.sock`). It carries no token: the shim reads it from the config dir.
+fn command_entry(ctx: &Ctx, agent: &str, event: &str, timeout: u64) -> Value {
+    let command = format!(
+        "{} hook {agent} {event} --config-dir {} {MARKER}",
+        sh_quote(&ctx.exe.to_string_lossy()),
+        sh_quote(&ctx.config_dir.to_string_lossy())
+    );
+    json!({"type": "command", "command": command, "timeout": timeout})
+}
+
+pub fn claude_group(ctx: &Ctx, event: &str, matcher: Option<&str>, timeout: u64) -> Value {
+    let entry = command_entry(ctx, "claude", event, timeout);
+    match matcher {
+        Some(value) => json!({"matcher": value, "hooks": [entry]}),
+        None => json!({"hooks": [entry]}),
+    }
+}
+
+/// The group earlier versions wrote for Claude (an http hook with the token in
+/// its headers), for tests of the migration and of the token rewrite.
+#[cfg(test)]
+pub fn legacy_claude_group(
+    port: u16,
     token: &str,
     event: &str,
     matcher: Option<&str>,
@@ -34,7 +56,7 @@ pub fn claude_group(
 ) -> Value {
     let entry = json!({
         "type": "http",
-        "url": format!("http://127.0.0.1:{}/hook/claude/{event}?marker={MARKER}", ctx.hook_port),
+        "url": format!("http://127.0.0.1:{port}/hook/claude/{event}?marker={MARKER}"),
         "timeout": timeout,
         "headers": {
             "X-Acd-Token": token,
@@ -56,12 +78,7 @@ pub fn sh_quote(value: &str) -> String {
 }
 
 pub fn codex_group(ctx: &Ctx, event: &str, timeout: u64) -> Value {
-    let command = format!(
-        "{} hook codex {event} --config-dir {} {MARKER}",
-        sh_quote(&ctx.exe.to_string_lossy()),
-        sh_quote(&ctx.config_dir.to_string_lossy())
-    );
-    json!({"hooks": [{"type": "command", "command": command, "timeout": timeout}]})
+    json!({"hooks": [command_entry(ctx, "codex", event, timeout)]})
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,7 +140,10 @@ pub fn sh_words(cmd: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
-fn claude_owned(event: &str, entry: &Value) -> bool {
+/// The http hook earlier versions wrote for Claude: it carries the hook token
+/// in its headers. Still owned, so a reinstall replaces it and an uninstall
+/// removes it; `acd hooks status` warns about it.
+pub fn claude_http_owned(event: &str, entry: &Value) -> bool {
     if entry.get("type").and_then(Value::as_str) != Some("http") {
         return false;
     }
@@ -142,7 +162,15 @@ fn claude_owned(event: &str, entry: &Value) -> bool {
         && path == format!("hook/claude/{event}?marker={MARKER}")
 }
 
+fn claude_owned(event: &str, entry: &Value) -> bool {
+    claude_http_owned(event, entry) || command_owned("claude", event, entry)
+}
+
 fn codex_owned(event: &str, entry: &Value) -> bool {
+    command_owned("codex", event, entry)
+}
+
+fn command_owned(agent: &str, event: &str, entry: &Value) -> bool {
     if entry.get("type").and_then(Value::as_str) != Some("command") {
         return false;
     }
@@ -154,8 +182,8 @@ fn codex_owned(event: &str, entry: &Value) -> bool {
         return false;
     };
     matches!(words.as_slice(),
-        [exe, hook, codex, found_event, flag, dir, marker]
-            if exe.starts_with('/') && hook == "hook" && codex == "codex" && found_event == event
+        [exe, hook, found_agent, found_event, flag, dir, marker]
+            if exe.starts_with('/') && hook == "hook" && found_agent == agent && found_event == event
                && flag == "--config-dir" && dir.starts_with('/') && marker == MARKER)
 }
 
@@ -187,6 +215,7 @@ pub fn classify(event: &str, entry: &Value) -> Ownership {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks_install::Target;
 
     fn ctx() -> Ctx {
         Ctx {
@@ -205,20 +234,25 @@ mod tests {
         assert_eq!(sh_quote("/opt/my tools/a'b"), "'/opt/my tools/a'\\''b'");
     }
 
+    fn legacy_http(event: &str) -> Value {
+        legacy_claude_group(47801, "tok", event, None, 1)["hooks"][0].clone()
+    }
+
     #[test]
-    fn owned_entries_carry_the_marker_and_environment_allowlist() {
+    fn owned_entries_run_the_shim_and_carry_the_marker_and_no_token() {
         let context = ctx();
-        let claude = claude_group(&context, "tok", "Stop", None, 1);
+        let claude = claude_group(&context, "Stop", None, 1);
         assert_eq!(classify("Stop", &claude["hooks"][0]), Ownership::Owned);
         assert_eq!(
-            claude["hooks"][0]["url"],
-            "http://127.0.0.1:47801/hook/claude/Stop?marker=acd-managed:v1"
+            claude["hooks"][0],
+            json!({
+                "type": "command",
+                "command": "'/opt/my tools/acd' hook claude Stop --config-dir '/h/.config/acd' acd-managed:v1",
+                "timeout": 1
+            })
         );
-        assert_eq!(
-            claude["hooks"][0]["headers"]["X-Herdr-Pane"],
-            "$HERDR_PANE_ID"
-        );
-        assert_eq!(claude["hooks"][0]["allowedEnvVars"][0], "HERDR_PANE_ID");
+        let text = claude.to_string();
+        assert!(!text.contains("http") && !text.contains("X-Acd-Token"), "{text}");
         let codex = codex_group(&context, "Stop", 2);
         assert_eq!(
             codex["hooks"][0]["command"],
@@ -244,9 +278,28 @@ mod tests {
     }
 
     #[test]
+    fn the_legacy_http_entry_is_still_owned_but_only_for_claude() {
+        let http = legacy_http("Stop");
+        assert_eq!(classify("Stop", &http), Ownership::Owned);
+        assert_eq!(
+            classify_for(Target::Claude, "Stop", &http),
+            Ownership::Owned
+        );
+        assert!(claude_http_owned("Stop", &http));
+        assert!(!claude_http_owned(
+            "Stop",
+            &claude_group(&ctx(), "Stop", None, 1)["hooks"][0]
+        ));
+        assert_eq!(
+            classify_for(Target::Codex, "Stop", &http),
+            Ownership::Suspicious
+        );
+    }
+
+    #[test]
     fn ownership_is_exact() {
         let context = ctx();
-        let owned_claude = claude_group(&context, "tok", "Stop", None, 1)["hooks"][0].clone();
+        let owned_claude = claude_group(&context, "Stop", None, 1)["hooks"][0].clone();
         let owned_codex = codex_group(&context, "Stop", 2)["hooks"][0].clone();
         assert_eq!(classify("Stop", &owned_claude), Ownership::Owned);
         assert_eq!(classify("Stop", &owned_codex), Ownership::Owned);
@@ -257,6 +310,8 @@ mod tests {
         );
         for entry in [
             json!({"type": "command", "command": "echo acd-managed:v1 >> log"}),
+            json!({"type": "command", "command": "'/bin/acd' hook claude Stop --config-dir '/h' acd-managed:v1 extra"}),
+            json!({"type": "command", "command": "'bin/acd' hook claude Stop --config-dir '/h' acd-managed:v1"}),
             json!({"type": "http", "url": "https://example.com/x?note=acd-managed:v1"}),
             json!({"type": "http", "url": "http://10.0.0.1:47801/hook/claude/Stop?marker=acd-managed:v1"}),
             json!({"type": "http", "url": "http://127.0.0.1:47801/hook/claude/Stop?marker=acd-managed:v1&x=1"}),
