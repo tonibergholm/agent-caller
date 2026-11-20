@@ -192,7 +192,7 @@ impl Push {
         let rotated = self
             .blocking(move |s| {
                 min.fetch_max(generation, Ordering::SeqCst);
-                s.rotate_client(&client)
+                s.rotate_client_from(&client, generation)
             })
             .await;
         if rotated != Some(Ok(())) {
@@ -351,7 +351,7 @@ impl PushControl for Push {
                 if generation < min.load(Ordering::SeqCst) {
                     Err(StoreError::Revoked)
                 } else {
-                    s.register(&id, device)
+                    s.register_at(&id, device, generation)
                 }
             })
             .await;

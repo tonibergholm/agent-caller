@@ -181,6 +181,9 @@ struct FileRepr {
 pub struct Entry {
     pub device: Device,
     pub generation: u64,
+    /// The client token generation of the session that registered it, in
+    /// memory only: a rotation keeps entries made under the new token.
+    pub auth: u64,
 }
 
 pub struct Store {
@@ -248,7 +251,7 @@ impl Store {
                 for (id, device) in devices {
                     let generation = store.next_generation;
                     store.next_generation += 1;
-                    store.devices.insert(id, Entry { device, generation });
+                    store.devices.insert(id, Entry { device, generation, auth: 0 });
                 }
             }
             Err(why) => {
@@ -283,6 +286,11 @@ impl Store {
 
     /// Stores (or replaces) a registration with a fresh wake state.
     pub fn register(&mut self, client_id: &str, device: Device) -> Result<(), StoreError> {
+        self.register_at(client_id, device, 0)
+    }
+
+    /// `register` for a session authenticated under token generation `auth`.
+    pub fn register_at(&mut self, client_id: &str, device: Device, auth: u64) -> Result<(), StoreError> {
         if !client_id_ok(client_id) {
             return Err(StoreError::BadId);
         }
@@ -291,7 +299,7 @@ impl Store {
         }
         let generation = self.next_generation;
         let mut next = self.devices.clone();
-        next.insert(client_id.to_string(), Entry { device, generation });
+        next.insert(client_id.to_string(), Entry { device, generation, auth });
         self.commit(next)?;
         self.next_generation += 1;
         Ok(())
@@ -310,8 +318,21 @@ impl Store {
     /// Client token rotation: revokes every registration and makes `client`
     /// (the new token's fingerprint) the generation the file is written under.
     pub fn rotate_client(&mut self, client: &str) -> Result<(), StoreError> {
+        self.rotate_client_from(client, u64::MAX)
+    }
+
+    /// A rotation to token generation `min_auth`: entries registered under an
+    /// older generation are revoked, newer ones are kept, so a device that
+    /// registered with the new token before this ran keeps its wakes. If the
+    /// kept entries cannot be written, everything is revoked (fail closed).
+    pub fn rotate_client_from(&mut self, client: &str, min_auth: u64) -> Result<(), StoreError> {
         self.client = client.to_string();
-        self.clear()
+        let kept: BTreeMap<String, Entry> =
+            self.devices.iter().filter(|(_, e)| e.auth >= min_auth).map(|(k, e)| (k.clone(), e.clone())).collect();
+        if kept.is_empty() {
+            return self.clear();
+        }
+        self.commit(kept).or_else(|_| self.clear())
     }
 
     /// Revokes every registration (client token rotation, spec 4.8). Fails

@@ -821,6 +821,22 @@ async fn a_new_generation_session_registers_after_a_rotation() {
     assert!(rig.status("phone").await.registered);
 }
 
+/// The daemon publishes the new token first and clears push after, so a
+/// device can register with the new token in between: that registration
+/// survives the clear, while the old session's does not, also on disk.
+#[tokio::test]
+async fn a_registration_under_the_new_token_before_the_clear_survives_it() {
+    const ROTATED: &str = "rotated-client-token";
+    let rig = Rig::new(NO_WINDOW).await;
+    assert!(rig.register_at("old-phone", 0, &handle_for("old-phone")).await.ok);
+    assert!(rig.register_at("new-phone", 1, &handle_for("new-phone")).await.ok);
+    rig.push.revoke_all(ROTATED, 1).await;
+    assert!(rig.status("new-phone").await.registered);
+    assert!(!rig.status("old-phone").await.registered);
+    let reloaded = Store::load(rig.dir.path(), &store::client_fingerprint(ROTATED));
+    assert_eq!(reloaded.len(), 1);
+}
+
 #[tokio::test]
 async fn revoking_cancels_a_wake_that_is_already_in_flight() {
     // An hour-long request deadline: only the cancellation can end the send,
