@@ -1,6 +1,7 @@
 //! One connection's model of a daemon (spec §7.4). Pure: no I/O, no clock.
 use std::collections::BTreeMap;
 
+use acd_protocol::text::{is_forbidden_control, is_forbidden_format};
 use acd_protocol::{Agent, Effect, MAX_AGENT_BYTES, MAX_AGENTS_PER_MACHINE, Cursor, Machine, Request, RequestOption, ResolveReason, ResolvedBy, ServerMessage};
 
 #[derive(Clone, Debug, Default)]
@@ -42,6 +43,28 @@ fn agent_too_big(agent: &Agent) -> bool {
     serde_json::to_vec(agent).map_or(true, |v| v.len() > MAX_AGENT_BYTES)
 }
 
+/// Peer text is shown as sent except that bidi controls, separators and
+/// other controls (not `\n`, `\t`) become a visible `\u{..}` escape.
+fn clean(s: &mut String) {
+    if !s.chars().any(|c| is_forbidden_control(c) || is_forbidden_format(c)) {
+        return;
+    }
+    *s = s
+        .chars()
+        .map(|c| {
+            if is_forbidden_control(c) || is_forbidden_format(c) {
+                format!("\\u{{{:x}}}", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+}
+
+fn clean_opt(s: &mut Option<String>) {
+    s.iter_mut().for_each(clean);
+}
+
 /// The one place that decides a label contradicts its effect: the first word
 /// of an allow's label is a refusal, or of a deny's label is an approval.
 fn contradicts(o: &RequestOption) -> bool {
@@ -56,6 +79,8 @@ fn contradicts(o: &RequestOption) -> bool {
 
 fn clean_options(options: &mut [RequestOption]) {
     for o in options {
+        clean(&mut o.label);
+        clean_opt(&mut o.description);
         if contradicts(o) {
             o.effect = Effect::Unknown;
         }
@@ -63,13 +88,23 @@ fn clean_options(options: &mut [RequestOption]) {
 }
 
 fn clean_request(r: &mut Request) {
+    clean(&mut r.title);
+    clean(&mut r.detail);
+    clean_opt(&mut r.raw_screen);
     clean_options(&mut r.options);
     for q in r.questions.iter_mut().flatten() {
+        clean_opt(&mut q.header);
+        clean(&mut q.text);
         clean_options(&mut q.options);
     }
 }
 
 fn clean_agent(a: &mut Agent) {
+    clean(&mut a.title);
+    clean_opt(&mut a.cwd);
+    clean_opt(&mut a.project);
+    clean_opt(&mut a.last_message);
+    clean_opt(&mut a.parent_title);
     a.pending.iter_mut().for_each(clean_request);
 }
 
@@ -122,6 +157,8 @@ impl Session {
             Some(known_epoch) if known_epoch == epoch => EpochChange::Same,
             Some(_) => EpochChange::New,
         };
+        let mut machine = machine;
+        clean(&mut machine.name);
         self.machine = Some(machine);
         self.capabilities = capabilities;
         self.known_epoch = Some(epoch.to_owned());
@@ -204,7 +241,9 @@ impl Session {
                 Applied::Changed
             }
             ServerMessage::MachineUpdated { machine, .. } => {
-                self.machine = Some(machine.clone());
+                let mut machine = machine.clone();
+                clean(&mut machine.name);
+                self.machine = Some(machine);
                 Applied::Changed
             }
             ServerMessage::RequestOpened { request, .. } => {
@@ -226,7 +265,10 @@ impl Session {
                 by: *by,
                 option_id: option_id.clone(),
                 reason: *reason,
-                message: message.clone(),
+                message: message.clone().map(|mut m| {
+                    clean(&mut m);
+                    m
+                }),
             },
             _ => Applied::Ignored,
         }
@@ -454,7 +496,6 @@ mod tests {
     // Demonstration for docs/research/2026-11-04-security-review-apps-voice.md (F10).
     // Fails today: a peer's text reaches the card model unchanged, bidi controls included.
     #[test]
-    #[ignore = "finding F10: peer-supplied agent text is stored with bidi controls"]
     fn peer_text_with_bidi_controls_does_not_reach_the_card_model() {
         let mut hostile = agent("a");
         hostile.title = "safe\u{202E}fdp.exe".into();
@@ -494,5 +535,20 @@ mod tests {
         s.apply(&ServerMessage::Snapshot { epoch: "e1".into(), seq: 1, agents: vec![hostile] });
         let stored = &s.agents["a"].pending.as_ref().unwrap().options[0];
         assert_eq!(stored.effect, Effect::Unknown, "stored {:?} with effect {:?}", stored.label, stored.effect);
+    }
+
+    #[test]
+    fn an_opened_request_is_cleaned_and_honest_options_are_kept() {
+        let mut s = Session::default();
+        s.welcome(machine(), vec![], "e1", 0);
+        s.apply(&snap("e1", 1, &[]));
+        let req: Request = serde_json::from_value(serde_json::json!({"id":"r1","agent_id":"a","kind":"permission",
+            "status":"open","answer_path":"hook","title":"Bash","detail":"ls\u{202E}\nok\ttab","free_text":false,
+            "raw_screen":null,"questions":null,"opened_at":"2026-10-08T00:00:00.000Z","options":[
+            {"id":"a","label":"Yes","description":null,"effect":"allow"},
+            {"id":"b","label":"No, and tell Claude","description":null,"effect":"deny"}]})).unwrap();
+        let Applied::Opened(r) = s.apply(&ServerMessage::RequestOpened { epoch: "e1".into(), seq: 2, request: req }) else { panic!() };
+        assert_eq!(r.detail, "ls\\u{202e}\nok\ttab");
+        assert_eq!((r.options[0].effect, r.options[1].effect), (Effect::Allow, Effect::Deny));
     }
 }
