@@ -218,6 +218,9 @@ pub enum StoreError {
     Corrupt,
     /// The client token rotated after the request was accepted.
     Revoked,
+    /// The session is on a token generation whose rotation push has not
+    /// applied yet: nothing is stored until it has (retryable).
+    Rotating,
 }
 
 impl Store {

@@ -348,8 +348,14 @@ impl PushControl for Push {
         }
         let stored = self
             .blocking(move |s| {
-                if generation < min.load(Ordering::SeqCst) {
+                let min = min.load(Ordering::SeqCst);
+                if generation < min {
                     Err(StoreError::Revoked)
+                } else if generation > min {
+                    // The daemon publishes the new token before `revoke_all`
+                    // runs; an ack now would name a push.json that still holds
+                    // the old fingerprint, and a restart would drop it.
+                    Err(StoreError::Rotating)
                 } else {
                     s.register_at(&id, device, generation)
                 }
@@ -365,6 +371,10 @@ impl PushControl for Push {
             Some(Err(StoreError::Revoked)) => Err(PushFailure {
                 code: ErrorCode::Unauthorized,
                 message: "the client token was rotated",
+            }),
+            Some(Err(StoreError::Rotating)) => Err(PushFailure {
+                code: ErrorCode::SourceUnavailable,
+                message: "the client token is being rotated; retry",
             }),
             Some(Err(StoreError::Corrupt)) => Err(PushFailure {
                 code: ErrorCode::SourceUnavailable,
