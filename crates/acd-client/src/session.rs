@@ -45,7 +45,7 @@ fn agent_too_big(agent: &Agent) -> bool {
 
 /// Peer text is shown as sent except that bidi controls, separators and
 /// other controls (not `\n`, `\t`) become a visible `\u{..}` escape.
-fn clean(s: &mut String) {
+pub(crate) fn clean(s: &mut String) {
     if !s.chars().any(|c| is_forbidden_control(c) || is_forbidden_format(c)) {
         return;
     }
@@ -101,6 +101,14 @@ fn clean_request(r: &mut Request) {
         clean_opt(&mut q.header);
         clean(&mut q.text);
         clean_options(&mut q.options);
+    }
+}
+
+fn clean_machine(m: &mut Machine) {
+    clean(&mut m.name);
+    clean(&mut m.acd_version);
+    for status in [&mut m.sources.hooks, &mut m.sources.herdr, &mut m.sources.t3] {
+        clean_opt(&mut status.message);
     }
 }
 
@@ -163,7 +171,7 @@ impl Session {
             Some(_) => EpochChange::New,
         };
         let mut machine = machine;
-        clean(&mut machine.name);
+        clean_machine(&mut machine);
         self.machine = Some(machine);
         self.capabilities = capabilities;
         self.known_epoch = Some(epoch.to_owned());
@@ -247,7 +255,7 @@ impl Session {
             }
             ServerMessage::MachineUpdated { machine, .. } => {
                 let mut machine = machine.clone();
-                clean(&mut machine.name);
+                clean_machine(&mut machine);
                 self.machine = Some(machine);
                 Applied::Changed
             }
@@ -584,5 +592,32 @@ mod tests {
             assert_eq!(option_effect(good, Effect::Deny), Effect::Deny, "{good:?}");
         }
         assert_eq!(option_effect("Anything", Effect::Choose), Effect::Choose);
+    }
+
+    #[test]
+    fn every_peer_string_on_the_machine_is_cleaned() {
+        let mut hostile = machine();
+        hostile.name = "box\u{202E}".into();
+        hostile.acd_version = "1\u{2066}".into();
+        hostile.sources.hooks.message = Some("a\u{202E}b".into());
+        hostile.sources.herdr.message = Some("c\u{2028}d".into());
+        hostile.sources.t3.message = Some("e\u{1b}f".into());
+        let all = |m: &Machine| {
+            let mut v = vec![m.name.clone(), m.acd_version.clone()];
+            v.extend([&m.sources.hooks, &m.sources.herdr, &m.sources.t3].map(|s| s.message.clone().unwrap()));
+            v
+        };
+        let mut s = Session::default();
+        s.welcome(hostile.clone(), vec![], "e1", 0);
+        s.apply(&snap("e1", 1, &[]));
+        for stored in all(s.machine.as_ref().unwrap()) {
+            assert!(!acd_protocol::text::has_forbidden_chars(&stored), "welcome kept {stored:?}");
+        }
+        assert_eq!(s.machine.as_ref().unwrap().name, "box\\u{202e}");
+        s.machine = None;
+        s.apply(&ServerMessage::MachineUpdated { epoch: "e1".into(), seq: 2, machine: hostile });
+        for stored in all(s.machine.as_ref().unwrap()) {
+            assert!(!acd_protocol::text::has_forbidden_chars(&stored), "update kept {stored:?}");
+        }
     }
 }

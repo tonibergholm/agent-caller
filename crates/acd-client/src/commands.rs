@@ -167,11 +167,12 @@ impl Commands {
                 .as_ref()
                 .map(|e| e.code)
                 .unwrap_or(ErrorCode::BadRequest);
-            let message = r
+            let mut message = r
                 .error
                 .as_ref()
                 .map(|e| e.message.clone())
                 .unwrap_or_default();
+            crate::session::clean(&mut message);
             if code == ErrorCode::RequestNotReady {
                 item.delivery = Delivery::NotDelivered;
                 let next = now + t.not_ready_interval;
@@ -441,6 +442,25 @@ mod tests {
             legacy,
             ClientMessage::RequestAnswer { revision: None, .. }
         ));
+    }
+
+    #[test]
+    fn a_daemon_error_message_is_cleaned_before_it_is_stored() {
+        let t0 = Instant::now();
+        let mut c = Commands::default();
+        let (tx, mut rx) = oneshot::channel();
+        let msg = c
+            .begin(answer(), tx, &["answer".into(), "answer.revision".into()], C1, t0)
+            .unwrap();
+        c.on_result(
+            &CommandResult::err(&id_of(&msg), ErrorCode::BadRequest, "ok\u{202E}fdp"),
+            t0,
+            &t(),
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Outcome::Failed { code: ErrorCode::BadRequest, message: "ok\\u{202e}fdp".into() }
+        );
     }
 
     #[test]
