@@ -65,25 +65,30 @@ fn clean_opt(s: &mut Option<String>) {
     s.iter_mut().for_each(clean);
 }
 
-/// The one place that decides a label contradicts its effect: the first word
-/// of an allow's label is a refusal, or of a deny's label is an approval.
+/// The one place that decides a label contradicts its effect. It reads the
+/// label as sent, before cleaning, and skips leading characters that are not
+/// letters or digits (spaces, escapes, emoji). An allow is kept only when the
+/// first word approves, so any other label fails closed; a deny is refused
+/// when the first word approves. Every allow label the daemon produces
+/// starts with "Yes"; producers of free labels use `Effect::Choose`.
 fn contradicts(o: &RequestOption) -> bool {
-    let label = o.label.trim().to_lowercase();
-    let first = label.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+    let label = o.label.to_lowercase();
+    let first = label.split(|c: char| !c.is_alphanumeric()).find(|w| !w.is_empty()).unwrap_or("");
+    let approves = matches!(first, "yes" | "y" | "allow" | "approve" | "always" | "accept" | "ok" | "proceed");
     match o.effect {
-        Effect::Allow | Effect::AllowAlways => matches!(first, "deny" | "no" | "reject"),
-        Effect::Deny => matches!(first, "allow" | "yes" | "approve"),
+        Effect::Allow | Effect::AllowAlways => !approves,
+        Effect::Deny => approves,
         _ => false,
     }
 }
 
 fn clean_options(options: &mut [RequestOption]) {
     for o in options {
-        clean(&mut o.label);
-        clean_opt(&mut o.description);
         if contradicts(o) {
             o.effect = Effect::Unknown;
         }
+        clean(&mut o.label);
+        clean_opt(&mut o.description);
     }
 }
 
@@ -550,5 +555,34 @@ mod tests {
         let Applied::Opened(r) = s.apply(&ServerMessage::RequestOpened { epoch: "e1".into(), seq: 2, request: req }) else { panic!() };
         assert_eq!(r.detail, "ls\\u{202e}\nok\ttab");
         assert_eq!((r.options[0].effect, r.options[1].effect), (Effect::Allow, Effect::Deny));
+    }
+
+    fn option_effect(label: &str, effect: Effect) -> Effect {
+        let mut o = RequestOption { id: "o".into(), label: label.into(), description: None, effect, confirm: false };
+        clean_options(std::slice::from_mut(&mut o));
+        o.effect
+    }
+
+    #[test]
+    fn an_allow_is_kept_only_when_its_label_approves() {
+        for bad in ["Deny", "Nope", "Block", "Cancel", "Do not allow", "\u{200b}Deny", "\u{1F6AB} Deny", "", "  "] {
+            assert_eq!(option_effect(bad, Effect::Allow), Effect::Unknown, "{bad:?}");
+            assert_eq!(option_effect(bad, Effect::AllowAlways), Effect::Unknown, "{bad:?}");
+        }
+        for good in ["Yes", "Yes, proceed", "Yes, and always allow access to /tmp from this project", "Yes, for this session"] {
+            assert_eq!(option_effect(good, Effect::Allow), Effect::Allow, "{good:?}");
+        }
+        assert_eq!(option_effect("Yes, for this session", Effect::AllowAlways), Effect::AllowAlways);
+    }
+
+    #[test]
+    fn a_deny_is_refused_when_its_label_approves_and_other_effects_are_untouched() {
+        for bad in ["Yes", "\u{200b}Approve", "Allow once"] {
+            assert_eq!(option_effect(bad, Effect::Deny), Effect::Unknown, "{bad:?}");
+        }
+        for good in ["No", "No, and tell Claude what to do differently", "Nope", "Deny"] {
+            assert_eq!(option_effect(good, Effect::Deny), Effect::Deny, "{good:?}");
+        }
+        assert_eq!(option_effect("Anything", Effect::Choose), Effect::Choose);
     }
 }
