@@ -69,7 +69,12 @@ with "no herdr socket found" when none exists; `degraded` with
 
    Use the port your T3 server listens on. The URL is scheme, host and port.
    The host must be `localhost`, a loopback IP or a Tailscale IP, because the
-   token travels over plain `ws://`. MagicDNS names are refused.
+   token travels over plain `ws://`. MagicDNS names are refused. On a
+   loopback host, acd sends the token only after it proves the T3 process
+   holding that connection runs as your user (`/proc/net/tcp` on Linux,
+   `lsof` on macOS); run T3 as the same user, or use its Tailscale address.
+   `100.64.0.0/10` is also carrier-grade NAT space, so a Tailscale address
+   over plain `ws://` is only as private as that network path.
 
 3. Run `acd service install` again (or restart `acd run`). The daemon reads
    its config at start.
@@ -85,6 +90,7 @@ Source status messages and what to do:
 | `T3 rejected the token` | Issue a new token with both scopes. |
 | `T3 does not speak orchestration protocol 2` | Update T3 or acd. |
 | `cannot reach T3` | Start T3, check the URL and port. |
+| `the T3 port is held by another user; token not sent` | Something other than your own T3 holds the loopback port. Stop it, or run T3 as your user. |
 | `N T3 items could not be read (see the debug log)` | Some items are skipped. Update acd. |
 
 T3 message text never reaches the acd logs, only tags, lengths and hashes.

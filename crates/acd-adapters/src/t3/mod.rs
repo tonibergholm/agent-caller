@@ -6,6 +6,7 @@ pub mod detail;
 pub mod fake;
 pub mod map;
 pub mod outcome;
+mod owner;
 pub mod reconciler;
 pub mod sessions;
 pub mod targets;

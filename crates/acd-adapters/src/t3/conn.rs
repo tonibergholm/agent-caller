@@ -29,6 +29,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 
+use super::owner;
 use super::wire::{
     ExitValue, Failure, PING_FRAME, ServerFrame, ack_frame, failure, interrupt_frame, parse_frames,
     request_frame, string_fingerprint,
@@ -142,6 +143,10 @@ pub enum ConnectError {
     Protocol,
     #[error("cannot reach T3")]
     Unreachable,
+    /// A loopback T3 whose server end is not held by this user. The token
+    /// was not sent.
+    #[error("the T3 port is held by another user; token not sent")]
+    NotOurs,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -391,17 +396,23 @@ pub async fn connect(
         .trim_start_matches('[')
         .trim_end_matches(']');
     let port = uri.port_u16().unwrap_or(80);
-    let dial = async {
-        let tcp = TcpStream::connect((host, port))
-            .await
-            .map_err(tungstenite::Error::Io)?;
-        let _ = tcp.set_nodelay(true);
-        let stream = ProgressStream {
-            inner: tcp,
-            clock: clock.clone(),
-        };
-        client_async_with_config(request, stream, Some(config)).await
+    let tcp = match timeout(timing.connect, TcpStream::connect((host, port))).await {
+        Err(_) => return Err(unreachable(&"connect timed out")),
+        Ok(Err(e)) => return Err(unreachable(&e)),
+        Ok(Ok(tcp)) => tcp,
     };
+    // Nothing has been written yet. On loopback, prove this connection's
+    // server end is ours before the upgrade request carries the token.
+    if owner::is_loopback(&tcp) && !owner::server_is_ours(&tcp).await {
+        tracing::warn!("T3 loopback port is not held by this user; token not sent");
+        return Err(ConnectError::NotOurs);
+    }
+    let _ = tcp.set_nodelay(true);
+    let stream = ProgressStream {
+        inner: tcp,
+        clock: clock.clone(),
+    };
+    let dial = client_async_with_config(request, stream, Some(config));
     let ws = match timeout(timing.connect, dial).await {
         Err(_) => return Err(unreachable(&"connect timed out")),
         Ok(Ok((ws, _response))) => ws,

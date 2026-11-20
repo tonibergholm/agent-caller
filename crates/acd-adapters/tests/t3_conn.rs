@@ -771,3 +771,20 @@ async fn a_reader_waiting_on_a_slow_consumer_keeps_the_connection() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!conn.is_closed(), "closed: {}", conn.closed().await);
 }
+
+// With no process holding the server end, nothing proves who owns the port,
+// so connect refuses and the token is never written. (Linux cannot build
+// this case: the backlog socket carries the listener's uid, which is ours.)
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn loopback_server_end_not_proven_ours_gets_no_token() {
+    use tokio::io::AsyncReadExt;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = ws_url(&format!("http://{}", l.local_addr().unwrap())).unwrap();
+    let err = connect(&url, FAKE_TOKEN, &fast()).await.err().expect("refused");
+    assert!(matches!(err, ConnectError::NotOurs), "{err}");
+    let (mut s, _) = l.accept().await.unwrap();
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await.unwrap();
+    assert!(buf.is_empty(), "bytes were written to the squatter");
+}

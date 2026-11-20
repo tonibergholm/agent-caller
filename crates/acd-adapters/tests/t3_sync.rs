@@ -1886,7 +1886,7 @@ async fn a_snooze_that_ends_shows_the_thread() {
     let fake = FakeT3::start().await;
     let mut t = root("a", "idle");
     t["snoozedUntil"] =
-        json!((chrono::Utc::now() + chrono::Duration::milliseconds(600)).to_rfc3339());
+        json!((chrono::Utc::now() + chrono::Duration::milliseconds(1500)).to_rfc3339());
     fake.put_thread(t);
     let r = rig(fake).await;
     until("ok", || (t3_state(&r) == SourceState::Ok).then_some(())).await;
