@@ -107,7 +107,7 @@ fn clean_request(r: &mut Request) {
     clean_opt(&mut r.raw_screen);
     escaped |= clean_options(&mut r.options);
     for q in r.questions.iter_mut().flatten() {
-        clean_opt(&mut q.header);
+        escaped |= clean_opt(&mut q.header);
         escaped |= clean(&mut q.text);
         escaped |= clean_options(&mut q.options);
     }
@@ -591,6 +591,24 @@ mod tests {
             {"id":"a","label":"Yes","description":null,"effect":"allow"}]})).unwrap();
         let Applied::Opened(r) = s.apply(&ServerMessage::RequestOpened { epoch: "e1".into(), seq: 2, request: req }) else { panic!() };
         assert_eq!(r.answer_path, acd_protocol::AnswerPath::Hook);
+    }
+
+    /// The question header is shown, so escaping it makes the request
+    /// read-only like any other displayed field. Nothing else needs escaping.
+    #[test]
+    fn an_escaped_question_header_alone_makes_the_request_read_only() {
+        let mut s = Session::default();
+        s.welcome(machine(), vec![], "e1", 0);
+        s.apply(&snap("e1", 1, &[]));
+        let req: Request = serde_json::from_value(serde_json::json!({"id":"r1","agent_id":"a","kind":"question",
+            "status":"open","answer_path":"hook","title":"Ask","detail":"d","free_text":false,
+            "raw_screen":null,"opened_at":"2026-10-08T00:00:00.000Z","options":[],
+            "questions":[{"id":"q1","header":"Scope\u{202E}","text":"Which?","multi_select":false,"options":[
+            {"id":"a","label":"Yes","description":null,"effect":"choose"}]}]})).unwrap();
+        let Applied::Opened(r) = s.apply(&ServerMessage::RequestOpened { epoch: "e1".into(), seq: 2, request: req }) else { panic!() };
+        assert_eq!(r.questions.as_ref().unwrap()[0].header.as_deref(), Some("Scope\\u{202e}"));
+        assert_eq!(r.answer_path, acd_protocol::AnswerPath::None);
+        assert!(!r.is_answerable());
     }
 
     fn option_effect(label: &str, effect: Effect) -> Effect {
