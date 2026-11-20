@@ -65,6 +65,18 @@ test_refuses_when_the_attestation_fails() {
 	assert_no_path "$WORK/bin"
 }
 
+test_skips_provenance_when_asked() {
+	prepare_release
+	make_stub_gh 1
+	export ACD_INSTALL_SKIP_PROVENANCE=1
+	install_from
+	unset ACD_INSTALL_SKIP_PROVENANCE
+	assert_eq "$R_RC" 0 "exit status"
+	assert_file "$WORK/bin/acd"
+	assert_contains "$R_OUT" "skipped by ACD_INSTALL_SKIP_PROVENANCE"
+	assert_no_path "$WORK/gh-args"
+}
+
 test_says_provenance_was_not_checked_when_gh_is_signed_out() {
 	prepare_release
 	make_stub_gh 1 1

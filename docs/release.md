@@ -236,9 +236,11 @@ Local builds work the same way. `just app-install` uses
 `~/.local/bin`. It needs `curl`, `tar`, and `sha256sum` or `shasum`. It
 never uses sudo. It checks the archive against `SHA256SUMS` before it
 extracts anything, and it stops without installing when the check fails.
-If `gh` is installed, it also runs `gh attestation verify` on the archive and
-stops when that fails (it needs `gh auth login`). Without `gh` it prints that
-the provenance was not checked.
+If `gh` is installed and signed in, it also runs `gh attestation verify` on
+the archive and stops when that fails. Without `gh`, or with `gh` signed out,
+it prints that the provenance was not checked. Set
+`ACD_INSTALL_SKIP_PROVENANCE=1` to skip the check for an archive you built
+yourself or a release made before attestations.
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/tonibergholm/agent-caller/vX.Y.Z/scripts/install.sh
@@ -261,7 +263,10 @@ sh scripts/install.sh --version X.Y.Z --from-dir /path/to/downloads
 - `ubuntu-22.04` will be retired by GitHub at some point. When that
   happens, move the Linux jobs to a newer image and update the glibc floor
   in this page.
-- The pipeline does not yet produce SBOMs or build provenance attestations.
+- The pipeline does not yet produce SBOMs.
+- `install.sh` verifies attestations with `--repo` only. It does not pin the
+  signing workflow or the tag ref (`--signer-workflow`, `--source-ref`), so an
+  attestation from any workflow run in the repository passes.
 - Re-runs: every upload sets `overwrite: true`, so a re-run replaces the
   artifacts of an earlier attempt instead of failing with "artifact already
   exists". The upload-artifact README documents `overwrite` and the failure

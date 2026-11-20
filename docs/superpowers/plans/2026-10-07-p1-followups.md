@@ -428,6 +428,18 @@ Seen failing on CI in 2026-11 (each passed on rerun; none reproduced alone):
 
 Residuals from the 2026-11 relay and review work, none blocking:
 
+- **2026-11-20 audit residuals.**
+  - Keyboard replies bind to the agent incarnation of the card on screen when
+    the reply is sent, not when typing started; a card that changed agent
+    while the user typed sends to the agent it now shows.
+  - The pre-auth integration tests that used 127.0.0.x aliases as separate
+    sources were removed, because loopback is now one source. Separate
+    network sources are covered by the `SourcePool` and `Admission` unit
+    tests only.
+  - `install.sh` verifies attestations with `--repo` only, without
+    `--signer-workflow` or `--source-ref`.
+  - Between the herdr `agent.get` check and `agent.prompt` there is a small
+    window, because herdr cannot target a terminal id.
 - **Mutation tests (#101).** Some tests wait for indirect 5 s bounds, and the
   counts quoted in the mutation document are stale.
 - **Bug-hunt reproducers (#110).** `#[ignore]`d tests that fail today: B1

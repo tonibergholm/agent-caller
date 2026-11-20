@@ -55,7 +55,10 @@ Fixes from the 2026-11-20 security audit.
   run as another user on loopback is now refused.
 - `request.answer` must carry the request revision (`bad_request` without
   it). `agent.send` must carry the agent's `incarnation` when the agent has
-  one, and is refused while the agent's screen shows a dialog.
+  one, and is refused while the agent's screen shows a dialog. Neither has a
+  capability flag: update the apps, `acd-inbox` and the Omarchy plugin
+  together with the daemon, or older clients cannot answer requests or reply
+  to herdr agents.
 - Every loopback address counts as one source for the pre-auth limits.
 - Clients clean control and bidi characters from peer text, and treat an allow
   option whose label does not start with an approval word as unanswerable.
@@ -71,7 +74,8 @@ Fixes from the 2026-11-20 security audit.
 - Debug logs record hook and herdr errors by name, length and hash, not by
   their text.
 - Releases carry GitHub build provenance attestations, and
-  `scripts/install.sh` verifies them when `gh` is installed and signed in.
+  `scripts/install.sh` verifies them when `gh` is installed and signed in
+  (`ACD_INSTALL_SKIP_PROVENANCE=1` skips the check).
   Dependabot also covers the cargo and npm dependencies.
 
 ### Changed

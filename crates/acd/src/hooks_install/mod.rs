@@ -719,7 +719,7 @@ pub fn legacy_warnings(config_dir: &Path) -> Vec<String> {
             String::new()
         } else {
             format!(
-                ", and the file is readable by group or others (mode {:04o})",
+                ", and the file is readable by group or others (mode {:04o}), so also run `acd token rotate hook --revoke` after the reinstall",
                 mode & 0o7777
             )
         };

@@ -1152,7 +1152,7 @@ fn status_and_hooks_status_warn_about_a_legacy_http_entry_and_its_file_mode() {
     set_mode(&p, 0o644);
     let stdout = String::from_utf8_lossy(&hooks_status(&dir, home.path()).stdout).into_owned();
     assert!(
-        warns(&stdout) && stdout.contains("readable by group or others (mode 0644)"),
+        warns(&stdout) && stdout.contains("readable by group or others (mode 0644)") && stdout.contains("--revoke"),
         "{stdout}"
     );
     // `acd status` prints it before it connects, so no daemon is needed.

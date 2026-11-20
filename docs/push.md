@@ -68,7 +68,9 @@ fingerprint, drops the registrations and retries the rewrite, so a revoked
 device does not come back. A `push.json` from before this field has no
 fingerprint and is treated the same way: after upgrading, each device
 registers once more. Registering is the safe default here, because a wake sent
-to a revoked handle is the failure this prevents.
+to a revoked handle is the failure this prevents. An older acd does not know
+the field and reports push as degraded: after a downgrade, delete `push.json`
+and register the devices again.
 
 ## Not here
 
