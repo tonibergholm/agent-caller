@@ -8,7 +8,7 @@ Q=${Q:-w2:p1}
 ms() { python3 -c "print(round(($2-$1)*1000))"; }
 cl_prompt() { hd pane send-text $Q "$1"; sleep 0.3; hd pane send-keys $Q Enter; }
 cl_agent() { inbox agents | jq -r '[.[]|select(.kind=="claude" and (.id|startswith("herdr")))][0].id'; }
-cl_up() { hd agent list | jq -e '.result.agents[]|select(.agent=="claude")' >/dev/null || { claude_launch $Q; wait_pane_text $Q 'for shortcuts' 40 || return 1; sleep 2; }; }
+cl_up() { hd agent list | jq -e '.result.agents[]|select(.agent=="claude")' >/dev/null || { claude_launch $Q; wait_pane_text $Q "$CLAUDE_READY" 40 || return 1; sleep 2; }; }
 ask_touch() { T_ENTER=$(epoch_now); cl_prompt "Use the Bash tool to run exactly: touch /tmp/ace2e/$1 . Then reply done. Do nothing else."; }
 dlg() { for _ in $(seq 600); do pane_text $Q | grep -q 'Do you want to proceed' && { epoch_now; return 0; }; sleep 0.1; done; return 1; }
 hook_ts() { sed 's/\x1b\[[0-9;]*m//g' "$ACD_LOG" | grep -E "$1" | python3 -c '
@@ -65,7 +65,7 @@ dlg >/dev/null; T_KEY=$(epoch_now); hd pane send-keys $Q 1
 r=$(wait_resolved $T_KEY $RID 10); note "resolved: $r"
 by=$(echo "$r" | jq -r .by 2>/dev/null); t=$(echo "$r" | jq -r .t 2>/dev/null)
 [ "$by" = terminal ] && pass "3a terminal Yes resolved the card by=terminal $(ms $T_KEY $t) ms after the key (spec: within 2 s)" || fail "3a $r"
-late=$(inbox answer "$RID" deny); echo "$late" | jq -e '.error.code=="request_gone"' >/dev/null && pass "3b late inbox answer -> request_gone" || fail "3b $late"
+late=$(inbox answer "$RID" deny --revision "$(echo "$req" | jq -r .revision)"); echo "$late" | jq -e '.error.code=="request_gone"' >/dev/null && pass "3b late inbox answer -> request_gone" || fail "3b $late"
 [ -e /tmp/ace2e/x-cl-term.txt ] && pass "3c only the terminal answer applied (file created)" || fail "3c"
 wait_agent_idle
 
@@ -108,6 +108,6 @@ req=$(inbox wait-open --agent "$AID" --timeout 60 --ready); RID=$(echo "$req" | 
 sleep 3; T_KEY=$(epoch_now); hd pane send-keys $Q 1
 r=$(wait_resolved $T_KEY $RID 10); by=$(echo "$r" | jq -r .by 2>/dev/null); t=$(echo "$r" | jq -r .t 2>/dev/null)
 [ "$by" = terminal ] && pass "5b terminal answer resolved the question by=terminal $(ms $T_KEY $t) ms after the key" || fail "5b $r"
-late=$(inbox answer "$RID" "$(echo "$req" | jq -r '.options[1].id')"); echo "$late" | jq -e '.ok==false and (.error.code=="request_gone" or .error.code=="screen_mismatch")' >/dev/null && pass "5c late inbox answer on a keys request -> $(echo "$late" | jq -r .error.code)" || fail "5c $late"
+late=$(inbox answer "$RID" "$(echo "$req" | jq -r '.options[1].id')" --revision "$(echo "$req" | jq -r .revision)"); echo "$late" | jq -e '.ok==false and (.error.code=="request_gone" or .error.code=="screen_mismatch")' >/dev/null && pass "5c late inbox answer on a keys request -> $(echo "$late" | jq -r .error.code)" || fail "5c $late"
 wait_agent_idle
 exit $FAILED

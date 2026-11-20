@@ -16,7 +16,7 @@ variant() { # name foreign(0/1)
     printf '%s' '{"hooks":{"PermissionRequest":[{"matcher":"Bash","hooks":[{"type":"command","command":"touch /tmp/ace2e/coexist-fired && cat >/dev/null","timeout":5}]}]}}' >"$PROJ/.claude/settings.local.json"
   else rm -f "$PROJ/.claude/settings.local.json"; fi
   hd agent list | jq -e '.result.agents[]|select(.agent=="claude")' >/dev/null && { hd pane send-text $Q "/exit"; hd pane send-keys $Q Enter; sleep 3; }
-  claude_launch $Q; wait_pane_text $Q 'for shortcuts' 40; sleep 2
+  claude_launch $Q; wait_pane_text $Q "$CLAUDE_READY" 40; sleep 2
   AID=$(inbox agents | jq -r '[.[]|select(.kind=="claude" and (.id|startswith("herdr")))][0].id')
   for i in 1 2 3; do
     T0=$(epoch_now); cl_prompt "Use the Bash tool to run exactly: touch /tmp/ace2e/x-esc-$1-$i.txt . Then reply done. Do nothing else."
