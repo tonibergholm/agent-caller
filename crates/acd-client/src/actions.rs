@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(a.views().len(), 1);
     }
     fn req() -> Request {
-        serde_json::from_value(serde_json::json!({"id":"r","agent_id":"a","kind":"permission","status":"open","answer_path":"hook","title":"Bash","detail":"npm test","options":[{"id":"allow","label":"Yes","description":null,"effect":"allow"},{"id":"always","label":"Always","description":"Bash(npm test:*)","effect":"allow_always"}],"questions":null,"free_text":false,"raw_screen":null,"opened_at":"2026-10-08T00:00:00Z"})).unwrap()
+        serde_json::from_value(serde_json::json!({"id":"r","agent_id":"a","kind":"permission","status":"open","answer_path":"hook","title":"Bash","detail":"npm test","options":[{"id":"allow","label":"Yes","description":null,"effect":"allow"},{"id":"always","label":"Yes, always","description":"Bash(npm test:*)","effect":"allow_always"}],"questions":null,"free_text":false,"raw_screen":null,"opened_at":"2026-10-08T00:00:00Z"})).unwrap()
     }
     fn state() -> MachineState {
         let a:Agent=serde_json::from_value(serde_json::json!({"id":"a","machine_id":"m","source":"herdr","kind":"claude","title":"agent","cwd":null,"project":null,"state":"needs_you","state_since":"2026-10-08T00:00:00Z","failed":false,"last_message":null,"can_send":true,"pending":serde_json::to_value(req()).unwrap()})).unwrap();
