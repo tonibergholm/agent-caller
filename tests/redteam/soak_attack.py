@@ -15,11 +15,11 @@ local test daemon:
 
 Usage:
     python3 -I soak_attack.py --dir <acd config dir> --port <ws port> \
-        --hook-port <hook port> --duration 3600 [--revision N]
+        --hook-port <hook port> --duration 3600
 
 acd/1 requires `revision` on `request.answer`. The flood answers request ids
-that do not exist, so any revision reaches `request_gone` (without one the
-daemon answers `bad_request` first); `--revision` sets the one sent.
+that do not exist, so any valid revision reaches `request_gone` (without one
+the daemon answers `bad_request` first); the flood sends revision 1.
 
 Safety: every socket is bound to 127.0.0.0/8 and connects only to
 127.0.0.1 at the given ports. Reads the client token from `<dir>/client.token`
@@ -63,7 +63,7 @@ def preauth_churn_worker(port: int, stats: dict):
         stats["preauth_churn"] = n
 
 
-def authed_flood_worker(port: int, token: str, revision: int, stats: dict):
+def authed_flood_worker(port: int, token: str, stats: dict):
     """Floods pings and bogus answers from an authenticated-but-hostile
     peer. Reuses a *fixed* command id per connection on purpose: acd's
     idempotency table (crates/acd-core/src/idem.rs, 16,384 entries,
@@ -92,7 +92,7 @@ def authed_flood_worker(port: int, token: str, revision: int, stats: dict):
                     "id": answer_id,
                     "type": "request.answer",
                     "request_id": acdws.new_id(),
-                    "revision": revision,
+                    "revision": 1,  # the request ids do not exist: any valid revision reaches request_gone
                     "option_id": "yes",
                 })
                 n += 2
@@ -147,9 +147,6 @@ def main():
     ap.add_argument("--hook-port", type=int, required=True)
     ap.add_argument("--duration", type=float, default=3600.0)
     ap.add_argument("--stats-out", default=None)
-    ap.add_argument("--revision", type=int, default=1,
-                    help="revision sent on the flood's request.answer; the "
-                         "request ids do not exist, so it does not matter")
     args = ap.parse_args()
 
     token = open(os.path.join(args.dir, "client.token")).read().strip()
@@ -158,7 +155,7 @@ def main():
     threads = [
         threading.Thread(target=preauth_churn_worker, args=(args.port, stats), daemon=True),
         threading.Thread(target=preauth_churn_worker, args=(args.port, stats), daemon=True),
-        threading.Thread(target=authed_flood_worker, args=(args.port, token, args.revision, stats), daemon=True),
+        threading.Thread(target=authed_flood_worker, args=(args.port, token, stats), daemon=True),
         threading.Thread(target=hook_abuse_worker, args=(args.hook_port, stats), daemon=True),
     ]
     for t in threads:
