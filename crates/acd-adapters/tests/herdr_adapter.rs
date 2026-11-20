@@ -46,6 +46,17 @@ async fn rig_with_timing(agents: &[(&str, &str, &str)], poll: Duration) -> Rig {
 }
 
 async fn rig_with_keys(agents: &[(&str, &str, &str)], poll: Duration, keys: KeysTiming) -> Rig {
+    let timing = Timing {
+        list_idle: Duration::from_millis(300),
+        list_blocked: Duration::from_millis(100),
+        backoff_max: Duration::from_millis(200),
+        fallback_after: Duration::from_millis(200),
+        poll,
+    };
+    rig_with(agents, timing, keys).await
+}
+
+async fn rig_with(agents: &[(&str, &str, &str)], timing: Timing, keys: KeysTiming) -> Rig {
     let home = tempfile::Builder::new()
         .prefix("acd")
         .tempdir_in("/tmp")
@@ -56,13 +67,6 @@ async fn rig_with_keys(agents: &[(&str, &str, &str)], poll: Duration, keys: Keys
     for (p, a, s) in agents {
         fake.set_agent(fake_agent(p, a, s));
     }
-    let timing = Timing {
-        list_idle: Duration::from_millis(300),
-        list_blocked: Duration::from_millis(100),
-        backoff_max: Duration::from_millis(200),
-        fallback_after: Duration::from_millis(200),
-        poll,
-    };
     let cfg = HerdrConfig {
         enabled: true,
         home: home.path().into(),
@@ -130,6 +134,53 @@ async fn follow_up_errors_map_to_not_delivered() {
         r.adapter.send(&gone, "hi").await,
         Err(DeliverError::NotDelivered(ErrorCode::AgentGone))
     ));
+    assert!(r.fake.prompts().is_empty());
+}
+
+/// A reconciler that never looks again on its own: the test decides what it sees.
+async fn quiet_rig(agents: &[(&str, &str, &str)]) -> Rig {
+    let hour = Duration::from_secs(3600);
+    let timing = Timing {
+        list_idle: hour,
+        list_blocked: hour,
+        backoff_max: hour,
+        fallback_after: hour,
+        poll: hour,
+    };
+    rig_with(agents, timing, KeysTiming::default()).await
+}
+
+#[tokio::test]
+async fn follow_up_never_reaches_another_agent_in_the_same_pane() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    // Claude exits and Codex starts in pane w1:p1 before the reconciler looks.
+    let mut codex = fake_agent("w1:p1", "codex", "idle");
+    codex["terminal_id"] = "term_other".into();
+    r.fake.set_agent(codex);
+    let res = r.adapter.send(&a, "run the tests").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty(), "the reply reached the new agent");
+    // The reconciler is asked to look, so clients see the replacement.
+    until("agent republished", || {
+        (r.adapter.panes().read().unwrap()[&a.id].kind == AgentKind::Codex).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn follow_up_to_a_pane_that_lost_its_agent_is_gone() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    r.fake.remove_agent("w1:p1");
+    let res = r.adapter.send(&a, "hi").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))),
+        "{res:?}"
+    );
     assert!(r.fake.prompts().is_empty());
 }
 

@@ -17,11 +17,12 @@ use std::time::Duration;
 use acd_core::{Adapter, Answer, Core, DeliverError};
 use acd_protocol::{Agent, AnswerPath, ErrorCode, Request, Source, SourceState, SourceStatus};
 use async_trait::async_trait;
+use tokio::time::{Instant, timeout_at};
 
 use self::client::CallError;
 use self::discovery::Discovery;
 use self::keys::{AgentLocks, Engine, Evidence, KeysTargets, KeysTiming};
-use self::reconciler::{Hint, PaneMap, Timing};
+use self::reconciler::{Hint, PaneMap, Timing, pane_replaced};
 
 const SEND_DEADLINE: Duration = Duration::from_secs(10);
 const SCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -165,20 +166,34 @@ impl Adapter for HerdrAdapter {
         if crate::text::check_prompt_text(text).is_err() {
             return Err(DeliverError::NotDelivered(ErrorCode::BadRequest));
         }
+        let deadline = Instant::now() + SEND_DEADLINE;
+        let unavailable = || DeliverError::NotDelivered(ErrorCode::SourceUnavailable);
+        // Held to the end: the pane cannot change owner between the checks and the prompt.
+        let _lock = timeout_at(deadline, self.keys.locks().lock(&agent.id))
+            .await
+            .map_err(|_| unavailable())?;
         // Clone out of the map so no lock is held across an await.
         let pane = self.panes.read().expect("pane map").get(&agent.id).cloned();
         let Some(pane) = pane else {
             return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
         };
-        let result =
-            match tokio::time::timeout(SEND_DEADLINE, pane.herdr.prompt(&pane.pane_id, text)).await
-            {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(map_call_error(&e)),
-                Err(_) => Err(DeliverError::Uncertain(
-                    "herdr did not confirm the prompt in time".into(),
-                )),
-            };
+        // The pane id outlives the agent in it: another agent may have taken
+        // the pane since the reconciler last looked. Ask herdr now, fail closed.
+        let live = timeout_at(deadline, pane.herdr.get(&pane.pane_id))
+            .await
+            .map_err(|_| unavailable())?
+            .map_err(|_| unavailable())?;
+        if live.as_ref().is_none_or(|i| pane_replaced(&pane, i)) {
+            let _ = pane.hints.try_send(Hint::Pane(pane.pane_id.clone()));
+            return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
+        }
+        let result = match timeout_at(deadline, pane.herdr.prompt(&pane.pane_id, text)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(map_call_error(&e)),
+            Err(_) => Err(DeliverError::Uncertain(
+                "herdr did not confirm the prompt in time".into(),
+            )),
+        };
         if matches!(result, Ok(()) | Err(DeliverError::Uncertain(_))) {
             // The reconciler may be reconnecting and not draining: never block.
             let _ = pane.hints.try_send(Hint::Pane(pane.pane_id.clone()));

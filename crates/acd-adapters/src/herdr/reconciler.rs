@@ -90,6 +90,25 @@ impl PaneIdentity {
     }
 }
 
+/// Whether `info`, read from herdr just now, is no longer the agent `pane`
+/// was recorded for: a plain shell now, or a different terminal, session or
+/// kind. The reconciler may not have noticed yet.
+pub(super) fn pane_replaced(pane: &PaneRef, info: &AgentInfo) -> bool {
+    let Some(kind) = map::kind(info.agent.as_deref()) else {
+        return true;
+    };
+    PaneIdentity {
+        terminal_id: pane.terminal_id.clone(),
+        session: pane.session.clone(),
+        kind: pane.kind,
+    }
+    .replaced_by(&PaneIdentity {
+        terminal_id: info.terminal_id.clone(),
+        session: info.agent_session.as_ref().and_then(|s| s.value.clone()),
+        kind,
+    })
+}
+
 /// `agent_id -> PaneRef`. The reconciler inserts and removes; adapters read.
 pub type PaneMap = RwLock<HashMap<String, PaneRef>>;
 
