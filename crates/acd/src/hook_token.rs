@@ -305,21 +305,25 @@ pub fn update_headers(
 /// once instead of retaining it, and so needs no `force`.
 pub fn rotate(
     dir: &Path,
-    ctx: &hooks_install::Ctx,
+    load_ctx: impl FnOnce() -> Result<hooks_install::Ctx>,
     flags: hooks_install::Flags,
     force: bool,
     revoke: bool,
     now_ms: i64,
 ) -> Result<(Store, hooks_install::RewriteReport)> {
     let held = writer_lock::acquire(dir)?;
-    // A revocation answers a leaked token, so no settings-file problem may
-    // stand before the store save: such a problem is reported after it.
-    if let Err(e) = hooks_install::journal::recover(dir) {
-        if !revoke {
-            return Err(e);
-        }
-        eprintln!("warning: a settings edit journal could not be recovered: {e:#}");
-    }
+    // A revocation answers a leaked token, so nothing but the token store may
+    // stand before its save: the config, the journal and the settings files
+    // are read after it, and their problems reported then.
+    // Called once, on whichever side of the save the mode puts it.
+    let mut load_ctx = Some(load_ctx);
+    let mut ctx_once = || load_ctx.take().expect("the context is loaded once")();
+    let ctx = if revoke {
+        None
+    } else {
+        hooks_install::journal::recover(dir)?;
+        Some(ctx_once()?)
+    };
     let store = migrate_locked(dir, &held)?;
     if !revoke && (store.headers.state != HeaderState::Done || store.headers.generation != store.generation) {
         bail!("the last hook token rotation is incomplete: run `acd hooks install claude` first");
@@ -336,19 +340,27 @@ pub fn rotate(
             "warning: the token before the last rotation is no longer accepted; restart Claude sessions that still use it"
         );
     }
-    if !revoke {
+    if let Some(ctx) = &ctx {
         hooks_install::precheck_claude(ctx, &held, flags)?;
     }
     rotate_store_keeping(dir, &held, now_ms, !revoke)?;
     fail_at("after-store")?;
-    if revoke {
-        // The checks `acd` runs before every other command, after the save: a
-        // loose journal or record must not have kept the old token alive.
-        crate::preflight(dir).context(
-            "the old hook token is revoked, but the config directory failed its safety checks; fix them and run `acd hooks install claude`",
-        )?;
-    }
-    let report = update_headers_locked(dir, ctx, &held, flags).map_err(|e| {
+    let ctx = match ctx {
+        Some(ctx) => ctx,
+        None => {
+            const REVOKED: &str = "the old hook token is revoked, but";
+            // The checks `acd` runs before every other command, after the save: a
+            // loose journal or record must not have kept the old token alive.
+            crate::preflight(dir).with_context(|| {
+                format!("{REVOKED} the config directory failed its safety checks; fix them and run `acd hooks install claude`")
+            })?;
+            hooks_install::journal::recover(dir).with_context(|| {
+                format!("{REVOKED} a settings edit journal could not be recovered; run `acd hooks install claude`")
+            })?;
+            ctx_once().with_context(|| format!("{REVOKED} the config could not be loaded to rewrite the Claude settings"))?
+        }
+    };
+    let report = update_headers_locked(dir, &ctx, &held, flags).map_err(|e| {
         if revoke {
             e.context("the old hook token is revoked, but the Claude settings headers were not rewritten")
         } else {

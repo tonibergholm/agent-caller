@@ -232,14 +232,14 @@ fn real_main() -> Result<()> {
                     Ok(())
                 }
                 TokenKind::Hook => {
-                    let ctx = hooks_install::Ctx::from_env(&dir)?;
                     let flags = hooks_install::Flags {
                         allow_tracked,
                         allow_unknown_git,
                     };
+                    // Built lazily: a revocation saves the store before it reads the config.
                     let (store, report) = hook_token::rotate(
                         &dir,
-                        &ctx,
+                        || hooks_install::Ctx::from_env(&dir),
                         flags,
                         force,
                         revoke,

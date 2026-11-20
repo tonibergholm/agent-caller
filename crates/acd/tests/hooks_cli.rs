@@ -3036,6 +3036,30 @@ fn rotate_revoke_saves_the_store_before_the_installer_preflight_can_fail() {
     }
 }
 
+#[test]
+fn rotate_revoke_saves_the_store_before_the_config_is_read() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let old = store_token(&dir);
+    let config = dir.join("config.toml");
+    let saved = std::fs::read(&config).unwrap();
+    std::fs::write(&config, "this is = = not toml").unwrap();
+    let out = rotate(&dir, home.path(), &["--revoke"]);
+    assert!(!out.status.success(), "an unreadable config must exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("the old hook token is revoked"), "{} bytes of stderr", stderr.len());
+    assert!(!stderr.contains(&old) && !String::from_utf8_lossy(&out.stdout).contains(&old));
+    let store = store_of(&dir);
+    assert!(store["previous"].is_null());
+    let new = store_token(&dir);
+    assert!(old != new, "revoke did not change the token");
+    std::fs::write(&config, saved).unwrap();
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let body = claude_fixture("payload-Stop.json");
+    assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0, 401);
+    assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0, 200);
+}
+
 /// A well-formed token (43 base64url characters, 32 bytes) for hand-written stores.
 fn fixed_token(c: char) -> String {
     format!("{}A", c.to_string().repeat(42))
