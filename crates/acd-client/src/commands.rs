@@ -20,6 +20,8 @@ pub enum Command {
     Send {
         agent_id: String,
         text: String,
+        /// The agent's `incarnation` as the user last saw it (PROTOCOL.md §4).
+        incarnation: Option<String>,
     },
     MarkSeen {
         agent_id: String,
@@ -43,10 +45,11 @@ impl fmt::Debug for Command {
                 .field("revision", revision)
                 .field("text_bytes", &text.len())
                 .finish(),
-            Self::Send { agent_id, text } => f
+            Self::Send { agent_id, text, incarnation } => f
                 .debug_struct("Send")
                 .field("agent_id", agent_id)
                 .field("text_bytes", &text.len())
+                .field("incarnation", incarnation)
                 .finish(),
             Self::MarkSeen { agent_id } => f.debug_struct("MarkSeen").field("agent_id", agent_id).finish(),
         }
@@ -339,10 +342,11 @@ fn message(cmd: &Command, id: String) -> ClientMessage {
             option_id: None,
             text: Some(text.clone()),
         },
-        Command::Send { agent_id, text } => ClientMessage::AgentSend {
+        Command::Send { agent_id, text, incarnation } => ClientMessage::AgentSend {
             id,
             agent_id: agent_id.clone(),
             text: text.clone(),
+            incarnation: incarnation.clone(),
         },
         Command::MarkSeen { agent_id } => ClientMessage::AgentMarkSeen {
             id,
@@ -724,7 +728,8 @@ mod tests {
                 .begin(
                     Command::Send {
                         agent_id: "a".into(),
-                        text: "x".into()
+                        text: "x".into(),
+                        incarnation: None
                     },
                     tx,
                     &["answer".into()],

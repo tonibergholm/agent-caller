@@ -41,7 +41,7 @@ fn answer_opt(id: &str, request_id: &str, revision: Option<u64>) -> ClientMessag
 }
 
 fn send_msg(id: &str, agent_id: &str, text: &str) -> ClientMessage {
-    ClientMessage::AgentSend { id: id.into(), agent_id: agent_id.into(), text: text.into() }
+    ClientMessage::AgentSend { id: id.into(), agent_id: agent_id.into(), text: text.into(), incarnation: None }
 }
 
 fn core_with_request(free_text: bool) -> (Arc<Core>, Arc<FakeAdapter>, String) {

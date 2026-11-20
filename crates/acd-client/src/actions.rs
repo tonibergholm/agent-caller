@@ -66,7 +66,9 @@ impl TextSemantics {
 pub enum ActionKind {
     Answer(Semantics),
     AnswerText(TextSemantics),
-    Reply { text: String },
+    /// `incarnation` is the agent's as the user saw it when the reply was
+    /// armed; the reply is not sent if the agent's has changed since.
+    Reply { text: String, incarnation: Option<String> },
 }
 impl fmt::Debug for Semantics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -100,7 +102,7 @@ impl fmt::Debug for ActionKind {
         match self {
             ActionKind::Answer(s) => f.debug_tuple("Answer").field(s).finish(),
             ActionKind::AnswerText(s) => f.debug_tuple("AnswerText").field(s).finish(),
-            ActionKind::Reply { text } => f.debug_struct("Reply").field("text_bytes", &text.len()).finish(),
+            ActionKind::Reply { text, .. } => f.debug_struct("Reply").field("text_bytes", &text.len()).finish(),
         }
     }
 }
@@ -286,6 +288,11 @@ pub fn check_reason(a: &Action, state: &MachineState) -> Result<(), NotSentReaso
                 return Err(NotSentReason::Changed);
             }
         }
+        // The id may now name another agent (herdr reuses a pane): the reply
+        // was written for the one the user saw.
+        ActionKind::Reply { incarnation, .. } if agent.incarnation != *incarnation => {
+            return Err(NotSentReason::AgentGone);
+        }
         ActionKind::Reply { .. } if !agent.can_send => {
             return Err(NotSentReason::AgentBusy);
         }
@@ -309,7 +316,7 @@ mod tests {
             agent_id: "a".into(),
             instance: 1,
             conn_gen: generation,
-            kind: ActionKind::Reply { text: "hi".into() },
+            kind: ActionKind::Reply { text: "hi".into(), incarnation: None },
             fires_at,
             view: ActionView {
                 id: id.into(),

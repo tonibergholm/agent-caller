@@ -35,7 +35,7 @@ fn reply_action(instance: u64, conn_gen: u64) -> Action {
         agent_id: "agent-1".into(),
         instance,
         conn_gen,
-        kind: ActionKind::Reply { text: "hello".into() },
+        kind: ActionKind::Reply { text: "hello".into(), incarnation: None },
         fires_at: Instant::now(),
         view: ActionView {
             id: "a1".into(),

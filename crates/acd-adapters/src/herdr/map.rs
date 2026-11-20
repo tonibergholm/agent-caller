@@ -20,6 +20,16 @@ pub fn agent_id(socket_hash: &str, pane_id: &str) -> String {
     crate::ids::bounded(&format!("herdr:{socket_hash}:"), pane_id)
 }
 
+/// The agent's `incarnation` on the wire: the pane incarnation (new for every
+/// replacement the reconciler sees, never repeated in a process) and the
+/// terminal it runs in. Opaque to clients; `send` recomputes it from the pane.
+pub fn incarnation_id(incarnation: u64, terminal_id: Option<&str>) -> String {
+    let terminal: String = terminal_id
+        .map(|t| Sha256::digest(t.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect())
+        .unwrap_or_default();
+    format!("{incarnation}.{terminal}")
+}
+
 /// `None` for a pane with no detected agent.
 pub fn kind(agent: Option<&str>) -> Option<AgentKind> {
     agent.map(|a| match a {

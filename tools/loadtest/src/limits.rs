@@ -221,7 +221,7 @@ async fn frames(p: &Proc, dir: &Path) {
     for (label, n) in [("64KiB", 64 * 1024), ("64KiB+1", 64 * 1024 + 1)] {
         let Ok(mut ws) = ws_hello(&p.acd_sock(), &token, "lt-text").await else { continue };
         let _ = read_until(&mut ws, |v| v["type"] == "snapshot", Duration::from_secs(3)).await;
-        let msg = ClientMessage::AgentSend { id: format!("c-{label}"), agent_id: "nobody".into(), text: "a".repeat(n) };
+        let msg = ClientMessage::AgentSend { id: format!("c-{label}"), agent_id: "nobody".into(), text: "a".repeat(n), incarnation: None };
         let _ = ws.send(Message::text(serde_json::to_string(&msg).unwrap())).await;
         let (got, end) = read_until(&mut ws, |v| v["type"] == "result", Duration::from_secs(3)).await;
         out(&format!("agent_send_text_{label}"), match got {

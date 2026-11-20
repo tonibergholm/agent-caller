@@ -178,8 +178,16 @@ impl Adapter for HerdrAdapter {
         let Some(pane) = pane else {
             return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
         };
-        // The pane id outlives the agent in it: another agent may have taken
-        // the pane since the reconciler last looked. Ask herdr now, fail closed.
+        // The agent id is a pane id and outlives the agent in it. The core
+        // checked the client's incarnation against `agent`; `agent` must
+        // still be this pane's agent now, else the reply was written for one
+        // that has left (or the registry has not caught up).
+        let marker = map::incarnation_id(pane.incarnation, pane.terminal_id.as_deref());
+        if agent.incarnation.as_deref() != Some(marker.as_str()) {
+            return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
+        }
+        // The pane may also have changed hands since the reconciler last
+        // looked. Ask herdr now, fail closed.
         let live = timeout_at(deadline, pane.herdr.get(&pane.pane_id))
             .await
             .map_err(|_| unavailable())?

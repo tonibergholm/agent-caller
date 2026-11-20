@@ -405,6 +405,7 @@ async fn hostile_failure_text_never_reaches_warn_logs_or_source_status() {
                 id: "follow-up".into(),
                 agent_id: agent.id,
                 text: "continue".into(),
+                incarnation: None,
             },
         )
         .await;
@@ -582,6 +583,7 @@ async fn a_written_follow_up_retry_returns_the_cached_uncertain_result() {
         id: "f1".into(),
         agent_id: agent.id,
         text: "hi".into(),
+        incarnation: None,
     };
     let first = r.core.handle("c", msg.clone()).await;
     assert_eq!(first.outcome, Some(Outcome::Delivered));

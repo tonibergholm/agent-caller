@@ -171,6 +171,49 @@ async fn follow_up_never_reaches_another_agent_in_the_same_pane() {
     .await;
 }
 
+/// The original finding: Claude exits, Codex starts in the same pane, the
+/// reconciler republishes under the same id, and a reply composed for Claude
+/// must not reach Codex.
+#[tokio::test]
+async fn a_reply_for_the_old_agent_is_refused_after_a_republish_under_the_same_id() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let old = agent(&r);
+    let seen = old.incarnation.clone().expect("a herdr agent publishes its incarnation");
+    let mut codex = fake_agent("w1:p1", "codex", "idle");
+    codex["terminal_id"] = "term_other".into();
+    r.fake.set_agent(codex);
+    let pane = r.adapter.panes().read().unwrap()[&old.id].clone();
+    pane.hints
+        .try_send(acd_adapters::herdr::reconciler::Hint::Pane("w1:p1".into()))
+        .unwrap();
+    let new = until("republished", || {
+        let a = agent(&r);
+        (a.kind == AgentKind::Codex).then_some(a)
+    })
+    .await;
+    assert_eq!(new.id, old.id, "the id is the pane's");
+    assert_ne!(new.incarnation.as_ref(), Some(&seen), "the incarnation tells them apart");
+    let send = |id: &str, incarnation: Option<String>| ClientMessage::AgentSend {
+        id: id.into(),
+        agent_id: old.id.clone(),
+        text: "run the tests".into(),
+        incarnation,
+    };
+    // Through the core: the stale value and a missing one are refused.
+    for (id, inc) in [("s1", Some(seen.clone())), ("s2", None)] {
+        let res = r.core.handle("c", send(id, inc)).await;
+        assert_eq!(res.error_code(), Some(ErrorCode::AgentGone), "{res:?}");
+    }
+    // Through the adapter alone, with the Agent the client last saw.
+    let res = r.adapter.send(&old, "run the tests").await;
+    assert!(matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))), "{res:?}");
+    assert!(r.fake.prompts().is_empty(), "nothing was typed into the new agent");
+    // The current incarnation is accepted.
+    let res = r.core.handle("c", send("s3", new.incarnation.clone())).await;
+    assert!(res.ok, "{res:?}");
+    assert_eq!(r.fake.prompts().len(), 1);
+}
+
 #[tokio::test]
 async fn follow_up_to_a_pane_that_lost_its_agent_is_gone() {
     let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;

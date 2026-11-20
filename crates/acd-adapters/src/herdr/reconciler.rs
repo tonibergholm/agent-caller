@@ -862,8 +862,9 @@ impl Reconciler {
         } else {
             self.blocked.remove(pane_id);
         }
+        let marker = map::incarnation_id(incarnation, next.terminal_id.as_deref());
         self.panes.write().expect("pane map").insert(
-            agent_id,
+            agent_id.clone(),
             PaneRef {
                 herdr: self.herdr.clone(),
                 pane_id: pane_id.to_owned(),
@@ -881,6 +882,11 @@ impl Reconciler {
             obs.state == AgentState::NeedsYou,
             Instant::now().into_std(),
         );
+        // Before the upsert, so a new agent is first published with it.
+        self.core.observe(Observation::AgentIncarnation {
+            agent_id,
+            incarnation: marker,
+        });
         self.core.observe(Observation::AgentUpsert(obs));
     }
 

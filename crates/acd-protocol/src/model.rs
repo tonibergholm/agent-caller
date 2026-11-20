@@ -309,4 +309,9 @@ pub struct Agent {
     /// The parent thread's title, for a subagent when known.
     #[serde(default)]
     pub parent_title: Option<String>,
+    /// Opaque. Changes whenever the agent behind `id` changes (herdr: another
+    /// agent took the pane). Absent when the source cannot tell. A client
+    /// echoes it in `agent.send`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
 }

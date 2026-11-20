@@ -194,7 +194,7 @@ async fn follow_up_retry_sends_once() {
     let (mut ws, welcome, snap) = snapshot_with(&r.url, 1).await;
     let agent_id = snap["agents"][0]["id"].clone();
     let resume = json!({"epoch": welcome["epoch"], "seq": snap["seq"]});
-    let cmd = json!({"type":"agent.send","id":"f1","agent_id":agent_id,"text":"run the tests"});
+    let cmd = json!({"type":"agent.send","id":"f1","agent_id":agent_id,"text":"run the tests","incarnation":snap["agents"][0]["incarnation"]});
 
     // Send, then drop the socket without reading the result.
     send(&mut ws, cmd.clone()).await;

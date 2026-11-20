@@ -17,6 +17,13 @@
         "id": {
           "type": "string"
         },
+        "incarnation": {
+          "description": "Opaque. Changes whenever the agent behind `id` changes (herdr: another\nagent took the pane). Absent when the source cannot tell. A client\nechoes it in `agent.send`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/AgentKind"
         },

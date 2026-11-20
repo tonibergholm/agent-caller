@@ -186,6 +186,7 @@ fn agent() -> impl Strategy<Value = Agent> {
             can_send,
             role,
             parent_title,
+            incarnation: None,
         },
     )
 }
@@ -343,7 +344,7 @@ fn client_message() -> impl Strategy<Value = ClientMessage> {
             }
         ),
         (word(), word(), text())
-            .prop_map(|(id, agent_id, text)| ClientMessage::AgentSend { id, agent_id, text }),
+            .prop_map(|(id, agent_id, text)| ClientMessage::AgentSend { id, agent_id, text, incarnation: None }),
         (word(), word()).prop_map(|(id, agent_id)| ClientMessage::AgentMarkSeen { id, agent_id }),
         word().prop_map(|id| ClientMessage::Ping { id }),
     ]

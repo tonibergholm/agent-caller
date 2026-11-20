@@ -44,6 +44,11 @@ pub enum ClientMessage {
         id: String,
         agent_id: String,
         text: String,
+        /// The `incarnation` of the agent as the client last saw it. Required
+        /// when the agent publishes one; a mismatch or a missing value is
+        /// `agent_gone`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        incarnation: Option<String>,
     },
     #[serde(rename = "agent.mark_seen")]
     AgentMarkSeen { id: String, agent_id: String },
@@ -120,11 +125,12 @@ impl std::fmt::Debug for ClientMessage {
                 .field("option_id", option_id)
                 .field("text_bytes", &text.as_ref().map(String::len))
                 .finish(),
-            ClientMessage::AgentSend { id, agent_id, text } => f
+            ClientMessage::AgentSend { id, agent_id, text, incarnation } => f
                 .debug_struct("AgentSend")
                 .field("id", id)
                 .field("agent_id", agent_id)
                 .field("text_bytes", &text.len())
+                .field("incarnation", incarnation)
                 .finish(),
             ClientMessage::AgentMarkSeen { id, agent_id } => {
                 f.debug_struct("AgentMarkSeen").field("id", id).field("agent_id", agent_id).finish()
@@ -274,6 +280,8 @@ impl CommandResult {
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "type")]
+// `Agent` carries a whole request; boxing it would change every consumer's pattern.
+#[allow(clippy::large_enum_variant)]
 pub enum ServerMessage {
     #[serde(rename = "welcome")]
     Welcome {

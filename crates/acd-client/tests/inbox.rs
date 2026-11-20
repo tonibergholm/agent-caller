@@ -317,6 +317,56 @@ async fn reply_goes_through_the_undo() {
     assert_eq!(sent, 1);
 }
 
+fn idle_with_incarnation(incarnation: &str) -> Value {
+    let mut idle = pending_agent();
+    idle["state"] = Value::String("idle".into());
+    idle["pending"] = Value::Null;
+    idle["incarnation"] = Value::String(incarnation.into());
+    idle
+}
+
+#[tokio::test]
+async fn a_reply_carries_the_incarnation_the_user_saw() {
+    let (f, c, ib) = setup().await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":idle_with_incarnation("i1")}))
+        .await;
+    ib.set_show_idle(true);
+    view_until(&ib, "reply card", |v| {
+        v.cards.iter().any(|c| c.can_reply && c.agent.incarnation.as_deref() == Some("i1"))
+    })
+    .await;
+    ib.reply("m1/a1", "next step".into()).unwrap();
+    view_until(&ib, "counting", |v| v.actions.len() == 1).await;
+    ib.expire_countdowns_for_test();
+    received_at_least(&f, "agent.send", 1).await;
+    let sent = frame_of_type(&f, "agent.send").await;
+    assert_eq!(sent["incarnation"], "i1");
+}
+
+/// The agent behind the id changes (a herdr pane is taken by another agent)
+/// while the reply counts down: the reply was written for the old one.
+#[tokio::test]
+async fn a_reply_is_not_sent_to_a_replaced_agent() {
+    let (f, c, ib) = setup().await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":idle_with_incarnation("i1")}))
+        .await;
+    ib.set_show_idle(true);
+    view_until(&ib, "reply card", |v| {
+        v.cards.iter().any(|c| c.can_reply && c.agent.incarnation.as_deref() == Some("i1"))
+    })
+    .await;
+    ib.reply("m1/a1", "next step".into()).unwrap();
+    view_until(&ib, "counting", |v| v.actions.len() == 1).await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":idle_with_incarnation("i2")}))
+        .await;
+    view_until(&ib, "republished", |v| {
+        v.cards.iter().any(|c| c.agent.incarnation.as_deref() == Some("i2"))
+    })
+    .await;
+    expire_expecting_no_send(&ib).await;
+    assert!(!f.received().iter().any(|v| v["type"] == "agent.send"), "nothing was sent");
+}
+
 #[tokio::test]
 async fn import_pairing_stores_the_secret_and_never_reports_it() {
     let f = FakeServer::start(common::TOKEN, Identity::Paired).await;
@@ -1604,10 +1654,10 @@ fn debug_output_shows_text_lengths_only() {
     use acd_client::actions::{ActionKind, TextSemantics};
     use acd_client::commands::{Command, Outcome};
     let shown = [
-        format!("{:?}", Command::Send { agent_id: "a".into(), text: "SECRET-1".into() }),
+        format!("{:?}", Command::Send { agent_id: "a".into(), text: "SECRET-1".into(), incarnation: None }),
         format!("{:?}", Command::AnswerText { request_id: "r".into(), revision: 1, text: "SECRET-2".into() }),
         format!("{:?}", Outcome::Failed { code: acd_protocol::ErrorCode::BadRequest, message: "SECRET-3".into() }),
-        format!("{:?}", ActionKind::Reply { text: "SECRET-4".into() }),
+        format!("{:?}", ActionKind::Reply { text: "SECRET-4".into(), incarnation: None }),
     ];
     for s in shown {
         assert!(!s.contains("SECRET"), "{s}");

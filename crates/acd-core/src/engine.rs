@@ -57,6 +57,7 @@ impl Txn<'_> {
 fn apply_bounded(registry: &mut Registry, obs: Observation) -> Vec<Change> {
     let published = match &obs {
         Observation::AgentUpsert(a) => Some(&a.id),
+        Observation::AgentIncarnation { agent_id, .. } => Some(agent_id),
         Observation::RequestSeen(r) => Some(&r.agent_id),
         Observation::AgentMigrated { to, .. } => Some(to),
         _ => None,
@@ -432,13 +433,13 @@ impl Core {
                     }
                 }
             }
-            ClientMessage::AgentSend { agent_id, text, .. } => {
+            ClientMessage::AgentSend { agent_id, text, incarnation, .. } => {
                 let agent = match self
                     .inner
                     .lock()
                     .unwrap()
                     .registry
-                    .check_send(&agent_id, &text)
+                    .check_send(&agent_id, &text, incarnation.as_deref())
                 {
                     Ok(a) => a,
                     Err(code) => {
@@ -574,7 +575,7 @@ fn check_limits(msg: &ClientMessage) -> Result<(), &'static str> {
             text,
             ..
         } => (vec![id, request_id], text.as_deref()),
-        ClientMessage::AgentSend { id, agent_id, text } => (vec![id, agent_id], Some(text)),
+        ClientMessage::AgentSend { id, agent_id, text, .. } => (vec![id, agent_id], Some(text)),
         ClientMessage::AgentMarkSeen { id, agent_id } => (vec![id, agent_id], None),
         ClientMessage::PushRegister {
             id, relay, handle, ..

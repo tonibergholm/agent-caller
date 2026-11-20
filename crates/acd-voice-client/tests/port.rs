@@ -152,7 +152,7 @@ async fn debug_never_shows_content_from_snapshot_to_wire() {
             option_id: None,
             text: Some("SECRET-ANSWER".into()),
         },
-        ClientMessage::AgentSend { id: "c2".into(), agent_id: "a1".into(), text: "SECRET-SEND".into() },
+        ClientMessage::AgentSend { id: "c2".into(), agent_id: "a1".into(), text: "SECRET-SEND".into(), incarnation: None },
         ClientMessage::Hello {
             protocol: "acd/1".into(),
             token: "SECRET-TOKEN".into(),

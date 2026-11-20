@@ -76,7 +76,7 @@ fn mark_seen(id: &str) -> ClientMessage {
 }
 
 fn send(id: &str) -> ClientMessage {
-    ClientMessage::AgentSend { id: id.into(), agent_id: "a2".into(), text: "hi".into() }
+    ClientMessage::AgentSend { id: id.into(), agent_id: "a2".into(), text: "hi".into(), incarnation: None }
 }
 
 fn open_agent(core: &Core) {

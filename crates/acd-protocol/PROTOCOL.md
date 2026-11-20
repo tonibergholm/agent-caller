@@ -177,7 +177,7 @@ UUID.
 ```text
 hello            {protocol: "acd/1", token, client: {id, name, version}, resume?: {epoch, seq}}
 request.answer   {id, request_id, revision?, option_id?, text?}    // revision is required when answer.revision is advertised (the daemon always does) and is sent only then; exactly one of option_id or text
-agent.send       {id, agent_id, text}
+agent.send       {id, agent_id, text, incarnation?}    // incarnation: the agent's, as last seen; required when the agent has one (§4)
 agent.mark_seen  {id, agent_id}
 ping             {id}
 push.register    {id, relay, handle, platform: "android"|"ios", expires_at}   // only with the `push` capability
@@ -307,6 +307,15 @@ code 4408.
   claimed or delivered, and the id is released like any other refusal. A
   daemon that predates revisions does not advertise `answer.revision` and
   does not check one.
+- **Incarnations and follow-ups.** An id can outlive the agent behind it: a
+  herdr pane id stays when one agent exits and another starts in the pane.
+  An `Agent` may carry an opaque `incarnation` that changes when the agent
+  behind its id changes. When the agent has one, `agent.send` must carry the
+  same value; a different value or none is `agent_gone`, and nothing is
+  typed. A client sends the incarnation of the agent as it last showed it
+  to the user, not a fresher one. An agent without an `incarnation` takes
+  an `agent.send` without one, and a daemon that predates the field never
+  publishes one.
 
 **Recovery after a lost result.** The cache does not survive an epoch
 change. After a reconnect into a new epoch, a client with commands in
@@ -386,6 +395,7 @@ Agent {
   can_send: bool                     // whether a follow-up through agent.send is possible
   role: "main" | "subagent"          // optional on the wire; absent or unknown means "main"
   parent_title: string | null        // optional; a subagent's parent thread title when known
+  incarnation?: string               // optional, opaque; changes when the agent behind `id` changes (herdr: a new agent in the same pane)
 }
 
 Request {

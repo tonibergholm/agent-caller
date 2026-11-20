@@ -261,22 +261,22 @@ fn check_send_rules() {
     let mut r = Registry::new("m".into());
     r.apply(Observation::AgentUpsert(agent("a1", true)));
     r.apply(Observation::AgentUpsert(agent("hooks-only", false)));
-    assert!(r.check_send("a1", "run the tests").is_ok());
+    assert!(r.check_send("a1", "run the tests", None).is_ok());
     assert_eq!(
-        r.check_send("ghost", "x").unwrap_err(),
+        r.check_send("ghost", "x", None).unwrap_err(),
         ErrorCode::AgentGone
     );
     assert_eq!(
-        r.check_send("hooks-only", "x").unwrap_err(),
+        r.check_send("hooks-only", "x", None).unwrap_err(),
         ErrorCode::NotSupported
     );
-    assert_eq!(r.check_send("a1", "").unwrap_err(), ErrorCode::BadRequest);
+    assert_eq!(r.check_send("a1", "", None).unwrap_err(), ErrorCode::BadRequest);
     assert_eq!(
-        r.check_send("a1", "rm -rf /\r").unwrap_err(),
+        r.check_send("a1", "rm -rf /\r", None).unwrap_err(),
         ErrorCode::BadRequest
     );
     r.apply(Observation::RequestSeen(perm("k")));
-    assert_eq!(r.check_send("a1", "x").unwrap_err(), ErrorCode::AgentBusy);
+    assert_eq!(r.check_send("a1", "x", None).unwrap_err(), ErrorCode::AgentBusy);
 }
 
 #[test]
@@ -287,7 +287,7 @@ fn check_send_refuses_needs_you_agent_without_pending_request() {
         ..agent("a1", true)
     }));
     assert!(r.agent("a1").unwrap().pending.is_none());
-    assert_eq!(r.check_send("a1", "x").unwrap_err(), ErrorCode::AgentBusy);
+    assert_eq!(r.check_send("a1", "x", None).unwrap_err(), ErrorCode::AgentBusy);
 }
 
 #[test]

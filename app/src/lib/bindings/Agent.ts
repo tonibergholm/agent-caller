@@ -14,4 +14,10 @@ role: AgentRole,
 /**
  * The parent thread's title, for a subagent when known.
  */
-parent_title: string | null, };
+parent_title: string | null, 
+/**
+ * Opaque. Changes whenever the agent behind `id` changes (herdr: another
+ * agent took the pane). Absent when the source cannot tell. A client
+ * echoes it in `agent.send`.
+ */
+incarnation?: string | null, };

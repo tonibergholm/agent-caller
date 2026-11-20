@@ -1047,9 +1047,10 @@ impl Inbox {
                     revision: s.revision,
                     text: s.text,
                 },
-                ActionKind::Reply { text } => Command::Send {
+                ActionKind::Reply { text, incarnation } => Command::Send {
                     agent_id: action.agent_id.clone(),
                     text,
+                    incarnation,
                 },
             };
             {
@@ -1345,7 +1346,7 @@ impl Inbox {
         let (machine_key, handle, _) = find_card(&inner, card_key)?;
         let state = handle.state().borrow().clone();
         guard(&inner.settings, &state, card_key, origin.expect)?;
-        let agent_id = match origin.expect {
+        let (agent_id, incarnation) = match origin.expect {
             // Voice: live state only; no published card is needed (D7, B2).
             Some(g) => {
                 let live = state.status == conn::MachineStatus::Online
@@ -1354,7 +1355,8 @@ impl Inbox {
                 if !live {
                     return Err(PickError::CannotReply);
                 }
-                g.agent_id.clone()
+                let incarnation = state.session.agents.get(&g.agent_id).and_then(|a| a.incarnation.clone());
+                (g.agent_id.clone(), incarnation)
             }
             // Keyboard: unchanged.
             None => {
@@ -1367,7 +1369,9 @@ impl Inbox {
                 if !card.can_reply {
                     return Err(PickError::CannotReply);
                 }
-                card.agent.id.clone()
+                // The card is what the user is looking at: its incarnation,
+                // not a fresher one from the live state.
+                (card.agent.id.clone(), card.agent.incarnation.clone())
             }
         };
         let id = uuid::Uuid::new_v4().to_string();
@@ -1381,7 +1385,7 @@ impl Inbox {
             agent_id,
             instance: state.instance,
             conn_gen: state.conn_gen,
-            kind: ActionKind::Reply { text },
+            kind: ActionKind::Reply { text, incarnation },
             fires_at: now + self.opts.timing.undo,
             view: ActionView {
                 id: id.clone(),
