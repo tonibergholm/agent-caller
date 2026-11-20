@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use acd_core::{Adapter, Answer, Core, DeliverError};
-use acd_protocol::{Agent, AnswerPath, ErrorCode, Request, Source, SourceState, SourceStatus};
+use acd_protocol::{Agent, AgentState, AnswerPath, ErrorCode, Request, Source, SourceState, SourceStatus};
 use async_trait::async_trait;
 use tokio::time::{Instant, timeout_at};
 
@@ -192,10 +192,10 @@ impl Adapter for HerdrAdapter {
             .await
             .map_err(|_| unavailable())?
             .map_err(|_| unavailable())?;
-        if live.as_ref().is_none_or(|i| pane_replaced(&pane, i)) {
+        let Some(live) = live.filter(|i| !pane_replaced(&pane, i)) else {
             let _ = pane.hints.try_send(Hint::Pane(pane.pane_id.clone()));
             return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
-        }
+        };
         // A dialog may have opened since the last poll: text starting with "1"
         // would pick "Yes". A read that fails or is cut short proves nothing.
         let read = pane
@@ -206,7 +206,8 @@ impl Adapter for HerdrAdapter {
         if read.truncated {
             return Err(unavailable());
         }
-        if find_dialog(&read.text).is_some() {
+        // herdr reports a dialog this parser cannot read as `blocked`.
+        if find_dialog(&read.text).is_some() || map::state(live.agent_status) == AgentState::NeedsYou {
             return Err(DeliverError::NotDelivered(ErrorCode::AgentBusy));
         }
         let result = match timeout_at(deadline, pane.herdr.prompt(&pane.pane_id, text)).await {

@@ -242,6 +242,27 @@ async fn follow_up_never_answers_a_dialog_the_registry_has_not_seen() {
     assert!(r.fake.prompts().is_empty(), "text answered the dialog");
 }
 
+/// A dialog the screen parser cannot read still counts: herdr reports the
+/// pane `blocked`, and "1" typed into it would pick an option.
+#[tokio::test]
+async fn follow_up_is_refused_while_herdr_says_blocked_on_a_screen_nothing_parses() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    let unparsed = "Some new dialog\nPress a key to continue\n";
+    assert!(acd_adapters::herdr::screen::find_dialog(unparsed).is_none());
+    r.fake.set_screen("w1:p1", "detection", unparsed);
+    r.fake.set_agent(fake_agent("w1:p1", "claude", "blocked"));
+    let res = r.adapter.send(&a, "1").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentBusy))),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty(), "text went into the dialog");
+    // The fake refuses a prompt to a blocked pane, as herdr does; the
+    // adapter must not depend on that.
+    assert!(r.fake.calls().iter().all(|(m, _)| m != "agent.prompt"), "the prompt was attempted");
+}
+
 #[tokio::test]
 async fn follow_up_needs_a_whole_screen_read() {
     let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
