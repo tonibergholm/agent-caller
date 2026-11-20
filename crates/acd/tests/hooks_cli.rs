@@ -2969,6 +2969,39 @@ fn rotate_revoke_drops_the_old_token_at_once_even_while_one_is_retained() {
     );
 }
 
+/// A settings file that cannot be rewritten must not keep the old token
+/// alive: the store is saved first, and the rewrite failure is reported after.
+#[test]
+fn rotate_revoke_saves_the_store_before_a_settings_rewrite_can_fail() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let old = store_token(&dir);
+    // The recorded destination is no longer valid JSON.
+    std::fs::write(home.path().join(".claude/settings.json"), "{ not json").unwrap();
+    let out = rotate(&dir, home.path(), &["--revoke"]);
+    assert!(!out.status.success(), "the rewrite failure must exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("the old hook token is revoked"), "{stderr}");
+    assert!(!stderr.contains(&old) && !String::from_utf8_lossy(&out.stdout).contains(&old));
+    let store = store_of(&dir);
+    assert!(store["previous"].is_null());
+    assert_eq!(store["generation"], 2);
+    assert_eq!(store["headers"]["state"], "failed");
+    let new = store_token(&dir);
+    assert!(old != new, "revoke did not change the token");
+    // The headers are not done, yet a second revocation still goes through.
+    let again = rotate(&dir, home.path(), &["--revoke"]);
+    assert!(!again.status.success());
+    assert_eq!(store_of(&dir)["generation"], 3);
+    let newest = store_token(&dir);
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let body = claude_fixture("payload-Stop.json");
+    for stale in [&old, &new] {
+        assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", stale, &[], &body).0, 401);
+    }
+    assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &newest, &[], &body).0, 200);
+}
+
 /// A well-formed token (43 base64url characters, 32 bytes) for hand-written stores.
 fn fixed_token(c: char) -> String {
     format!("{}A", c.to_string().repeat(42))

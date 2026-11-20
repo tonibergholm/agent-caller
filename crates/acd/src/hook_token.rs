@@ -312,9 +312,16 @@ pub fn rotate(
     now_ms: i64,
 ) -> Result<(Store, hooks_install::RewriteReport)> {
     let held = writer_lock::acquire(dir)?;
-    hooks_install::journal::recover(dir)?;
+    // A revocation answers a leaked token, so no settings-file problem may
+    // stand before the store save: such a problem is reported after it.
+    if let Err(e) = hooks_install::journal::recover(dir) {
+        if !revoke {
+            return Err(e);
+        }
+        eprintln!("warning: a settings edit journal could not be recovered: {e:#}");
+    }
     let store = migrate_locked(dir, &held)?;
-    if store.headers.state != HeaderState::Done || store.headers.generation != store.generation {
+    if !revoke && (store.headers.state != HeaderState::Done || store.headers.generation != store.generation) {
         bail!("the last hook token rotation is incomplete: run `acd hooks install claude` first");
     }
     if let Some(previous) = &store.previous
@@ -329,10 +336,18 @@ pub fn rotate(
             "warning: the token before the last rotation is no longer accepted; restart Claude sessions that still use it"
         );
     }
-    hooks_install::precheck_claude(ctx, &held, flags)?;
+    if !revoke {
+        hooks_install::precheck_claude(ctx, &held, flags)?;
+    }
     rotate_store_keeping(dir, &held, now_ms, !revoke)?;
     fail_at("after-store")?;
-    let report = update_headers_locked(dir, ctx, &held, flags)?;
+    let report = update_headers_locked(dir, ctx, &held, flags).map_err(|e| {
+        if revoke {
+            e.context("the old hook token is revoked, but the Claude settings headers were not rewritten")
+        } else {
+            e
+        }
+    })?;
     Ok((load(dir)?, report))
 }
 

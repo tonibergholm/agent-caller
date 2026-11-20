@@ -245,13 +245,18 @@ fn real_main() -> Result<()> {
                         for (path, why) in &report.failed {
                             eprintln!("could not update {}: {why}", path.display());
                         }
+                        if revoke {
+                            bail!(
+                                "the old hook token is revoked (a running daemon stops accepting it within about 2 s), but the Claude settings above were not updated: fix the file(s) and run `acd hooks install claude`"
+                            );
+                        }
                         bail!(
                             "hook token rotation incomplete: fix the file(s) and run `acd hooks install claude`"
                         );
                     }
                     if revoke {
                         println!(
-                            "Hook token rotated to generation {} and the old token revoked. Running Claude sessions that use the old token lose acd until restarted.",
+                            "Hook token rotated to generation {} and the old token revoked; a running daemon stops accepting it within about 2 s. Running Claude sessions that use the old token lose acd until restarted.",
                             store.generation
                         );
                         return Ok(());
