@@ -2929,6 +2929,8 @@ fn rotate_without_revoke_still_accepts_the_old_token() {
 fn rotate_revoke_drops_the_old_token_at_once_even_while_one_is_retained() {
     let (home, dir) = home_with_acd();
     assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    // A legacy http install holds the token, so the rotation rewrites it.
+    make_legacy(&home.path().join(".claude/settings.json"), &dir);
     assert!(rotate(&dir, home.path(), &[]).status.success());
     let leaked = store_token(&dir);
     // Without --revoke a second rotation is refused while a previous token is retained.
@@ -2939,8 +2941,12 @@ fn rotate_revoke_drops_the_old_token_at_once_even_while_one_is_retained() {
     assert!(store["previous"].is_null());
     assert_eq!(store["headers"]["state"], "done");
     let new = store_token(&dir);
-    assert_ne!(leaked, new);
-    assert_eq!(settings_token(home.path()), new.as_str());
+    // No token values in failure messages.
+    assert!(leaked != new, "revoke did not change the token");
+    assert!(
+        settings_token(home.path()) == new.as_str(),
+        "the legacy settings entry does not hold the new token"
+    );
     let started = start_daemon(&dir, None, "", &home_env(home.path()));
     let body = claude_fixture("payload-Stop.json");
     assert_eq!(
