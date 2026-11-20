@@ -156,6 +156,18 @@ async fn a_named_agent_is_prompted_by_its_name() {
     assert_eq!(r.fake.prompts(), vec![("w1:p1".to_string(), "run the tests".to_string())]);
 }
 
+/// A name outside herdr's syntax (here shaped like another pane id) is
+/// never used as a target: only the agent's own pane id is.
+#[tokio::test]
+async fn a_name_outside_herdrs_syntax_is_not_a_target() {
+    for odd in ["w1:p2", "Builder", "1st", ""] {
+        let r = rig(&[("w1:p1", "claude", "idle")]).await;
+        r.fake.set_agent(fake_named_agent("w1:p1", "claude", "idle", odd));
+        r.adapter.send(&agent(&r), "run the tests").await.unwrap();
+        assert_eq!(prompt_targets(&r), vec!["w1:p1"], "{odd:?}");
+    }
+}
+
 #[tokio::test]
 async fn an_unnamed_agent_is_prompted_by_its_pane_id() {
     let r = rig(&[("w1:p1", "claude", "idle")]).await;

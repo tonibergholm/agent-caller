@@ -242,7 +242,10 @@ impl Adapter for HerdrAdapter {
         if !unchanged {
             return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
         }
-        let target = live.name.as_deref().filter(|n| !n.is_empty()).unwrap_or(&pane.pane_id);
+        // A live name follows its occupant and is cleared when the agent is
+        // replaced, so herdr refuses a prompt by name for a replaced agent. Only
+        // a name in herdr's own syntax is used: it cannot be read as a pane id.
+        let target = live.name.as_deref().filter(|n| herdr_name(n)).unwrap_or(&pane.pane_id);
         let result = match timeout_at(deadline, pane.herdr.prompt(target, text)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(map_call_error(&e)),
@@ -256,4 +259,12 @@ impl Adapter for HerdrAdapter {
         }
         result
     }
+}
+
+/// herdr's agent name syntax: `[a-z][a-z0-9_-]{0,31}`.
+fn herdr_name(n: &str) -> bool {
+    let mut c = n.chars();
+    n.len() <= 32
+        && c.next().is_some_and(|f| f.is_ascii_lowercase())
+        && c.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
 }
