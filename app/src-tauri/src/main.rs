@@ -90,6 +90,7 @@ fn main() {
             )?;
             app.manage(AppState {
                 inbox: inbox.clone(),
+                pairing: Default::default(),
             });
             let voice_path = app.path().app_config_dir()?.join("voice.json");
             let voice_settings = voice::settings::VoiceSettings::load(&voice_path);

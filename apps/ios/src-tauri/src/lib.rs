@@ -62,6 +62,7 @@ pub fn run() {
             import_dev_pairing(&inbox);
             app.manage(AppState {
                 inbox: inbox.clone(),
+                pairing: Default::default(),
             });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

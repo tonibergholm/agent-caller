@@ -133,12 +133,16 @@ pub fn list_machines(state: State<'_, AppState>) -> Vec<MachineEntryView> {
 
 /// Reads the clipboard and says what it would pair; saves nothing (F9).
 #[tauri::command]
-pub fn preview_pairing_from_clipboard(window: WebviewWindow, app: AppHandle) -> Result<PairingPreview, String> {
+pub fn preview_pairing_from_clipboard(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<PairingPreview, String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
     if !allowed(&window, SETTINGS) {
         return Err("Not available from this window.".into());
     }
-    acd_app_core::pairing::preview_text(app.clipboard().read_text().ok().as_deref())
+    state.pairing.preview(app.clipboard().read_text().ok().as_deref())
 }
 
 /// Pairs the clipboard line, but only when it is still the one `shown`.
@@ -158,6 +162,7 @@ pub fn import_pairing_from_clipboard(
         tauri::async_runtime::handle().inner(),
         app.clipboard().read_text().ok(),
         &shown,
+        &state.pairing,
         || {
             let _ = app.clipboard().clear();
         },

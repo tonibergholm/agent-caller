@@ -14,6 +14,8 @@ use tokio::runtime::Handle;
 /// Tauri managed state in both shells.
 pub struct AppState {
     pub inbox: Arc<Inbox>,
+    /// The pairing line last previewed, for the confirm to match (finding 19).
+    pub pairing: crate::pairing::PendingPairing,
 }
 
 pub fn get_view(inbox: &Arc<Inbox>) -> InboxView {
