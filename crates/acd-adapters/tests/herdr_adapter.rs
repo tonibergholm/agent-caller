@@ -57,13 +57,33 @@ async fn rig_with_keys(agents: &[(&str, &str, &str)], poll: Duration, keys: Keys
 }
 
 async fn rig_with(agents: &[(&str, &str, &str)], timing: Timing, keys: KeysTiming) -> Rig {
+    rig_with_version(agents, timing, keys, "0.9.3").await
+}
+
+/// `rig`'s timing, against a fake herdr reporting `version`.
+async fn rig_version(agents: &[(&str, &str, &str)], version: &str) -> Rig {
+    let timing = Timing {
+        list_idle: Duration::from_millis(300),
+        list_blocked: Duration::from_millis(100),
+        backoff_max: Duration::from_millis(200),
+        fallback_after: Duration::from_millis(200),
+        poll: Duration::from_millis(50),
+    };
+    let keys = KeysTiming {
+        evidence_timeout: Duration::from_millis(500),
+        ..KeysTiming::default()
+    };
+    rig_with_version(agents, timing, keys, version).await
+}
+
+async fn rig_with_version(agents: &[(&str, &str, &str)], timing: Timing, keys: KeysTiming, version: &str) -> Rig {
     let home = tempfile::Builder::new()
         .prefix("acd")
         .tempdir_in("/tmp")
         .unwrap(); // short: macOS socket paths max 104 bytes
     let sock = home.path().join(".config/herdr/herdr.sock");
     std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
-    let fake = FakeHerdr::start_at(&sock).await;
+    let fake = FakeHerdr::start_at_with_version(&sock, version).await;
     for (p, a, s) in agents {
         fake.set_agent(fake_agent(p, a, s));
     }
@@ -149,11 +169,21 @@ fn prompt_targets(r: &Rig) -> Vec<String> {
 
 #[tokio::test]
 async fn a_named_agent_is_prompted_by_its_name() {
-    let r = rig(&[("w1:p1", "claude", "idle")]).await;
+    let r = rig_version(&[("w1:p1", "claude", "idle")], "0.9.5").await;
     r.fake.set_agent(fake_named_agent("w1:p1", "claude", "idle", "builder"));
     r.adapter.send(&agent(&r), "run the tests").await.unwrap();
     assert_eq!(prompt_targets(&r), vec!["builder"]);
     assert_eq!(r.fake.prompts(), vec![("w1:p1".to_string(), "run the tests".to_string())]);
+}
+
+/// Name targeting is verified on herdr 0.9.5 only: an older herdr keeps the
+/// pane id even for a named agent.
+#[tokio::test]
+async fn a_named_agent_on_an_older_herdr_is_prompted_by_its_pane_id() {
+    let r = rig_version(&[("w1:p1", "claude", "idle")], "0.9.3").await;
+    r.fake.set_agent(fake_named_agent("w1:p1", "claude", "idle", "builder"));
+    r.adapter.send(&agent(&r), "run the tests").await.unwrap();
+    assert_eq!(prompt_targets(&r), vec!["w1:p1"]);
 }
 
 /// A name outside herdr's syntax (here shaped like another pane id) is
@@ -161,7 +191,7 @@ async fn a_named_agent_is_prompted_by_its_name() {
 #[tokio::test]
 async fn a_name_outside_herdrs_syntax_is_not_a_target() {
     for odd in ["w1:p2", "Builder", "1st", ""] {
-        let r = rig(&[("w1:p1", "claude", "idle")]).await;
+        let r = rig_version(&[("w1:p1", "claude", "idle")], "0.9.5").await;
         r.fake.set_agent(fake_named_agent("w1:p1", "claude", "idle", odd));
         r.adapter.send(&agent(&r), "run the tests").await.unwrap();
         assert_eq!(prompt_targets(&r), vec!["w1:p1"], "{odd:?}");
@@ -179,7 +209,7 @@ async fn an_unnamed_agent_is_prompted_by_its_pane_id() {
 /// the prompt. The name went with the old agent, so herdr refuses.
 #[tokio::test]
 async fn a_named_agent_replaced_after_the_identity_check_gets_no_prompt() {
-    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let r = quiet_rig_version(&[("w1:p1", "claude", "idle")], "0.9.5").await;
     r.fake.set_agent(fake_named_agent("w1:p1", "claude", "idle", "builder"));
     let old = agent(&r);
     let gate = r.fake.block_next("agent.prompt");
@@ -200,6 +230,10 @@ async fn a_named_agent_replaced_after_the_identity_check_gets_no_prompt() {
 
 /// A reconciler that never looks again on its own: the test decides what it sees.
 async fn quiet_rig(agents: &[(&str, &str, &str)]) -> Rig {
+    quiet_rig_version(agents, "0.9.3").await
+}
+
+async fn quiet_rig_version(agents: &[(&str, &str, &str)], version: &str) -> Rig {
     let hour = Duration::from_secs(3600);
     let timing = Timing {
         list_idle: hour,
@@ -208,7 +242,7 @@ async fn quiet_rig(agents: &[(&str, &str, &str)]) -> Rig {
         fallback_after: hour,
         poll: hour,
     };
-    rig_with(agents, timing, KeysTiming::default()).await
+    rig_with_version(agents, timing, KeysTiming::default(), version).await
 }
 
 #[tokio::test]

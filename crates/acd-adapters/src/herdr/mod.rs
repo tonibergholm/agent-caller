@@ -245,7 +245,11 @@ impl Adapter for HerdrAdapter {
         // A live name follows its occupant and is cleared when the agent is
         // replaced, so herdr refuses a prompt by name for a replaced agent. Only
         // a name in herdr's own syntax is used: it cannot be read as a pane id.
-        let target = live.name.as_deref().filter(|n| herdr_name(n)).unwrap_or(&pane.pane_id);
+        let target = live
+            .name
+            .as_deref()
+            .filter(|n| pane.names_target && herdr_name(n))
+            .unwrap_or(&pane.pane_id);
         let result = match timeout_at(deadline, pane.herdr.prompt(target, text)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(map_call_error(&e)),

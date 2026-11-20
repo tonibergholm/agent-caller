@@ -162,6 +162,11 @@ impl FakeHerdr {
     /// A fresh server on an existing socket path, for a herdr restart. The
     /// previous server must be stopped; its state is not carried over.
     pub async fn start_at(path: &Path) -> FakeHerdr {
+        FakeHerdr::start_at_with_version(path, "0.9.3").await
+    }
+
+    /// `start_at` reporting `version` on `ping`.
+    pub async fn start_at_with_version(path: &Path, version: &str) -> FakeHerdr {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).expect("socket dir");
         }
@@ -169,7 +174,7 @@ impl FakeHerdr {
         let listener = UnixListener::bind(path).expect("rebind fake herdr socket");
         let shared = Arc::new(Shared {
             path: path.to_path_buf(),
-            version: "0.9.3".to_owned(),
+            version: version.to_owned(),
             protocol: 22,
             state: Mutex::new(State::default()),
         });
