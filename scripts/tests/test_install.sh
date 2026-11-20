@@ -40,7 +40,7 @@ test_installs_verified_archive() {
 # its arguments and exits with $1.
 make_stub_gh() {
 	mkdir -p "$WORK/stub"
-	printf '#!/bin/sh\n[ "$1" = auth ] && exit %s\necho "$@" >"%s/gh-args"\nexit %s\n' "${2:-0}" "$WORK" "$1" >"$WORK/stub/gh"
+	printf '#!/bin/sh\n[ "$1" = --version ] && echo "gh version %s (2026-11-12)" && exit 0\n[ "$1" = auth ] && exit %s\necho "$@" >"%s/gh-args"\nexit %s\n' "${3:-2.104.0}" "${2:-0}" "$WORK" "$1" >"$WORK/stub/gh"
 	chmod +x "$WORK/stub/gh"
 	ACD_INSTALL_GH="$WORK/stub/gh"
 	export ACD_INSTALL_GH
@@ -109,6 +109,23 @@ test_skips_provenance_when_asked() {
 	assert_file "$WORK/bin/acd"
 	assert_contains "$R_OUT" "skipped by ACD_INSTALL_SKIP_PROVENANCE"
 	assert_no_path "$WORK/gh-args"
+}
+
+test_does_not_rely_on_a_gh_that_matches_workflows_as_a_prefix() {
+	prepare_release
+	make_stub_gh 0 0 2.101.0
+	install_from
+	assert_eq "$R_RC" 0 "exit status"
+	assert_contains "$R_OUT" "Provenance not checked: gh is older than 2.102.0"
+	assert_no_path "$WORK/gh-args"
+}
+
+test_verifies_with_gh_2_102() {
+	prepare_release
+	make_stub_gh 0 0 2.102.0
+	install_from
+	assert_eq "$R_RC" 0 "exit status"
+	assert_contains "$R_OUT" "Provenance OK"
 }
 
 test_says_provenance_was_not_checked_when_gh_is_signed_out() {

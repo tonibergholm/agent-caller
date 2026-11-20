@@ -153,12 +153,24 @@ echo "Checksum OK: $archive"
 # in the repository, including a branch dispatch. ACD_INSTALL_GH names the gh
 # command (the tests use it).
 gh_cmd=${ACD_INSTALL_GH:-gh}
+# True when gh is 2.102.0 or later: earlier versions match the signer
+# workflow as a prefix. An unreadable version counts as too old.
+gh_pins_workflows() {
+	ver=$("$1" --version 2>/dev/null | sed -n '1s/^gh version \([0-9][0-9]*\)\.\([0-9][0-9]*\)\..*/\1 \2/p')
+	[ -n "$ver" ] || return 1
+	set -- $ver
+	[ "$1" -gt 2 ] || { [ "$1" -eq 2 ] && [ "$2" -ge 102 ]; }
+}
 signer="$REPO/.github/workflows/release.yml"
 verify_flags="--repo $REPO --signer-workflow $signer --source-ref refs/tags/v$version"
 if [ "${ACD_INSTALL_SKIP_PROVENANCE:-}" = 1 ]; then
 	echo "Provenance not checked: skipped by ACD_INSTALL_SKIP_PROVENANCE."
 elif ! command -v "$gh_cmd" >/dev/null 2>&1; then
 	echo "Provenance not checked: gh is not installed. To check it, install gh, sign in, and run: gh attestation verify $archive $verify_flags"
+elif ! gh_pins_workflows "$gh_cmd"; then
+	# gh up to 2.101.0 matches --signer-workflow as a prefix
+	# (GHSA-wjmr-j3rp-mh2g), so the pin would not hold.
+	echo "Provenance not checked: gh is older than 2.102.0. To check it, update gh, then run: gh attestation verify $archive $verify_flags"
 elif ! "$gh_cmd" auth status >/dev/null 2>&1; then
 	# A signed-out gh cannot verify anything; treat it like no gh.
 	echo "Provenance not checked: gh is not signed in. To check it, run gh auth login, then: gh attestation verify $archive $verify_flags"
