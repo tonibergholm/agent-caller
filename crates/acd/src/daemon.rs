@@ -731,11 +731,15 @@ pub async fn run(dir: &Path) -> Result<()> {
             match secrets::read_secret(&token_path).and_then(|t| secrets::parse_token(&t)) {
                 Ok(t) if t != current => {
                     tracing::info!("client token rotated");
-                    rot_auth.rotate(t.clone());
                     // Spec 4.8: the old holders of the token lose their wakes too.
+                    // Push moves first, to the generation `rotate` is about to
+                    // publish: old sessions are refused from here on, and no
+                    // new-token session exists yet whose registration the
+                    // clear could drop. Only this loop rotates.
                     if let Some(p) = &rot_push {
-                        p.revoke_all(&t, rot_auth.generation()).await;
+                        p.revoke_all(&t, rot_auth.generation() + 1).await;
                     }
+                    rot_auth.rotate(t.clone());
                     current = t;
                     invalid_logged = false;
                 }
