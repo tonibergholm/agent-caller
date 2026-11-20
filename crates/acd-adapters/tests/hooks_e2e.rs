@@ -23,7 +23,7 @@ async fn answer(r: &Rig, id: &str, rid: &str, option: &str) -> CommandResult {
             ClientMessage::RequestAnswer {
                 id: id.into(),
                 request_id: rid.into(),
-                revision: None,
+                revision: Some(1),
                 option_id: Some(option.into()),
                 text: None,
             },

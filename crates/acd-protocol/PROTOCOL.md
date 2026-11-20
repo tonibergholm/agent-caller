@@ -176,7 +176,7 @@ UUID.
 
 ```text
 hello            {protocol: "acd/1", token, client: {id, name, version}, resume?: {epoch, seq}}
-request.answer   {id, request_id, revision?, option_id?, text?}    // revision is sent only when answer.revision is advertised; exactly one of option_id or text
+request.answer   {id, request_id, revision?, option_id?, text?}    // revision is required when answer.revision is advertised (the daemon always does) and is sent only then; exactly one of option_id or text
 agent.send       {id, agent_id, text}
 agent.mark_seen  {id, agent_id}
 ping             {id}
@@ -302,8 +302,11 @@ code 4408.
   be sent again with the corrected revision after the user reviews the
   request again.
 - **Revisions and older peers.** A `Request` without `revision` reads as
-  revision 0. A `request.answer` without `revision` is not checked
-  against the request (the behaviour before revisions).
+  revision 0. The daemon always advertises `answer.revision`, so it answers
+  a `request.answer` without `revision` with `bad_request`: nothing is
+  claimed or delivered, and the id is released like any other refusal. A
+  daemon that predates revisions does not advertise `answer.revision` and
+  does not check one.
 
 **Recovery after a lost result.** The cache does not survive an epoch
 change. After a reconnect into a new epoch, a client with commands in

@@ -8,7 +8,7 @@ fn answer(id: &str, request_id: &str) -> ClientMessage {
     ClientMessage::RequestAnswer {
         id: id.into(),
         request_id: request_id.into(),
-        revision: None,
+        revision: Some(1),
         option_id: Some("allow".into()),
         text: None,
     }
@@ -128,13 +128,29 @@ async fn stale_revision_rejects_before_delivery_and_same_id_retries_corrected_re
 }
 
 #[tokio::test]
-async fn old_style_answer_without_revision_still_delivers() {
+async fn an_answer_without_a_revision_is_refused() {
     let fake = FakeAdapter::new();
     let core = Core::new(test_machine(), vec![fake.clone()]);
     let rid = open_request(&core);
+    let msg = |id: &str, revision| ClientMessage::RequestAnswer {
+        id: id.into(),
+        request_id: rid.clone(),
+        revision,
+        option_id: Some("allow".into()),
+        text: None,
+    };
+    // The daemon advertises `answer.revision`, so the check cannot be skipped.
     assert_eq!(
-        core.handle("cl", answer("legacy", &rid)).await,
-        CommandResult::delivered("legacy")
+        core.handle("cl", msg("c1", None)).await.error_code(),
+        Some(ErrorCode::BadRequest)
+    );
+    assert!(fake.delivered().is_empty());
+    assert_eq!(core.request(&rid).unwrap().status, RequestStatus::Open);
+    // The refusal released the id: the same command with a revision delivers.
+    let current = core.request(&rid).unwrap().revision;
+    assert_eq!(
+        core.handle("cl", msg("c1", Some(current))).await,
+        CommandResult::delivered("c1")
     );
     assert_eq!(fake.delivered().len(), 1);
 }
@@ -416,14 +432,14 @@ async fn oversized_ids_and_texts_are_bad_requests() {
         ClientMessage::RequestAnswer {
             id: "a".into(),
             request_id: long.clone(),
-            revision: None,
+            revision: Some(1),
             option_id: Some("allow".into()),
             text: None,
         },
         ClientMessage::RequestAnswer {
             id: "b".into(),
             request_id: "r1".into(),
-            revision: None,
+            revision: Some(1),
             option_id: None,
             text: Some(text.clone()),
         },

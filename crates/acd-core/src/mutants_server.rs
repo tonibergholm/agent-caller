@@ -37,7 +37,7 @@ async fn revoked_waits_for_a_rotation() {
 
 fn answer(id: &str, request_id: &str) -> ClientMessage {
     ClientMessage::RequestAnswer {
-        id: id.into(), request_id: request_id.into(), revision: None,
+        id: id.into(), request_id: request_id.into(), revision: Some(1),
         option_id: Some("allow".into()), text: None,
     }
 }

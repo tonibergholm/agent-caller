@@ -83,7 +83,7 @@ async fn answer_with_id(r: &Rig, req: &Request, option: &str, command_id: &str) 
             ClientMessage::RequestAnswer {
                 id: command_id.into(),
                 request_id: req.id.clone(),
-                revision: None,
+                revision: Some(1),
                 option_id: Some(option.into()),
                 text: None,
             },
@@ -192,7 +192,7 @@ async fn superseding_request_during_held_success_resolves_old_uncertain() {
             ClientMessage::RequestAnswer {
                 id: "held".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },
@@ -243,7 +243,7 @@ async fn removing_thread_during_held_success_resolves_uncertain() {
             ClientMessage::RequestAnswer {
                 id: "held-remove".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },
@@ -687,7 +687,7 @@ async fn answer_text(r: &Rig, req: &Request, text: &str, command_id: &str) -> Co
             ClientMessage::RequestAnswer {
                 id: command_id.into(),
                 request_id: req.id.clone(),
-                revision: None,
+                revision: Some(1),
                 option_id: None,
                 text: Some(text.into()),
             },

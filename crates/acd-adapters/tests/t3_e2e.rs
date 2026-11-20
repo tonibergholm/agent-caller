@@ -230,7 +230,7 @@ async fn approval_and_question_answered_over_the_protocol() {
     );
     send(
         &mut ws,
-        json!({"type":"request.answer","id":"a1","request_id":approval["id"],"option_id":"accept"}),
+        json!({"type":"request.answer","id":"a1","request_id":approval["id"],"revision":approval["revision"],"option_id":"accept"}),
     )
     .await;
     assert_eq!(result(&mut ws, "a1").await["outcome"], "delivered");
@@ -244,7 +244,7 @@ async fn approval_and_question_answered_over_the_protocol() {
     );
     send(
         &mut ws,
-        json!({"type":"request.answer","id":"q1","request_id":question["id"],"option_id":"o1"}),
+        json!({"type":"request.answer","id":"q1","request_id":question["id"],"revision":question["revision"],"option_id":"o1"}),
     )
     .await;
     assert_eq!(result(&mut ws, "q1").await["outcome"], "delivered");
@@ -302,7 +302,7 @@ async fn answered_in_t3_resolves_the_card_within_2_s() {
     assert_eq!(right["by"], "terminal");
     send(
         &mut clients[0],
-        json!({"type":"request.answer","id":"late","request_id":request_id,"option_id":"accept"}),
+        json!({"type":"request.answer","id":"late","request_id":request_id,"revision":1,"option_id":"accept"}),
     )
     .await;
     assert_eq!(
@@ -458,10 +458,11 @@ async fn answer_reply_lost_resolves_uncertain_over_the_protocol() {
     let r = start(fake).await;
     let (mut ws, _, snap) = with_agent_count(&r.url, 1).await;
     let request_id = snap["agents"][0]["pending"]["id"].clone();
+    let revision = snap["agents"][0]["pending"]["revision"].clone();
     r.fake.hang_next_dispatch();
     send(
         &mut ws,
-        json!({"type":"request.answer","id":"a1","request_id":request_id,"option_id":"accept"}),
+        json!({"type":"request.answer","id":"a1","request_id":request_id,"revision":revision,"option_id":"accept"}),
     )
     .await;
     assert_eq!(result(&mut ws, "a1").await["outcome"], "delivered");

@@ -206,7 +206,7 @@ async fn restart_cancels_the_pending_request_as_lost() {
             ClientMessage::RequestAnswer {
                 id: "x1".into(),
                 request_id: req.id.clone(),
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },
@@ -234,7 +234,7 @@ async fn end_seen_during_a_claim_is_applied_after_release() {
             ClientMessage::RequestAnswer {
                 id: "x1".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },
@@ -279,7 +279,7 @@ async fn end_between_claim_check_and_end_observation_is_retried() {
             ClientMessage::RequestAnswer {
                 id: "x1".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },
@@ -340,7 +340,7 @@ async fn deferred_end_applies_under_a_steady_event_stream() {
             ClientMessage::RequestAnswer {
                 id: "x1".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },
@@ -389,7 +389,7 @@ async fn deferred_end_observed_during_claim_resolves_after_release() {
             ClientMessage::RequestAnswer {
                 id: "race".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },
@@ -447,7 +447,7 @@ async fn cancelled_request_during_claim_resolves_as_lost() {
             ClientMessage::RequestAnswer {
                 id: "x1".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },
@@ -1784,7 +1784,7 @@ async fn hidden_thread_answered_while_the_resolution_precedes_the_ack_resolves_i
             ClientMessage::RequestAnswer {
                 id: "x1".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("accept".into()),
                 text: None,
             },

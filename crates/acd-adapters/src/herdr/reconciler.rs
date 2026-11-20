@@ -1045,7 +1045,7 @@ mod retire_tests {
                 acd_protocol::ClientMessage::RequestAnswer {
                     id: "x".into(),
                     request_id: r2,
-                    revision: None,
+                    revision: Some(1),
                     option_id: Some("allow".into()),
                     text: None,
                 },

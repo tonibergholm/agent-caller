@@ -742,7 +742,7 @@ async fn answer(r: &Rig, id: &str, rid: &str, option: &str) -> CommandResult {
             ClientMessage::RequestAnswer {
                 id: id.into(),
                 request_id: rid.into(),
-                revision: None,
+                revision: Some(r.core.request(rid).map_or(1, |q| q.revision)),
                 option_id: Some(option.into()),
                 text: None,
             },
@@ -1011,13 +1011,14 @@ async fn delivery_racing_supersession_is_serialized_before_terminal_retirement()
     retire_reached.await.unwrap();
     let core = r.core.clone();
     let request_id = rid1.clone();
+    let revision = core.request(&request_id).map_or(1, |q| q.revision);
     let answer = tokio::spawn(async move {
         core.handle(
             "a1",
             ClientMessage::RequestAnswer {
                 id: "a1".into(),
                 request_id,
-                revision: None,
+                revision: Some(revision),
                 option_id: Some("allow".into()),
                 text: None,
             },

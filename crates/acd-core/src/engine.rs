@@ -350,6 +350,14 @@ impl Core {
                         );
                     }
                 };
+                // The daemon always advertises `answer.revision`: an answer that
+                // omits it would skip the changed-content check (PROTOCOL.md §4).
+                let Some(revision) = revision else {
+                    return (
+                        CommandResult::err(id, ErrorCode::BadRequest, ErrorCode::BadRequest.describe()),
+                        Delivery::Attempted,
+                    );
+                };
                 // Route first, outside the lock: adapter callbacks may panic, and a
                 // panic here (Phase::Start) must leave nothing claimed.
                 let Some(path) = self
@@ -376,7 +384,7 @@ impl Core {
                     .cloned();
                 let request = {
                     let mut st = self.inner.lock().unwrap();
-                    match st.registry.claim(&request_id, answer.clone(), revision) {
+                    match st.registry.claim(&request_id, answer.clone(), Some(revision)) {
                         Ok((req, changes)) => {
                             if adapter.is_none() || req.answer_path != path {
                                 // Undo without publishing: clients never see answering -> open churn.

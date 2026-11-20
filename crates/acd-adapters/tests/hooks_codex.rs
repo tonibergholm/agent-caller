@@ -48,7 +48,7 @@ async fn answer(r: &Rig, rid: &str, option: &str) -> CommandResult {
             ClientMessage::RequestAnswer {
                 id: "a1".into(),
                 request_id: rid.into(),
-                revision: None,
+                revision: Some(1),
                 option_id: Some(option.into()),
                 text: None,
             },
@@ -439,7 +439,7 @@ async fn a_target_dialog_replaced_during_the_rival_reads_gets_no_key() {
             ClientMessage::RequestAnswer {
                 id: "a1".into(),
                 request_id: id,
-                revision: None,
+                revision: Some(1),
                 option_id: Some("allow".into()),
                 text: None,
             },

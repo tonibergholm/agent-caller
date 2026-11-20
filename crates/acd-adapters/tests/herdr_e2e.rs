@@ -259,7 +259,7 @@ async fn blocked_pane_is_read_only_over_the_protocol() {
 
     send(
         &mut ws,
-        json!({"type":"request.answer","id":"a1","request_id":req["id"],"option_id":"1"}),
+        json!({"type":"request.answer","id":"a1","request_id":req["id"],"revision":req["revision"],"option_id":"1"}),
     )
     .await;
     let res = next_matching(&mut ws, Duration::from_secs(2), |v| v["type"] == "result").await;
