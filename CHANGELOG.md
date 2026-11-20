@@ -74,8 +74,8 @@ Fixes from the 2026-11-20 security audit.
   While a client token rotation is in progress, `push.register` answers
   `source_unavailable` (retry) instead of acknowledging a registration that
   a restart could lose.
-- herdr follow-up text goes to the agent's herdr name when it has one, so
-  herdr itself refuses it once the agent is replaced.
+- On herdr 0.9.5 and later, follow-up text goes to the agent's herdr name
+  when it has one, so herdr itself refuses it once the agent is replaced.
 - Debug logs record hook and herdr errors by name, length and hash, not by
   their text.
 - Releases carry GitHub build provenance attestations, and

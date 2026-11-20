@@ -209,6 +209,14 @@ test_refuses_bad_tag() {
 	assert_no_path "$WORK/bin"
 }
 
+test_refuses_a_version_with_spaces_or_globs() {
+	prepare_release
+	run_capture R sh "$INSTALL" --version "0.1.0 --repo x*" --from-dir "$WORK/rel" --bin-dir "$WORK/bin"
+	assert_eq "$R_RC" 1 "exit status"
+	assert_contains "$R_ERR" "not a version"
+	assert_no_path "$WORK/bin"
+}
+
 test_refuses_unknown_argument() {
 	run_capture R sh "$INSTALL" --bogus
 	assert_eq "$R_RC" 1 "exit status"

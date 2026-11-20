@@ -22,7 +22,7 @@ echo "$ans" | jq -e '.ok and .outcome=="delivered"' >/dev/null && pass "3b T3 ap
 sleep 8; [ -e /tmp/ace2e/x-t3-yes.txt ] && pass "3c the approved command ran under T3" || fail "3c no file"
 r=$(jl "select(.t>$T0 and .msg.type==\"request.resolved\" and .msg.request_id==\"$RID\")|.msg|{by,option_id}" | head -1); note "resolved: $r"
 echo "$r" | jq -e '.by=="inbox"' >/dev/null && pass "3d request.resolved by=inbox" || fail "3d $r"
-late=$(inbox answer "$RID" decline); echo "$late" | jq -e '.error.code=="request_gone"' >/dev/null && pass "4a late answer on a t3 request -> request_gone" || fail "4a $late"
+late=$(inbox answer "$RID" decline --revision "$(echo "$req" | jq -r .revision)"); echo "$late" | jq -e '.error.code=="request_gone"' >/dev/null && pass "4a late answer on a t3 request -> request_gone" || fail "4a $late"
 
 log "single-select question"
 T0=$(epoch_now)

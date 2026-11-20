@@ -449,7 +449,7 @@ type Source = (SocketAddr, String);
 
 fn two_sources(s: &Served) -> Option<(Source, Source)> {
     let Some(net) = own_non_loopback_ip() else {
-        eprintln!("SKIPPED: this machine has no non-loopback address");
+        eprintln!("SKIPPED: no non-loopback address, or a firewall drops connections to it");
         return None;
     };
     let port = s.tcp.port();

@@ -428,24 +428,31 @@ Seen failing on CI in 2026-11 (each passed on rerun; none reproduced alone):
 
 Residuals from the 2026-11 relay and review work, none blocking:
 
-- **2026-11-20 audit residuals.** Closed by the follow-up PR: keyboard
-  replies (the card key carries the incarnation), the push registration
+- **2026-11-20 audit residuals.** Keyboard replies were already closed in
+  #115 (the card key carries the incarnation). Closed by the follow-up PR:
+  the push registration
   window (a registration during a rotation is refused with a retryable
   `source_unavailable`), the attestation pin (`--signer-workflow` and
   `--source-ref`), the runtime window-scope test, and the red-team
   reproducers (they send the revision). Still open:
-  - A herdr agent with no name is prompted by pane id, so the window between
-    the `agent.get` check and `agent.prompt` remains for it; a named agent
-    is prompted by its name, which herdr clears when the agent is replaced.
-    Closing it for unnamed agents needs herdr to accept a terminal id as a
-    prompt target. A name reused by another agent within that window would
-    still receive the prompt.
+  - A herdr agent with no name, or any agent on herdr 0.9.3 or 0.9.4, is
+    prompted by pane id, so the window between the `agent.get` check and
+    `agent.prompt` remains for it. On herdr 0.9.5 a named agent is prompted
+    by its name, which herdr clears when the agent is replaced
+    (`docs/research/2026-11-20-herdr-name-target.md`). Closing it for
+    unnamed agents needs herdr to accept a terminal id as a prompt target.
+    If another live agent is renamed to the same name within that window,
+    the text reaches it, and its screen was never read for a dialog, so text
+    starting with "1" could answer one. That needs a rename within
+    milliseconds.
   - The pre-auth integration tests with two real sources (loopback and this
     machine's own address) skip themselves when the address is unreachable;
     on macOS the application firewall makes that happen in
     `cargo test --workspace` runs. They run under `cargo test -p acd-core`.
-  - The voice commands' window checks have no IPC test; the inbox commands
-    have one (`app/src-tauri/src/commands.rs`, `window_scope`).
+  - The window checks of `escape`, `set_hotkey` and the voice commands have
+    no IPC test (they need `VoiceState` or the Wry runtime). The other 13
+    inbox commands have one (`app/src-tauri/src/commands.rs`,
+    `window_scope`).
   - Live Claude scenarios 40 and 41 pass with the shim hooks (Claude Code
     2.1.329, Haiku). They run Claude with the real HOME, so each run records
     the scratch project, and now its folder trust, in `~/.claude.json`.

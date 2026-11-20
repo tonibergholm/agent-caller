@@ -79,6 +79,10 @@ fi
 if [ -z "$version" ]; then
 	die "give --tag vX.Y.Z (or --version X.Y.Z with --from-dir)"
 fi
+# The version becomes part of file names and of the gh verify arguments.
+case "$version" in
+*[!0-9A-Za-z.+-]*) die "not a version: $version" ;;
+esac
 if [ -n "$from_dir" ] && [ ! -d "$from_dir" ]; then
 	die "--from-dir is not a directory: $from_dir"
 fi
