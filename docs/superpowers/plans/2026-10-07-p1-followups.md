@@ -440,6 +440,12 @@ Residuals from the 2026-11 relay and review work, none blocking:
     `--signer-workflow` or `--source-ref`.
   - Between the herdr `agent.get` check and `agent.prompt` there is a small
     window, because herdr cannot target a terminal id.
+  - A push registration made with the new client token in the moment
+    between the auth rotation and the push store rewrite is acknowledged
+    while `push.json` still names the old token. A restart inside that
+    window drops it, and the device registers again. Wake timing only.
+  - The window-scope checks on Tauri commands are pinned by allow-list unit
+    tests, not by a call from a live HUD window.
 - **Mutation tests (#101).** Some tests wait for indirect 5 s bounds, and the
   counts quoted in the mutation document are stale.
 - **Bug-hunt reproducers (#110).** `#[ignore]`d tests that fail today: B1
