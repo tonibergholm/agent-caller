@@ -186,8 +186,36 @@ impl Adapter for HerdrAdapter {
         if agent.incarnation.as_deref() != Some(marker.as_str()) {
             return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
         }
-        // The pane may also have changed hands since the reconciler last
-        // looked. Ask herdr now, fail closed.
+        // A dialog may have opened since the last poll: text starting with "1"
+        // would pick "Yes". A read that fails or is cut short proves nothing.
+        let read = match pane
+            .herdr
+            .read_screen(&pane.pane_id, "detection", None, deadline)
+            .await
+        {
+            Ok(read) => read,
+            Err(_) => {
+                // A pane whose agent has left cannot be read: say so, not "unavailable".
+                let left = matches!(
+                    timeout_at(deadline, pane.herdr.get(&pane.pane_id)).await,
+                    Ok(Ok(live)) if live.as_ref().is_none_or(|i| pane_replaced(&pane, i))
+                );
+                if left {
+                    let _ = pane.hints.try_send(Hint::Pane(pane.pane_id.clone()));
+                    return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
+                }
+                return Err(unavailable());
+            }
+        };
+        if read.truncated {
+            return Err(unavailable());
+        }
+        if find_dialog(&read.text).is_some() {
+            return Err(DeliverError::NotDelivered(ErrorCode::AgentBusy));
+        }
+        // The pane may have changed hands since the reconciler last looked,
+        // including during the screen read above. Ask herdr now, after the
+        // read, fail closed.
         let live = timeout_at(deadline, pane.herdr.get(&pane.pane_id))
             .await
             .map_err(|_| unavailable())?
@@ -196,18 +224,8 @@ impl Adapter for HerdrAdapter {
             let _ = pane.hints.try_send(Hint::Pane(pane.pane_id.clone()));
             return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
         };
-        // A dialog may have opened since the last poll: text starting with "1"
-        // would pick "Yes". A read that fails or is cut short proves nothing.
-        let read = pane
-            .herdr
-            .read_screen(&pane.pane_id, "detection", None, deadline)
-            .await
-            .map_err(|_| unavailable())?;
-        if read.truncated {
-            return Err(unavailable());
-        }
         // herdr reports a dialog this parser cannot read as `blocked`.
-        if find_dialog(&read.text).is_some() || map::state(live.agent_status) == AgentState::NeedsYou {
+        if map::state(live.agent_status) == AgentState::NeedsYou {
             return Err(DeliverError::NotDelivered(ErrorCode::AgentBusy));
         }
         // The reconciler does not take the agent lock, so it can have replaced

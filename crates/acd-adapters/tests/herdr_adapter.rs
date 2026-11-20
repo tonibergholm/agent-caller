@@ -235,6 +235,30 @@ async fn a_pane_replaced_during_the_screen_read_gets_no_prompt() {
     assert!(r.fake.prompts().is_empty(), "nothing was typed into the replacement");
 }
 
+/// herdr replaces the agent while the send's screen read is in flight and the
+/// reconciler has not updated the pane map: only a live check made after the
+/// read sees it.
+#[tokio::test]
+async fn an_agent_replaced_during_the_screen_read_gets_no_prompt() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let old = agent(&r);
+    let gate = r.fake.block_next("agent.read");
+    let send = tokio::spawn({
+        let adapter = r.adapter.clone();
+        let old = old.clone();
+        async move { adapter.send(&old, "run the tests").await }
+    });
+    gate.arrived().await; // the screen read is held
+    let mut codex = fake_agent("w1:p1", "codex", "idle");
+    codex["terminal_id"] = "term_other".into();
+    r.fake.set_agent(codex);
+    gate.release();
+    let res = send.await.unwrap();
+    assert!(matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))), "{res:?}");
+    assert!(r.fake.prompts().is_empty(), "nothing was typed into the replacement");
+    assert!(r.fake.calls().iter().all(|(m, _)| m != "agent.prompt"));
+}
+
 #[tokio::test]
 async fn follow_up_to_a_pane_that_lost_its_agent_is_gone() {
     let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
