@@ -156,8 +156,8 @@ only the user's SID (reuse the SDDL builders in `winacl`, with pipe access
 rights); the shim calls `GetNamedPipeServerProcessId`, opens that process's
 token and requires its user SID to equal its own before sending the token. A
 failed check prints nothing and exits 0, as the shim does today. Localhost TCP
-is rejected for the Codex shim (it cannot prove the peer); the Claude Code HTTP
-hook on `127.0.0.1:<port>` with `X-Acd-Token` is portable as it stands. Whether
+is rejected for the shim (it cannot prove the peer). Claude Code and Codex
+both use the shim, so both need the named pipe on Windows. Whether
 Codex hooks run on native Windows is unconfirmed.
 
 ### E. Daemon supervision

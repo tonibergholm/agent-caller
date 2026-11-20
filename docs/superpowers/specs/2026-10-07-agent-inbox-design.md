@@ -1841,6 +1841,20 @@ hostile local users, loopback-capable sandboxes, or same-uid processes.**
 Moving Claude to the command shim is a later change and needs gate 2
 re-tested for command hooks.
 
+*Amended 2026-11-20 (security audit).* Claude now uses the command shim:
+`acd hooks install claude` writes `acd hook claude <Event>` command hooks
+that talk to `hook.sock`, with the same events, matchers and timeouts, and
+no token in the settings file. The shim forwards `HERDR_PANE_ID`,
+`HERDR_SOCKET_PATH` and `CLAUDE_CODE_ENTRYPOINT` as the headers the http
+hook sent, so the endpoint mapping is unchanged. On any failure it prints
+nothing and Claude shows its own dialog. Gate 2 was re-run for command hooks
+with Claude Code 2.1.329: allow and deny are honoured, a daemon that is down
+gives no allow, a terminal answer leaves the hook running until Claude exits,
+and Esc ends it. Reinstalling replaces older http entries, and `acd status`
+warns while any remain. acd still binds `hook_port` for Claude sessions that
+started before the reinstall, so the R7 exposure is limited to those
+sessions.
+
 **Release targets.**
 - `aarch64-apple-darwin`
 - `x86_64-apple-darwin`
