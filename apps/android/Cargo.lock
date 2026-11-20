@@ -7,7 +7,9 @@ name = "acd-app-core"
 version = "0.9.0"
 dependencies = [
  "acd-client",
+ "acd-protocol",
  "security-framework",
+ "serde",
  "tokio",
  "windows-sys 0.61.2",
 ]

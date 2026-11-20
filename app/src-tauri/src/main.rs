@@ -42,6 +42,7 @@ fn main() {
             commands::set_show_subagents,
             commands::set_show_hook_only,
             commands::list_machines,
+            commands::preview_pairing_from_clipboard,
             commands::import_pairing_from_clipboard,
             commands::rename_machine,
             commands::remove_machine,

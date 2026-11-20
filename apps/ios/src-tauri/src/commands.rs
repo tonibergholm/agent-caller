@@ -5,6 +5,7 @@
 //! equivalent.
 
 use acd_app_core::commands::{self as core, AppState};
+use acd_app_core::pairing::PairingPreview;
 use acd_client::view::{InboxView, MachineEntryView};
 use tauri::{AppHandle, State};
 
@@ -79,16 +80,26 @@ pub fn list_machines(state: State<'_, AppState>) -> Vec<MachineEntryView> {
     core::list_machines(&state.inbox)
 }
 
+/// Reads the clipboard and says what it would pair; saves nothing (F9).
+#[tauri::command]
+pub fn preview_pairing_from_clipboard(app: AppHandle) -> Result<PairingPreview, String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    acd_app_core::pairing::preview_text(app.clipboard().read_text().ok().as_deref())
+}
+
+/// Pairs the clipboard line, but only when it is still the one `shown`.
 #[tauri::command]
 pub fn import_pairing_from_clipboard(
     app: AppHandle,
     state: State<'_, AppState>,
+    shown: PairingPreview,
 ) -> Result<MachineEntryView, String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
-    acd_app_core::pairing::import_and_clear(
+    acd_app_core::pairing::import_previewed_and_clear(
         &state.inbox,
         tauri::async_runtime::handle().inner(),
         app.clipboard().read_text().ok(),
+        &shown,
         || {
             let _ = app.clipboard().clear();
         },

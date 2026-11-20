@@ -74,6 +74,7 @@ dependencies = [
  "acd-client",
  "acd-protocol",
  "security-framework",
+ "serde",
  "tempfile",
  "tokio",
  "windows-sys 0.61.2",

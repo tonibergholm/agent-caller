@@ -2,8 +2,52 @@
 
 use std::sync::Arc;
 
-use acd_client::{inbox::Inbox, view::MachineEntryView};
+use acd_client::{
+    endpoint,
+    inbox::{Inbox, MachineError},
+    view::MachineEntryView,
+};
+use acd_protocol::pairing::Pairing;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
+
+/// What a pairing line says about the machine it would add: no token. Shown
+/// to the user before anything is saved (security review F9).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingPreview {
+    pub host: String,
+    pub port: u16,
+    pub pin: String,
+}
+
+/// Parses the clipboard text without saving anything. The error text never
+/// echoes the clipboard.
+pub fn preview_text(clip: Option<&str>) -> Result<PairingPreview, String> {
+    let text = clip
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| "The clipboard does not hold an acd pairing line.".to_owned())?;
+    let pairing = Pairing::parse(text).map_err(|_| MachineError::BadPairing.to_string())?;
+    if endpoint::refuses_literal(&pairing.host) {
+        return Err(MachineError::NotTailscale.to_string());
+    }
+    Ok(PairingPreview { host: pairing.host, port: pairing.port, pin: pairing.pin })
+}
+
+/// [`import_and_clear`], but only when the clipboard still holds the line the
+/// user was shown (`shown`). A clipboard rewritten after the preview imports
+/// nothing and is left alone.
+pub fn import_previewed_and_clear(
+    inbox: &Arc<Inbox>,
+    runtime: &Handle,
+    clip: Option<String>,
+    shown: &PairingPreview,
+    clear: impl FnOnce(),
+) -> Result<MachineEntryView, String> {
+    if preview_text(clip.as_deref())? != *shown {
+        return Err("The clipboard changed after it was shown. Nothing was added.".to_owned());
+    }
+    import_and_clear(inbox, runtime, clip, clear)
+}
 
 /// Imports the clipboard text as a pairing line. `runtime` is entered for the
 /// import: shells call this from synchronous commands, outside Tokio. The
@@ -78,6 +122,42 @@ mod tests {
         let _guard = runtime.enter();
         inbox.start();
         inbox
+    }
+
+    #[test]
+    fn a_preview_saves_nothing_and_carries_no_token() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let inbox = inbox(&runtime);
+        let pin = acd_protocol::pairing::spki_pin(b"test certificate");
+        let line = format!("acd://example.test:47800?pin={pin}#{TOKEN}");
+        let preview = preview_text(Some(&line)).unwrap();
+        assert_eq!(preview, PairingPreview { host: "example.test".into(), port: 47800, pin });
+        assert!(!format!("{preview:?}").contains(TOKEN));
+        assert!(inbox.machines().is_empty(), "a preview must not save");
+        for bad in [None, Some("  "), Some("hello #tok")] {
+            let err = preview_text(bad).unwrap_err();
+            assert!(!err.contains("tok"), "{err}");
+        }
+        let lan = format!("acd://192.168.1.10:47800?pin={}#{TOKEN}", preview.pin);
+        assert!(preview_text(Some(&lan)).unwrap_err().contains("Tailscale"));
+    }
+
+    #[test]
+    fn a_changed_clipboard_is_not_imported_after_the_preview() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let inbox = inbox(&runtime);
+        let pin = acd_protocol::pairing::spki_pin(b"test certificate");
+        let shown = preview_text(Some(&format!("acd://example.test:47800?pin={pin}#{TOKEN}"))).unwrap();
+        let swapped = format!("acd://evil.test:47800?pin={pin}#{TOKEN}");
+        let mut cleared = 0;
+        let err = import_previewed_and_clear(&inbox, runtime.handle(), Some(swapped), &shown, || cleared += 1)
+            .unwrap_err();
+        assert!(err.contains("changed"), "{err}");
+        assert!(inbox.machines().is_empty());
+        assert_eq!(cleared, 0);
+        let same = format!("acd://example.test:47800?pin={pin}#{TOKEN}");
+        import_previewed_and_clear(&inbox, runtime.handle(), Some(same), &shown, || cleared += 1).unwrap();
+        assert_eq!((inbox.machines().len(), cleared), (1, 1));
     }
 
     #[test]
