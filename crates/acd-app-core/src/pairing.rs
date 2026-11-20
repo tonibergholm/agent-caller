@@ -208,7 +208,7 @@ mod tests {
         let err = import_previewed_and_clear(&inbox, runtime.handle(), Some(swapped), &shown, &pending, || cleared += 1)
             .unwrap_err();
         assert!(err.contains("changed"), "{err}");
-        assert!(!err.contains(&other_token), "{err}");
+        assert!(!err.contains(&other_token), "the error names the token ({} bytes)", err.len());
         assert!(inbox.machines().is_empty());
         assert_eq!(cleared, 0);
     }

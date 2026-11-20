@@ -1604,15 +1604,18 @@ fn find_card(i: &Inner, key: &str) -> Result<(String, MachineHandle, MachineEntr
         .find(|m| m.entry.key == mk)
         .ok_or(PickError::UnknownCard)?;
     let h = m.handle.clone().ok_or(PickError::UnknownCard)?;
-    let aid = h
+    // Exactly one agent: `X#Y` without an incarnation and `X` with
+    // incarnation `Y` share a key, and an ambiguous key names no card.
+    let matches: Vec<String> = h
         .state()
         .borrow()
         .session
         .agents
         .values()
-        .find(|a| view::card_key(mk, &a.id, a.incarnation.as_deref()) == key)
+        .filter(|a| view::card_key(mk, &a.id, a.incarnation.as_deref()) == key)
         .map(|a| a.id.clone())
-        .ok_or(PickError::UnknownCard)?;
+        .collect();
+    let [aid] = <[String; 1]>::try_from(matches).map_err(|_| PickError::UnknownCard)?;
     Ok((mk.into(), h, m.entry.clone(), aid))
 }
 /// Where and how to connect to `entry`. Reads the SecretStore for a TCP

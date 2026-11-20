@@ -854,6 +854,7 @@ async fn revoking_cancels_a_wake_that_is_already_in_flight() {
 /// S14: cancelling sends in flight and the cutoff for new ones must not
 /// wait for the store's file I/O.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // held on purpose: it stalls the store's I/O
 async fn revoking_cancels_wakes_before_the_store_is_written() {
     let rig = Rig::new(NO_WINDOW).await;
     let mut cancelled = rig.push.revoked.subscribe();
@@ -874,6 +875,7 @@ async fn revoking_cancels_wakes_before_the_store_is_written() {
 
 /// S13: the daemon's rotation stops the old client token before push I/O.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // held on purpose: it stalls the store's I/O
 async fn the_client_token_rotates_before_push_writes_anything() {
     let rig = Rig::new(NO_WINDOW).await;
     let auth = Arc::new(acd_core::server::Auth::new(TOKEN.into()));

@@ -391,6 +391,23 @@ async fn a_card_key_of_a_replaced_agent_names_no_card() {
     ib.reply("m1/a1#i2", "for the new one".into()).unwrap();
 }
 
+/// `a1#i1` with no incarnation and `a1` with incarnation `i1` share a card
+/// key; an ambiguous key names no card rather than either agent.
+#[tokio::test]
+async fn an_ambiguous_card_key_names_no_card() {
+    let (f, c, ib) = setup().await;
+    ib.set_show_idle(true);
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":idle_with_incarnation("i1")}))
+        .await;
+    let mut twin = idle_with_incarnation("i1");
+    twin["id"] = Value::String("a1#i1".into());
+    twin["incarnation"] = Value::Null;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":twin})).await;
+    view_until(&ib, "both cards", |v| v.cards.iter().filter(|c| c.key == "m1/a1#i1").count() == 2).await;
+    assert_eq!(ib.reply("m1/a1#i1", "which one?".into()), Err(PickError::UnknownCard));
+    assert!(!f.received().iter().any(|v| v["type"] == "agent.send"), "nothing was sent");
+}
+
 #[tokio::test]
 async fn import_pairing_stores_the_secret_and_never_reports_it() {
     let f = FakeServer::start(common::TOKEN, Identity::Paired).await;

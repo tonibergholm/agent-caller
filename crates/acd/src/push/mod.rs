@@ -129,9 +129,10 @@ pub struct Push {
     handled: watch::Sender<u64>,
     /// Bumped by every revocation. A send in flight is cancelled when it moves.
     revoked: watch::Sender<u64>,
-    /// The lowest token generation that may register: the one a rotation
-    /// moved to. Read and written only under the store lock, so a check and
-    /// the write it guards cannot be split by a rotation.
+    /// The lowest token generation that may register or be woken: the one a
+    /// rotation moved to. `revoke_all` raises it before it takes the store
+    /// lock, and `register` reads it under that lock, so a check and the
+    /// write it guards cannot be split by a rotation.
     min_generation: Arc<AtomicU64>,
     /// Test hook: `register` waits here twice once it is accepted.
     #[cfg(test)]

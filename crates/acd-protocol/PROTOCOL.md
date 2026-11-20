@@ -346,6 +346,9 @@ normal command rules (§4): idempotency and the in-flight caps.
   session's `hello.client.id`; there is no way to name another one. A
   registration under the same `client.id` replaces the old one and enables
   it again.
+  - `unauthorized` "the client token was rotated": the session's token was
+    rotated away while the command ran. The session closes too, so a client
+    rarely sees this result.
   - `relay` must equal the daemon's configured relay URL (https, no trailing
     slash), else `bad_request` "relay mismatch".
   - `handle` is the opaque blob the relay issued: 1 to 512 bytes of base64url,

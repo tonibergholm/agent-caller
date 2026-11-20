@@ -2981,8 +2981,8 @@ fn rotate_revoke_saves_the_store_before_a_settings_rewrite_can_fail() {
     let out = rotate(&dir, home.path(), &["--revoke"]);
     assert!(!out.status.success(), "the rewrite failure must exit non-zero");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("the old hook token is revoked"), "{stderr}");
     assert!(!stderr.contains(&old) && !String::from_utf8_lossy(&out.stdout).contains(&old));
+    assert!(stderr.contains("the old hook token is revoked"), "{stderr}");
     let store = store_of(&dir);
     assert!(store["previous"].is_null());
     assert_eq!(store["generation"], 2);
@@ -3019,9 +3019,10 @@ fn rotate_revoke_saves_the_store_before_the_installer_preflight_can_fail() {
         let out = rotate(&dir, home.path(), &["--revoke"]);
         assert!(!out.status.success(), "{file}: the preflight failure must exit non-zero");
         let stderr = String::from_utf8_lossy(&out.stderr);
+        // The token check first, so the messages below never print a token.
+        assert!(!stderr.contains(&old) && !String::from_utf8_lossy(&out.stdout).contains(&old));
         assert!(stderr.contains("the old hook token is revoked"), "{file}: {stderr}");
         assert!(stderr.contains(file), "{file}: the problem is not named: {stderr}");
-        assert!(!stderr.contains(&old) && !String::from_utf8_lossy(&out.stdout).contains(&old));
         let store = store_of(&dir);
         assert!(store["previous"].is_null(), "{file}");
         assert_eq!(store["generation"], 2, "{file}");
