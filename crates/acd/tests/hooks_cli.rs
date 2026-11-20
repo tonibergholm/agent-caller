@@ -180,11 +180,12 @@ fn a_record_save_failure_stops_rewrite_and_install_recovers_both_destinations() 
     assert!(!dir.join("hooks-journal.json").exists());
     let current = hook_token_of(&dir);
     // The reinstalled destination now runs the shim: no token in the file.
-    assert_eq!(settings_token(home.path()), serde_json::Value::Null);
+    assert!(settings_token(home.path()).is_null(), "the file still holds a token");
     assert!(
         !std::fs::read_to_string(home.path().join(".claude/settings.json"))
             .unwrap()
-            .contains(&current)
+            .contains(&current),
+        "the file still holds the token"
     );
     // The other legacy destination is repaired by the header rewrite.
     let other_value: serde_json::Value =
@@ -221,9 +222,8 @@ fn a_crash_after_the_store_commit_is_repaired_by_install() {
         assert_eq!(store_of(&dir)["generation"], 2);
         assert!(install(&dir, home.path(), "claude", &[]).status.success());
         assert_eq!(store_of(&dir)["headers"]["state"], "done");
-        assert_eq!(
-            settings_token(home.path()),
-            serde_json::Value::Null,
+        assert!(
+            settings_token(home.path()).is_null(),
             "the reinstall replaced the legacy entry"
         );
     }
@@ -309,7 +309,7 @@ fn a_failed_header_write_fails_rotation_until_install_succeeds() {
             .success()
     );
     assert_eq!(store_of(&dir)["headers"]["state"], "done");
-    assert_eq!(settings_token(home.path()), serde_json::Value::Null);
+    assert!(settings_token(home.path()).is_null(), "the file still holds a token");
 }
 
 #[cfg(debug_assertions)]
@@ -631,7 +631,7 @@ fn the_shim_forwards_the_hook_and_prints_the_reply() {
     let req = rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(
         req.starts_with("POST /hook/codex/PermissionRequest HTTP/1.1\r\n"),
-        "{req}"
+        "the request line differs"
     );
     assert!(req.contains(&format!("X-Acd-Token: {token}\r\n")));
     assert!(req.contains("X-Herdr-Pane: w1:p2\r\n"));
@@ -675,17 +675,18 @@ fn the_claude_shim_forwards_the_event_with_the_environment_headers() {
     assert!(out.status.success() && out.stderr.is_empty());
     assert_eq!(String::from_utf8_lossy(&out.stdout), reply);
     let req = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    // The request carries the token: no assert message prints it.
     assert!(
         req.starts_with("POST /hook/claude/PermissionRequest HTTP/1.1\r\n"),
-        "{req}"
+        "the request line differs"
     );
-    assert!(req.contains(&format!("X-Acd-Token: {token}\r\n")));
+    assert!(req.contains(&format!("X-Acd-Token: {token}\r\n")), "the token header differs");
     for header in [
         "X-Herdr-Pane: w1:p2\r\n",
         "X-Herdr-Socket: /run/herdr.sock\r\n",
         "X-Claude-Entrypoint: cli\r\n",
     ] {
-        assert!(req.contains(header), "{header}: {req}");
+        assert!(req.contains(header), "missing {header}");
     }
     assert!(req.ends_with(std::str::from_utf8(&body).unwrap()));
     assert!(!String::from_utf8_lossy(&out.stdout).contains(&token));
@@ -698,7 +699,7 @@ fn the_codex_shim_does_not_send_the_claude_entrypoint() {
     let (out, _) = run_shim(&dir, "Stop", b"{}", &[("CLAUDE_CODE_ENTRYPOINT", "cli")]);
     assert!(out.status.success());
     let req = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(!req.contains("X-Claude-Entrypoint"), "{req}");
+    assert!(!req.contains("X-Claude-Entrypoint"), "the codex shim sent the Claude entrypoint header");
 }
 
 #[test]
@@ -1078,7 +1079,8 @@ fn claude_install_writes_shim_commands_without_the_token_at_mode_0600() {
     let text = std::fs::read_to_string(&p).unwrap();
     assert!(
         !text.contains(&token) && !text.contains("X-Acd-Token") && !text.contains("http"),
-        "{text}"
+        "the settings file holds a token header or a URL ({} bytes)",
+        text.len()
     );
     for o in [&out.stdout, &out.stderr] {
         assert!(!String::from_utf8_lossy(o).contains(&token));
@@ -1182,7 +1184,11 @@ fn reinstalling_replaces_the_legacy_http_entries_with_shim_commands() {
     // The legacy file is replaced, not appended to: the token is gone, the
     // mode is private and nothing warns any more.
     let text = std::fs::read_to_string(&p).unwrap();
-    assert!(!text.contains(&token) && !text.contains("http"), "{text}");
+    assert!(
+        !text.contains(&token) && !text.contains("http"),
+        "the reinstalled file holds a token or a URL ({} bytes)",
+        text.len()
+    );
     let v = json_of(&p);
     assert_eq!(owned_count(&v), 7);
     assert_eq!(
