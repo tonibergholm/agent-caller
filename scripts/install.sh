@@ -142,12 +142,15 @@ echo "Checksum OK: $archive"
 # about who built it. The GitHub build attestation does. ACD_INSTALL_GH names
 # the gh command (the tests use it).
 gh_cmd=${ACD_INSTALL_GH:-gh}
-if command -v "$gh_cmd" >/dev/null 2>&1; then
-	"$gh_cmd" attestation verify "$tarball" --repo "$REPO" >/dev/null ||
-		die "provenance check failed for $archive (is gh signed in? run gh auth login); nothing installed"
-	echo "Provenance OK: $archive"
-else
+if ! command -v "$gh_cmd" >/dev/null 2>&1; then
 	echo "Provenance not checked: gh is not installed. To check it, install gh, sign in, and run: gh attestation verify $archive --repo $REPO"
+elif ! "$gh_cmd" auth status >/dev/null 2>&1; then
+	# A signed-out gh cannot verify anything; treat it like no gh.
+	echo "Provenance not checked: gh is not signed in. To check it, run gh auth login, then: gh attestation verify $archive --repo $REPO"
+else
+	"$gh_cmd" attestation verify "$tarball" --repo "$REPO" >/dev/null ||
+		die "provenance check failed for $archive; nothing installed"
+	echo "Provenance OK: $archive"
 fi
 
 # Refuse absolute paths and parent-directory entries before extracting.

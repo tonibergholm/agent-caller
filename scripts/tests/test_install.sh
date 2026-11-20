@@ -36,10 +36,11 @@ test_installs_verified_archive() {
 	assert_contains "$R_OUT" "Checksum OK: $ARCHIVE"
 }
 
-# A stub gh that records its arguments and exits with the given status.
+# A stub gh: `auth status` exits with $2 (default 0); any other call records
+# its arguments and exits with $1.
 make_stub_gh() {
 	mkdir -p "$WORK/stub"
-	printf '#!/bin/sh\necho "$@" >"%s/gh-args"\nexit %s\n' "$WORK" "$1" >"$WORK/stub/gh"
+	printf '#!/bin/sh\n[ "$1" = auth ] && exit %s\necho "$@" >"%s/gh-args"\nexit %s\n' "${2:-0}" "$WORK" "$1" >"$WORK/stub/gh"
 	chmod +x "$WORK/stub/gh"
 	ACD_INSTALL_GH="$WORK/stub/gh"
 	export ACD_INSTALL_GH
@@ -62,6 +63,16 @@ test_refuses_when_the_attestation_fails() {
 	assert_eq "$R_RC" 1 "exit status"
 	assert_contains "$R_ERR" "provenance check failed"
 	assert_no_path "$WORK/bin"
+}
+
+test_says_provenance_was_not_checked_when_gh_is_signed_out() {
+	prepare_release
+	make_stub_gh 1 1
+	install_from
+	assert_eq "$R_RC" 0 "exit status"
+	assert_file "$WORK/bin/acd"
+	assert_contains "$R_OUT" "Provenance not checked: gh is not signed in"
+	assert_no_path "$WORK/gh-args"
 }
 
 test_says_provenance_was_not_checked_without_gh() {
