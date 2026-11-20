@@ -428,28 +428,27 @@ Seen failing on CI in 2026-11 (each passed on rerun; none reproduced alone):
 
 Residuals from the 2026-11 relay and review work, none blocking:
 
-- **2026-11-20 audit residuals.**
-  - Keyboard replies bind to the agent incarnation of the card on screen when
-    the reply is sent, not when typing started; a card that changed agent
-    while the user typed sends to the agent it now shows.
-  - The pre-auth integration tests that used 127.0.0.x aliases as separate
-    sources were removed, because loopback is now one source. Separate
-    network sources are covered by the `SourcePool` and `Admission` unit
-    tests only.
-  - `install.sh` verifies attestations with `--repo` only, without
-    `--signer-workflow` or `--source-ref`.
-  - Between the herdr `agent.get` check and `agent.prompt` there is a small
-    window, because herdr cannot target a terminal id.
-  - A push registration made with the new client token in the moment
-    between the auth rotation and the push store rewrite is acknowledged
-    while `push.json` still names the old token. A restart inside that
-    window drops it, and the device registers again. Wake timing only.
-  - The window-scope checks on Tauri commands are pinned by allow-list unit
-    tests, not by a call from a live HUD window.
-  - The Python reproducers in `tests/redteam/` send `request.answer` without
-    a revision, so they now get `bad_request` before the paths they once
-    exercised. The live E2E harness (`tests/e2e/inbox.py`) is updated; the
-    live Claude scenarios (40, 41) were not re-run with the shim hooks.
+- **2026-11-20 audit residuals.** Closed by the follow-up PR: keyboard
+  replies (the card key carries the incarnation), the push registration
+  window (a registration during a rotation is refused with a retryable
+  `source_unavailable`), the attestation pin (`--signer-workflow` and
+  `--source-ref`), the runtime window-scope test, and the red-team
+  reproducers (they send the revision). Still open:
+  - A herdr agent with no name is prompted by pane id, so the window between
+    the `agent.get` check and `agent.prompt` remains for it; a named agent
+    is prompted by its name, which herdr clears when the agent is replaced.
+    Closing it for unnamed agents needs herdr to accept a terminal id as a
+    prompt target. A name reused by another agent within that window would
+    still receive the prompt.
+  - The pre-auth integration tests with two real sources (loopback and this
+    machine's own address) skip themselves when the address is unreachable;
+    on macOS the application firewall makes that happen in
+    `cargo test --workspace` runs. They run under `cargo test -p acd-core`.
+  - The voice commands' window checks have no IPC test; the inbox commands
+    have one (`app/src-tauri/src/commands.rs`, `window_scope`).
+  - Live Claude scenarios 40 and 41 pass with the shim hooks (Claude Code
+    2.1.329, Haiku). They run Claude with the real HOME, so each run records
+    the scratch project, and now its folder trust, in `~/.claude.json`.
 - **Mutation tests (#101).** Some tests wait for indirect 5 s bounds, and the
   counts quoted in the mutation document are stale.
 - **Bug-hunt reproducers (#110).** `#[ignore]`d tests that fail today: B1

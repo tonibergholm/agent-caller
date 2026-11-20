@@ -71,10 +71,16 @@ Fixes from the 2026-11-20 security audit.
 - Push registrations are bound to the client token and are dropped after a
   rotation, also across a restart. Existing registrations must register
   once more. The relay checks per-IP limits before its global limit.
+  While a client token rotation is in progress, `push.register` answers
+  `source_unavailable` (retry) instead of acknowledging a registration that
+  a restart could lose.
+- herdr follow-up text goes to the agent's herdr name when it has one, so
+  herdr itself refuses it once the agent is replaced.
 - Debug logs record hook and herdr errors by name, length and hash, not by
   their text.
 - Releases carry GitHub build provenance attestations, and
-  `scripts/install.sh` verifies them when `gh` is installed and signed in
+  `scripts/install.sh` verifies them, pinned to the `release.yml` workflow
+  and the release tag, when `gh` is installed and signed in
   (`ACD_INSTALL_SKIP_PROVENANCE=1` skips the check).
   Dependabot also covers the cargo and npm dependencies.
 
