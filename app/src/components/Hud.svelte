@@ -76,7 +76,10 @@
   // Everything the user would approve is on screen: the body does not scroll
   // and no block is cut off.
   const showsAll = () =>
-    !!body && body.scrollHeight <= body.clientHeight && ![...(main?.querySelectorAll<HTMLElement>(".block") ?? [])].some((b) => b.scrollHeight > b.clientHeight);
+    !!body && body.scrollHeight <= body.clientHeight && ![...(main?.querySelectorAll<HTMLElement>(".block") ?? [])].some((b) => b.scrollHeight > b.clientHeight) && !cutSideways();
+  // A word that does not wrap runs past the edge: the body and blocks clip it
+  // and an option label (`.what`) overflows. Not visible, so not shown.
+  const cutSideways = () => [body, ...(main?.querySelectorAll<HTMLElement>(".block, .what") ?? [])].some((e) => !!e && e.scrollWidth > e.clientWidth);
 
   $effect(() => {
     void hud;
@@ -91,7 +94,7 @@
       // A failed resize shows up below as a clipped viewport.
       const fitted = api.voiceHudFit(seq, needed).catch(() => {});
       if (id === null) return;
-      if (needed > MAX_HUD_HEIGHT || ![...main.querySelectorAll<HTMLElement>(".block")].every((b) => b.scrollHeight <= b.clientHeight)) {
+      if (needed > MAX_HUD_HEIGHT || ![...main.querySelectorAll<HTMLElement>(".block")].every((b) => b.scrollHeight <= b.clientHeight) || cutSideways()) {
         tooLong = true;
         return;
       }
@@ -319,13 +322,17 @@
     color: var(--text-muted);
   }
   .what {
+    min-width: 0;
     margin: 0;
+    overflow-wrap: anywhere;
     font-size: 15px;
     font-weight: 600;
     letter-spacing: -0.015em;
   }
   .label {
+    min-width: 0;
     margin: 0;
+    overflow-wrap: anywhere;
     font-size: 11px;
     color: var(--amber-text);
   }

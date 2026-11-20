@@ -111,6 +111,33 @@ test("a block that is cut off is never acknowledged and cannot be confirmed (F1)
   expect(fits.calls).toContainEqual(["voiceShown", 72]);
 });
 
+// jsdom has no layout: give each element a scroll and client width.
+function withWidths(widths: (el: Element) => [number, number]) {
+  const proto = Element.prototype;
+  const orig = { s: Object.getOwnPropertyDescriptor(proto, "scrollWidth")!, c: Object.getOwnPropertyDescriptor(proto, "clientWidth")! };
+  Object.defineProperty(proto, "scrollWidth", { configurable: true, get(this: Element) { return widths(this)[0]; } });
+  Object.defineProperty(proto, "clientWidth", { configurable: true, get(this: Element) { return widths(this)[1]; } });
+  return () => {
+    Object.defineProperty(proto, "scrollWidth", orig.s);
+    Object.defineProperty(proto, "clientWidth", orig.c);
+  };
+}
+
+test("a label wider than the panel is never acknowledged and cannot be confirmed", async () => {
+  const restore = withWidths((el) => (el.classList.contains("what") ? [300, 100] : [100, 100]));
+  try {
+    const api = await show({ state: "confirm", proposal: proposal({ action: "answer", option: "x".repeat(200) }), proposal_id: 75 });
+    expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+    expect(screen.getByText(/Too long to show here/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Confirm/ }) as HTMLButtonElement).disabled).toBe(true);
+  } finally {
+    restore();
+  }
+  cleanup();
+  const fits = await show({ state: "confirm", proposal: proposal(), proposal_id: 76 });
+  expect(fits.calls).toContainEqual(["voiceShown", 76]);
+});
+
 test("content taller than the panel can be is not acknowledged either (F1)", async () => {
   // No block overflows, but the content needs 600 - 200 + 300 = 700 px > 420.
   const restore = withHeights((el) => (el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [300, 200] : el.classList.contains("hud") ? [600, 600] : [0, 0]));
