@@ -199,8 +199,9 @@ The two hashes must match. `scripts/install.sh` runs this check for you.
 
 `SHA256SUMS` comes from the same release as the archive, so it does not show
 who built it. The build attestation does. With the GitHub CLI installed and
-signed in (`gh auth login`); use 2.102.0 or later, because earlier versions
-match `--signer-workflow` as a prefix (GHSA-wjmr-j3rp-mh2g):
+signed in (`gh auth login`); use gh 2.102.0 or later for a manual check,
+because earlier versions match `--signer-workflow` as a prefix
+(GHSA-wjmr-j3rp-mh2g):
 
 ```sh
 gh attestation verify acd-0.9.0-aarch64-apple-darwin.tar.gz \
@@ -251,9 +252,10 @@ never uses sudo. It checks the archive against `SHA256SUMS` before it
 extracts anything, and it stops without installing when the check fails.
 If `gh` is installed and signed in, it also runs `gh attestation verify` on
 the archive, pinned to `release.yml` and the `vX.Y.Z` tag, and stops when
-that fails. With `gh` older than 2.102.0 the workflow pin is only a prefix
-match, and the install says so. Without `gh`, or with `gh` signed out, it
-prints that the provenance was not checked. Set
+that fails. It also requires one verified attestation whose
+`buildSignerURI` is exactly `release.yml` at `refs/tags/vX.Y.Z`, so the pin
+holds on a `gh` with the prefix bug too. Without `gh`, or with `gh` signed
+out, it prints that the provenance was not checked. Set
 `ACD_INSTALL_SKIP_PROVENANCE=1` to skip the check for an archive you built
 yourself or a release made before attestations.
 

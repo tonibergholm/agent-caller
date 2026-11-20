@@ -153,14 +153,6 @@ echo "Checksum OK: $archive"
 # in the repository, including a branch dispatch. ACD_INSTALL_GH names the gh
 # command (the tests use it).
 gh_cmd=${ACD_INSTALL_GH:-gh}
-# True when gh is 2.102.0 or later: earlier versions match the signer
-# workflow as a prefix. An unreadable version counts as too old.
-gh_pins_workflows() {
-	ver=$("$1" --version 2>/dev/null | sed -n '1s/^gh version \([0-9][0-9]*\)\.\([0-9][0-9]*\)\..*/\1 \2/p')
-	[ -n "$ver" ] || return 1
-	set -- $ver
-	[ "$1" -gt 2 ] || { [ "$1" -eq 2 ] && [ "$2" -ge 102 ]; }
-}
 signer="$REPO/.github/workflows/release.yml"
 verify_flags="--repo $REPO --signer-workflow $signer --source-ref refs/tags/v$version"
 if [ "${ACD_INSTALL_SKIP_PROVENANCE:-}" = 1 ]; then
@@ -172,16 +164,15 @@ elif ! "$gh_cmd" auth status >/dev/null 2>&1; then
 	echo "Provenance not checked: gh is not signed in. To check it, run gh auth login, then: gh attestation verify $archive $verify_flags"
 else
 	# shellcheck disable=SC2086 # verify_flags holds no spaces inside a value
-	"$gh_cmd" attestation verify "$tarball" $verify_flags >/dev/null ||
+	verified=$("$gh_cmd" attestation verify "$tarball" $verify_flags --format json 2>/dev/null) ||
 		die "provenance check failed for $archive; nothing installed"
-	if gh_pins_workflows "$gh_cmd"; then
-		echo "Provenance OK: $archive"
-	else
-		# gh up to 2.101.0 matches --signer-workflow as a prefix
-		# (GHSA-wjmr-j3rp-mh2g): repository and tag held, the workflow only
-		# as a prefix. Still far stronger than no check, so keep it and say so.
-		echo "Provenance OK, with a weaker workflow pin: $archive (gh older than 2.102.0 matches the signer workflow as a prefix; update gh for an exact check)"
-	fi
+	# gh 2.51.0 to 2.101.0 match --signer-workflow as a prefix
+	# (GHSA-wjmr-j3rp-mh2g). Require a verified attestation whose signer is
+	# exactly release.yml at this tag, whatever the gh version.
+	want="\"buildSignerURI\":\"https://github.com/$signer@refs/tags/v$version\""
+	printf '%s' "$verified" | tr -d ' \n\r\t' | grep -Fq "$want" ||
+		die "provenance check failed for $archive: not signed by release.yml at v$version; nothing installed"
+	echo "Provenance OK: $archive"
 fi
 
 # Refuse absolute paths and parent-directory entries before extracting.

@@ -37,10 +37,12 @@ test_installs_verified_archive() {
 }
 
 # A stub gh: `auth status` exits with $2 (default 0); any other call records
-# its arguments and exits with $1.
+# its arguments, prints an attestation result signed by workflow $3 (default
+# release.yml at v0.1.0, the release the tests install) and exits with $1.
 make_stub_gh() {
 	mkdir -p "$WORK/stub"
-	printf '#!/bin/sh\n[ "$1" = --version ] && echo "gh version %s (2026-11-12)" && exit 0\n[ "$1" = auth ] && exit %s\necho "$@" >"%s/gh-args"\nexit %s\n' "${3:-2.104.0}" "${2:-0}" "$WORK" "$1" >"$WORK/stub/gh"
+	signer=${3:-https://github.com/tonibergholm/agent-caller/.github/workflows/release.yml@refs/tags/v0.1.0}
+	printf '#!/bin/sh\n[ "$1" = auth ] && exit %s\necho "$@" >"%s/gh-args"\necho '"'"'[{"verificationResult":{"signature":{"certificate":{"buildSignerURI": "%s"}}}}]'"'"'\nexit %s\n' "${2:-0}" "$WORK" "$signer" "$1" >"$WORK/stub/gh"
 	chmod +x "$WORK/stub/gh"
 	ACD_INSTALL_GH="$WORK/stub/gh"
 	export ACD_INSTALL_GH
@@ -111,30 +113,23 @@ test_skips_provenance_when_asked() {
 	assert_no_path "$WORK/gh-args"
 }
 
-test_an_older_gh_still_verifies_and_says_the_pin_is_weaker() {
+test_refuses_an_attestation_from_a_workflow_that_only_shares_the_prefix() {
 	prepare_release
-	make_stub_gh 0 0 2.101.0
-	install_from
-	assert_eq "$R_RC" 0 "exit status"
-	assert_contains "$(cat "$WORK/gh-args")" "attestation verify"
-	assert_contains "$R_OUT" "weaker workflow pin"
-}
-
-test_an_older_gh_that_fails_the_check_still_aborts() {
-	prepare_release
-	make_stub_gh 1 0 2.101.0
+	# What gh up to 2.101.0 accepts for --signer-workflow .../release.yml.
+	make_stub_gh 0 0 https://github.com/tonibergholm/agent-caller/.github/workflows/release.yml.extra.yml@refs/tags/v0.1.0
 	install_from
 	assert_eq "$R_RC" 1 "exit status"
-	assert_contains "$R_ERR" "provenance check failed"
+	assert_contains "$R_ERR" "not signed by release.yml at v0.1.0"
 	assert_no_path "$WORK/bin"
 }
 
-test_verifies_with_gh_2_102() {
+test_refuses_an_attestation_from_another_tag() {
 	prepare_release
-	make_stub_gh 0 0 2.102.0
+	make_stub_gh 0 0 https://github.com/tonibergholm/agent-caller/.github/workflows/release.yml@refs/heads/main
 	install_from
-	assert_eq "$R_RC" 0 "exit status"
-	assert_contains "$R_OUT" "Provenance OK"
+	assert_eq "$R_RC" 1 "exit status"
+	assert_contains "$R_ERR" "not signed by release.yml at v0.1.0"
+	assert_no_path "$WORK/bin"
 }
 
 test_says_provenance_was_not_checked_when_gh_is_signed_out() {
