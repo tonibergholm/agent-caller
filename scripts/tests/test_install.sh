@@ -56,6 +56,40 @@ test_continues_when_the_attestation_verifies() {
 	assert_contains "$R_OUT" "Provenance OK"
 }
 
+# Every acd-<version>-<target> archive is built and attested by release.yml
+# (release-linux.yml makes agent-caller-linux-* archives, which install.sh
+# never installs), so the signer and the tag ref are pinned for each target.
+test_pins_signer_workflow_and_tag_ref() {
+	for target in aarch64-apple-darwin x86_64-unknown-linux-gnu; do
+		rm -rf "$WORK/rel" "$WORK/gh-args"
+		ACD_INSTALL_TARGET=$target
+		ARCHIVE=acd-0.1.0-$target.tar.gz
+		prepare_release
+		make_stub_gh 0
+		install_from
+		assert_eq "$R_RC" 0 "exit status ($target)"
+		args=$(cat "$WORK/gh-args")
+		assert_contains "$args" "attestation verify $WORK/rel/$ARCHIVE "
+		assert_contains "$args" "--signer-workflow tonibergholm/agent-caller/.github/workflows/release.yml"
+		assert_contains "$args" "--source-ref refs/tags/v0.1.0"
+		assert_contains "$args" "--repo tonibergholm/agent-caller"
+	done
+}
+
+# --tag downloads with curl. A stub curl writes the archive and sums.
+test_pins_the_tag_ref_with_tag_flag() {
+	prepare_release
+	make_stub_gh 0
+	mkdir -p "$WORK/stub"
+	printf '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\ncase "$out" in *SHA256SUMS) cp "%s/rel/SHA256SUMS" "$out" ;; *) cp "%s/rel/%s" "$out" ;; esac\n' "$WORK" "$WORK" "$ARCHIVE" >"$WORK/stub/curl"
+	chmod +x "$WORK/stub/curl"
+	PATH="$WORK/stub:$PATH" run_capture R sh "$INSTALL" --tag v0.1.0 --bin-dir "$WORK/bin"
+	assert_eq "$R_RC" 0 "exit status"
+	args=$(cat "$WORK/gh-args")
+	assert_contains "$args" "--signer-workflow tonibergholm/agent-caller/.github/workflows/release.yml"
+	assert_contains "$args" "--source-ref refs/tags/v0.1.0"
+}
+
 test_refuses_when_the_attestation_fails() {
 	prepare_release
 	make_stub_gh 1
@@ -93,7 +127,7 @@ test_says_provenance_was_not_checked_without_gh() {
 	assert_eq "$R_RC" 0 "exit status"
 	assert_file "$WORK/bin/acd"
 	assert_contains "$R_OUT" "Provenance not checked"
-	assert_contains "$R_OUT" "gh attestation verify $ARCHIVE --repo tonibergholm/agent-caller"
+	assert_contains "$R_OUT" "gh attestation verify $ARCHIVE --repo tonibergholm/agent-caller --signer-workflow tonibergholm/agent-caller/.github/workflows/release.yml --source-ref refs/tags/v0.1.0"
 }
 
 test_refuses_checksum_mismatch() {

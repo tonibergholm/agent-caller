@@ -202,10 +202,22 @@ who built it. The build attestation does. With the GitHub CLI installed and
 signed in (`gh auth login`):
 
 ```sh
-gh attestation verify acd-0.9.0-aarch64-apple-darwin.tar.gz --repo tonibergholm/agent-caller
+gh attestation verify acd-0.9.0-aarch64-apple-darwin.tar.gz \
+  --repo tonibergholm/agent-caller \
+  --signer-workflow tonibergholm/agent-caller/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.9.0
 ```
 
-It fails when the file was not built by this repository's release workflow.
+`--repo` alone accepts an attestation from any workflow run in the
+repository, including a `workflow_dispatch` from a branch. The two other
+flags pin the signer to `release.yml` and the ref to the release tag. Every
+`acd-<version>-<target>.tar.gz` comes from `release.yml` on a `vX.Y.Z` tag,
+for Linux too. `release-linux.yml` builds `agent-caller-linux-*` archives on
+`linux-vX.Y.Z` tags, which `install.sh` does not install; to verify one of
+those, use its own workflow file and `--source-ref refs/tags/linux-vX.Y.Z`.
+`scripts/install.sh` passes these flags itself.
+
+It fails when the file was not built by that workflow on that tag.
 Releases cut before the attestation step have none, and the check fails for them.
 
 ## Keychain and privacy permissions
@@ -237,7 +249,8 @@ Local builds work the same way. `just app-install` uses
 never uses sudo. It checks the archive against `SHA256SUMS` before it
 extracts anything, and it stops without installing when the check fails.
 If `gh` is installed and signed in, it also runs `gh attestation verify` on
-the archive and stops when that fails. Without `gh`, or with `gh` signed out,
+the archive, pinned to `release.yml` and the `vX.Y.Z` tag, and stops when
+that fails. Without `gh`, or with `gh` signed out,
 it prints that the provenance was not checked. Set
 `ACD_INSTALL_SKIP_PROVENANCE=1` to skip the check for an archive you built
 yourself or a release made before attestations.
@@ -264,9 +277,6 @@ sh scripts/install.sh --version X.Y.Z --from-dir /path/to/downloads
   happens, move the Linux jobs to a newer image and update the glibc floor
   in this page.
 - The pipeline does not yet produce SBOMs.
-- `install.sh` verifies attestations with `--repo` only. It does not pin the
-  signing workflow or the tag ref (`--signer-workflow`, `--source-ref`), so an
-  attestation from any workflow run in the repository passes.
 - Re-runs: every upload sets `overwrite: true`, so a re-run replaces the
   artifacts of an earlier attempt instead of failing with "artifact already
   exists". The upload-artifact README documents `overwrite` and the failure
