@@ -18,6 +18,9 @@
   // Listening keeps a step that waits on screen, read-only (plan S7).
   const under = $derived<Hud>(hud.state === "listening" && hud.over ? hud.over : hud);
   const listening = $derived(hud.state === "listening");
+  // A block that scrolls hides part of what a "yes" would approve (F1): such a
+  // step is not acknowledged, so the app refuses it after its display timeout.
+  let tooLong = $state(false);
 
   // Rejections are dropped silently: the console never sees voice text.
   const quiet = (p: Promise<unknown>) => void p.catch(() => {});
@@ -32,6 +35,7 @@
         seen.seq = e.seq;
         hud = e.hud;
         shownId = e.id;
+        tooLong = false;
         const id = awaitingDisplay(e.hud);
         if (id === null) return;
         // Acknowledge only after the DOM shows it, and only if it is still
@@ -39,7 +43,13 @@
         // acknowledge a proposal that never rendered (D22).
         quiet(
           tick().then(() => {
-            if (seen.seq === e.seq && awaitingDisplay(hud) === id) return api.voiceShown(id);
+            if (seen.seq !== e.seq || awaitingDisplay(hud) !== id) return;
+            const blocks = [...(main?.querySelectorAll<HTMLElement>(".block") ?? [])];
+            if (blocks.some((b) => b.scrollHeight > b.clientHeight)) {
+              tooLong = true;
+              return;
+            }
+            return api.voiceShown(id);
           }),
         );
       })
@@ -127,7 +137,7 @@
     if (e.key === "Escape") {
       e.preventDefault();
       cancel();
-    } else if (e.key === "Enter" && hud.state === "confirm") {
+    } else if (e.key === "Enter" && hud.state === "confirm" && !tooLong) {
       e.preventDefault();
       confirmStep(hud.proposal_id);
     } else if (hud.state === "which_one" && /^[1-9]$/.test(e.key)) {
@@ -165,6 +175,7 @@
         {#if p.question}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block" tabindex="0" aria-label="Request">{p.question}</pre>{/if}
         {#if p.rule}<p class="label">Always allow, from now on:</p><!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block rule" tabindex="0" aria-label="Rule to remember">{p.rule}</pre>{/if}
         {#if p.text}<!-- svelte-ignore a11y_no_noninteractive_tabindex --><pre class="block payload" tabindex="0" aria-label="Text to send">{p.text}</pre>{/if}
+        {#if tooLong}<p class="status error">Too long to show here. Nothing is sent. Answer in the panel.</p>{/if}
         {#if under.state === "sending"}
           <p class="status">{under.too_late_to_cancel ? "Already sent. It can't be undone." : "Sent. Waiting for the result."}</p>
         {/if}
@@ -199,7 +210,7 @@
     {#if hud.state === "confirm"}
       {@const id = hud.proposal_id}
       <div class="buttons">
-        <button class="primary" onclick={() => confirmStep(id)}>Confirm <kbd>⏎</kbd></button>
+        <button class="primary" disabled={tooLong} onclick={() => confirmStep(id)}>Confirm <kbd>⏎</kbd></button>
         <button onclick={cancel}>Cancel <kbd>Esc</kbd></button>
       </div>
     {:else if hud.state === "countdown"}

@@ -75,6 +75,38 @@ test("a rendered proposal is acknowledged with its id; other states are not", as
   expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
 });
 
+// jsdom has no layout: give every element a fixed scroll and client height.
+function withHeights(scroll: number, client: number) {
+  const proto = Element.prototype;
+  const orig = { s: Object.getOwnPropertyDescriptor(proto, "scrollHeight")!, c: Object.getOwnPropertyDescriptor(proto, "clientHeight")! };
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get: () => scroll });
+  Object.defineProperty(proto, "clientHeight", { configurable: true, get: () => client });
+  return () => {
+    Object.defineProperty(proto, "scrollHeight", orig.s);
+    Object.defineProperty(proto, "clientHeight", orig.c);
+  };
+}
+
+test("a block that is cut off is never acknowledged and cannot be confirmed (F1)", async () => {
+  const restore = withHeights(130, 96);
+  try {
+    const api = await show({ state: "confirm", proposal: proposal({ question: "a\n".repeat(7) }), proposal_id: 70 });
+    expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+    expect(screen.getByText(/Too long to show here/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Confirm/ }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.keyboard("{Enter}");
+    expect(api.calls.some((c) => c[0] === "voiceConfirm")).toBe(false);
+    cleanup();
+    const api2 = await show({ state: "countdown", proposal: proposal({ level: "countdown" }), proposal_id: 71, action_id: null });
+    expect(api2.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+  } finally {
+    restore();
+  }
+  cleanup();
+  const fits = await show({ state: "confirm", proposal: proposal(), proposal_id: 72 });
+  expect(fits.calls).toContainEqual(["voiceShown", 72]);
+});
+
 test("a proposal replaced before the DOM flush is never acknowledged", async () => {
   const api = fakeApi();
   render(Hud, { api, view: view() });
