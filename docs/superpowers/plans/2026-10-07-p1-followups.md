@@ -446,6 +446,10 @@ Residuals from the 2026-11 relay and review work, none blocking:
     window drops it, and the device registers again. Wake timing only.
   - The window-scope checks on Tauri commands are pinned by allow-list unit
     tests, not by a call from a live HUD window.
+  - The Python reproducers in `tests/redteam/` send `request.answer` without
+    a revision, so they now get `bad_request` before the paths they once
+    exercised. The live E2E harness (`tests/e2e/inbox.py`) is updated; the
+    live Claude scenarios (40, 41) were not re-run with the shim hooks.
 - **Mutation tests (#101).** Some tests wait for indirect 5 s bounds, and the
   counts quoted in the mutation document are stale.
 - **Bug-hunt reproducers (#110).** `#[ignore]`d tests that fail today: B1

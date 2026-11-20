@@ -167,6 +167,17 @@ class Mirror:
     def open_requests(self):
         return [a["pending"] for a in self.agents.values() if a.get("pending")]
 
+    def revision(self, request_id):
+        """The revision of an open request as last seen; acd/1 requires it on request.answer."""
+        for r in self.open_requests():
+            if r["id"] == request_id:
+                return r.get("revision")
+        return None
+
+    def incarnation(self, agent_id):
+        """The agent's incarnation as last seen; agent.send must carry it when the agent has one."""
+        return self.agents.get(agent_id, {}).get("incarnation")
+
 
 def handshake(c, timeout=10):
     """Reads until the first snapshot; returns (mirror, welcome)."""
@@ -220,8 +231,10 @@ def main():
     p.add_argument("--ready", action="store_true", help="only a request whose answer_path is hook/keys/t3")
     p = sub.add_parser("answer"); p.add_argument("request_id"); p.add_argument("option_id", nargs="?")
     p.add_argument("--text"); p.add_argument("--id"); p.add_argument("--client-id")
+    p.add_argument("--revision", type=int, help="for a request no longer in the snapshot (a late answer)")
     p = sub.add_parser("answer-text", help="request.answer with `text` and no option_id")
     p.add_argument("request_id"); p.add_argument("text"); p.add_argument("--id"); p.add_argument("--client-id")
+    p.add_argument("--revision", type=int)
     p = sub.add_parser("race"); p.add_argument("request_id"); p.add_argument("a"); p.add_argument("b")
     p = sub.add_parser("send"); p.add_argument("agent_id"); p.add_argument("text")
     p.add_argument("--id"); p.add_argument("--repeat", type=int, default=1); p.add_argument("--client-id")
@@ -277,6 +290,8 @@ def main():
         mir, _ = handshake(c)
         cid = args.id or str(uuid.uuid4())
         msg = {"type": "request.answer", "id": cid, "request_id": args.request_id}
+        revision = args.revision if args.revision is not None else mir.revision(args.request_id)
+        if revision is not None: msg["revision"] = revision
         if getattr(args, "text", None) is not None: msg["text"] = args.text
         else: msg["option_id"] = args.option_id
         t0 = time.time(); c.send_raw(msg)
@@ -285,16 +300,19 @@ def main():
         print(json.dumps(res)); return
 
     if args.mode == "race":
-        conns = []
+        conns, revision = [], None
         for i, opt in enumerate((args.a, args.b)):
-            c = Conn(args.dir, name="%s-%d" % (args.name, i)); handshake(c)
+            c = Conn(args.dir, name="%s-%d" % (args.name, i)); seen, _ = handshake(c)
+            revision = revision if revision is not None else seen.revision(args.request_id)
             conns.append((c, opt, str(uuid.uuid4())))
         barrier, out = threading.Barrier(2), {}
         def go(i, c, opt, cid):
             mir = Mirror()
             barrier.wait()
             t0 = time.time()
-            c.send_raw({"type": "request.answer", "id": cid, "request_id": args.request_id, "option_id": opt})
+            msg = {"type": "request.answer", "id": cid, "request_id": args.request_id, "option_id": opt}
+            if revision is not None: msg["revision"] = revision
+            c.send_raw(msg)
             r = wait_result(c, mir, cid); r["_ms"] = round((time.time() - t0) * 1000); r["_option"] = opt
             out[i] = r
         ts = [threading.Thread(target=go, args=(i, *x)) for i, x in enumerate(conns)]
@@ -308,7 +326,9 @@ def main():
         results = []
         for _ in range(args.repeat):
             t0 = time.time()
-            c.send_raw({"type": "agent.send", "id": cid, "agent_id": args.agent_id, "text": args.text})
+            msg = {"type": "agent.send", "id": cid, "agent_id": args.agent_id, "text": args.text}
+            if mir.incarnation(args.agent_id) is not None: msg["incarnation"] = mir.incarnation(args.agent_id)
+            c.send_raw(msg)
             r = wait_result(c, mir, cid); r["_ms"] = round((time.time() - t0) * 1000)
             results.append(r)
         print(json.dumps({"command_id": cid, "client_id": c.client_id, "results": results})); return

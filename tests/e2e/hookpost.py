@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Synthetic Claude http hook client (NOT a live Claude): posts one hook payload
-to the scratch acd hook port the way Claude's http hooks do, and prints
-{"status", "ms", "body", "error"} as JSON.  The token is read from the scratch
-settings.json that `acd hooks install claude` wrote; it is never printed.
+to the scratch acd hook port the way Claude's http hooks did (installs from
+before the `acd hook claude` shim), and prints {"status", "ms", "body",
+"error"} as JSON.  The token is read from the scratch acd's hook token store
+(`hook-tokens.json`); it is never printed.
 
-  hookpost.py --settings F --port P EVENT --session S [--cmd C] [--timeout SEC] [--cwd D]
+  hookpost.py --config-dir D --port P EVENT --session S [--cmd C] [--timeout SEC] [--cwd D]
 """
 import argparse, json, socket, time, uuid
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--settings", required=True)
+ap.add_argument("--config-dir", required=True)
 ap.add_argument("--port", type=int, required=True)
 ap.add_argument("event")
 ap.add_argument("--session", required=True)
@@ -19,8 +20,7 @@ ap.add_argument("--timeout", type=float, default=10)
 ap.add_argument("--pane")
 a = ap.parse_args()
 
-hooks = json.load(open(a.settings))["hooks"][a.event][0]["hooks"][0]
-token = hooks["headers"]["X-Acd-Token"]
+token = json.load(open(a.config_dir + "/hook-tokens.json"))["current"]
 payload = {"session_id": a.session, "cwd": a.cwd, "permission_mode": "default", "hook_event_name": a.event,
            "prompt_id": str(uuid.uuid4())}
 if a.event in ("PermissionRequest", "PreToolUse", "PostToolUse", "PostToolUseFailure"):

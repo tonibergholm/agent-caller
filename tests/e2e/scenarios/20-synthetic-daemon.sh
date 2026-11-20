@@ -41,7 +41,7 @@ note "NOT covered here: 'a held PermissionRequest never blocks the terminal dial
 log "C. held PermissionRequest answered from the inbox, then a late answer"
 hp PermissionRequest --session s-c --cmd "touch /tmp/ace2e/x-c.txt" --timeout 30 >"$E2E_ROOT/c.hold" &
 H=$!; T0=$(epoch_now)
-req=$(open_wait claude:s-c || open_wait "$(inbox list | awk '/^claude:/{print $1; exit}')") ; RID=$(echo "$req" | jq -r .id)
+req=$(open_wait claude:s-c || open_wait "$(inbox list | awk '/^claude:/{print $1; exit}')") ; RID=$(echo "$req" | jq -r .id); REV=$(echo "$req" | jq -r .revision)
 note "request $RID: $(echo "$req" | jq -c '{kind,status,answer_path,options:[.options[].id]}')"
 opened=$(jl "select(.t>$T0 and .msg.type==\"request.opened\" and .msg.request.id==\"$RID\") | .t" | head -1)
 [ -n "$opened" ] && note "hook posted $T0, request.opened logged $opened: $(python3 -c "print(round(($opened-$T0)*1000))") ms"
@@ -52,20 +52,20 @@ echo "$body" | jq -e '.body|fromjson|.hookSpecificOutput.decision.behavior=="all
 late=$(inbox answer "$RID" deny); note "late answer before the agent confirmed: $late"
 echo "$late" | jq -e '.ok==false and (.error.code=="request_busy" or .error.code=="request_gone")' >/dev/null && pass "C3 a late inbox answer is refused ($(echo "$late" | jq -r .error.code)); it never reaches the agent" || fail "C3 $late"
 hp PostToolUse --session s-c --cmd "touch /tmp/ace2e/x-c.txt" >/dev/null; sleep 0.5
-late=$(inbox answer "$RID" deny); echo "$late" | jq -e '.error.code=="request_gone"' >/dev/null && pass "C4 after the agent's PostToolUse, a late inbox answer gets request_gone" || fail "C4 $late"
+late=$(inbox answer "$RID" deny --revision "$REV"); echo "$late" | jq -e '.error.code=="request_gone"' >/dev/null && pass "C4 after the agent's PostToolUse, a late inbox answer gets request_gone" || fail "C4 $late"
 jl "select(.t>$T0 and .msg.type==\"request.resolved\" and .msg.request_id==\"$RID\") | .msg | {by,option_id}" | head -2 | while read -r l; do note "request.resolved $l"; done
 
 log "D. terminal answered first (PostToolUse arrives while held)"
 hp PermissionRequest --session s-d --cmd "touch /tmp/ace2e/x-d.txt" --timeout 30 >"$E2E_ROOT/d.hold" &
 H=$!; req=$(inbox wait-open --timeout 10 --ready --agent "$(inbox list | awk '/^claude:s-d/{print $1}' | head -1)")
-RID=$(echo "$req" | jq -r .id); T1=$(epoch_now)
+RID=$(echo "$req" | jq -r .id); REV=$(echo "$req" | jq -r .revision); T1=$(epoch_now)
 hp PostToolUse --session s-d --cmd "touch /tmp/ace2e/x-d.txt" >/dev/null; sleep 1
 res=$(jl "select(.t>$T1 and .msg.type==\"request.resolved\" and .msg.request_id==\"$RID\") | {by:.msg.by,t}" | head -1); note "resolved: $res"
 by=$(echo "$res" | jq -r .by 2>/dev/null); rt=$(echo "$res" | jq -r .t 2>/dev/null)
 [ "$by" = terminal ] && pass "D1 request resolved by=terminal $(python3 -c "print(round(($rt-$T1)*1000))") ms after the PostToolUse was posted" || fail "D1 $res"
 wait $H; note "held reply after terminal answer: $(cat "$E2E_ROOT/d.hold")"
 jq -e '.error==null and .body==""' "$E2E_ROOT/d.hold" >/dev/null && pass "D2 the held connection was released with an empty reply (the dialog stays the terminal's)" || fail "D2"
-late=$(inbox answer "$RID" allow); echo "$late" | jq -e '.error.code=="request_gone"' >/dev/null && pass "D3 late inbox answer -> request_gone" || fail "D3 $late"
+late=$(inbox answer "$RID" allow --revision "$REV"); echo "$late" | jq -e '.error.code=="request_gone"' >/dev/null && pass "D3 late inbox answer -> request_gone" || fail "D3 $late"
 
 log "E. simultaneous answers"
 hp PermissionRequest --session s-e --cmd "touch /tmp/ace2e/x-e.txt" --timeout 30 >"$E2E_ROOT/e.hold" &
