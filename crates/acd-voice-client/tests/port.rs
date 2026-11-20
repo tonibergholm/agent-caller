@@ -5,6 +5,7 @@ use acd_voice::plan::{Enqueue, EnqueueError, Guard, InboxPort, NotSentReason, Vo
 use acd_voice::text::VoiceText;
 use acd_voice_client::{AcdPort, freeze, voice_outcome};
 use common::*;
+use std::time::Duration;
 
 #[tokio::test]
 async fn the_port_enqueues_only_on_the_state_the_step_was_planned_on() {
@@ -12,7 +13,7 @@ async fn the_port_enqueues_only_on_the_state_the_step_was_planned_on() {
     let port = AcdPort::new(r.inbox.clone());
     let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
     let card = snap.card("m1/a1").unwrap();
-    let guard = Guard { conn: card.conn.unwrap(), agent_id: "a1".into(), request: Some(("r1".into(), 1)), named_send_only: false };
+    let guard = Guard { conn: card.conn.unwrap(), agent_id: "a1".into(), request: Some(("r1".into(), 1)), incarnation: None, named_send_only: false };
     let stale = Guard { request: Some(("r1".into(), 9)), ..guard.clone() };
     let pick = |guard| Enqueue::Pick { card: "m1/a1".into(), option_id: "allow".into(), guard };
     assert_eq!(port.enqueue(pick(stale)), Err(EnqueueError::Stale));
@@ -29,7 +30,7 @@ async fn a_send_reaches_an_idle_agent_the_panel_hides() {
     let snap = freeze(&r.inbox.stamped_view(), shown(None, &["m1/a1"]), false);
     let idle = snap.card("m1/a3").expect("frozen although hidden");
     assert!(idle.idle_hidden);
-    let guard = Guard { conn: idle.conn.unwrap(), agent_id: "a3".into(), request: None, named_send_only: true };
+    let guard = Guard { conn: idle.conn.unwrap(), agent_id: "a3".into(), request: None, incarnation: None, named_send_only: true };
     let port = AcdPort::new(r.inbox.clone());
     port.enqueue(Enqueue::Reply { card: "m1/a3".into(), text: VoiceText::new("run the tests"), guard }).unwrap();
     let sent = frame(&r.f, "agent.send").await;
@@ -65,7 +66,7 @@ async fn answer_text_is_refused_on_a_stale_revision() {
     let port = AcdPort::new(r.inbox.clone());
     let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
     let conn = snap.card("m1/a1").unwrap().conn.unwrap();
-    let guard = Guard { conn, agent_id: "a1".into(), request: Some(("r1".into(), 1)), named_send_only: false };
+    let guard = Guard { conn, agent_id: "a1".into(), request: Some(("r1".into(), 1)), incarnation: None, named_send_only: false };
     let answer = |guard| Enqueue::AnswerText { card: "m1/a1".into(), text: VoiceText::new("use main"), guard };
     let stale = Guard { request: Some(("r1".into(), 9)), ..guard.clone() };
     assert_eq!(port.enqueue(answer(stale)), Err(EnqueueError::Stale));
@@ -82,7 +83,7 @@ async fn a_guard_from_another_connection_is_refused() {
     let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
     let conn = snap.card("m1/a1").unwrap().conn.unwrap();
     let other_conn = acd_voice::snapshot::ConnStamp { conn_gen: conn.conn_gen + 1, ..conn };
-    let guard = Guard { conn: other_conn, agent_id: "a1".into(), request: Some(("r1".into(), 1)), named_send_only: false };
+    let guard = Guard { conn: other_conn, agent_id: "a1".into(), request: Some(("r1".into(), 1)), incarnation: None, named_send_only: false };
     let card = || "m1/a1".to_owned();
     for op in [
         Enqueue::Pick { card: card(), option_id: "allow".into(), guard: guard.clone() },
@@ -175,4 +176,62 @@ async fn debug_never_shows_content_from_snapshot_to_wire() {
     }
     assert!(shown[2].contains("Confirm"), "the HUD is the confirm step: {}", shown[2]);
     assert!(shown[7].contains("request_id: \"r1\""), "ids stay readable: {}", shown[7]);
+}
+
+/// Another agent takes the id between the HUD showing a follow-up and the
+/// user confirming it: the reply is refused, and nothing reaches the wire.
+#[tokio::test]
+async fn a_reply_is_refused_when_another_agent_took_the_id_since_the_step_was_planned() {
+    let incarnated = |inc: &str| {
+        let mut a = working_agent();
+        a["id"] = "a1".into();
+        a["incarnation"] = inc.into();
+        a
+    };
+    let r = inbox_rig(vec![incarnated("i1")]).await;
+    let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
+    let card = snap.card("m1/a1").unwrap();
+    assert_eq!(card.incarnation.as_deref(), Some("i1"));
+    let guard = Guard {
+        conn: card.conn.unwrap(),
+        agent_id: "a1".into(),
+        request: None,
+        incarnation: card.incarnation.clone(),
+        named_send_only: false,
+    };
+    let reply = || Enqueue::Reply { card: "m1/a1".into(), text: VoiceText::new("go on"), guard: guard.clone() };
+    let port = AcdPort::new(r.inbox.clone());
+    r.c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":incarnated("i2")})).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while r.inbox.stamped_view().view.cards.iter().all(|c| c.agent.incarnation.as_deref() != Some("i2")) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the replacement is published");
+    assert_eq!(port.enqueue(reply()), Err(EnqueueError::ConnectionChanged));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(frames(&r.f, "agent.send").is_empty(), "nothing was sent to the new agent");
+}
+
+/// The reply carries the incarnation the user saw, which is the live one here.
+#[tokio::test]
+async fn a_reply_carries_the_guards_incarnation() {
+    let mut a = working_agent();
+    a["id"] = "a1".into();
+    a["incarnation"] = "i1".into();
+    let r = inbox_rig(vec![a]).await;
+    let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
+    let card = snap.card("m1/a1").unwrap();
+    let guard = Guard {
+        conn: card.conn.unwrap(),
+        agent_id: "a1".into(),
+        request: None,
+        incarnation: card.incarnation.clone(),
+        named_send_only: false,
+    };
+    AcdPort::new(r.inbox.clone())
+        .enqueue(Enqueue::Reply { card: "m1/a1".into(), text: VoiceText::new("go on"), guard })
+        .unwrap();
+    assert_eq!(frame(&r.f, "agent.send").await["incarnation"], "i1");
 }

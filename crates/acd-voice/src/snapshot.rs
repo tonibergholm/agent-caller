@@ -101,6 +101,8 @@ pub struct CardSnap {
     /// An idle agent the panel hides ("Show idle" off). Voice can still
     /// send to it when named (D7).
     pub idle_hidden: bool,
+    /// `AgentView::incarnation`: which agent held the id when the card was frozen.
+    pub incarnation: Option<String>,
 }
 
 impl fmt::Debug for OptionSnap {
@@ -149,6 +151,7 @@ impl fmt::Debug for CardSnap {
             .field("can_reply", &self.can_reply)
             .field("pending", &self.pending)
             .field("idle_hidden", &self.idle_hidden)
+            .field("incarnation", &self.incarnation)
             .finish()
     }
 }
@@ -323,6 +326,7 @@ pub mod fixtures {
             can_reply: false,
             pending: Some(permission(&format!("r-{agent}"))),
             idle_hidden: false,
+            incarnation: None,
         }
     }
 

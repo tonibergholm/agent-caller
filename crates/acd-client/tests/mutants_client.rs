@@ -375,7 +375,7 @@ async fn a_reply_may_be_exactly_64_kib() {
 }
 
 fn voice_guard(ib: &Inbox) -> Guard {
-    Guard { conn: ib.conn_stamp("m1").unwrap(), agent_id: "a1".into(), request: None, named_send_only: false }
+    Guard { conn: ib.conn_stamp("m1").unwrap(), agent_id: "a1".into(), request: None, incarnation: None, named_send_only: false }
 }
 
 /// inbox.rs:1269 / 1270 `&&` -> `||` (`reply_with`, voice path): the live state

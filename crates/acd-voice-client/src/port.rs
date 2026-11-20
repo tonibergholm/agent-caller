@@ -40,6 +40,7 @@ fn client(g: &Guard) -> ClientGuard {
         conn: ClientStamp { instance: g.conn.instance, conn_gen: g.conn.conn_gen },
         agent_id: g.agent_id.clone(),
         request: g.request.clone(),
+        incarnation: g.incarnation.clone(),
         named_send_only: g.named_send_only,
     }
 }

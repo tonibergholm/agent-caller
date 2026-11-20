@@ -1355,8 +1355,12 @@ impl Inbox {
                 if !live {
                     return Err(PickError::CannotReply);
                 }
-                let incarnation = state.session.agents.get(&g.agent_id).and_then(|a| a.incarnation.clone());
-                (g.agent_id.clone(), incarnation)
+                // The guard's incarnation is the one the user saw; another
+                // agent behind the id is a changed target.
+                if state.session.agents.get(&g.agent_id).and_then(|a| a.incarnation.as_ref()) != g.incarnation.as_ref() {
+                    return Err(PickError::ConnectionChanged);
+                }
+                (g.agent_id.clone(), g.incarnation.clone())
             }
             // Keyboard: unchanged.
             None => {

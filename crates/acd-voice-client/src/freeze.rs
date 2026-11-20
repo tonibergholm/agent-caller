@@ -76,6 +76,7 @@ fn card(c: &CardView, conn: Option<ConnStamp>, idle_hidden: bool) -> CardSnap {
                 .collect(),
         }),
         idle_hidden,
+        incarnation: c.agent.incarnation.clone(),
     }
 }
 

@@ -1313,7 +1313,7 @@ fn guard_for(ib: &Inbox, card: &str) -> Guard {
         .iter()
         .find(|c| c.key == card)
         .and_then(|c| c.agent.pending.as_ref().map(|r| (r.id.clone(), r.revision)));
-    Guard { conn: ib.conn_stamp(machine).unwrap(), agent_id: agent.into(), request, named_send_only: false }
+    Guard { conn: ib.conn_stamp(machine).unwrap(), agent_id: agent.into(), request, incarnation: None, named_send_only: false }
 }
 
 #[tokio::test]
@@ -1496,6 +1496,7 @@ async fn the_stamped_view_never_pairs_new_stamps_with_old_cards() {
         conn: held.stamps["m1"],
         agent_id: "a1".into(),
         request: Some((ANSWER_REQ.into(), 1)),
+        incarnation: None,
         named_send_only: false,
     };
     assert_eq!(ib.pick_guarded("m1/a1", "allow", &planned), Err(PickError::ConnectionChanged));
@@ -1595,7 +1596,7 @@ async fn a_guarded_send_reaches_a_hidden_idle_agent() {
     .expect("the hidden idle card");
     assert_eq!(ib.reply("m1/a3", "x".into()), Err(PickError::UnknownCard), "keyboard path unchanged");
     // Only a send that named it while it was out of view reaches it (D7).
-    let unnamed = Guard { conn: ib.conn_stamp("m1").unwrap(), agent_id: "a3".into(), request: None, named_send_only: false };
+    let unnamed = Guard { conn: ib.conn_stamp("m1").unwrap(), agent_id: "a3".into(), request: None, incarnation: None, named_send_only: false };
     assert_eq!(ib.reply_guarded("m1/a3", "rebase".into(), &unnamed), Err(PickError::Hidden));
     let guard = Guard { named_send_only: true, ..unnamed };
     ib.reply_guarded("m1/a3", "rebase".into(), &guard).unwrap();
