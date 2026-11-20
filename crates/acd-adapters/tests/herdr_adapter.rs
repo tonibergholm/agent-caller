@@ -260,6 +260,20 @@ async fn an_agent_replaced_during_the_screen_read_gets_no_prompt() {
 }
 
 #[tokio::test]
+async fn a_replacement_showing_a_dialog_reports_the_old_agent_gone_not_busy() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let old = agent(&r);
+    let mut codex = fake_agent("w1:p1", "codex", "idle");
+    codex["terminal_id"] = "term_other".into();
+    r.fake.set_agent(codex);
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("claude-permission-bash.txt"));
+    let res = r.adapter.send(&old, "1").await;
+    assert!(matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))), "{res:?}");
+    assert!(r.fake.prompts().is_empty());
+}
+
+#[tokio::test]
 async fn follow_up_to_a_pane_that_lost_its_agent_is_gone() {
     let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
     let a = agent(&r);

@@ -210,9 +210,9 @@ impl Adapter for HerdrAdapter {
         if read.truncated {
             return Err(unavailable());
         }
-        if find_dialog(&read.text).is_some() {
-            return Err(DeliverError::NotDelivered(ErrorCode::AgentBusy));
-        }
+        // Decided after the identity check: a dialog of a replacement agent
+        // means this agent is gone, not busy.
+        let dialog = find_dialog(&read.text).is_some();
         // The pane may have changed hands since the reconciler last looked,
         // including during the screen read above. Ask herdr now, after the
         // read, fail closed.
@@ -225,7 +225,7 @@ impl Adapter for HerdrAdapter {
             return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
         };
         // herdr reports a dialog this parser cannot read as `blocked`.
-        if map::state(live.agent_status) == AgentState::NeedsYou {
+        if dialog || map::state(live.agent_status) == AgentState::NeedsYou {
             return Err(DeliverError::NotDelivered(ErrorCode::AgentBusy));
         }
         // The reconciler does not take the agent lock, so it can have replaced
