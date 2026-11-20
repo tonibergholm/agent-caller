@@ -84,7 +84,9 @@ async fn initial_list_builds_agents_and_ignores_plain_shells() {
     })
     .await;
     assert_eq!(r.panes.read().unwrap().len(), 2);
-    assert_eq!(*r.handle.health().borrow(), Health::Connected);
+    // Agents are published by the list, before the resubscribe that ends in
+    // Connected: wait for it rather than race it under load.
+    until("connected", || (*r.handle.health().borrow() == Health::Connected).then_some(())).await;
 }
 
 #[tokio::test]
