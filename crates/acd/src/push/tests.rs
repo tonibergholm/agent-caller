@@ -764,6 +764,30 @@ async fn rotating_the_client_token_revokes_every_registration_also_after_a_resta
     assert_eq!(relay.hits(), 0);
 }
 
+/// A registration accepted under the old token, whose write runs after the
+/// rotation, must not be persisted under the new token's fingerprint.
+#[tokio::test]
+async fn a_registration_queued_before_a_rotation_is_not_stored_after_it() {
+    const ROTATED: &str = "rotated-client-token";
+    let rig = Rig::new(NO_WINDOW).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    *rig.push.accepted.lock().unwrap() = Some(barrier.clone());
+    let msg = rig.register_msg(&handle_for("phone"));
+    let pending = tokio::spawn({
+        let core = rig.core.clone();
+        async move { core.handle("phone", msg).await }
+    });
+    barrier.wait().await; // accepted under the old token, nothing written yet
+    rig.push.revoke_all(ROTATED).await;
+    barrier.wait().await; // the queued write now runs
+    let result = pending.await.unwrap();
+    assert_eq!(result.error_code(), Some(ErrorCode::Unauthorized), "{result:?}");
+    assert!(!rig.status("phone").await.registered);
+    // After a restart under the new token the file lists nothing.
+    let again = Store::load(rig.dir.path(), &store::client_fingerprint(ROTATED));
+    assert!(again.get("phone").is_none(), "the old holder's registration survived the rotation");
+}
+
 #[tokio::test]
 async fn revoking_cancels_a_wake_that_is_already_in_flight() {
     // An hour-long request deadline: only the cancellation can end the send,

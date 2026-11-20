@@ -129,6 +129,9 @@ pub struct Push {
     handled: watch::Sender<u64>,
     /// Bumped by every revocation. A send in flight is cancelled when it moves.
     revoked: watch::Sender<u64>,
+    /// Test hook: `register` waits here twice once it is accepted.
+    #[cfg(test)]
+    accepted: Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl Push {
@@ -142,6 +145,8 @@ impl Push {
             wake: Notify::new(),
             handled: watch::channel(0).0,
             revoked: watch::channel(0).0,
+            #[cfg(test)]
+            accepted: Mutex::new(None),
         })
     }
 
@@ -312,7 +317,22 @@ impl PushControl for Push {
             reg.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         );
         let id = client_id.to_string();
-        let stored = self.blocking(move |s| s.register(&id, device)).await;
+        // The token this request was accepted under. Rotation clears the
+        // store and sets the new fingerprint, so a write queued before it but
+        // run after it is refused, under the store lock, instead of
+        // persisting the old holder's handle under the new token.
+        let accepted_under = self.store().client().to_owned();
+        #[cfg(test)]
+        {
+            let hook = self.accepted.lock().unwrap().clone();
+            if let Some(b) = hook {
+                b.wait().await;
+                b.wait().await;
+            }
+        }
+        let stored = self
+            .blocking(move |s| if s.client() == accepted_under { s.register(&id, device) } else { Err(StoreError::Revoked) })
+            .await;
         match stored {
             Some(Ok(())) => {
                 tracing::info!(client = %client_tag(client_id), "push device registered");
@@ -320,6 +340,10 @@ impl PushControl for Push {
             }
             Some(Err(StoreError::TooMany)) => bad("too many push devices"),
             Some(Err(StoreError::BadId)) => bad("invalid client id"),
+            Some(Err(StoreError::Revoked)) => Err(PushFailure {
+                code: ErrorCode::Unauthorized,
+                message: "the client token was rotated",
+            }),
             Some(Err(StoreError::Corrupt)) => Err(PushFailure {
                 code: ErrorCode::SourceUnavailable,
                 message: "push.json is corrupt; repair or remove it",

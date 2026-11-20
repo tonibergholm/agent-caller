@@ -213,6 +213,8 @@ pub enum StoreError {
     Write,
     /// `push.json` is corrupt as a whole; it is left untouched.
     Corrupt,
+    /// The client token rotated after the request was accepted.
+    Revoked,
 }
 
 impl Store {
@@ -277,6 +279,11 @@ impl Store {
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Entry)> {
         self.devices.iter()
+    }
+
+    /// Fingerprint of the client token the registrations belong to.
+    pub fn client(&self) -> &str {
+        &self.client
     }
 
     /// Stores (or replaces) a registration with a fresh wake state.
