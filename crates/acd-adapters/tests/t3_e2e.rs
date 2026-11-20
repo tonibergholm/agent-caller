@@ -137,6 +137,21 @@ async fn with_agent_count(url: &str, count: usize) -> (Ws, Value, Value) {
     panic!("no snapshot with {count} agents");
 }
 
+/// One agent whose request is attached: the agent can be published before
+/// its request, so a snapshot with one agent may still have no `pending`.
+async fn with_one_pending(url: &str) -> (Ws, Value, Value) {
+    for _ in 0..100 {
+        let (ws, welcome, snapshot) = authed(url, "c1").await;
+        let agents = snapshot["agents"].as_array().cloned().unwrap_or_default();
+        if agents.len() == 1 && agents[0]["pending"]["id"].is_string() {
+            return (ws, welcome, snapshot);
+        }
+        drop(ws);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no snapshot with one pending request");
+}
+
 async fn result(ws: &mut Ws, id: &str) -> Value {
     next_matching(ws, Duration::from_secs(3), |v| {
         v["type"] == "result" && v["id"] == id
@@ -271,7 +286,7 @@ async fn answered_in_t3_resolves_the_card_within_2_s() {
         approval_projection("approve", "rq-approve", None),
     );
     let r = start(fake).await;
-    let (waiter, _, snap) = with_agent_count(&r.url, 1).await;
+    let (waiter, _, snap) = with_one_pending(&r.url).await;
     let request_id = snap["agents"][0]["pending"]["id"]
         .as_str()
         .unwrap()
@@ -456,7 +471,7 @@ async fn answer_reply_lost_resolves_uncertain_over_the_protocol() {
         approval_projection("approve", "rq-approve", None),
     );
     let r = start(fake).await;
-    let (mut ws, _, snap) = with_agent_count(&r.url, 1).await;
+    let (mut ws, _, snap) = with_one_pending(&r.url).await;
     let request_id = snap["agents"][0]["pending"]["id"].clone();
     let revision = snap["agents"][0]["pending"]["revision"].clone();
     r.fake.hang_next_dispatch();
