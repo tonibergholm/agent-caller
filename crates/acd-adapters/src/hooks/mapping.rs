@@ -705,14 +705,19 @@ mod tests {
         assert_ne!(escape_text("\u{7}", true), escape_text("\\u{7}", true));
     }
 
-    /// Accepted residual (follow-ups, 2026-11-03): characters that are neither
-    /// control nor in the format list pass unchanged, so "whole command" is
-    /// not a universal visible-character encoding. Pinned so a change shows.
+    /// Unicode default-ignorable code points render as nothing or as a space
+    /// (U+3164), so a shown command would differ from what runs. They are
+    /// escaped like the other format characters.
     #[test]
-    fn characters_outside_the_escaped_classes_pass_unchanged() {
-        for c in ['\u{34f}', '\u{115f}', '\u{3164}', '\u{fe0f}'] {
-            let s = format!("a{c}b");
-            assert_eq!(escape_text(&s, true), s, "{c:?}");
+    fn default_ignorable_characters_are_escaped() {
+        for c in [
+            '\u{34f}', '\u{115f}', '\u{1160}', '\u{17b4}', '\u{17b5}', '\u{180b}',
+            '\u{180d}', '\u{180f}', '\u{2065}', '\u{3164}', '\u{fe00}', '\u{fe0f}',
+            '\u{ffa0}', '\u{fff0}', '\u{e0000}', '\u{e0100}', '\u{e0fff}',
+        ] {
+            let want = format!("a\\u{{{:x}}}b", c as u32);
+            assert_eq!(escape_text(&format!("a{c}b"), true), want, "{c:?}");
+            assert!(!rule_displayable(&format!("Bash(ls{c}x)")), "{c:?}");
         }
     }
     #[test]
