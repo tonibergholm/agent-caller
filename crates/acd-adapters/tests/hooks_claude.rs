@@ -1605,38 +1605,6 @@ async fn unavailable_hold_end_reads_resolve_uncertain() {
     assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Uncertain);
 }
 
-/// Esc in the terminal ends the hook (Claude kills the shim) while the
-/// captured dialog closes: the request is the terminal's, not uncertain.
-#[tokio::test]
-async fn a_hook_ended_by_claude_with_the_captured_dialog_gone_is_terminal() {
-    let (r, agent) = bound_rig().await;
-    let (_, mut rx) = r.core.attach(None);
-    let h = bound_headers(&r);
-    let h: Vec<(&str, &str)> = h
-        .iter()
-        .map(|(key, value)| (*key, value.as_str()))
-        .collect();
-    let held = r
-        .hold(&fx("claude/payload-PermissionRequest-Bash.json"), &h)
-        .await;
-    let rid = until("request", || {
-        r.agent(&agent).and_then(|a| a.pending).map(|p| p.id)
-    })
-    .await;
-    until("the dialog is captured", || {
-        (r.core.request(&rid).map(|q| q.answer_path) == Some(AnswerPath::Hook)
-            && r.agent(&agent).is_some())
-        .then_some(())
-    })
-    .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let f = r.fake.as_ref().unwrap();
-    f.set_screen("w1:p1", "detection", &herdr_screen("claude-idle-detection.txt"));
-    f.set_screen("w1:p1", "visible", &herdr_screen("claude-idle-prompt.txt"));
-    drop(held);
-    assert_eq!(resolution(&mut rx, &rid).await, ResolvedBy::Terminal);
-}
-
 #[tokio::test]
 async fn a_capture_result_waits_for_the_herdr_delivery_lock_before_applying() {
     let (r, agent, _filler) = unheld_bound_rig().await;

@@ -2345,15 +2345,6 @@ impl Reconciler {
             (Purpose::HoldEnded { .. }, ReadResult::Matched(screen)) => {
                 self.switch_to_keys_locked(&rid, screen, ticket.incarnation)
             }
-            (Purpose::HoldEnded { expired: false }, ReadResult::NoMatch)
-                if self.delivered(&rid).is_none()
-                    && self.tracks.get(&rid).is_some_and(|t| t.capture.is_some()) =>
-            {
-                // Claude ended the hook (Esc kills the shim) and the dialog
-                // acd had captured is gone with nothing delivered: the
-                // terminal decided, as the Presence rule concludes.
-                self.end(&rid, ResolvedBy::Terminal);
-            }
             (Purpose::HoldEnded { .. }, ReadResult::NoMatch) => {
                 // Without an exact capture, the hook stream owns attribution.
                 // Keep the occurrence open for later lifecycle evidence.
