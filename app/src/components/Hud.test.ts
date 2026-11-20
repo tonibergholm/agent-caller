@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { flushSync, tick } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
@@ -150,6 +150,20 @@ test("confirm shows target, action and the whole payload; Enter confirms its id,
   await userEvent.keyboard("{Enter}");
   await userEvent.keyboard("{Escape}");
   expect(others(api.calls)).toEqual([["voiceConfirm", 3], ["voiceCancel", 3]]);
+});
+
+test("a held Enter or digit key does not confirm or pick; a fresh press does (F3)", async () => {
+  const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 80 });
+  await fireEvent.keyDown(window, { key: "Enter", repeat: true });
+  expect(others(api.calls)).toEqual([]);
+  await fireEvent.keyDown(window, { key: "Enter" });
+  expect(others(api.calls)).toEqual([["voiceConfirm", 80]]);
+  cleanup();
+  const pick = await show({ state: "which_one", transcript: "x", choice_id: 81, candidates: [target, { ...target, card: "minos/b", title: "Write docs" }] });
+  await fireEvent.keyDown(window, { key: "2", repeat: true });
+  expect(pick.calls).toEqual([]);
+  await fireEvent.keyDown(window, { key: "2" });
+  expect(pick.calls).toEqual([["voiceChoose", 81, 1]]);
 });
 
 test("confirm and cancel have buttons too", async () => {
