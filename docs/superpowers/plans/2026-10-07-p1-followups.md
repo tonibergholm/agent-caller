@@ -449,6 +449,13 @@ Residuals from the 2026-11 relay and review work, none blocking:
   - Live Claude scenarios 40 and 41 pass with the shim hooks (Claude Code
     2.1.329, Haiku). They run Claude with the real HOME, so each run records
     the scratch project, and now its folder trust, in `~/.claude.json`.
+    Check 3d (Esc while held resolves `terminal` within 2 s) is intermittent:
+    one of three runs resolved `uncertain`. This is Bug 1 of
+    `docs/research/2026-10-11-e2e-run.md`. When the hold-end read finds the
+    captured dialog already gone, spec §4 waits for evidence and Claude
+    sends none after Esc. A fix changes the §4 attribution rule (a gone
+    dialog also follows a dead process) and is an owner decision. It
+    affects the label only, never delivery.
 - **Mutation tests (#101).** Some tests wait for indirect 5 s bounds, and the
   counts quoted in the mutation document are stale.
 - **Bug-hunt reproducers (#110).** `#[ignore]`d tests that fail today: B1
