@@ -167,10 +167,6 @@ if [ "${ACD_INSTALL_SKIP_PROVENANCE:-}" = 1 ]; then
 	echo "Provenance not checked: skipped by ACD_INSTALL_SKIP_PROVENANCE."
 elif ! command -v "$gh_cmd" >/dev/null 2>&1; then
 	echo "Provenance not checked: gh is not installed. To check it, install gh, sign in, and run: gh attestation verify $archive $verify_flags"
-elif ! gh_pins_workflows "$gh_cmd"; then
-	# gh up to 2.101.0 matches --signer-workflow as a prefix
-	# (GHSA-wjmr-j3rp-mh2g), so the pin would not hold.
-	echo "Provenance not checked: gh is older than 2.102.0. To check it, update gh, then run: gh attestation verify $archive $verify_flags"
 elif ! "$gh_cmd" auth status >/dev/null 2>&1; then
 	# A signed-out gh cannot verify anything; treat it like no gh.
 	echo "Provenance not checked: gh is not signed in. To check it, run gh auth login, then: gh attestation verify $archive $verify_flags"
@@ -178,7 +174,14 @@ else
 	# shellcheck disable=SC2086 # verify_flags holds no spaces inside a value
 	"$gh_cmd" attestation verify "$tarball" $verify_flags >/dev/null ||
 		die "provenance check failed for $archive; nothing installed"
-	echo "Provenance OK: $archive"
+	if gh_pins_workflows "$gh_cmd"; then
+		echo "Provenance OK: $archive"
+	else
+		# gh up to 2.101.0 matches --signer-workflow as a prefix
+		# (GHSA-wjmr-j3rp-mh2g): repository and tag held, the workflow only
+		# as a prefix. Still far stronger than no check, so keep it and say so.
+		echo "Provenance OK, with a weaker workflow pin: $archive (gh older than 2.102.0 matches the signer workflow as a prefix; update gh for an exact check)"
+	fi
 fi
 
 # Refuse absolute paths and parent-directory entries before extracting.

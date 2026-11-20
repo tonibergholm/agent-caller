@@ -111,13 +111,22 @@ test_skips_provenance_when_asked() {
 	assert_no_path "$WORK/gh-args"
 }
 
-test_does_not_rely_on_a_gh_that_matches_workflows_as_a_prefix() {
+test_an_older_gh_still_verifies_and_says_the_pin_is_weaker() {
 	prepare_release
 	make_stub_gh 0 0 2.101.0
 	install_from
 	assert_eq "$R_RC" 0 "exit status"
-	assert_contains "$R_OUT" "Provenance not checked: gh is older than 2.102.0"
-	assert_no_path "$WORK/gh-args"
+	assert_contains "$(cat "$WORK/gh-args")" "attestation verify"
+	assert_contains "$R_OUT" "weaker workflow pin"
+}
+
+test_an_older_gh_that_fails_the_check_still_aborts() {
+	prepare_release
+	make_stub_gh 1 0 2.101.0
+	install_from
+	assert_eq "$R_RC" 1 "exit status"
+	assert_contains "$R_ERR" "provenance check failed"
+	assert_no_path "$WORK/bin"
 }
 
 test_verifies_with_gh_2_102() {
