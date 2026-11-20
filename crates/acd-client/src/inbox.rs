@@ -1164,8 +1164,12 @@ impl Inbox {
                 ..
             } => {
                 if let Some(n) = view::resolution_notice(by, reason, message.as_deref()) {
+                    let incarnation = m
+                        .handle
+                        .as_ref()
+                        .and_then(|h| h.state().borrow().session.agents.get(&agent_id).and_then(|a| a.incarnation.clone()));
                     inner.notices.insert(
-                        view::card_key(key, &agent_id),
+                        view::card_key(key, &agent_id, incarnation.as_deref()),
                         (n, Instant::now() + self.opts.timing.notice_ttl),
                     );
                 }
@@ -1205,9 +1209,9 @@ impl Inbox {
         revision: u64,
     ) -> Result<String, PickError> {
         let mut inner = self.inner.lock().unwrap();
-        let (machine_key, handle, entry) = find_card(&inner, card_key)?;
+        let (machine_key, handle, entry, agent_id) = find_card(&inner, card_key)?;
         let state = handle.state().borrow().clone();
-        guard(&inner.settings, &state, card_key, origin.expect)?;
+        guard(&inner.settings, &state, &agent_id, origin.expect)?;
         let current_view = self.view_tx.borrow().clone();
         let card = current_view
             .cards
@@ -1220,14 +1224,10 @@ impl Inbox {
         if state.status != conn::MachineStatus::Online || !state.session.has("answer") {
             return Err(PickError::NotAnswerable);
         }
-        let agent_id = card_key
-            .split_once('/')
-            .map(|(_, id)| id)
-            .ok_or(PickError::UnknownCard)?;
         let agent = state
             .session
             .agents
-            .get(agent_id)
+            .get(&agent_id)
             .ok_or(PickError::StaleRequest)?;
         let req = agent.pending.as_ref().ok_or(PickError::StaleRequest)?;
         if req.id != request_id || req.revision != revision {
@@ -1290,20 +1290,16 @@ impl Inbox {
             return Err(PickError::BadAnswerText);
         }
         let mut inner = self.inner.lock().unwrap();
-        let (machine_key, handle, _) = find_card(&inner, card_key)?;
+        let (machine_key, handle, _, card_agent_id) = find_card(&inner, card_key)?;
         let state = handle.state().borrow().clone();
-        guard(&inner.settings, &state, card_key, origin.expect)?;
+        guard(&inner.settings, &state, &card_agent_id, origin.expect)?;
         if state.status != conn::MachineStatus::Online || !state.session.has("answer") {
             return Err(PickError::NotAnswerable);
         }
-        let agent_id = card_key
-            .split_once('/')
-            .map(|(_, id)| id)
-            .ok_or(PickError::UnknownCard)?;
         let agent = state
             .session
             .agents
-            .get(agent_id)
+            .get(&card_agent_id)
             .ok_or(PickError::StaleRequest)?;
         let req = agent.pending.as_ref().ok_or(PickError::StaleRequest)?;
         if req.id != request_id || req.revision != revision {
@@ -1343,9 +1339,9 @@ impl Inbox {
             return Err(PickError::BadText);
         }
         let mut inner = self.inner.lock().unwrap();
-        let (machine_key, handle, _) = find_card(&inner, card_key)?;
+        let (machine_key, handle, _, card_agent_id) = find_card(&inner, card_key)?;
         let state = handle.state().borrow().clone();
-        guard(&inner.settings, &state, card_key, origin.expect)?;
+        guard(&inner.settings, &state, &card_agent_id, origin.expect)?;
         let (agent_id, incarnation) = match origin.expect {
             // Voice: live state only; no published card is needed (D7, B2).
             Some(g) => {
@@ -1490,7 +1486,7 @@ impl Inbox {
     }
     pub fn mark_seen(self: &Arc<Self>, card_key: &str) -> Result<(), PickError> {
         let inner = self.inner.lock().unwrap();
-        let (machine_key, h, _) = find_card(&inner, card_key)?;
+        let (_, h, _, _) = find_card(&inner, card_key)?;
         let current_view = self.view_tx.borrow().clone();
         let c = current_view
             .cards
@@ -1503,6 +1499,7 @@ impl Inbox {
         let agent = c.agent.id.clone();
         drop(inner);
         let ib = self.clone();
+        let card_key = card_key.to_owned();
         tokio::spawn(async move {
             let o = h
                 .submit(
@@ -1513,7 +1510,7 @@ impl Inbox {
                 )
                 .await;
             if let Some(n) = view::notice_for_outcome(&o) {
-                ib.set_notice(&format!("{machine_key}/{agent}"), n).await
+                ib.set_notice(&card_key, n).await
             }
         });
         Ok(())
@@ -1571,14 +1568,14 @@ fn notice(text: &str, tone: NoticeTone) -> Notice {
 /// spec §5.6): connection, agent, and pending request or its absence.
 /// Checked on the live machine state and the live settings, under the lock
 /// that records the action, never on the published view.
-fn guard(settings: &Settings, state: &MachineState, card_key: &str, expect: Option<&Guard>) -> Result<(), PickError> {
+fn guard(settings: &Settings, state: &MachineState, card_agent_id: &str, expect: Option<&Guard>) -> Result<(), PickError> {
     let Some(g) = expect else {
         return Ok(());
     };
     if (state.instance, state.conn_gen) != (g.conn.instance, g.conn.conn_gen) {
         return Err(PickError::ConnectionChanged);
     }
-    if card_key.split_once('/').map(|(_, a)| a) != Some(g.agent_id.as_str()) {
+    if card_agent_id != g.agent_id {
         return Err(PickError::UnknownCard);
     }
     let agent = state.session.agents.get(&g.agent_id).ok_or(PickError::StaleRequest)?;
@@ -1596,18 +1593,27 @@ fn guard(settings: &Settings, state: &MachineState, card_key: &str, expect: Opti
     }
     Ok(())
 }
-fn find_card(i: &Inner, key: &str) -> Result<(String, MachineHandle, MachineEntry), PickError> {
-    let (mk, aid) = key.split_once('/').ok_or(PickError::UnknownCard)?;
+/// The machine and agent a card key names. The key is opaque: the agent is
+/// the live one whose card key is exactly `key`, so a key from before a
+/// replacement (another incarnation behind the same id) finds no card.
+fn find_card(i: &Inner, key: &str) -> Result<(String, MachineHandle, MachineEntry, String), PickError> {
+    let (mk, _) = key.split_once('/').ok_or(PickError::UnknownCard)?;
     let m = i
         .machines
         .iter()
         .find(|m| m.entry.key == mk)
         .ok_or(PickError::UnknownCard)?;
     let h = m.handle.clone().ok_or(PickError::UnknownCard)?;
-    if !h.state().borrow().session.agents.contains_key(aid) {
-        return Err(PickError::UnknownCard);
-    }
-    Ok((mk.into(), h, m.entry.clone()))
+    let aid = h
+        .state()
+        .borrow()
+        .session
+        .agents
+        .values()
+        .find(|a| view::card_key(mk, &a.id, a.incarnation.as_deref()) == key)
+        .map(|a| a.id.clone())
+        .ok_or(PickError::UnknownCard)?;
+    Ok((mk.into(), h, m.entry.clone(), aid))
 }
 /// Where and how to connect to `entry`. Reads the SecretStore for a TCP
 /// machine, so never call it while holding `inner`.

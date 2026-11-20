@@ -335,7 +335,7 @@ async fn a_reply_carries_the_incarnation_the_user_saw() {
         v.cards.iter().any(|c| c.can_reply && c.agent.incarnation.as_deref() == Some("i1"))
     })
     .await;
-    ib.reply("m1/a1", "next step".into()).unwrap();
+    ib.reply("m1/a1#i1", "next step".into()).unwrap();
     view_until(&ib, "counting", |v| v.actions.len() == 1).await;
     ib.expire_countdowns_for_test();
     received_at_least(&f, "agent.send", 1).await;
@@ -355,7 +355,7 @@ async fn a_reply_is_not_sent_to_a_replaced_agent() {
         v.cards.iter().any(|c| c.can_reply && c.agent.incarnation.as_deref() == Some("i1"))
     })
     .await;
-    ib.reply("m1/a1", "next step".into()).unwrap();
+    ib.reply("m1/a1#i1", "next step".into()).unwrap();
     view_until(&ib, "counting", |v| v.actions.len() == 1).await;
     c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":idle_with_incarnation("i2")}))
         .await;
@@ -365,6 +365,30 @@ async fn a_reply_is_not_sent_to_a_replaced_agent() {
     .await;
     expire_expecting_no_send(&ib).await;
     assert!(!f.received().iter().any(|v| v["type"] == "agent.send"), "nothing was sent");
+}
+
+/// A draft is keyed by card key. The key carries the incarnation, so after a
+/// same-id replacement the old key names no card, and a reply or pick sent
+/// against it is refused without reaching the new agent.
+#[tokio::test]
+async fn a_card_key_of_a_replaced_agent_names_no_card() {
+    let (f, c, ib) = setup().await;
+    ib.set_show_idle(true);
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":idle_with_incarnation("i1")}))
+        .await;
+    view_until(&ib, "i1 card", |v| v.cards.iter().any(|c| c.key == "m1/a1#i1")).await;
+    // Same incarnation again: same key.
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":3,"agent":idle_with_incarnation("i1")}))
+        .await;
+    view_until(&ib, "still i1", |v| v.cards.iter().any(|c| c.key == "m1/a1#i1")).await;
+    c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":4,"agent":idle_with_incarnation("i2")}))
+        .await;
+    view_until(&ib, "i2 card", |v| v.cards.iter().all(|c| c.key != "m1/a1#i1") && v.cards.iter().any(|c| c.key == "m1/a1#i2")).await;
+    assert_eq!(ib.reply("m1/a1#i1", "for the old one".into()), Err(PickError::UnknownCard));
+    assert_eq!(ib.pick("m1/a1#i1", "r1", "allow", 1), Err(PickError::UnknownCard));
+    assert_eq!(ib.reply("m1/a1", "no incarnation".into()), Err(PickError::UnknownCard));
+    assert!(!f.received().iter().any(|v| v["type"] == "agent.send"), "nothing was sent");
+    ib.reply("m1/a1#i2", "for the new one".into()).unwrap();
 }
 
 #[tokio::test]
