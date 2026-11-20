@@ -1023,6 +1023,22 @@ async fn read_events(
 }
 
 #[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    /// Name targeting is verified on herdr 0.9.5 only; the boundary is pinned.
+    #[test]
+    fn names_are_targets_from_herdr_0_9_5() {
+        for v in ["0.9.3", "0.9.4", "0.9.5-rc1", "0.10.0", "1.0.0", "", "x"] {
+            assert!(!names_target(v), "{v}");
+        }
+        for v in ["0.9.5", "0.9.6", "0.9.10"] {
+            assert!(names_target(v), "{v}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod retire_tests {
     use super::*;
     use acd_core::testing::{FakeAdapter, agent_obs, permission_obs, test_machine};

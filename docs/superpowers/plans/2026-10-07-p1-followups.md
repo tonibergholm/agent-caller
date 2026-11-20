@@ -435,7 +435,8 @@ Residuals from the 2026-11 relay and review work, none blocking:
   `source_unavailable`), the attestation pin (`--signer-workflow` and
   `--source-ref`), the runtime window-scope test, and the red-team
   reproducers (they send the revision). Still open:
-  - A herdr agent with no name, or any agent on herdr 0.9.3 or 0.9.4, is
+  - A herdr agent with no name or a name outside herdr's syntax
+    (`[a-z][a-z0-9_-]{0,31}`), or any agent on herdr 0.9.3 or 0.9.4, is
     prompted by pane id, so the window between the `agent.get` check and
     `agent.prompt` remains for it. On herdr 0.9.5 a named agent is prompted
     by its name, which herdr clears when the agent is replaced
