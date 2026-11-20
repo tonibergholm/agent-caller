@@ -158,10 +158,10 @@ verify_flags="--repo $REPO --signer-workflow $signer --source-ref refs/tags/v$ve
 if [ "${ACD_INSTALL_SKIP_PROVENANCE:-}" = 1 ]; then
 	echo "Provenance not checked: skipped by ACD_INSTALL_SKIP_PROVENANCE."
 elif ! command -v "$gh_cmd" >/dev/null 2>&1; then
-	echo "Provenance not checked: gh is not installed. To check it, install gh, sign in, and run: gh attestation verify $archive $verify_flags"
+	echo "Provenance not checked: gh is not installed. To check it, install gh 2.102.0 or later (older versions match --signer-workflow as a prefix), sign in, and run: gh attestation verify $archive $verify_flags"
 elif ! "$gh_cmd" auth status >/dev/null 2>&1; then
 	# A signed-out gh cannot verify anything; treat it like no gh.
-	echo "Provenance not checked: gh is not signed in. To check it, run gh auth login, then: gh attestation verify $archive $verify_flags"
+	echo "Provenance not checked: gh is not signed in. To check it with gh 2.102.0 or later (older versions match --signer-workflow as a prefix), run gh auth login, then: gh attestation verify $archive $verify_flags"
 else
 	# shellcheck disable=SC2086 # verify_flags holds no spaces inside a value
 	# gh 2.51.0 to 2.101.0 match --signer-workflow as a prefix

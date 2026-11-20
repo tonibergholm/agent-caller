@@ -162,6 +162,7 @@ test_says_provenance_was_not_checked_when_gh_is_signed_out() {
 	assert_eq "$R_RC" 0 "exit status"
 	assert_file "$WORK/bin/acd"
 	assert_contains "$R_OUT" "Provenance not checked: gh is not signed in"
+	assert_contains "$R_OUT" "gh 2.102.0 or later"
 	assert_no_path "$WORK/gh-args"
 }
 
@@ -172,6 +173,7 @@ test_says_provenance_was_not_checked_without_gh() {
 	assert_file "$WORK/bin/acd"
 	assert_contains "$R_OUT" "Provenance not checked"
 	assert_contains "$R_OUT" "gh attestation verify $ARCHIVE --repo tonibergholm/agent-caller --signer-workflow tonibergholm/agent-caller/.github/workflows/release.yml --source-ref refs/tags/v0.1.0"
+	assert_contains "$R_OUT" "gh 2.102.0 or later"
 }
 
 test_refuses_checksum_mismatch() {
