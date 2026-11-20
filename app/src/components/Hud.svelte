@@ -144,7 +144,8 @@
 
   function key(e: KeyboardEvent) {
     // A held key must not act: only a fresh press confirms or picks (F3).
-    if (e.repeat && (e.key === "Enter" || /^[1-9]$/.test(e.key))) return;
+    // preventDefault too: a focused button would still activate natively.
+    if (e.repeat && (e.key === "Enter" || /^[1-9]$/.test(e.key))) return e.preventDefault();
     // Enter on a focused button activates that button natively (Cancel must not confirm).
     if (e.key === "Enter" && e.target instanceof HTMLElement && e.target.closest("button")) return;
     if (!wantsKey(hud) || e.isComposing || e.keyCode === 229 || e.metaKey || e.ctrlKey || e.altKey) return;

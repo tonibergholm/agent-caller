@@ -239,6 +239,16 @@ test("a held Enter or digit key does not confirm or pick; a fresh press does (F3
   expect(pick.calls).toEqual([["voiceChoose", 81, 1]]);
 });
 
+test("a held Enter does not activate a focused Confirm button (S7)", async () => {
+  const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 82 });
+  const confirm = screen.getByRole("button", { name: /Confirm/ });
+  confirm.focus();
+  // The native activation is the default action: it must be cancelled.
+  expect(await fireEvent.keyDown(confirm, { key: "Enter", repeat: true })).toBe(false);
+  expect(await fireEvent.keyDown(window, { key: "2", repeat: true })).toBe(false);
+  expect(others(api.calls)).toEqual([]);
+});
+
 test("confirm and cancel have buttons too", async () => {
   const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 4 });
   await userEvent.click(screen.getByRole("button", { name: /Confirm/ }));
