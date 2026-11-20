@@ -341,6 +341,13 @@ pub fn rotate(
     }
     rotate_store_keeping(dir, &held, now_ms, !revoke)?;
     fail_at("after-store")?;
+    if revoke {
+        // The checks `acd` runs before every other command, after the save: a
+        // loose journal or record must not have kept the old token alive.
+        crate::preflight(dir).context(
+            "the old hook token is revoked, but the config directory failed its safety checks; fix them and run `acd hooks install claude`",
+        )?;
+    }
     let report = update_headers_locked(dir, ctx, &held, flags).map_err(|e| {
         if revoke {
             e.context("the old hook token is revoked, but the Claude settings headers were not rewritten")

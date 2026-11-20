@@ -3002,6 +3002,40 @@ fn rotate_revoke_saves_the_store_before_a_settings_rewrite_can_fail() {
     assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &newest, &[], &body).0, 200);
 }
 
+/// A journal or install record the installer preflight refuses must not keep
+/// the old token alive: the store is saved first, and the problem is
+/// reported after.
+#[test]
+fn rotate_revoke_saves_the_store_before_the_installer_preflight_can_fail() {
+    for file in ["hooks-journal.json", "hooks-installed.json"] {
+        let (home, dir) = home_with_acd();
+        assert!(install(&dir, home.path(), "claude", &[]).status.success());
+        let old = store_token(&dir);
+        let path = dir.join(file);
+        if !path.exists() {
+            std::fs::write(&path, "{}").unwrap();
+        }
+        set_mode(&path, 0o644);
+        let out = rotate(&dir, home.path(), &["--revoke"]);
+        assert!(!out.status.success(), "{file}: the preflight failure must exit non-zero");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("the old hook token is revoked"), "{file}: {stderr}");
+        assert!(stderr.contains(file), "{file}: the problem is not named: {stderr}");
+        assert!(!stderr.contains(&old) && !String::from_utf8_lossy(&out.stdout).contains(&old));
+        let store = store_of(&dir);
+        assert!(store["previous"].is_null(), "{file}");
+        assert_eq!(store["generation"], 2, "{file}");
+        let new = store_token(&dir);
+        assert!(old != new, "{file}: revoke did not change the token");
+        // The daemon refuses to start on the loose file, as it does for every command.
+        set_mode(&path, 0o600);
+        let started = start_daemon(&dir, None, "", &home_env(home.path()));
+        let body = claude_fixture("payload-Stop.json");
+        assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0, 401, "{file}");
+        assert_eq!(post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0, 200, "{file}");
+    }
+}
+
 /// A well-formed token (43 base64url characters, 32 bytes) for hand-written stores.
 fn fixed_token(c: char) -> String {
     format!("{}A", c.to_string().repeat(42))

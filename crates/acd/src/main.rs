@@ -211,7 +211,14 @@ fn real_main() -> Result<()> {
             if !dir.is_dir() {
                 bail!("{} not initialized; run `acd init`", dir.display());
             }
-            preflight(&dir)?;
+            // A hook revocation answers a leaked token: only the store it saves
+            // is checked first. `hook_token::rotate` runs the full preflight
+            // after the save, so a loose journal cannot keep the old token alive.
+            if revoke && matches!(which, TokenKind::Hook) {
+                preflight_hook_store(&dir)?;
+            } else {
+                preflight(&dir)?;
+            }
             match which {
                 TokenKind::Client => {
                     if revoke {
@@ -420,6 +427,19 @@ fn real_main() -> Result<()> {
 pub(crate) fn preflight(dir: &Path) -> Result<()> {
     preflight_prerequisites(dir)?;
     tls::load(dir).context("TLS bundle is invalid or unsafe; run `acd init` to repair it")?;
+    Ok(())
+}
+
+/// What `hook_token::load` and `save` need: the directory and the store (or
+/// the legacy token file it migrates from), owner-only.
+fn preflight_hook_store(dir: &Path) -> Result<()> {
+    secrets::check_mode(dir, 0o700)?;
+    for f in [hook_token::STORE_FILE, hook_token::LEGACY_FILE] {
+        let p = dir.join(f);
+        if p.symlink_metadata().is_ok() {
+            secrets::check_mode(&p, 0o600)?;
+        }
+    }
     Ok(())
 }
 
