@@ -37,22 +37,6 @@
         hud = e.hud;
         shownId = e.id;
         tooLong = false;
-        const id = awaitingDisplay(e.hud);
-        if (id === null) return;
-        // Acknowledge only after the DOM shows it, and only if it is still
-        // the state on screen: two events before one flush must not
-        // acknowledge a proposal that never rendered (D22).
-        quiet(
-          tick().then(() => {
-            if (seen.seq !== e.seq || awaitingDisplay(hud) !== id) return;
-            const blocks = [...(main?.querySelectorAll<HTMLElement>(".block") ?? [])];
-            if (blocks.some((b) => b.scrollHeight > b.clientHeight) || neededHeight() > MAX_HUD_HEIGHT) {
-              tooLong = true;
-              return;
-            }
-            return api.voiceShown(id);
-          }),
-        );
       })
       .then(keep, () => {});
     api
@@ -85,12 +69,43 @@
   let main = $state<HTMLElement | null>(null);
   let body = $state<HTMLElement | null>(null);
   const neededHeight = () => (main && body ? main.scrollHeight - body.clientHeight + body.scrollHeight : 0);
+  // How long after the resize the viewport may take to show the new size. The
+  // app refuses an unacknowledged step after its 1 s display timeout.
+  const FIT_WAIT_MS = 400;
+  const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+  // Everything the user would approve is on screen: the body does not scroll
+  // and no block is cut off.
+  const showsAll = () =>
+    !!body && body.scrollHeight <= body.clientHeight && ![...(main?.querySelectorAll<HTMLElement>(".block") ?? [])].some((b) => b.scrollHeight > b.clientHeight);
+
   $effect(() => {
     void hud;
     const seq = seen.seq;
-    void tick().then(() => {
+    // A step that waits for input is acknowledged (D22), but only once the
+    // whole of it is visible: after the resize took effect, in the real
+    // viewport. Two events before one flush acknowledge only the last.
+    const id = awaitingDisplay(hud);
+    void tick().then(async () => {
       if (!main || !body || seen.seq !== seq) return;
-      quiet(api.voiceHudFit(seq, neededHeight()));
+      const needed = neededHeight();
+      // A failed resize shows up below as a clipped viewport.
+      const fitted = api.voiceHudFit(seq, needed).catch(() => {});
+      if (id === null) return;
+      if (needed > MAX_HUD_HEIGHT || ![...main.querySelectorAll<HTMLElement>(".block")].every((b) => b.scrollHeight <= b.clientHeight)) {
+        tooLong = true;
+        return;
+      }
+      await fitted;
+      const end = Date.now() + FIT_WAIT_MS;
+      for (;;) {
+        await nextFrame();
+        if (seen.seq !== seq || awaitingDisplay(hud) !== id) return;
+        if (showsAll()) return void quiet(api.voiceShown(id));
+        if (Date.now() >= end) {
+          tooLong = true;
+          return;
+        }
+      }
     });
   });
 

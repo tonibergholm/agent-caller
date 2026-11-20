@@ -53,8 +53,12 @@ async function show(state: HudState, v: InboxView = view()) {
   api.hud!({ seq: ++seq, id: inputId(state), hud: state });
   await tick();
   await tick();
+  await frames();
   return api;
 }
+
+// The acknowledgement waits for the fit call and a frame (S4).
+const frames = () => new Promise((r) => setTimeout(r, 60));
 
 const others = (calls: unknown[][]) => calls.filter((c) => c[0] !== "voiceShown");
 
@@ -115,14 +119,61 @@ test("content taller than the panel can be is not acknowledged either (F1)", asy
     expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
     expect(screen.getByText(/Too long to show here/)).toBeTruthy();
     cleanup();
-    // The same blocks with content that fits (160 - 100 + 120 = 180 px) are acknowledged.
-    const restoreFit = withHeights((el) => (el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [120, 100] : el.classList.contains("hud") ? [160, 160] : [0, 0]));
+    // The same blocks with content that fits (160 - 120 + 120 = 160 px, body not scrolling) are acknowledged.
+    const restoreFit = withHeights((el) => (el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [120, 120] : el.classList.contains("hud") ? [160, 160] : [0, 0]));
     try {
       const ok = await show({ state: "confirm", proposal: proposal(), proposal_id: 74 });
       expect(ok.calls).toContainEqual(["voiceShown", 74]);
     } finally {
       restoreFit();
     }
+  } finally {
+    restore();
+  }
+});
+
+// S4: the panel starts at 260 px and grows after the fit call, so a proposal
+// that only fits after the resize is acknowledged after it, not before.
+test("content that fits only after the resize is acknowledged after the resize", async () => {
+  let resized = false;
+  const restore = withHeights((el) =>
+    el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [200, resized ? 200 : 100] : el.classList.contains("hud") ? [300, 300] : [0, 0],
+  );
+  try {
+    const api = fakeApi();
+    let shownBeforeResize: boolean | null = null;
+    api.voiceHudFit = async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      shownBeforeResize = api.calls.some((c) => c[0] === "voiceShown");
+      resized = true;
+    };
+    render(Hud, { api, view: view() });
+    await tick();
+    api.hud!({ seq: ++seq, id: 90, hud: { state: "confirm", proposal: proposal(), proposal_id: 90 } });
+    await vi.waitFor(() => expect(api.calls).toContainEqual(["voiceShown", 90]));
+    expect(shownBeforeResize).toBe(false);
+    expect(screen.queryByText(/Too long to show here/)).toBeNull();
+  } finally {
+    restore();
+  }
+});
+
+test("content still clipped after the resize is not acknowledged and cannot be confirmed", async () => {
+  // The resize never takes effect (it failed): body still scrolls.
+  const restore = withHeights((el) =>
+    el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [200, 100] : el.classList.contains("hud") ? [300, 300] : [0, 0],
+  );
+  try {
+    const api = fakeApi();
+    api.voiceHudFit = async () => {
+      throw new Error("resize failed");
+    };
+    render(Hud, { api, view: view() });
+    await tick();
+    api.hud!({ seq: ++seq, id: 91, hud: { state: "confirm", proposal: proposal(), proposal_id: 91 } });
+    await vi.waitFor(() => expect(screen.getByText(/Too long to show here/)).toBeTruthy());
+    expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+    expect((screen.getByRole("button", { name: /Confirm/ }) as HTMLButtonElement).disabled).toBe(true);
   } finally {
     restore();
   }
@@ -137,6 +188,7 @@ test("a proposal replaced before the DOM flush is never acknowledged", async () 
   api.hud!({ seq: ++seq, id: 21, hud: { state: "confirm", proposal: proposal({ option: "Yes" }), proposal_id: 21 } });
   await tick();
   await tick();
+  await frames();
   expect(api.calls.filter((c) => c[0] === "voiceShown")).toEqual([["voiceShown", 21]]);
   api.hud!({ seq: ++seq, id: 22, hud: { state: "countdown", proposal: proposal({ level: "countdown" }), proposal_id: 22, action_id: null } });
   api.hud!({ seq: ++seq, id: null, hud: { state: "speaking", text: "Nothing needs you.", audio: false } });
@@ -357,6 +409,7 @@ test("the proposal is in the DOM when the acknowledgement fires", async () => {
   api.hud!({ seq: ++seq, id: 65, hud: { state: "confirm", proposal: proposal(), proposal_id: 65 } });
   await tick();
   await tick();
+  await frames();
   expect(seen).toBe(true);
 });
 
