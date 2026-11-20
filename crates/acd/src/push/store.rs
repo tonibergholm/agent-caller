@@ -237,7 +237,8 @@ impl Store {
             Ok(None) => {}
             Ok(Some(Loaded { client: stored, devices, skipped })) => {
                 store.skipped = skipped;
-                if stored.as_deref() != Some(client) && !devices.is_empty() {
+                // An empty fingerprint (unreadable token) never matches.
+                if (client.is_empty() || stored.as_deref() != Some(client)) && !devices.is_empty() {
                     tracing::warn!(devices = devices.len(), "push.json belongs to another client token; registrations dropped");
                     store.clear_pending = true;
                     return store;

@@ -305,6 +305,9 @@ fn real_main() -> Result<()> {
                     allow_tracked,
                     allow_unknown_git,
                 } => {
+                    // The token sat in a settings file: say to rotate it after the migration.
+                    let had_legacy = matches!(target, hooks_install::Target::Claude)
+                        && !hooks_install::legacy_warnings(&dir).is_empty();
                     let r = hooks_install::install(
                         &ctx,
                         target,
@@ -339,6 +342,11 @@ fn real_main() -> Result<()> {
                             // Other recorded destinations may still hold the legacy http hook.
                             for w in hooks_install::legacy_warnings(&dir) {
                                 eprintln!("warning: {w}");
+                            }
+                            if had_legacy {
+                                println!(
+                                    "The old http hook stored the hook token in a settings file. Once your Claude sessions have restarted, run `acd token rotate hook --revoke` so that copy stops working (without --revoke it stays valid for up to 30 days)."
+                                );
                             }
                         }
                         hooks_install::Target::Codex => println!(

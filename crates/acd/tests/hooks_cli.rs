@@ -1175,6 +1175,10 @@ fn reinstalling_replaces_the_legacy_http_entries_with_shim_commands() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // The token was in the file, so the user is told to revoke it.
+    assert!(String::from_utf8_lossy(&out.stdout).contains("acd token rotate hook --revoke"));
+    let again = install(&dir, home.path(), "claude", &[]);
+    assert!(!String::from_utf8_lossy(&again.stdout).contains("rotate"), "no advice without a legacy entry");
     // The legacy file is replaced, not appended to: the token is gone, the
     // mode is private and nothing warns any more.
     let text = std::fs::read_to_string(&p).unwrap();

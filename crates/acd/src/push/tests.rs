@@ -830,6 +830,16 @@ fn a_file_without_a_token_fingerprint_counts_as_another_token() {
     assert!(s.clear_pending());
 }
 
+#[test]
+fn an_empty_fingerprint_never_matches() {
+    // An unreadable client token gives "" (`client_of`); a file written with
+    // "" must not load under it.
+    let d = private_dir();
+    let mut st = Store::load(d.path(), "");
+    st.register("phone", Device::new(PushPlatform::Android, handle_for("phone"), "2026-12-04T10:00:00.000Z".into())).unwrap();
+    assert_eq!(Store::load(d.path(), "").len(), 0);
+}
+
 #[tokio::test]
 async fn a_new_registration_after_revocation_wakes_again() {
     let rig = Rig::new(NO_WINDOW).await;
