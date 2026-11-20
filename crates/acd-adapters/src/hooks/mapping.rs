@@ -10,7 +10,7 @@ use super::wire::{
 };
 use crate::herdr::screen::Dialog;
 use crate::text::{
-    TITLE_CHARS, cap_chars, clean_display, clean_screen, is_format_character, redact_log,
+    TITLE_CHARS, cap_chars, clean_display, clean_screen, is_format_character,
 };
 
 pub const DETAIL_CHARS: usize = 4000;
@@ -463,12 +463,12 @@ pub fn codex_permission(
     }
 }
 
-pub fn payload_for_log(raw: &[u8]) -> String {
-    redact_log(&String::from_utf8_lossy(raw))
-}
+/// Debug log line for a hook payload: hook name, byte length and a short
+/// hash, never the text (CLAUDE.md: message text never reaches logs).
 pub fn log_payload(agent: HookAgent, name: &HookName, raw: &[u8]) {
     if tracing::enabled!(tracing::Level::DEBUG) {
-        tracing::debug!(?agent,?name,payload=%payload_for_log(raw),"hook payload");
+        let (len, sha) = acd_core::server::log_tag(&String::from_utf8_lossy(raw));
+        tracing::debug!(?agent, ?name, len, sha, "hook payload");
     }
 }
 
@@ -939,9 +939,6 @@ mod tests {
         ok.tool_input = serde_json::json!({"questions":[{"question":" Q ","header":"H","options":[{"label":"A","description":"d"}]}]});
         assert_eq!(claude_question("a", k(), None, &ok, true).unwrap().answer_path, AnswerPath::Keys);
     }
-    #[test]
-    fn logged_payloads_are_redacted() {
-        let s = payload_for_log(br#"{"tool_input":{"command":"GITHUB_TOKEN=ghp_secret make"}}"#);
-        assert!(!s.contains("ghp_secret"), "{s}");
-    }
+    // Hook payload logging is covered in tests/coverage_adapters.rs
+    // (failed_dispatches_classify_conservatively_and_never_log_server_text).
 }
