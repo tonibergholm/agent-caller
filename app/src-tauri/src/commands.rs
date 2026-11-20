@@ -278,8 +278,17 @@ mod tests {
                 .invoke_handler(tauri::generate_handler![
                     pick_option,
                     send_reply,
-                    remove_machine,
+                    answer_text,
+                    cancel_action,
+                    mark_seen,
+                    set_show_idle,
+                    set_show_subagents,
+                    set_show_hook_only,
+                    preview_pairing_from_clipboard,
                     import_pairing_from_clipboard,
+                    rename_machine,
+                    remove_machine,
+                    retry_machine,
                 ])
                 .build(mock_context(noop_assets()))
                 .unwrap();
@@ -306,33 +315,106 @@ mod tests {
             .map(|body| body.deserialize().unwrap())
         }
 
-        fn commands() -> [(&'static str, Value); 4] {
-            [
-                ("pick_option", json!({"cardKey": "c", "requestId": "r", "optionId": "o", "revision": 1})),
-                ("send_reply", json!({"cardKey": "c", "text": "hi"})),
-                ("remove_machine", json!({"key": "nope"})),
-                ("import_pairing_from_clipboard", json!({"shown": {"host": "h", "port": 1, "pin": "p"}})),
+        // Counts the "ignored an inbox command" debug events `allowed` logs while
+        // `f` runs. Commands that return `false` or `()` refuse silently, so the
+        // return value alone cannot tell a refusal from a real run.
+        fn refusals_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
+            #[derive(Clone, Default)]
+            struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+            impl std::io::Write for Sink {
+                fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(b);
+                    Ok(b.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let sink = Sink::default();
+            let writer = sink.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .finish();
+            let out = tracing::subscriber::with_default(subscriber, f);
+            let log = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+            (out, log.matches("ignored an inbox command from another window").count())
+        }
+
+        struct Case {
+            cmd: &'static str,
+            args: Value,
+            /// A label this command accepts.
+            from: &'static str,
+            /// What the HUD gets: the refusal, in the command's own return type.
+            refused: Result<Value, Value>,
+            /// What `from` gets with these arguments on an empty inbox. `None`
+            /// when the result depends on the real clipboard.
+            allowed: Option<Result<Value, Value>>,
+        }
+
+        fn refusal() -> Result<Value, Value> {
+            Err(json!(REFUSED))
+        }
+
+        // One line per scoped command. Left out: `escape` takes `VoiceState` (the
+        // Swift speech bridge) and `set_hotkey` is Wry-only, so the mock runtime
+        // cannot build them; the `voice_*` commands in voice/commands.rs need
+        // `VoiceState` too. `every_scoped_handler_is_in_the_table` fails when a
+        // handler with an `allowed` check is added without a line here.
+        fn cases() -> Vec<Case> {
+            let unknown_card = || Some(Err(json!("unknown card")));
+            let unknown_machine = || Some(Err(json!("Unknown machine")));
+            let done = || Some(Ok(Value::Null));
+            let case = |cmd, args, from, refused, allowed| Case { cmd, args, from, refused, allowed };
+            vec![
+                case("pick_option", json!({"cardKey": "c", "requestId": "r", "optionId": "o", "revision": 1}), "panel", refusal(), unknown_card()),
+                case("send_reply", json!({"cardKey": "c", "text": "hi"}), "panel", refusal(), unknown_card()),
+                case("answer_text", json!({"cardKey": "c", "requestId": "r", "revision": 1, "text": "hi"}), "panel", refusal(), unknown_card()),
+                case("cancel_action", json!({"actionId": "a"}), "panel", Ok(json!(false)), Some(Ok(json!(false)))),
+                case("mark_seen", json!({"cardKey": "c"}), "panel", refusal(), unknown_card()),
+                case("set_show_idle", json!({"on": true}), "panel", Ok(Value::Null), done()),
+                case("set_show_subagents", json!({"on": true}), "settings", refusal(), done()),
+                case("set_show_hook_only", json!({"on": true}), "settings", refusal(), done()),
+                case("preview_pairing_from_clipboard", json!({}), "settings", refusal(), None),
+                case("import_pairing_from_clipboard", json!({"shown": {"host": "h", "port": 1, "pin": "p"}}), "settings", refusal(), None),
+                case("rename_machine", json!({"key": "nope", "name": "n"}), "settings", refusal(), unknown_machine()),
+                case("remove_machine", json!({"key": "nope"}), "settings", refusal(), unknown_machine()),
+                case("retry_machine", json!({"key": "nope"}), "settings", Ok(Value::Null), done()),
             ]
         }
 
         #[test]
         fn the_hud_window_is_refused_by_every_inbox_command() {
             let h = harness();
-            for (cmd, args) in commands() {
-                let got = call(&h, crate::voice::hud::LABEL, cmd, args);
-                assert_eq!(got, Err(json!(REFUSED)), "{cmd} from the HUD");
+            for c in cases() {
+                let (got, refusals) = refusals_during(|| call(&h, crate::voice::hud::LABEL, c.cmd, c.args.clone()));
+                assert_eq!(got, c.refused, "{} from the HUD", c.cmd);
+                assert_eq!(refusals, 1, "{} from the HUD logged one refusal", c.cmd);
             }
         }
 
         #[test]
         fn an_allowed_window_gets_past_the_window_check() {
             let h = harness();
-            // Settings may remove a machine: it fails on the unknown key, not the window.
-            let got = call(&h, "settings", "remove_machine", json!({"key": "nope"}));
-            assert_ne!(got, Err(json!(REFUSED)), "settings reached the handler");
-            // The panel may not.
+            for c in cases() {
+                let Some(expected) = c.allowed else { continue };
+                let (got, refusals) = refusals_during(|| call(&h, c.from, c.cmd, c.args.clone()));
+                assert_eq!(got, expected, "{} from {}", c.cmd, c.from);
+                assert_eq!(refusals, 0, "{} from {} passed the window check", c.cmd, c.from);
+            }
+            // The panel may not remove a machine.
             let got = call(&h, "panel", "remove_machine", json!({"key": "nope"}));
-            assert_eq!(got, Err(json!(REFUSED)));
+            assert_eq!(got, refusal());
+        }
+
+        #[test]
+        fn every_scoped_handler_is_in_the_table() {
+            let check = format!("if !{}(&window", "allowed");
+            let scoped = include_str!("commands.rs").matches(&check).count();
+            // `escape` and `set_hotkey` are the two the table cannot cover.
+            assert_eq!(scoped, cases().len() + 2, "add the new command to `cases`");
         }
     }
 
