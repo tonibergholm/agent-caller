@@ -189,8 +189,8 @@ async fn a_reply_is_refused_when_another_agent_took_the_id_since_the_step_was_pl
         a
     };
     let r = inbox_rig(vec![incarnated("i1")]).await;
-    let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
-    let card = snap.card("m1/a1").unwrap();
+    let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1#i1"), &["m1/a1#i1"]), true);
+    let card = snap.card("m1/a1#i1").unwrap();
     assert_eq!(card.incarnation.as_deref(), Some("i1"));
     let guard = Guard {
         conn: card.conn.unwrap(),
@@ -199,7 +199,7 @@ async fn a_reply_is_refused_when_another_agent_took_the_id_since_the_step_was_pl
         incarnation: card.incarnation.clone(),
         named_send_only: false,
     };
-    let reply = || Enqueue::Reply { card: "m1/a1".into(), text: VoiceText::new("go on"), guard: guard.clone() };
+    let reply = || Enqueue::Reply { card: "m1/a1#i1".into(), text: VoiceText::new("go on"), guard: guard.clone() };
     let port = AcdPort::new(r.inbox.clone());
     r.c.send(serde_json::json!({"type":"agent.updated","epoch":"e1","seq":2,"agent":incarnated("i2")})).await;
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -209,7 +209,7 @@ async fn a_reply_is_refused_when_another_agent_took_the_id_since_the_step_was_pl
     })
     .await
     .expect("the replacement is published");
-    assert_eq!(port.enqueue(reply()), Err(EnqueueError::ConnectionChanged));
+    assert_eq!(port.enqueue(reply()), Err(EnqueueError::UnknownCard), "the old incarnation's key names no card");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(frames(&r.f, "agent.send").is_empty(), "nothing was sent to the new agent");
 }
@@ -221,8 +221,8 @@ async fn a_reply_carries_the_guards_incarnation() {
     a["id"] = "a1".into();
     a["incarnation"] = "i1".into();
     let r = inbox_rig(vec![a]).await;
-    let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
-    let card = snap.card("m1/a1").unwrap();
+    let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1#i1"), &["m1/a1#i1"]), true);
+    let card = snap.card("m1/a1#i1").unwrap();
     let guard = Guard {
         conn: card.conn.unwrap(),
         agent_id: "a1".into(),
@@ -231,7 +231,7 @@ async fn a_reply_carries_the_guards_incarnation() {
         named_send_only: false,
     };
     AcdPort::new(r.inbox.clone())
-        .enqueue(Enqueue::Reply { card: "m1/a1".into(), text: VoiceText::new("go on"), guard })
+        .enqueue(Enqueue::Reply { card: "m1/a1#i1".into(), text: VoiceText::new("go on"), guard })
         .unwrap();
     assert_eq!(frame(&r.f, "agent.send").await["incarnation"], "i1");
 }
