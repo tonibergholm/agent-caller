@@ -109,8 +109,8 @@ async fn debug_never_shows_content_from_snapshot_to_wire() {
     a["project"] = "SECRET-PROJECT".into();
     a["pending"]["title"] = "SECRET-REQUEST".into();
     a["pending"]["detail"] = "SECRET-DETAIL".into();
-    a["pending"]["options"][0]["label"] = "SECRET-YES".into();
-    a["pending"]["options"][2]["label"] = "SECRET-ALWAYS".into();
+    a["pending"]["options"][0]["label"] = "Yes SECRET-YES".into();
+    a["pending"]["options"][2]["label"] = "Yes SECRET-ALWAYS".into();
     a["pending"]["options"][2]["description"] = "SECRET-RULE".into();
     let r = inbox_rig(vec![a.clone()]).await;
     let snap = freeze(&r.inbox.stamped_view(), shown(Some("m1/a1"), &["m1/a1"]), true);
