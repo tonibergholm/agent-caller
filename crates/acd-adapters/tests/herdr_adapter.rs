@@ -214,6 +214,27 @@ async fn a_reply_for_the_old_agent_is_refused_after_a_republish_under_the_same_i
     assert_eq!(r.fake.prompts().len(), 1);
 }
 
+/// The reconciler replaces the pane while the send's screen read is in
+/// flight: the checks before the read passed for the old agent, so the prompt
+/// must be refused at the last look at the pane map.
+#[tokio::test]
+async fn a_pane_replaced_during_the_screen_read_gets_no_prompt() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let old = agent(&r);
+    let gate = r.fake.block_next("agent.read");
+    let send = tokio::spawn({
+        let adapter = r.adapter.clone();
+        let old = old.clone();
+        async move { adapter.send(&old, "run the tests").await }
+    });
+    gate.arrived().await; // the screen read is held
+    r.adapter.panes().write().unwrap().get_mut(&old.id).unwrap().incarnation += 1;
+    gate.release();
+    let res = send.await.unwrap();
+    assert!(matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentGone))), "{res:?}");
+    assert!(r.fake.prompts().is_empty(), "nothing was typed into the replacement");
+}
+
 #[tokio::test]
 async fn follow_up_to_a_pane_that_lost_its_agent_is_gone() {
     let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;

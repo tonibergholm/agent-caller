@@ -210,6 +210,19 @@ impl Adapter for HerdrAdapter {
         if find_dialog(&read.text).is_some() || map::state(live.agent_status) == AgentState::NeedsYou {
             return Err(DeliverError::NotDelivered(ErrorCode::AgentBusy));
         }
+        // The reconciler does not take the agent lock, so it can have replaced
+        // the pane while the screen read ran. Re-read the map entry right
+        // before the prompt. What remains is the gap between this check and
+        // herdr, closed only by targeting a terminal id (p1 follow-ups).
+        let unchanged = self
+            .panes
+            .read()
+            .expect("pane map")
+            .get(&agent.id)
+            .is_some_and(|p| p.incarnation == pane.incarnation && p.terminal_id == pane.terminal_id);
+        if !unchanged {
+            return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
+        }
         let result = match timeout_at(deadline, pane.herdr.prompt(&pane.pane_id, text)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(map_call_error(&e)),
