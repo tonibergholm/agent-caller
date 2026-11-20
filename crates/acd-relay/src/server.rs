@@ -396,12 +396,10 @@ async fn wake_inner(
         return (err(StatusCode::BAD_REQUEST, "bad_request"), None, None);
     }
     let now = st.clock.now_secs();
-    // Cheapest checks first, each before anything is sent.
-    if !st.wake_global.check([0; 16], now) {
-        return (err(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), None, None);
-    }
+    // Cheapest checks first, each before anything is sent. The shared bucket
+    // goes last, so a request refused for its own source never spends it.
     let ip = st.client_ip(peer, headers);
-    if !st.wake_ip.check(st.ip_key(ip), now) {
+    if !st.wake_ip.check(st.ip_key(ip), now) || !st.wake_global.check([0; 16], now) {
         return (err(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), None, None);
     }
     let opened = match handle::open(&st.keys, &req.handle, now) {
@@ -485,9 +483,11 @@ async fn register_inner(
     let now = st.clock.now_secs();
     let ip = st.client_ip(peer, headers);
     let akey = st.addr_key(f.kind, &f.address);
-    if !st.issue_global.check([0; 16], now)
-        || !st.issue_ip.check(st.ip_key(ip), now)
+    // The shared bucket goes last: a refusal for the source's own limits
+    // must not spend it.
+    if !st.issue_ip.check(st.ip_key(ip), now)
         || !st.issue_address.check(akey, now)
+        || !st.issue_global.check([0; 16], now)
     {
         return (err(StatusCode::TOO_MANY_REQUESTS, "rate_limited"), platform, None);
     }

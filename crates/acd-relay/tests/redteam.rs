@@ -3,9 +3,7 @@
 //! Method and full attack log: `docs/research/2026-11-04-red-team-relay.md`.
 //! These tests reproduce findings from that session as deterministic,
 //! in-process repros (no real sockets or wall clock), matching the style of
-//! `tests/api.rs`. Each `#[ignore]` test documents a finding: it fails on
-//! the tree as it stands and is expected to pass once the named fix lands.
-//! No production code is changed by this file.
+//! `tests/api.rs`. Each test documents a finding and fails without its fix.
 
 mod common;
 
@@ -39,7 +37,6 @@ async fn plain_with(rates: Rates) -> (Relay, Arc<FakeSender>) {
 /// reverting the swap reproduces the failure (see the research doc for the
 /// before/after run).
 #[tokio::test]
-#[ignore = "finding: global wake budget is drained by one source past its own per-IP limit (docs/research/2026-11-04-red-team-relay.md)"]
 async fn one_source_cannot_drain_the_global_wake_budget_past_its_own_ip_limit() {
     // An attacker's own per-IP cap (3) is far smaller than the global
     // budget (10) shared with everyone else, and the attacker sends more
@@ -73,7 +70,6 @@ async fn one_source_cannot_drain_the_global_wake_budget_past_its_own_ip_limit() 
 /// Finding 1 (`register`): the same pattern on `POST /v1/handles`
 /// (`issue_global` checked before `issue_ip`/`issue_address`).
 #[tokio::test]
-#[ignore = "finding: global registration budget is drained by one source past its own per-IP limit (docs/research/2026-11-04-red-team-relay.md)"]
 async fn one_source_cannot_drain_the_global_registration_budget_past_its_own_ip_limit() {
     let (r, s) = plain_with(Rates { issue_ip: Limit::hourly(2), issue_global: Limit::hourly(10), ..Rates::default() }).await;
     let _ = &s; // unused sender; kept for symmetry with other tests
