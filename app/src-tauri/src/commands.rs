@@ -1,7 +1,7 @@
 use acd_app_core::commands::{self as core, AppState};
 use acd_app_core::pairing::PairingPreview;
 use acd_client::view::{InboxView, MachineEntryView};
-use tauri::{AppHandle, State, WebviewWindow};
+use tauri::{AppHandle, Runtime, State, WebviewWindow};
 
 // The windows that call each inbox-changing command (security review F7).
 // The HUD shows peer text and calls only the `voice_*` HUD commands.
@@ -9,7 +9,7 @@ const PANEL: &[&str] = &["panel"];
 const SETTINGS: &[&str] = &["settings"];
 const PANEL_OR_SETTINGS: &[&str] = &["panel", "settings"];
 
-fn allowed(window: &WebviewWindow, labels: &[&str]) -> bool {
+fn allowed<R: Runtime>(window: &WebviewWindow<R>, labels: &[&str]) -> bool {
     let ok = labels.contains(&window.label());
     if !ok {
         tracing::debug!(label = window.label(), "ignored an inbox command from another window");
@@ -23,8 +23,8 @@ pub fn get_view(state: State<'_, AppState>) -> InboxView {
 }
 
 #[tauri::command]
-pub fn pick_option(
-    window: WebviewWindow,
+pub fn pick_option<R: Runtime>(
+    window: WebviewWindow<R>,
     state: State<'_, AppState>,
     card_key: String,
     request_id: String,
@@ -38,8 +38,8 @@ pub fn pick_option(
 }
 
 #[tauri::command]
-pub fn send_reply(
-    window: WebviewWindow,
+pub fn send_reply<R: Runtime>(
+    window: WebviewWindow<R>,
     state: State<'_, AppState>,
     card_key: String,
     text: String,
@@ -51,8 +51,8 @@ pub fn send_reply(
 }
 
 #[tauri::command]
-pub fn answer_text(
-    window: WebviewWindow,
+pub fn answer_text<R: Runtime>(
+    window: WebviewWindow<R>,
     state: State<'_, AppState>,
     card_key: String,
     request_id: String,
@@ -66,7 +66,7 @@ pub fn answer_text(
 }
 
 #[tauri::command]
-pub fn cancel_action(window: WebviewWindow, state: State<'_, AppState>, action_id: String) -> bool {
+pub fn cancel_action<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, action_id: String) -> bool {
     if !allowed(&window, PANEL) {
         return false;
     }
@@ -84,7 +84,7 @@ fn escape_all(stop_speech: impl FnOnce() -> bool, rest: impl FnOnce() -> bool) -
 /// else undoes the newest countdown, else cancels a voice step that is
 /// still thinking. False when none ran.
 #[tauri::command]
-pub fn escape(window: WebviewWindow, state: State<'_, AppState>, voice: State<'_, crate::voice::VoiceState>) -> bool {
+pub fn escape<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, voice: State<'_, crate::voice::VoiceState>) -> bool {
     if !allowed(&window, PANEL) {
         return false;
     }
@@ -95,7 +95,7 @@ pub fn escape(window: WebviewWindow, state: State<'_, AppState>, voice: State<'_
 }
 
 #[tauri::command]
-pub fn mark_seen(window: WebviewWindow, state: State<'_, AppState>, card_key: String) -> Result<(), String> {
+pub fn mark_seen<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, card_key: String) -> Result<(), String> {
     if !allowed(&window, PANEL) {
         return Err("Not available from this window.".into());
     }
@@ -103,7 +103,7 @@ pub fn mark_seen(window: WebviewWindow, state: State<'_, AppState>, card_key: St
 }
 
 #[tauri::command]
-pub fn set_show_idle(window: WebviewWindow, state: State<'_, AppState>, on: bool) {
+pub fn set_show_idle<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, on: bool) {
     if !allowed(&window, PANEL_OR_SETTINGS) {
         return;
     }
@@ -111,7 +111,7 @@ pub fn set_show_idle(window: WebviewWindow, state: State<'_, AppState>, on: bool
 }
 
 #[tauri::command]
-pub fn set_show_subagents(window: WebviewWindow, state: State<'_, AppState>, on: bool) -> Result<(), String> {
+pub fn set_show_subagents<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, on: bool) -> Result<(), String> {
     if !allowed(&window, SETTINGS) {
         return Err("Not available from this window.".into());
     }
@@ -119,7 +119,7 @@ pub fn set_show_subagents(window: WebviewWindow, state: State<'_, AppState>, on:
 }
 
 #[tauri::command]
-pub fn set_show_hook_only(window: WebviewWindow, state: State<'_, AppState>, on: bool) -> Result<(), String> {
+pub fn set_show_hook_only<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, on: bool) -> Result<(), String> {
     if !allowed(&window, SETTINGS) {
         return Err("Not available from this window.".into());
     }
@@ -133,9 +133,9 @@ pub fn list_machines(state: State<'_, AppState>) -> Vec<MachineEntryView> {
 
 /// Reads the clipboard and says what it would pair; saves nothing (F9).
 #[tauri::command]
-pub fn preview_pairing_from_clipboard(
-    window: WebviewWindow,
-    app: AppHandle,
+pub fn preview_pairing_from_clipboard<R: Runtime>(
+    window: WebviewWindow<R>,
+    app: AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<PairingPreview, String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -147,9 +147,9 @@ pub fn preview_pairing_from_clipboard(
 
 /// Pairs the clipboard line, but only when it is still the one `shown`.
 #[tauri::command]
-pub fn import_pairing_from_clipboard(
-    window: WebviewWindow,
-    app: AppHandle,
+pub fn import_pairing_from_clipboard<R: Runtime>(
+    window: WebviewWindow<R>,
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     shown: PairingPreview,
 ) -> Result<MachineEntryView, String> {
@@ -170,7 +170,7 @@ pub fn import_pairing_from_clipboard(
 }
 
 #[tauri::command]
-pub fn rename_machine(window: WebviewWindow, state: State<'_, AppState>, key: String, name: String) -> Result<(), String> {
+pub fn rename_machine<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, key: String, name: String) -> Result<(), String> {
     if !allowed(&window, SETTINGS) {
         return Err("Not available from this window.".into());
     }
@@ -178,7 +178,7 @@ pub fn rename_machine(window: WebviewWindow, state: State<'_, AppState>, key: St
 }
 
 #[tauri::command]
-pub fn remove_machine(window: WebviewWindow, state: State<'_, AppState>, key: String) -> Result<(), String> {
+pub fn remove_machine<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, key: String) -> Result<(), String> {
     if !allowed(&window, SETTINGS) {
         return Err("Not available from this window.".into());
     }
@@ -186,7 +186,7 @@ pub fn remove_machine(window: WebviewWindow, state: State<'_, AppState>, key: St
 }
 
 #[tauri::command]
-pub fn retry_machine(window: WebviewWindow, state: State<'_, AppState>, key: String) {
+pub fn retry_machine<R: Runtime>(window: WebviewWindow<R>, state: State<'_, AppState>, key: String) {
     if !allowed(&window, SETTINGS) {
         return;
     }
@@ -242,6 +242,97 @@ mod tests {
     fn the_hud_may_call_no_inbox_command() {
         for labels in [PANEL, SETTINGS, PANEL_OR_SETTINGS] {
             assert!(!labels.contains(&crate::voice::hud::LABEL));
+        }
+    }
+
+    // The allow-lists above only say who may call. These send real IPC from a
+    // mock-runtime webview, so a handler that loses its `allowed` check fails.
+    mod window_scope {
+        use super::*;
+        use serde_json::{Value, json};
+        use tauri::ipc::{CallbackFn, InvokeBody};
+        use tauri::test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder, mock_context, noop_assets};
+        use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, webview::InvokeRequest};
+
+        const REFUSED: &str = "Not available from this window.";
+
+        struct Harness {
+            app: tauri::App<MockRuntime>,
+            _runtime: tokio::runtime::Runtime,
+        }
+
+        fn harness() -> Harness {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("acd-window-scope-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let inbox = acd_app_core::setup::open_inbox(
+                &dir.join("settings.json"),
+                std::sync::Arc::new(acd_client::settings::MemorySecrets::default()),
+                runtime.handle(),
+                acd_app_core::setup::OpenOptions { client_name: "test", client_version: "0", local_machine: false },
+            )
+            .unwrap();
+            let app = mock_builder()
+                .invoke_handler(tauri::generate_handler![
+                    pick_option,
+                    send_reply,
+                    remove_machine,
+                    import_pairing_from_clipboard,
+                ])
+                .build(mock_context(noop_assets()))
+                .unwrap();
+            app.manage(AppState { inbox, pairing: Default::default() });
+            Harness { app, _runtime: runtime }
+        }
+
+        fn call(h: &Harness, label: &str, cmd: &str, args: Value) -> Result<Value, Value> {
+            let window = h.app.get_webview_window(label).unwrap_or_else(|| {
+                WebviewWindowBuilder::new(&h.app, label, WebviewUrl::default()).build().unwrap()
+            });
+            get_ipc_response(
+                &window,
+                InvokeRequest {
+                    cmd: cmd.into(),
+                    callback: CallbackFn(0),
+                    error: CallbackFn(1),
+                    url: "tauri://localhost".parse().unwrap(),
+                    body: InvokeBody::Json(args),
+                    headers: Default::default(),
+                    invoke_key: INVOKE_KEY.to_string(),
+                },
+            )
+            .map(|body| body.deserialize().unwrap())
+        }
+
+        fn commands() -> [(&'static str, Value); 4] {
+            [
+                ("pick_option", json!({"cardKey": "c", "requestId": "r", "optionId": "o", "revision": 1})),
+                ("send_reply", json!({"cardKey": "c", "text": "hi"})),
+                ("remove_machine", json!({"key": "nope"})),
+                ("import_pairing_from_clipboard", json!({"shown": {"host": "h", "port": 1, "pin": "p"}})),
+            ]
+        }
+
+        #[test]
+        fn the_hud_window_is_refused_by_every_inbox_command() {
+            let h = harness();
+            for (cmd, args) in commands() {
+                let got = call(&h, crate::voice::hud::LABEL, cmd, args);
+                assert_eq!(got, Err(json!(REFUSED)), "{cmd} from the HUD");
+            }
+        }
+
+        #[test]
+        fn an_allowed_window_gets_past_the_window_check() {
+            let h = harness();
+            // Settings may remove a machine: it fails on the unknown key, not the window.
+            let got = call(&h, "settings", "remove_machine", json!({"key": "nope"}));
+            assert_ne!(got, Err(json!(REFUSED)), "settings reached the handler");
+            // The panel may not.
+            let got = call(&h, "panel", "remove_machine", json!({"key": "nope"}));
+            assert_eq!(got, Err(json!(REFUSED)));
         }
     }
 

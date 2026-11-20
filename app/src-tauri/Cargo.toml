@@ -52,4 +52,6 @@ objc2-user-notifications = { version = "=0.3.2", features = ["UNUserNotification
 objc2-app-kit = { version = "=0.3.2", features = ["NSApplication"] }
 
 [dev-dependencies]
+# `test` enables tauri::test (mock runtime) for the window-scope IPC tests.
+tauri = { version = "=2.12.1", features = ["tray-icon", "test"] }
 acd-voice = { path = "../../crates/acd-voice", features = ["testing"] }
