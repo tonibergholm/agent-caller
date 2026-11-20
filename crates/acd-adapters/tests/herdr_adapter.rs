@@ -185,6 +185,69 @@ async fn follow_up_to_a_pane_that_lost_its_agent_is_gone() {
 }
 
 #[tokio::test]
+async fn follow_up_never_answers_a_dialog_the_registry_has_not_seen() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    // The dialog opened after the last poll; the status still says idle.
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("claude-permission-bash.txt"));
+    let res = r.adapter.send(&a, "1").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentBusy))),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty(), "text answered the dialog");
+}
+
+#[tokio::test]
+async fn follow_up_needs_a_whole_screen_read() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("claude-idle-detection.txt"));
+    r.fake.set_truncated("w1:p1", "detection", true);
+    let res = r.adapter.send(&a, "hi").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::SourceUnavailable))),
+        "{res:?}"
+    );
+    r.fake.set_truncated("w1:p1", "detection", false);
+    r.fake.set_read_failing("w1:p1", "detection", true);
+    let res = r.adapter.send(&a, "hi").await;
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::SourceUnavailable))),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty());
+    r.fake.set_read_failing("w1:p1", "detection", false);
+    r.adapter.send(&a, "hi").await.unwrap();
+    assert_eq!(r.fake.prompts().len(), 1, "an idle screen is let through");
+}
+
+#[tokio::test]
+async fn follow_up_waits_for_the_agent_lock_then_rechecks_the_screen() {
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let a = agent(&r);
+    let guard = r.adapter.agent_locks().lock(&a.id).await;
+    let adapter = r.adapter.clone();
+    let task = tokio::spawn({
+        let a = a.clone();
+        async move { adapter.send(&a, "1").await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!task.is_finished(), "send shares the keys path's agent lock");
+    r.fake
+        .set_screen("w1:p1", "detection", &screen("claude-permission-bash.txt"));
+    drop(guard);
+    let res = task.await.unwrap();
+    assert!(
+        matches!(res, Err(DeliverError::NotDelivered(ErrorCode::AgentBusy))),
+        "{res:?}"
+    );
+    assert!(r.fake.prompts().is_empty());
+}
+
+#[tokio::test]
 async fn prompt_reply_lost_after_write_is_uncertain() {
     let r = rig(&[("w1:p1", "claude", "idle")]).await;
     r.fake.hang_next("agent.prompt");

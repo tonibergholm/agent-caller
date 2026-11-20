@@ -23,6 +23,7 @@ use self::client::CallError;
 use self::discovery::Discovery;
 use self::keys::{AgentLocks, Engine, Evidence, KeysTargets, KeysTiming};
 use self::reconciler::{Hint, PaneMap, Timing, pane_replaced};
+use self::screen::find_dialog;
 
 const SEND_DEADLINE: Duration = Duration::from_secs(10);
 const SCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -186,6 +187,19 @@ impl Adapter for HerdrAdapter {
         if live.as_ref().is_none_or(|i| pane_replaced(&pane, i)) {
             let _ = pane.hints.try_send(Hint::Pane(pane.pane_id.clone()));
             return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
+        }
+        // A dialog may have opened since the last poll: text starting with "1"
+        // would pick "Yes". A read that fails or is cut short proves nothing.
+        let read = pane
+            .herdr
+            .read_screen(&pane.pane_id, "detection", None, deadline)
+            .await
+            .map_err(|_| unavailable())?;
+        if read.truncated {
+            return Err(unavailable());
+        }
+        if find_dialog(&read.text).is_some() {
+            return Err(DeliverError::NotDelivered(ErrorCode::AgentBusy));
         }
         let result = match timeout_at(deadline, pane.herdr.prompt(&pane.pane_id, text)).await {
             Ok(Ok(())) => Ok(()),
