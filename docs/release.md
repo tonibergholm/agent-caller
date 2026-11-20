@@ -21,7 +21,10 @@ run. It creates no release.
 | `SHA256SUMS` | `checksums` job | SHA-256 of every archive and the dmg |
 
 The `checksums` job also uploads all of these files as one artifact,
-`dist-all`. The dry run and the publish job both use that artifact.
+`dist-all`. The dry run and the publish job both use that artifact. The same
+job attests the build provenance of the archives, the dmg and `SHA256SUMS`
+(`actions/attest-build-provenance`; the job alone has `id-token: write` and
+`attestations: write`). `release-linux.yml` does the same for its archives.
 
 Notes on the choices:
 
@@ -194,6 +197,17 @@ grep acd-0.9.0-aarch64-apple-darwin.tar.gz SHA256SUMS
 
 The two hashes must match. `scripts/install.sh` runs this check for you.
 
+`SHA256SUMS` comes from the same release as the archive, so it does not show
+who built it. The build attestation does. With the GitHub CLI installed and
+signed in (`gh auth login`):
+
+```sh
+gh attestation verify acd-0.9.0-aarch64-apple-darwin.tar.gz --repo tonibergholm/agent-caller
+```
+
+It fails when the file was not built by this repository's release workflow.
+Releases cut before the attestation step have none, and the check fails for them.
+
 ## Keychain and privacy permissions
 
 The app stores remote machine credentials in the login Keychain
@@ -222,6 +236,9 @@ Local builds work the same way. `just app-install` uses
 `~/.local/bin`. It needs `curl`, `tar`, and `sha256sum` or `shasum`. It
 never uses sudo. It checks the archive against `SHA256SUMS` before it
 extracts anything, and it stops without installing when the check fails.
+If `gh` is installed, it also runs `gh attestation verify` on the archive and
+stops when that fails (it needs `gh auth login`). Without `gh` it prints that
+the provenance was not checked.
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/tonibergholm/agent-caller/vX.Y.Z/scripts/install.sh

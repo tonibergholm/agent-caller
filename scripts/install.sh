@@ -9,7 +9,9 @@
 #
 # The default bin directory is $HOME/.local/bin. The script never uses sudo.
 # It checks the SHA-256 of the tarball against SHA256SUMS before it extracts
-# anything, and it installs nothing when the check fails.
+# anything, and it installs nothing when the check fails. When gh is installed
+# it also runs `gh attestation verify` (build provenance) and installs nothing
+# when that fails; without gh it says the provenance was not checked.
 set -eu
 
 REPO="tonibergholm/agent-caller"
@@ -135,6 +137,18 @@ if [ "$actual" != "$expected" ]; then
 	die "checksum mismatch for $archive (expected $expected, got $actual); nothing installed"
 fi
 echo "Checksum OK: $archive"
+
+# SHA256SUMS comes from the same release as the tarball, so it proves nothing
+# about who built it. The GitHub build attestation does. ACD_INSTALL_GH names
+# the gh command (the tests use it).
+gh_cmd=${ACD_INSTALL_GH:-gh}
+if command -v "$gh_cmd" >/dev/null 2>&1; then
+	"$gh_cmd" attestation verify "$tarball" --repo "$REPO" >/dev/null ||
+		die "provenance check failed for $archive (is gh signed in? run gh auth login); nothing installed"
+	echo "Provenance OK: $archive"
+else
+	echo "Provenance not checked: gh is not installed. To check it, install gh, sign in, and run: gh attestation verify $archive --repo $REPO"
+fi
 
 # Refuse absolute paths and parent-directory entries before extracting.
 if tar -tzf "$tarball" | awk '/^\// || /(^|\/)\.\.(\/|$)/ { bad = 1 } END { exit bad }'; then

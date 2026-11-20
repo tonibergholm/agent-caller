@@ -11,6 +11,9 @@ INSTALL=${ACD_INSTALL_SCRIPT:-$ROOT/scripts/install.sh}
 TARGET=x86_64-unknown-linux-gnu
 ARCHIVE=acd-0.1.0-$TARGET.tar.gz
 export ACD_INSTALL_TARGET=$TARGET
+# The provenance check runs gh. Point it at a missing command unless a test
+# installs a stub, so a developer's real gh never reaches the network here.
+export ACD_INSTALL_GH=/nonexistent/gh
 
 # A release directory holding one valid archive and its SHA256SUMS.
 prepare_release() {
@@ -31,6 +34,43 @@ test_installs_verified_archive() {
 	assert_file "$WORK/bin/acd"
 	[ -x "$WORK/bin/acd" ] || fail "installed acd is not executable"
 	assert_contains "$R_OUT" "Checksum OK: $ARCHIVE"
+}
+
+# A stub gh that records its arguments and exits with the given status.
+make_stub_gh() {
+	mkdir -p "$WORK/stub"
+	printf '#!/bin/sh\necho "$@" >"%s/gh-args"\nexit %s\n' "$WORK" "$1" >"$WORK/stub/gh"
+	chmod +x "$WORK/stub/gh"
+	ACD_INSTALL_GH="$WORK/stub/gh"
+	export ACD_INSTALL_GH
+}
+
+test_continues_when_the_attestation_verifies() {
+	prepare_release
+	make_stub_gh 0
+	install_from
+	assert_eq "$R_RC" 0 "exit status"
+	assert_file "$WORK/bin/acd"
+	assert_contains "$(cat "$WORK/gh-args")" "attestation verify $WORK/rel/$ARCHIVE --repo tonibergholm/agent-caller"
+	assert_contains "$R_OUT" "Provenance OK"
+}
+
+test_refuses_when_the_attestation_fails() {
+	prepare_release
+	make_stub_gh 1
+	install_from
+	assert_eq "$R_RC" 1 "exit status"
+	assert_contains "$R_ERR" "provenance check failed"
+	assert_no_path "$WORK/bin"
+}
+
+test_says_provenance_was_not_checked_without_gh() {
+	prepare_release
+	install_from
+	assert_eq "$R_RC" 0 "exit status"
+	assert_file "$WORK/bin/acd"
+	assert_contains "$R_OUT" "Provenance not checked"
+	assert_contains "$R_OUT" "gh attestation verify $ARCHIVE --repo tonibergholm/agent-caller"
 }
 
 test_refuses_checksum_mismatch() {
