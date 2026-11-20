@@ -788,3 +788,27 @@ async fn loopback_server_end_not_proven_ours_gets_no_token() {
     s.read_to_end(&mut buf).await.unwrap();
     assert!(buf.is_empty(), "bytes were written to the squatter");
 }
+
+// Same, for the host's own non-loopback address (Tailscale or LAN): another
+// local user can bind it too while T3 is down.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn own_address_server_end_not_proven_ours_gets_no_token() {
+    use tokio::io::AsyncReadExt;
+    let Some(ip) = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| s.connect("192.0.2.1:9").and(s.local_addr()))
+        .ok()
+        .map(|a| a.ip())
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    else {
+        return;
+    };
+    let l = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
+    let url = format!("ws://{}/ws?orchestrationProtocol=2", l.local_addr().unwrap());
+    let err = connect(&url, FAKE_TOKEN, &fast()).await.err().expect("refused");
+    assert!(matches!(err, ConnectError::NotOurs), "{err}");
+    let (mut s, _) = l.accept().await.unwrap();
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await.unwrap();
+    assert!(buf.is_empty(), "bytes were written to the squatter");
+}

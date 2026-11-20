@@ -401,9 +401,10 @@ pub async fn connect(
         Ok(Err(e)) => return Err(unreachable(&e)),
         Ok(Ok(tcp)) => tcp,
     };
-    // Nothing has been written yet. On loopback, prove this connection's
-    // server end is ours before the upgrade request carries the token.
-    if owner::is_loopback(&tcp) && !owner::server_is_ours(&tcp).await {
+    // Nothing has been written yet. When the server is on this host (loopback,
+    // or our own Tailscale or LAN address), prove this connection's server
+    // end is ours before the upgrade request carries the token.
+    if owner::is_local(&tcp) && !owner::server_is_ours(&tcp).await {
         tracing::warn!("T3 loopback port is not held by this user; token not sent");
         return Err(ConnectError::NotOurs);
     }

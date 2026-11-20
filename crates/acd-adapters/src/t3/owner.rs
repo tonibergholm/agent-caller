@@ -12,9 +12,19 @@ use std::time::Duration;
 
 use tokio::net::TcpStream;
 
-/// True when `tcp` is a connection to a loopback address.
-pub fn is_loopback(tcp: &TcpStream) -> bool {
-    tcp.peer_addr().is_ok_and(|a| a.ip().to_canonical().is_loopback())
+/// True when `tcp` connects to this host: a loopback peer, or a peer equal to
+/// our own source address (a connection to one of our own addresses, such as
+/// the Tailscale or LAN one, uses it as its source). Needs no interface list.
+pub fn is_local(tcp: &TcpStream) -> bool {
+    match (tcp.peer_addr(), tcp.local_addr()) {
+        (Ok(peer), Ok(local)) => peer_is_local(peer.ip(), local.ip()),
+        _ => false,
+    }
+}
+
+fn peer_is_local(peer: IpAddr, local: IpAddr) -> bool {
+    let peer = peer.to_canonical();
+    peer.is_loopback() || peer == local.to_canonical()
 }
 
 /// True only when the process holding the server end of `tcp` runs as this
@@ -188,8 +198,41 @@ mod tests {
         let accept = tokio::spawn(async move { l.accept().await.unwrap() });
         let tcp = TcpStream::connect(addr).await.unwrap();
         let _server_end = accept.await.unwrap();
-        assert!(is_loopback(&tcp));
+        assert!(is_local(&tcp));
         assert!(server_is_ours(&tcp).await);
+    }
+
+    /// This host's outbound address, if it has a non-loopback one (a UDP
+    /// connect sends nothing).
+    fn own_non_loopback_ip() -> Option<IpAddr> {
+        let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        s.connect("192.0.2.1:9").ok()?;
+        Some(s.local_addr().ok()?.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    }
+
+    #[test]
+    fn local_means_loopback_or_our_own_source_address() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(peer_is_local(ip("127.0.0.1"), ip("127.0.0.1")));
+        assert!(peer_is_local(ip("::1"), ip("::1")));
+        assert!(peer_is_local(ip("100.64.1.2"), ip("100.64.1.2")));
+        assert!(peer_is_local(ip("::ffff:192.168.1.5"), ip("192.168.1.5")));
+        assert!(!peer_is_local(ip("100.64.1.2"), ip("100.64.1.3")), "a remote Tailscale peer");
+        assert!(!peer_is_local(ip("192.168.1.9"), ip("192.168.1.5")));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn a_listener_on_this_hosts_own_non_loopback_address_is_local_and_owner_checked() {
+        let Some(ip) = own_non_loopback_ip() else { return };
+        let l = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let accept = tokio::spawn(async move { l.accept().await.unwrap() });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let _server_end = accept.await.unwrap();
+        assert!(is_local(&tcp), "{addr}");
+        // The lookups find a non-loopback pair too.
+        assert!(server_is_ours(&tcp).await, "{addr}");
     }
 
 }

@@ -69,8 +69,8 @@ with "no herdr socket found" when none exists; `degraded` with
 
    Use the port your T3 server listens on. The URL is scheme, host and port.
    The host must be `localhost`, a loopback IP or a Tailscale IP, because the
-   token travels over plain `ws://`. MagicDNS names are refused. On a
-   loopback host, acd sends the token only after it proves the T3 process
+   token travels over plain `ws://`. MagicDNS names are refused. When
+   the host is loopback or this machine's own Tailscale or LAN address, acd sends the token only after it proves the T3 process
    holding that connection runs as your user (`/proc/net/tcp` on Linux,
    `lsof` on macOS); run T3 as the same user, or use its Tailscale address.
    `100.64.0.0/10` is also carrier-grade NAT space, so a Tailscale address
