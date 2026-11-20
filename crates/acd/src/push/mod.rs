@@ -129,6 +129,10 @@ pub struct Push {
     handled: watch::Sender<u64>,
     /// Bumped by every revocation. A send in flight is cancelled when it moves.
     revoked: watch::Sender<u64>,
+    /// The lowest token generation that may register: the one a rotation
+    /// moved to. Read and written only under the store lock, so a check and
+    /// the write it guards cannot be split by a rotation.
+    min_generation: Arc<AtomicU64>,
     /// Test hook: `register` waits here twice once it is accepted.
     #[cfg(test)]
     accepted: Mutex<Option<Arc<tokio::sync::Barrier>>>,
@@ -145,6 +149,7 @@ impl Push {
             wake: Notify::new(),
             handled: watch::channel(0).0,
             revoked: watch::channel(0).0,
+            min_generation: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             accepted: Mutex::new(None),
         })
@@ -179,9 +184,18 @@ impl Push {
 
     /// Client token rotation: deletes every registration, persisted and in
     /// memory (spec 4.8). Devices with the new token register again.
-    pub async fn revoke_all(&self, new_token: &str) {
+    /// `generation` is the token generation the rotation moved to: a session
+    /// of any older one can no longer register.
+    pub async fn revoke_all(&self, new_token: &str, generation: u64) {
         let client = store::client_fingerprint(new_token);
-        if self.blocking(move |s| s.rotate_client(&client)).await != Some(Ok(())) {
+        let min = self.min_generation.clone();
+        let rotated = self
+            .blocking(move |s| {
+                min.fetch_max(generation, Ordering::SeqCst);
+                s.rotate_client(&client)
+            })
+            .await;
+        if rotated != Some(Ok(())) {
             tracing::error!("push registrations revoked in memory; push.json could not be rewritten");
         } else {
             tracing::info!("push registrations revoked");
@@ -301,6 +315,7 @@ impl PushControl for Push {
     async fn register(
         &self,
         client_id: &str,
+        generation: u64,
         reg: PushRegistration,
     ) -> Result<(), PushFailure> {
         let bad = |message| Err(PushFailure { code: ErrorCode::BadRequest, message });
@@ -317,11 +332,12 @@ impl PushControl for Push {
             reg.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         );
         let id = client_id.to_string();
-        // The token this request was accepted under. Rotation clears the
-        // store and sets the new fingerprint, so a write queued before it but
-        // run after it is refused, under the store lock, instead of
-        // persisting the old holder's handle under the new token.
-        let accepted_under = self.store().client().to_owned();
+        // The session's token generation, compared under the store lock below.
+        // A write queued before a rotation can run after it (a blocking task
+        // outlives the dropped future), and a command can begin after it
+        // carrying the old generation: both are refused, so a revoked
+        // session's handle is never persisted.
+        let min = self.min_generation.clone();
         #[cfg(test)]
         {
             let hook = self.accepted.lock().unwrap().clone();
@@ -331,7 +347,13 @@ impl PushControl for Push {
             }
         }
         let stored = self
-            .blocking(move |s| if s.client() == accepted_under { s.register(&id, device) } else { Err(StoreError::Revoked) })
+            .blocking(move |s| {
+                if generation < min.load(Ordering::SeqCst) {
+                    Err(StoreError::Revoked)
+                } else {
+                    s.register(&id, device)
+                }
+            })
             .await;
         match stored {
             Some(Ok(())) => {

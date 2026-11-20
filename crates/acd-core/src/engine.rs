@@ -225,14 +225,23 @@ impl Core {
         (initial, rx)
     }
 
-    /// `handle_from` for a command that came in on the local socket.
+    /// `handle_from` for a command that came in on the local socket, from a
+    /// session of token generation 0.
     pub async fn handle(&self, client_id: &str, msg: ClientMessage) -> CommandResult {
-        self.handle_from(client_id, Origin::Local, msg).await
+        self.handle_from(client_id, Origin::Local, 0, msg).await
     }
 
     /// Runs one command. `origin` is the connection's source, which the
     /// idempotency table charges alongside `client_id` (the peer chooses that).
-    pub async fn handle_from(&self, client_id: &str, origin: Origin, msg: ClientMessage) -> CommandResult {
+    /// `generation` is the token generation the session authenticated under;
+    /// `push.register` carries it to the store, which refuses a revoked one.
+    pub async fn handle_from(
+        &self,
+        client_id: &str,
+        origin: Origin,
+        generation: u64,
+        msg: ClientMessage,
+    ) -> CommandResult {
         if let ClientMessage::Hello { .. } | ClientMessage::Ping { .. } = msg {
             let id = msg.command_id().unwrap_or("");
             return CommandResult::err(id, ErrorCode::BadRequest, "not a command");
@@ -261,7 +270,7 @@ impl Core {
                 );
             }
             let phase = Mutex::new(Phase::Start);
-            return self.execute(client_id, &id, msg, &phase).await.0;
+            return self.execute(client_id, generation, &id, msg, &phase).await.0;
         }
         let begin = self
             .inner
@@ -306,7 +315,7 @@ impl Core {
             phase: Mutex::new(Phase::Start),
             armed: true,
         };
-        let (result, delivery) = self.execute(client_id, &id, msg, &guard.phase).await;
+        let (result, delivery) = self.execute(client_id, generation, &id, msg, &guard.phase).await;
         guard.armed = false;
         // Only a command that reached the agent is cached (exactly-once). Any
         // refusal changed no state and is cheap to recompute, so it releases
@@ -325,6 +334,7 @@ impl Core {
     async fn execute(
         &self,
         client_id: &str,
+        generation: u64,
         id: &str,
         msg: ClientMessage,
         phase: &Mutex<Phase>,
@@ -514,7 +524,7 @@ impl Core {
                         platform,
                         expires_at,
                     };
-                    match push.register(client_id, reg).await {
+                    match push.register(client_id, generation, reg).await {
                         Ok(()) => CommandResult::ok(id),
                         Err(f) => CommandResult::err(id, f.code, f.message),
                     }

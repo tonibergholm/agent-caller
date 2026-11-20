@@ -599,7 +599,7 @@ async fn run_command<P: Send>(
         // ready in the same instant as a rotation is dropped, not completed.
         biased;
         () = revoked(&mut gen_rx, generation) => {}
-        result = core.handle_from(&client, origin, command) => {
+        result = core.handle_from(&client, origin, generation, command) => {
             drop(permits);
             let _ = reply(&out, &ServerMessage::Result(result)).await;
         }

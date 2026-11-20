@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acd_core::testing::{agent_obs, permission_obs, test_machine};
-use acd_core::{Core, Observation};
+use acd_core::{Core, Observation, Origin};
 use acd_protocol::*;
 use acd_relay::ManualClock;
 use acd_relay::client::{MAX_RESPONSE, Status, WakeState};
@@ -336,6 +336,11 @@ impl Rig {
 
     pub async fn register(&self, client: &str, handle: &str) -> CommandResult {
         self.core.handle(client, self.register_msg(handle)).await
+    }
+
+    /// Like [`Rig::register`], from a session of token generation `generation`.
+    pub async fn register_at(&self, client: &str, generation: u64, handle: &str) -> CommandResult {
+        self.core.handle_from(client, Origin::Local, generation, self.register_msg(handle)).await
     }
 
     /// Registers `client` and checks it was accepted.
@@ -751,7 +756,7 @@ async fn rotating_the_client_token_revokes_every_registration_also_after_a_resta
     let rig = Rig::new(NO_WINDOW).await;
     rig.enroll("phone").await;
     rig.enroll("tablet").await;
-    rig.push.revoke_all(TOKEN).await;
+    rig.push.revoke_all(TOKEN, 1).await;
     assert!(!rig.status("phone").await.registered);
     rig.open(1);
     rig.push.handled(1).await;
@@ -764,8 +769,8 @@ async fn rotating_the_client_token_revokes_every_registration_also_after_a_resta
     assert_eq!(relay.hits(), 0);
 }
 
-/// A registration accepted under the old token, whose write runs after the
-/// rotation, must not be persisted under the new token's fingerprint.
+/// A registration accepted under the old token (generation 0), whose write
+/// runs after the rotation (generation 1), must not be persisted.
 #[tokio::test]
 async fn a_registration_queued_before_a_rotation_is_not_stored_after_it() {
     const ROTATED: &str = "rotated-client-token";
@@ -775,10 +780,10 @@ async fn a_registration_queued_before_a_rotation_is_not_stored_after_it() {
     let msg = rig.register_msg(&handle_for("phone"));
     let pending = tokio::spawn({
         let core = rig.core.clone();
-        async move { core.handle("phone", msg).await }
+        async move { core.handle_from("phone", Origin::Local, 0, msg).await }
     });
-    barrier.wait().await; // accepted under the old token, nothing written yet
-    rig.push.revoke_all(ROTATED).await;
+    barrier.wait().await; // accepted under generation 0, nothing written yet
+    rig.push.revoke_all(ROTATED, 1).await;
     barrier.wait().await; // the queued write now runs
     let result = pending.await.unwrap();
     assert_eq!(result.error_code(), Some(ErrorCode::Unauthorized), "{result:?}");
@@ -786,6 +791,34 @@ async fn a_registration_queued_before_a_rotation_is_not_stored_after_it() {
     // After a restart under the new token the file lists nothing.
     let again = Store::load(rig.dir.path(), &store::client_fingerprint(ROTATED));
     assert!(again.get("phone").is_none(), "the old holder's registration survived the rotation");
+}
+
+/// The command itself starts after the rotation but carries the old
+/// generation: the old fingerprint-at-entry check read the new fingerprint
+/// and accepted it.
+#[tokio::test]
+async fn a_registration_that_starts_after_a_rotation_with_the_old_generation_is_refused() {
+    const ROTATED: &str = "rotated-client-token";
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.push.revoke_all(ROTATED, 1).await;
+    let result = rig.register_at("phone", 0, &handle_for("phone")).await;
+    assert_eq!(result.error_code(), Some(ErrorCode::Unauthorized), "{result:?}");
+    assert!(!rig.status("phone").await.registered);
+    let again = Store::load(rig.dir.path(), &store::client_fingerprint(ROTATED));
+    assert!(again.get("phone").is_none(), "a revoked session's handle was persisted");
+}
+
+/// A session authenticated with the new token is never refused.
+#[tokio::test]
+async fn a_new_generation_session_registers_after_a_rotation() {
+    const ROTATED: &str = "rotated-client-token";
+    let rig = Rig::new(NO_WINDOW).await;
+    rig.push.revoke_all(ROTATED, 1).await;
+    for generation in [1, 2] {
+        let result = rig.register_at("phone", generation, &handle_for("phone")).await;
+        assert!(result.ok, "generation {generation}: {:?}", result.error_code());
+    }
+    assert!(rig.status("phone").await.registered);
 }
 
 #[tokio::test]
@@ -797,7 +830,7 @@ async fn revoking_cancels_a_wake_that_is_already_in_flight() {
     let _gate = rig.relay.hold(); // never released: only cancellation ends the send
     rig.open(1);
     rig.relay.wait_in_flight(1).await;
-    rig.push.revoke_all(TOKEN).await;
+    rig.push.revoke_all(TOKEN, 1).await;
     rig.push.handled(1).await;
     assert!(!rig.status("phone").await.registered);
 }
@@ -868,8 +901,9 @@ fn an_empty_fingerprint_never_matches() {
 async fn a_new_registration_after_revocation_wakes_again() {
     let rig = Rig::new(NO_WINDOW).await;
     rig.enroll("phone").await;
-    rig.push.revoke_all(TOKEN).await;
-    rig.enroll("phone").await;
+    rig.push.revoke_all(TOKEN, 1).await;
+    let r = rig.register_at("phone", 1, &handle_for("phone")).await;
+    assert!(r.ok, "{:?}", r.error_code());
     rig.open(1);
     rig.relay.wait_hits(1).await;
 }

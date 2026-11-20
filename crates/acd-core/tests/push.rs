@@ -20,7 +20,7 @@ impl PushControl for Spy {
     fn request_opened(&self) {
         self.opened.fetch_add(1, Ordering::SeqCst);
     }
-    async fn register(&self, client_id: &str, reg: PushRegistration) -> Result<(), PushFailure> {
+    async fn register(&self, client_id: &str, _generation: u64, reg: PushRegistration) -> Result<(), PushFailure> {
         self.calls.lock().unwrap().push(format!("register {client_id} {}", reg.relay));
         if reg.relay == "https://other.example" {
             return Err(PushFailure { code: ErrorCode::BadRequest, message: "relay mismatch" });

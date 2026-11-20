@@ -281,11 +281,6 @@ impl Store {
         self.devices.iter()
     }
 
-    /// Fingerprint of the client token the registrations belong to.
-    pub fn client(&self) -> &str {
-        &self.client
-    }
-
     /// Stores (or replaces) a registration with a fresh wake state.
     pub fn register(&mut self, client_id: &str, device: Device) -> Result<(), StoreError> {
         if !client_id_ok(client_id) {
