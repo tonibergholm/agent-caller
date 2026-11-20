@@ -61,10 +61,14 @@ again with the new token.
 A wake already on its way when the token rotates is cancelled. If the daemon
 cannot rewrite or remove `push.json` at that moment (for example the state
 directory is not writable), the registrations are gone from memory at once and
-the daemon retries every 30 seconds, logging when it succeeds. Known limit: a
-restart before that retry succeeds loads the old file again, and the pending
-retry is lost, so fix the directory permissions and rotate again, or run `acd token rotate client` with the daemon stopped,
-which removes the file.
+the daemon retries every 30 seconds, logging when it succeeds. `push.json`
+records a SHA-256 fingerprint of the client token its registrations belong to
+(never the token). A restart before the retry succeeds sees the old
+fingerprint, drops the registrations and retries the rewrite, so a revoked
+device does not come back. A `push.json` from before this field has no
+fingerprint and is treated the same way: after upgrading, each device
+registers once more. Registering is the safe default here, because a wake sent
+to a revoked handle is the failure this prevents.
 
 ## Not here
 

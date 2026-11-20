@@ -174,8 +174,9 @@ impl Push {
 
     /// Client token rotation: deletes every registration, persisted and in
     /// memory (spec 4.8). Devices with the new token register again.
-    pub async fn revoke_all(&self) {
-        if self.blocking(|s| s.clear()).await != Some(Ok(())) {
+    pub async fn revoke_all(&self, new_token: &str) {
+        let client = store::client_fingerprint(new_token);
+        if self.blocking(move |s| s.rotate_client(&client)).await != Some(Ok(())) {
             tracing::error!("push registrations revoked in memory; push.json could not be rewritten");
         } else {
             tracing::info!("push registrations revoked");
@@ -367,7 +368,7 @@ pub fn enable(dir: &Path, cfg: &crate::config::Config, core: &acd_core::Core) ->
             None
         }
         Resolved::On { relay, sender } => {
-            let store = Store::load(dir);
+            let store = Store::load(dir, &client_of(dir));
             if let Some(why) = store.degraded() {
                 tracing::warn!(reason = %why, "push is degraded: starting with no registrations; push.json is left untouched and registering fails until it is repaired or removed");
             }
@@ -392,7 +393,7 @@ pub fn report(dir: &Path, cfg: &crate::config::Config) -> String {
         Resolved::Off(None) => "push: off".into(),
         Resolved::Off(Some(why)) => format!("push: off ({why})"),
         Resolved::On { .. } => {
-            let store = Store::load(dir);
+            let store = Store::load(dir, &client_of(dir));
             match store.degraded() {
                 Some(why) => format!("push: degraded ({why})"),
                 None => format!("push: on, {} device(s)", store.len()),
@@ -405,7 +406,7 @@ pub fn report(dir: &Path, cfg: &crate::config::Config) -> String {
 /// Handles are never printed.
 pub fn list(dir: &Path, cfg: &crate::config::Config, out: &mut impl std::io::Write) -> std::io::Result<()> {
     writeln!(out, "{}", report(dir, cfg))?;
-    let store = Store::load(dir);
+    let store = Store::load(dir, &client_of(dir));
     for (id, e) in store.iter() {
         let last = e
             .device
@@ -421,6 +422,14 @@ pub fn list(dir: &Path, cfg: &crate::config::Config, out: &mut impl std::io::Wri
         )?;
     }
     Ok(())
+}
+
+/// Fingerprint of the client token on disk. An unreadable token gives one
+/// nothing matches, so no registration counts as current (fail closed).
+fn client_of(dir: &Path) -> String {
+    crate::secrets::read_secret(&dir.join("client.token"))
+        .and_then(|t| crate::secrets::parse_token(&t))
+        .map_or_else(|_| String::new(), |t| store::client_fingerprint(&t))
 }
 
 /// Deletes `push.json` (the registrations) without a running daemon.

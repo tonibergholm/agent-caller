@@ -734,7 +734,7 @@ pub async fn run(dir: &Path) -> Result<()> {
                     rot_auth.rotate(t.clone());
                     // Spec 4.8: the old holders of the token lose their wakes too.
                     if let Some(p) = &rot_push {
-                        p.revoke_all().await;
+                        p.revoke_all(&t).await;
                     }
                     current = t;
                     invalid_logged = false;

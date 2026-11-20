@@ -11,6 +11,13 @@
 //! rewritten the skipped entries' raw text is kept in `push.json.quarantine`
 //! (0600, never logged), so a rewrite never destroys them silently.
 //!
+//! The file also records which client token the registrations belong to, as a
+//! non-secret fingerprint. A rotation revokes them (spec 4.8); if the file
+//! could not be rewritten then, a restart sees another fingerprint and drops
+//! them. A file with no fingerprint (written before this field) counts as
+//! another token's: after an upgrade devices register once more, which is
+//! the cheap side of failing closed.
+//!
 //! Nothing here logs or prints a handle, and no error carries file content
 //! (serde errors can quote values, so they are never shown).
 
@@ -30,6 +37,16 @@ pub const MAX_DEVICES: usize = 8;
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 const VERSION: u32 = 1;
 const MAX_ID_BYTES: usize = 128;
+
+/// Stands in for the client token in `push.json`: a SHA-256 of the token
+/// under a fixed label, so the file never holds the token itself.
+pub fn client_fingerprint(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::new_with_prefix(b"acd push client token v1\0")
+        .chain_update(token.as_bytes())
+        .finalize();
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// Client id rule, shared by registration and `read_file`: what is stored
 /// must always be loadable.
@@ -153,6 +170,7 @@ impl Device {
 #[serde(deny_unknown_fields)]
 struct FileRepr {
     version: u32,
+    client: String,
     devices: BTreeMap<String, Device>,
 }
 
@@ -169,6 +187,8 @@ pub struct Store {
     path: PathBuf,
     devices: BTreeMap<String, Entry>,
     next_generation: u64,
+    /// Fingerprint of the client token these registrations belong to.
+    client: String,
     degraded: Option<String>,
     /// The file as a whole was unusable: nothing is ever written over it.
     locked: bool,
@@ -181,6 +201,7 @@ pub struct Store {
 }
 
 struct Loaded {
+    client: Option<String>,
     devices: BTreeMap<String, Device>,
     skipped: Vec<(String, serde_json::Value)>,
 }
@@ -196,12 +217,16 @@ pub enum StoreError {
 
 impl Store {
     /// Never fails: an unusable file gives an empty store with a reason.
-    pub fn load(dir: &Path) -> Store {
+    /// `client` is the fingerprint of the current client token; registrations
+    /// written under another one are dropped, and their file is rewritten
+    /// by `retry_clear`.
+    pub fn load(dir: &Path, client: &str) -> Store {
         let path = dir.join(FILE);
         let mut store = Store {
             path,
             devices: BTreeMap::new(),
             next_generation: 1,
+            client: client.to_string(),
             degraded: None,
             locked: false,
             skipped: Vec::new(),
@@ -210,8 +235,13 @@ impl Store {
         };
         match read_file(&store.path) {
             Ok(None) => {}
-            Ok(Some(Loaded { devices, skipped })) => {
+            Ok(Some(Loaded { client: stored, devices, skipped })) => {
                 store.skipped = skipped;
+                if stored.as_deref() != Some(client) && !devices.is_empty() {
+                    tracing::warn!(devices = devices.len(), "push.json belongs to another client token; registrations dropped");
+                    store.clear_pending = true;
+                    return store;
+                }
                 for (id, device) in devices {
                     let generation = store.next_generation;
                     store.next_generation += 1;
@@ -274,11 +304,19 @@ impl Store {
         self.commit(next)
     }
 
+    /// Client token rotation: revokes every registration and makes `client`
+    /// (the new token's fingerprint) the generation the file is written under.
+    pub fn rotate_client(&mut self, client: &str) -> Result<(), StoreError> {
+        self.client = client.to_string();
+        self.clear()
+    }
+
     /// Revokes every registration (client token rotation, spec 4.8). Fails
     /// closed: the registrations are gone from memory even when the file
     /// cannot be rewritten, so no further wake uses them. If the rewrite
     /// fails the file is removed instead; if that fails too the revocation
-    /// stays pending (`retry_clear`); a restart before that succeeds loads the file again (documented in docs/push.md).
+    /// stays pending (`retry_clear`); a restart before that succeeds drops the
+    /// registrations again, because the file names the old client token.
     pub fn clear(&mut self) -> Result<(), StoreError> {
         if self.devices.is_empty() && !self.clear_pending {
             return Ok(());
@@ -368,6 +406,7 @@ impl Store {
         self.quarantine()?;
         let repr = FileRepr {
             version: VERSION,
+            client: self.client.clone(),
             devices: devices.iter().map(|(k, v)| (k.clone(), v.device.clone())).collect(),
         };
         let bytes = serde_json::to_vec_pretty(&repr).map_err(|_| StoreError::Write)?;
@@ -393,6 +432,10 @@ fn read_file(path: &Path) -> Result<Option<Loaded>, &'static str> {
     };
     let version = top.remove("version");
     let entries = top.remove("devices");
+    let client = match top.remove("client") {
+        Some(serde_json::Value::String(c)) => Some(c),
+        _ => None,
+    };
     if !top.is_empty() {
         return Err("push.json is not valid");
     }
@@ -415,5 +458,5 @@ fn read_file(path: &Path) -> Result<Option<Loaded>, &'static str> {
     if devices.len() > MAX_DEVICES {
         return Err("push.json lists too many devices");
     }
-    Ok(Some(Loaded { devices, skipped }))
+    Ok(Some(Loaded { client, devices, skipped }))
 }
