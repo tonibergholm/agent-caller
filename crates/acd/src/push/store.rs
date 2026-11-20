@@ -285,6 +285,7 @@ impl Store {
     }
 
     /// Stores (or replaces) a registration with a fresh wake state.
+    #[cfg(test)]
     pub fn register(&mut self, client_id: &str, device: Device) -> Result<(), StoreError> {
         self.register_at(client_id, device, 0)
     }
@@ -317,6 +318,7 @@ impl Store {
 
     /// Client token rotation: revokes every registration and makes `client`
     /// (the new token's fingerprint) the generation the file is written under.
+    #[cfg(test)]
     pub fn rotate_client(&mut self, client: &str) -> Result<(), StoreError> {
         self.rotate_client_from(client, u64::MAX)
     }
