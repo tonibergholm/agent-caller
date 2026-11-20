@@ -164,14 +164,19 @@ elif ! "$gh_cmd" auth status >/dev/null 2>&1; then
 	echo "Provenance not checked: gh is not signed in. To check it, run gh auth login, then: gh attestation verify $archive $verify_flags"
 else
 	# shellcheck disable=SC2086 # verify_flags holds no spaces inside a value
-	verified=$("$gh_cmd" attestation verify "$tarball" $verify_flags --format json 2>/dev/null) ||
-		die "provenance check failed for $archive; nothing installed"
 	# gh 2.51.0 to 2.101.0 match --signer-workflow as a prefix
-	# (GHSA-wjmr-j3rp-mh2g). Require a verified attestation whose signer is
-	# exactly release.yml at this tag, whatever the gh version.
-	want="\"buildSignerURI\":\"https://github.com/$signer@refs/tags/v$version\""
-	printf '%s' "$verified" | tr -d ' \n\r\t' | grep -Fq "$want" ||
-		die "provenance check failed for $archive: not signed by release.yml at v$version; nothing installed"
+	# (GHSA-wjmr-j3rp-mh2g). Count verified attestations whose certificate
+	# signer is exactly release.yml at this tag, read by path with gh's own
+	# jq, so no other field of an attestation can stand in for it. The
+	# version holds only [0-9A-Za-z.+-] (checked above), so it is safe inside
+	# the jq string.
+	want="https://github.com/$signer@refs/tags/v$version"
+	exact=$("$gh_cmd" attestation verify "$tarball" $verify_flags --format json \
+		--jq "[.[].verificationResult.signature.certificate.buildSignerURI | select(. == \"$want\")] | length" 2>/dev/null) ||
+		die "provenance check failed for $archive; nothing installed"
+	case "$exact" in
+	'' | *[!0-9]* | 0) die "provenance check failed for $archive: not signed by release.yml at v$version; nothing installed" ;;
+	esac
 	echo "Provenance OK: $archive"
 fi
 

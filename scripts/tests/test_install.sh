@@ -37,12 +37,23 @@ test_installs_verified_archive() {
 }
 
 # A stub gh: `auth status` exits with $2 (default 0); any other call records
-# its arguments, prints an attestation result signed by workflow $3 (default
-# release.yml at v0.1.0, the release the tests install) and exits with $1.
+# its arguments and exits with $1. On success it prints one attestation
+# result whose certificate is signed by workflow URI $3 (default release.yml
+# at v0.1.0, the release the tests install) and whose predicate holds the
+# JSON members $4. A --jq expression is applied with the real jq, as gh
+# would apply it.
 make_stub_gh() {
 	mkdir -p "$WORK/stub"
 	signer=${3:-https://github.com/tonibergholm/agent-caller/.github/workflows/release.yml@refs/tags/v0.1.0}
-	printf '#!/bin/sh\n[ "$1" = auth ] && exit %s\necho "$@" >"%s/gh-args"\necho '"'"'[{"verificationResult":{"signature":{"certificate":{"buildSignerURI": "%s"}}}}]'"'"'\nexit %s\n' "${2:-0}" "$WORK" "$signer" "$1" >"$WORK/stub/gh"
+	printf '[{"verificationResult":{"statement":{"predicate":{%s}},"signature":{"certificate":{"buildSignerURI":"%s"}}}}]\n' "${4:-}" "$signer" >"$WORK/stub/attestation.json"
+	cat >"$WORK/stub/gh" <<STUB
+#!/bin/sh
+[ "\$1" = auth ] && exit ${2:-0}
+echo "\$@" >"$WORK/gh-args"
+[ "${1}" = 0 ] || exit ${1}
+expr=""; while [ \$# -gt 0 ]; do [ "\$1" = --jq ] && expr="\$2"; shift; done
+if [ -n "\$expr" ]; then jq -r "\$expr" "$WORK/stub/attestation.json"; else cat "$WORK/stub/attestation.json"; fi
+STUB
 	chmod +x "$WORK/stub/gh"
 	ACD_INSTALL_GH="$WORK/stub/gh"
 	export ACD_INSTALL_GH
@@ -117,6 +128,18 @@ test_refuses_an_attestation_from_a_workflow_that_only_shares_the_prefix() {
 	prepare_release
 	# What gh up to 2.101.0 accepts for --signer-workflow .../release.yml.
 	make_stub_gh 0 0 https://github.com/tonibergholm/agent-caller/.github/workflows/release.yml.extra.yml@refs/tags/v0.1.0
+	install_from
+	assert_eq "$R_RC" 1 "exit status"
+	assert_contains "$R_ERR" "not signed by release.yml at v0.1.0"
+	assert_no_path "$WORK/bin"
+}
+
+test_reads_the_signer_from_the_certificate_not_from_other_fields() {
+	prepare_release
+	# A prefix-matching workflow whose predicate repeats the wanted signer: a
+	# text search finds it, the certificate field does not hold it.
+	make_stub_gh 0 0 https://github.com/tonibergholm/agent-caller/.github/workflows/release.yml.extra.yml@refs/tags/v0.1.0 \
+		'"buildSignerURI":"https://github.com/tonibergholm/agent-caller/.github/workflows/release.yml@refs/tags/v0.1.0"'
 	install_from
 	assert_eq "$R_RC" 1 "exit status"
 	assert_contains "$R_ERR" "not signed by release.yml at v0.1.0"
