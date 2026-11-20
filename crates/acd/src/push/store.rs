@@ -344,9 +344,10 @@ impl Store {
     }
 
     /// A rotation to token generation `min_auth`: entries registered under an
-    /// older generation are revoked, newer ones are kept, so a device that
-    /// registered with the new token before this ran keeps its wakes. If the
-    /// kept entries cannot be written, everything is revoked (fail closed).
+    /// older generation are revoked and newer ones kept. A session on the new
+    /// token cannot register before this has run (`register` waits for the
+    /// applied generation), so newer entries come only from a later rotation.
+    /// If the kept entries cannot be written, everything is revoked (fail closed).
     pub fn rotate_client_from(&mut self, client: &str, min_auth: u64) -> Result<(), StoreError> {
         self.client = client.to_string();
         self.applied = min_auth;
