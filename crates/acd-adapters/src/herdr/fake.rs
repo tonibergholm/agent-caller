@@ -122,6 +122,13 @@ pub fn fake_agent(pane_id: &str, agent: &str, status: &str) -> Value {
     })
 }
 
+/// `fake_agent` with a herdr agent name.
+pub fn fake_named_agent(pane_id: &str, agent: &str, status: &str, name: &str) -> Value {
+    let mut v = fake_agent(pane_id, agent, status);
+    v["name"] = name.into();
+    v
+}
+
 impl FakeHerdr {
     pub async fn start() -> FakeHerdr {
         FakeHerdr::start_with_version("0.9.3", 22).await
@@ -155,6 +162,11 @@ impl FakeHerdr {
     /// A fresh server on an existing socket path, for a herdr restart. The
     /// previous server must be stopped; its state is not carried over.
     pub async fn start_at(path: &Path) -> FakeHerdr {
+        FakeHerdr::start_at_with_version(path, "0.9.3").await
+    }
+
+    /// `start_at` reporting `version` on `ping`.
+    pub async fn start_at_with_version(path: &Path, version: &str) -> FakeHerdr {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).expect("socket dir");
         }
@@ -162,7 +174,7 @@ impl FakeHerdr {
         let listener = UnixListener::bind(path).expect("rebind fake herdr socket");
         let shared = Arc::new(Shared {
             path: path.to_path_buf(),
-            version: "0.9.3".to_owned(),
+            version: version.to_owned(),
             protocol: 22,
             state: Mutex::new(State::default()),
         });
@@ -548,7 +560,12 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
     let mut keys_call: Option<(KeysHook, String, Vec<String>)> = None;
     let outcome = {
         let mut st = shared.state.lock().expect("fake state");
-        let find = |st: &State, t: &str| st.agents.iter().find(|a| a["pane_id"] == t).cloned();
+        // A target is a pane id or a live agent name. A name belongs to the
+        // agent value, so replacing the agent clears it.
+        let find = |st: &State, t: &str| {
+            let by_pane = st.agents.iter().find(|a| a["pane_id"] == t);
+            by_pane.or_else(|| st.agents.iter().find(|a| a["name"] == t)).cloned()
+        };
         match method {
             "ping" => Outcome::Reply(json!({
                 "type": "pong",
@@ -564,6 +581,8 @@ fn handle(shared: &Arc<Shared>, method: &str, params: &Value) -> Outcome {
                 let Some(agent) = find(&st, t) else {
                     return err("agent_not_found", &format!("agent target {t} not found"));
                 };
+                // Everything below works on the pane the target resolved to.
+                let t = agent["pane_id"].as_str().expect("pane_id");
                 match method {
                     "agent.get" => Outcome::Reply(json!({"type": "agent_info", "agent": agent})),
                     "agent.read" => {

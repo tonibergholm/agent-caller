@@ -17,11 +17,19 @@ Cases:
      calls get the same result.
   C. Replay the same command id with a DIFFERENT payload after the first
      finished -- must be `duplicate_mismatch`, not a second delivery.
-  D. Answer with a wrong/huge `revision` -- must not deliver blindly.
-  E. Answer an already-resolved request_id again -- must be `request_gone`.
+  D. Answer with a wrong/huge `revision` -- must not deliver blindly. Every
+     other answer carries the `revision` of the request it answers, read
+     from the `request.opened` this script waits for (acd/1 requires it).
+  E. Answer an already-resolved request_id again -- must be refused
+     (`request_gone`, or `request_busy` while the answer settles).
   F. A second, unrelated authenticated client (different client.id) can
      answer a request it did not open -- confirmed by design (any token
      holder may act on any request); recorded as expected, not a finding.
+
+The daemon accepts only IDEM_CLIENT_IDS_PER_SOURCE (8) distinct client ids per
+source address inside the idempotency TTL, and this script opens 8
+connections with a new id each. Run it once per daemon start; a second run
+gets `bad_request: "too many recent commands"` on every answer.
 
 Usage:
     python3 -I toctou_idempotency.py --dir <acd config dir> --port <ws port>
@@ -107,16 +115,17 @@ def recv_result_for(ws, cmd_id, timeout=10):
     raise TimeoutError(f"no result for {cmd_id} within timeout")
 
 
-def answer(ws, request_id, option_id=None, revision=None, cmd_id=None):
+def answer(ws, request, option_id=None, revision=None, cmd_id=None):
+    """Answers `request` (the dict from request.opened). The revision defaults
+    to the request's own; pass one to override it."""
     cmd_id = cmd_id or acdws.new_id()
     msg = {
         "id": cmd_id,
         "type": "request.answer",
-        "request_id": request_id,
+        "request_id": request["id"],
+        "revision": request["revision"] if revision is None else revision,
         "option_id": option_id,
     }
-    if revision is not None:
-        msg["revision"] = revision
     ws.send_json(msg)
     return recv_result_for(ws, cmd_id, timeout=10)
 
@@ -156,7 +165,7 @@ def main():
     done = {}
 
     def do_answer(ws, key):
-        done[key] = answer(ws, rid, option_id="allow")
+        done[key] = answer(ws, req1, option_id="allow")
 
     t1 = threading.Thread(target=do_answer, args=(ws1, "a"))
     t2 = threading.Thread(target=do_answer, args=(ws2, "b"))
@@ -187,7 +196,7 @@ def main():
     cmd_id = acdws.new_id()
     msg = {
         "id": cmd_id, "type": "request.answer",
-        "request_id": req["id"], "option_id": "allow",
+        "request_id": req["id"], "revision": req["revision"], "option_id": "allow",
     }
     ws.send_json(msg)
     ws.send_json(msg)  # identical replay, same id+payload
@@ -213,10 +222,11 @@ def main():
     hook_sock_c = fresh_hook_request(hook_sock, hook_token, "replay-diff")
     req = wait_for_request_opened(ws)
     cmd_id = acdws.new_id()
-    r1 = answer(ws, req["id"], option_id="allow", cmd_id=cmd_id)
+    r1 = answer(ws, req, option_id="allow", cmd_id=cmd_id)
     read_http_response(hook_sock_c, timeout=10)
     # second call, same id, different option -- after the first is resolved
-    msg2 = {"id": cmd_id, "type": "request.answer", "request_id": req["id"], "option_id": "deny"}
+    msg2 = {"id": cmd_id, "type": "request.answer", "request_id": req["id"],
+            "revision": req["revision"], "option_id": "deny"}
     ws.send_json(msg2)
     r2 = recv_result_for(ws, cmd_id, timeout=10)
     code = r2.get("error", {}).get("code") if not r2.get("ok") else None
@@ -231,7 +241,7 @@ def main():
     ws = connect_authed(args.port, token)
     hook_sock_d = fresh_hook_request(hook_sock, hook_token, "revision")
     req = wait_for_request_opened(ws)
-    r = answer(ws, req["id"], option_id="allow", revision=2**62)
+    r = answer(ws, req, option_id="allow", revision=2**62)
     code = r.get("error", {}).get("code") if not r.get("ok") else None
     record(
         "answer_huge_revision",
@@ -239,9 +249,9 @@ def main():
         str(r),
     )
     # The bad-revision answer must not have delivered anything, so the
-    # hook is still held; answer again with the correct (omitted)
-    # revision to clean it up and confirm it was genuinely not delivered.
-    r_fix = answer(ws, req["id"], option_id="allow", cmd_id=acdws.new_id())
+    # hook is still held; answer again with the request's own revision to
+    # clean it up and confirm it was genuinely not delivered.
+    r_fix = answer(ws, req, option_id="allow", cmd_id=acdws.new_id())
     record("answer_huge_revision_then_correct", "info", str(r_fix))
     hook_resp = read_http_response(hook_sock_d, timeout=10)
     record("answer_huge_revision_hook_reply", "info", hook_resp.split(b"\r\n")[0])
@@ -251,13 +261,14 @@ def main():
     ws = connect_authed(args.port, token)
     hook_sock_e = fresh_hook_request(hook_sock, hook_token, "resolved-twice")
     req = wait_for_request_opened(ws)
-    answer(ws, req["id"], option_id="allow")
+    answer(ws, req, option_id="allow")
     read_http_response(hook_sock_e, timeout=10)
-    r2 = answer(ws, req["id"], option_id="allow", cmd_id=acdws.new_id())
+    r2 = answer(ws, req, option_id="allow", cmd_id=acdws.new_id())
     code = r2.get("error", {}).get("code") if not r2.get("ok") else None
     record(
         "answer_already_resolved_request",
-        "ok" if code == "request_gone" else "UNEXPECTED",
+        # request_busy lingers after a delivered answer (red-team doc, case 30).
+        "ok" if code in ("request_gone", "request_busy") else "UNEXPECTED",
         str(r2),
     )
     ws.close()
@@ -268,7 +279,7 @@ def main():
     hook_sock_f = fresh_hook_request(hook_sock, hook_token, "cross-client")
     req = wait_for_request_opened(ws_owner)
     wait_for_request_opened(ws_other)  # other client also sees it broadcast
-    r = answer(ws_other, req["id"], option_id="deny")
+    r = answer(ws_other, req, option_id="deny")
     record(
         "cross_client_answers_unrelated_request",
         "by-design-any-token-holder" if r.get("ok") else "refused",

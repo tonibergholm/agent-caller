@@ -59,11 +59,17 @@ async fn serve() -> Served {
 }
 
 async fn serve_with(hello: Duration, handshake: Duration, preauth: Duration) -> Served {
-    serve_opts(hello, handshake, preauth, None).await
+    serve_opts(hello, handshake, preauth, None, "127.0.0.1:0", 8).await
 }
 
 async fn serve_gated(hello: Duration, gate: watch::Receiver<bool>) -> Served {
-    serve_opts(hello, HOLD, HOLD, Some(gate)).await
+    serve_opts(hello, HOLD, HOLD, Some(gate), "127.0.0.1:0", 8).await
+}
+
+/// Listens on every interface, so loopback and this machine's own address
+/// are two real sources. `max_preauth` sizes the post-upgrade network pool.
+async fn serve_everywhere(max_preauth: usize) -> Served {
+    serve_opts(HOLD, HOLD, HOLD, None, "0.0.0.0:0", max_preauth).await
 }
 
 async fn serve_opts(
@@ -71,10 +77,12 @@ async fn serve_opts(
     handshake: Duration,
     preauth: Duration,
     hello_gate: Option<watch::Receiver<bool>>,
+    bind: &str,
+    max_preauth: usize,
 ) -> Served {
     let f = tls::generate("t");
     let (tx, rx) = watch::channel(tls::server_config(&f).unwrap());
-    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp = tokio::net::TcpListener::bind(bind).await.unwrap();
     let addr = tcp.local_addr().unwrap();
     let limits = tls::Limits {
         handshake,
@@ -89,6 +97,7 @@ async fn serve_opts(
         ServerOptions {
             hello_timeout: hello,
             hello_gate,
+            max_preauth,
             ..Default::default()
         },
     );
@@ -404,4 +413,102 @@ async fn filling_the_local_pool_does_not_block_tcp() {
         .await
         .expect("tcp pool is separate from the local pool");
     assert!(hello_ok(&mut remote).await);
+}
+
+/// This machine's own non-loopback address, if it has one (a UDP connect
+/// sends nothing). A local process connecting to it is seen as that address,
+/// not as loopback: a second real source. `None` also when this process
+/// cannot reach a listener of its own on that address (a host firewall can
+/// drop it, for a test binary it has not seen), which a skip covers.
+fn own_non_loopback_ip() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    if ip.is_loopback() || ip.is_unspecified() {
+        return None;
+    }
+    // A connect alone proves nothing: the kernel completes it even when a
+    // firewall never lets the listener see the connection. Echo one byte.
+    use std::io::{Read, Write};
+    let probe = std::net::TcpListener::bind("0.0.0.0:0").ok()?;
+    let to = SocketAddr::new(ip, probe.local_addr().ok()?.port());
+    std::thread::spawn(move || {
+        if let Ok((mut c, _)) = probe.accept() {
+            let _ = c.write_all(b"x");
+        }
+    });
+    let mut c = std::net::TcpStream::connect_timeout(&to, Duration::from_secs(1)).ok()?;
+    c.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+    c.read_exact(&mut [0u8; 1]).ok()?;
+    Some(ip)
+}
+
+/// A source as (server address to connect to, address to bind). `None`, with
+/// a note, when the machine has no non-loopback address.
+type Source = (SocketAddr, String);
+
+fn two_sources(s: &Served) -> Option<(Source, Source)> {
+    let Some(net) = own_non_loopback_ip() else {
+        eprintln!("SKIPPED: no non-loopback address, or a firewall drops connections to it");
+        return None;
+    };
+    let port = s.tcp.port();
+    Some((
+        (SocketAddr::from(([127, 0, 0, 1], port)), "127.0.0.1".into()),
+        (SocketAddr::new(net, port), net.to_string()),
+    ))
+}
+
+async fn idle_from(src: &Source, n: usize) -> Vec<TlsWs> {
+    idle_tls(src.0, &src.1, n).await
+}
+
+/// One source holding its whole share does not lock the other out, in either
+/// direction. Fails if every address maps to one source key: the second
+/// source is then refused before TLS.
+#[tokio::test]
+async fn a_source_holding_its_share_does_not_lock_out_the_other() {
+    let s = serve_everywhere(8).await;
+    let Some((loopback, net)) = two_sources(&s) else { return };
+    let held = idle_from(&loopback, 2).await;
+    assert_eq!(held.len(), 2, "loopback holds its share");
+    let mut other = open_tls(net.0, &net.1).await.expect("the network source is not locked out");
+    assert!(hello_ok(&mut other).await);
+
+    let s = serve_everywhere(8).await;
+    let Some((loopback, net)) = two_sources(&s) else { return };
+    let held = idle_from(&net, 2).await;
+    assert_eq!(held.len(), 2, "the network source holds its share");
+    let mut other = open_tls(loopback.0, &loopback.1).await.expect("loopback is not locked out");
+    assert!(hello_ok(&mut other).await);
+}
+
+/// With a post-upgrade pool of 4 and a reserve of 2, the reserved slots go
+/// only to a network source holding none. Loopback holds two slots (2/4),
+/// the network source then takes one, and its second is refused with 503
+/// although 3/4 are taken. In the other order loopback gets one slot: it
+/// never takes the reserve. Fails if every address maps to one source key.
+#[tokio::test]
+async fn the_reserve_goes_to_a_network_source_holding_none() {
+    let s = serve_everywhere(4).await;
+    let Some((loopback, net)) = two_sources(&s) else { return };
+    let held = idle_from(&loopback, 2).await;
+    assert_eq!(held.len(), 2, "loopback holds its share");
+    let first = open_tls(net.0, &net.1).await;
+    assert!(first.is_some(), "a source holding none takes a reserved slot");
+    assert!(
+        matches!(open_tls_result(net.0, &net.1).await, Err(Refused::Http(503))),
+        "it holds one now: its second is refused at 3/4"
+    );
+
+    let s = serve_everywhere(4).await;
+    let Some((loopback, net)) = two_sources(&s) else { return };
+    let held = idle_from(&net, 1).await;
+    assert_eq!(held.len(), 1);
+    let first = open_tls(loopback.0, &loopback.1).await;
+    assert!(first.is_some(), "loopback takes an unreserved slot");
+    assert!(
+        matches!(open_tls_result(loopback.0, &loopback.1).await, Err(Refused::Http(503))),
+        "loopback never takes the reserve, though it is under its cap and the pool is at 2/4"
+    );
 }

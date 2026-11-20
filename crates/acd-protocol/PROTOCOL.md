@@ -349,6 +349,10 @@ normal command rules (§4): idempotency and the in-flight caps.
   - `unauthorized` "the client token was rotated": the session's token was
     rotated away while the command ran. The session closes too, so a client
     rarely sees this result.
+  - `source_unavailable` "the client token is being rotated; retry": the
+    session already holds the new token, but the daemon has not yet moved
+    push to it. Nothing is stored; register again in a moment. A session on
+    the daemon's first token (no rotation yet) never sees this.
   - `relay` must equal the daemon's configured relay URL (https, no trailing
     slash), else `bad_request` "relay mismatch".
   - `handle` is the opaque blob the relay issued: 1 to 512 bytes of base64url,

@@ -814,27 +814,60 @@ async fn a_new_generation_session_registers_after_a_rotation() {
     const ROTATED: &str = "rotated-client-token";
     let rig = Rig::new(NO_WINDOW).await;
     rig.push.revoke_all(ROTATED, 1).await;
-    for generation in [1, 2] {
-        let result = rig.register_at("phone", generation, &handle_for("phone")).await;
-        assert!(result.ok, "generation {generation}: {:?}", result.error_code());
-    }
+    let result = rig.register_at("phone", 1, &handle_for("phone")).await;
+    assert!(result.ok, "{:?}", result.error_code());
+    rig.push.revoke_all("rotated-again", 2).await;
+    let result = rig.register_at("phone", 2, &handle_for("phone")).await;
+    assert!(result.ok, "{:?}", result.error_code());
     assert!(rig.status("phone").await.registered);
 }
 
-/// The daemon publishes the new token first and clears push after, so a
-/// device can register with the new token in between: that registration
-/// survives the clear, while the old session's does not, also on disk.
+/// The daemon publishes the new token first and clears push after. A session
+/// on the new token that registers in between is not acknowledged: push.json
+/// still names the old token, so a restart would drop the registration.
+/// Nothing is stored; the same register succeeds once the clear has run.
 #[tokio::test]
-async fn a_registration_under_the_new_token_before_the_clear_survives_it() {
+async fn a_registration_under_the_new_token_before_the_clear_is_refused_not_acknowledged() {
     const ROTATED: &str = "rotated-client-token";
     let rig = Rig::new(NO_WINDOW).await;
     assert!(rig.register_at("old-phone", 0, &handle_for("old-phone")).await.ok);
-    assert!(rig.register_at("new-phone", 1, &handle_for("new-phone")).await.ok);
+    // Auth is at generation 1; `revoke_all` has not run (min_generation is 0).
+    let gap = rig.register_at("new-phone", 1, &handle_for("new-phone")).await;
+    assert_eq!(gap.error_code(), Some(ErrorCode::SourceUnavailable), "{gap:?}");
+    assert!(!rig.status("new-phone").await.registered, "a refused register stored something");
+    assert!(rig.status("old-phone").await.registered, "the refusal touched another entry");
     rig.push.revoke_all(ROTATED, 1).await;
+    let retry = rig.register_at("new-phone", 1, &handle_for("new-phone")).await;
+    assert!(retry.ok, "{:?}", retry.error_code());
     assert!(rig.status("new-phone").await.registered);
     assert!(!rig.status("old-phone").await.registered);
     let reloaded = Store::load(rig.dir.path(), &store::client_fingerprint(ROTATED));
-    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded.len(), 1, "the acknowledged registration survives a restart");
+}
+
+/// `revoke_all` raises the minimum generation before it rotates the store. A
+/// register at the new generation in that gap passed both generation checks
+/// and was acknowledged under the old fingerprint.
+#[tokio::test]
+async fn a_registration_between_the_minimum_and_the_store_rotation_is_refused() {
+    const ROTATED: &str = "rotated-client-token";
+    let rig = Rig::new(NO_WINDOW).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    *rig.push.min_raised.lock().unwrap() = Some(barrier.clone());
+    let revoke = tokio::spawn({
+        let push = rig.push.clone();
+        async move { push.revoke_all(ROTATED, 1).await }
+    });
+    barrier.wait().await; // the minimum is 1, the store is not rotated yet
+    let gap = rig.register_at("phone", 1, &handle_for("phone")).await;
+    assert_eq!(gap.error_code(), Some(ErrorCode::SourceUnavailable), "{gap:?}");
+    assert!(!rig.status("phone").await.registered, "a refused register stored something");
+    barrier.wait().await;
+    revoke.await.unwrap();
+    let retry = rig.register_at("phone", 1, &handle_for("phone")).await;
+    assert!(retry.ok, "{:?}", retry.error_code());
+    let reloaded = Store::load(rig.dir.path(), &store::client_fingerprint(ROTATED));
+    assert!(reloaded.get("phone").is_some(), "the acknowledged registration survives a restart");
 }
 
 #[tokio::test]

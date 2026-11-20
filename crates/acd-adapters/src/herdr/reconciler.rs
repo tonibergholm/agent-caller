@@ -64,6 +64,9 @@ pub struct PaneRef {
     /// Raw `foreground_cwd`, else `cwd` (not display-cleaned).
     pub cwd: Option<String>,
     pub terminal_id: Option<String>,
+    /// herdr resolves a live agent name as a prompt target, clearing it when
+    /// the agent is replaced: verified on 0.9.5 (`docs/research/2026-11-20-herdr-name-target.md`).
+    pub names_target: bool,
     /// Which agent incarnation this is (G1). A replacement under the same
     /// agent id gets a new value; targets and read tickets compare it.
     pub incarnation: u64,
@@ -211,6 +214,7 @@ pub fn spawn(
     let hash = map::socket_hash(herdr.path());
     let timing_after = timing.fallback_after;
     let reconciler = Reconciler {
+        names_target: false,
         herdr,
         core: core.clone(),
         panes: panes.clone(),
@@ -289,6 +293,8 @@ impl Drop for SubReader {
 }
 
 struct Reconciler {
+    /// The connected herdr is new enough to target agents by name (0.9.5+).
+    names_target: bool,
     herdr: Herdr,
     core: Arc<Core>,
     panes: Arc<PaneMap>,
@@ -336,6 +342,13 @@ struct Reconciler {
 
 fn is_server(e: &CallError) -> bool {
     matches!(e, CallError::Server { .. })
+}
+
+/// herdr 0.9.5 and later accept a live agent name as an `agent.prompt` target
+/// and clear it on replacement; earlier versions are not verified.
+fn names_target(version: &str) -> bool {
+    let parts: Option<Vec<u32>> = version.split('.').map(|p| p.parse().ok()).collect();
+    matches!(parts.as_deref(), Some([0, 9, patch]) if *patch >= 5)
 }
 
 /// `>= 0.9.3, < 0.10`, protocol 22.
@@ -394,7 +407,10 @@ impl Reconciler {
                 r = self.herdr.ping() => r,
             };
             match pong {
-                Ok(p) if supported(&p.version, p.protocol) => break,
+                Ok(p) if supported(&p.version, p.protocol) => {
+                    self.names_target = names_target(&p.version);
+                    break;
+                }
                 Ok(p) => {
                     self.set_health(Health::Incompatible(format!(
                         "herdr {} protocol {} is not supported (need 0.9.x, protocol 22)",
@@ -874,6 +890,7 @@ impl Reconciler {
                 session: next.session,
                 cwd: info.foreground_cwd.clone().or_else(|| info.cwd.clone()),
                 terminal_id: next.terminal_id,
+                names_target: self.names_target,
                 incarnation,
             },
         );
@@ -1003,6 +1020,22 @@ async fn read_events(
         }
     }
     let _ = down.send(generation);
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    /// Name targeting is verified on herdr 0.9.5 only; the boundary is pinned.
+    #[test]
+    fn names_are_targets_from_herdr_0_9_5() {
+        for v in ["0.9.3", "0.9.4", "0.9.5-rc1", "0.10.0", "1.0.0", "", "x"] {
+            assert!(!names_target(v), "{v}");
+        }
+        for v in ["0.9.5", "0.9.6", "0.9.10"] {
+            assert!(names_target(v), "{v}");
+        }
+    }
 }
 
 #[cfg(test)]

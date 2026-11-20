@@ -11,7 +11,8 @@
 # The default bin directory is $HOME/.local/bin. The script never uses sudo.
 # It checks the SHA-256 of the tarball against SHA256SUMS before it extracts
 # anything, and it installs nothing when the check fails. When gh is installed
-# and signed in, it also runs `gh attestation verify` (build provenance) and
+# and signed in, it also runs `gh attestation verify` (build provenance), pinned
+# to release.yml and the tag refs/tags/vX.Y.Z, and
 # installs nothing when that fails; otherwise it says the provenance was not
 # checked. ACD_INSTALL_SKIP_PROVENANCE=1 skips the check, for an archive you
 # built yourself or a release made before attestations (0.9.0 and older).
@@ -78,6 +79,10 @@ fi
 if [ -z "$version" ]; then
 	die "give --tag vX.Y.Z (or --version X.Y.Z with --from-dir)"
 fi
+# The version becomes part of file names and of the gh verify arguments.
+case "$version" in
+*[!0-9A-Za-z.+-]*) die "not a version: $version" ;;
+esac
 if [ -n "$from_dir" ] && [ ! -d "$from_dir" ]; then
 	die "--from-dir is not a directory: $from_dir"
 fi
@@ -142,19 +147,36 @@ fi
 echo "Checksum OK: $archive"
 
 # SHA256SUMS comes from the same release as the tarball, so it proves nothing
-# about who built it. The GitHub build attestation does. ACD_INSTALL_GH names
-# the gh command (the tests use it).
+# about who built it. The GitHub build attestation does. Every acd-* archive is
+# built and attested by release.yml on its v* tag (release-linux.yml makes other
+# archives), so pin that workflow and tag; --repo alone accepts any workflow run
+# in the repository, including a branch dispatch. ACD_INSTALL_GH names the gh
+# command (the tests use it).
 gh_cmd=${ACD_INSTALL_GH:-gh}
+signer="$REPO/.github/workflows/release.yml"
+verify_flags="--repo $REPO --signer-workflow $signer --source-ref refs/tags/v$version"
 if [ "${ACD_INSTALL_SKIP_PROVENANCE:-}" = 1 ]; then
 	echo "Provenance not checked: skipped by ACD_INSTALL_SKIP_PROVENANCE."
 elif ! command -v "$gh_cmd" >/dev/null 2>&1; then
-	echo "Provenance not checked: gh is not installed. To check it, install gh, sign in, and run: gh attestation verify $archive --repo $REPO"
+	echo "Provenance not checked: gh is not installed. To check it, install gh 2.102.0 or later (older versions match --signer-workflow as a prefix), sign in, and run: gh attestation verify $archive $verify_flags"
 elif ! "$gh_cmd" auth status >/dev/null 2>&1; then
 	# A signed-out gh cannot verify anything; treat it like no gh.
-	echo "Provenance not checked: gh is not signed in. To check it, run gh auth login, then: gh attestation verify $archive --repo $REPO"
+	echo "Provenance not checked: gh is not signed in. To check it with gh 2.102.0 or later (older versions match --signer-workflow as a prefix), run gh auth login, then: gh attestation verify $archive $verify_flags"
 else
-	"$gh_cmd" attestation verify "$tarball" --repo "$REPO" >/dev/null ||
+	# shellcheck disable=SC2086 # verify_flags holds no spaces inside a value
+	# gh 2.51.0 to 2.101.0 match --signer-workflow as a prefix
+	# (GHSA-wjmr-j3rp-mh2g). Count verified attestations whose certificate
+	# signer is exactly release.yml at this tag, read by path with gh's own
+	# jq, so no other field of an attestation can stand in for it. The
+	# version holds only [0-9A-Za-z.+-] (checked above), so it is safe inside
+	# the jq string.
+	want="https://github.com/$signer@refs/tags/v$version"
+	exact=$("$gh_cmd" attestation verify "$tarball" $verify_flags --format json \
+		--jq "[.[].verificationResult.signature.certificate.buildSignerURI | select(. == \"$want\")] | length" 2>/dev/null) ||
 		die "provenance check failed for $archive; nothing installed"
+	case "$exact" in
+	'' | *[!0-9]* | 0) die "provenance check failed for $archive: not signed by release.yml at v$version; nothing installed" ;;
+	esac
 	echo "Provenance OK: $archive"
 fi
 

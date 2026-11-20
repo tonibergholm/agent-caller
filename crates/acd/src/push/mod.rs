@@ -137,6 +137,10 @@ pub struct Push {
     /// Test hook: `register` waits here twice once it is accepted.
     #[cfg(test)]
     accepted: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test hook: `revoke_all` waits here twice, between raising the minimum
+    /// and the store rotation.
+    #[cfg(test)]
+    min_raised: Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl Push {
@@ -153,6 +157,8 @@ impl Push {
             min_generation: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             accepted: Mutex::new(None),
+            #[cfg(test)]
+            min_raised: Mutex::new(None),
         })
     }
 
@@ -193,6 +199,14 @@ impl Push {
         // on, and sends already in flight are cancelled.
         self.min_generation.fetch_max(generation, Ordering::SeqCst);
         self.revoked.send_modify(|n| *n += 1);
+        #[cfg(test)]
+        {
+            let hook = self.min_raised.lock().unwrap().clone();
+            if let Some(b) = hook {
+                b.wait().await;
+                b.wait().await;
+            }
+        }
         let rotated = self.blocking(move |s| s.rotate_client_from(&client, generation)).await;
         if rotated != Some(Ok(())) {
             tracing::error!("push registrations revoked in memory; push.json could not be rewritten");
@@ -348,8 +362,15 @@ impl PushControl for Push {
         }
         let stored = self
             .blocking(move |s| {
-                if generation < min.load(Ordering::SeqCst) {
+                let min = min.load(Ordering::SeqCst);
+                if generation < min {
                     Err(StoreError::Revoked)
+                } else if generation > s.applied() {
+                    // The daemon publishes the new token before `revoke_all`
+                    // runs, and `revoke_all` raises `min` before the store is
+                    // rotated; an ack in either gap would name a push.json that
+                    // still holds the old fingerprint, and a restart would drop it.
+                    Err(StoreError::Rotating)
                 } else {
                     s.register_at(&id, device, generation)
                 }
@@ -365,6 +386,10 @@ impl PushControl for Push {
             Some(Err(StoreError::Revoked)) => Err(PushFailure {
                 code: ErrorCode::Unauthorized,
                 message: "the client token was rotated",
+            }),
+            Some(Err(StoreError::Rotating)) => Err(PushFailure {
+                code: ErrorCode::SourceUnavailable,
+                message: "the client token is being rotated; retry",
             }),
             Some(Err(StoreError::Corrupt)) => Err(PushFailure {
                 code: ErrorCode::SourceUnavailable,

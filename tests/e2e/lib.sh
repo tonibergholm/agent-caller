@@ -145,8 +145,22 @@ write_deny_profile() {
 (deny file-write* (literal "$h/.codex/config.toml"))
 SB
 }
+# Claude's input box is ready: older versions show "? for shortcuts", newer
+# ones a permission-mode footer such as "manual mode on".
+CLAUDE_READY='for shortcuts|mode on'
 claude_launch() { # pane [extra claude args...]
   local pane=$1; shift
   write_deny_profile
   hd pane run "$pane" "clear; cd /private/tmp/ace2e/proj && HOME=$REAL_HOME sandbox-exec -f $DENY_SB claude --model haiku --permission-mode default --settings $CLAUDE_CFG/settings.json $*" >/dev/null
+  # A fresh scratch project asks whether to trust the folder. Accept it for this
+  # path only; Claude records the scratch project in ~/.claude.json either way.
+  for _ in $(seq 40); do
+    if pane_text "$pane" | grep -q 'Yes, I trust this folder'; then
+      pane_text "$pane" | grep -q '/private/tmp/ace2e/proj' || return 1
+      hd pane send-keys "$pane" Down >/dev/null; sleep 0.3; hd pane send-keys "$pane" Enter >/dev/null
+      return 0
+    fi
+    pane_text "$pane" | grep -Eq "$CLAUDE_READY" && return 0
+    sleep 0.5
+  done
 }

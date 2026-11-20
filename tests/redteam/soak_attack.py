@@ -17,6 +17,10 @@ Usage:
     python3 -I soak_attack.py --dir <acd config dir> --port <ws port> \
         --hook-port <hook port> --duration 3600
 
+acd/1 requires `revision` on `request.answer`. The flood answers request ids
+that do not exist, so any valid revision reaches `request_gone` (without one
+the daemon answers `bad_request` first); the flood sends revision 1.
+
 Safety: every socket is bound to 127.0.0.0/8 and connects only to
 127.0.0.1 at the given ports. Reads the client token from `<dir>/client.token`
 only to drive the authenticated-flood thread, and never prints it.
@@ -88,6 +92,7 @@ def authed_flood_worker(port: int, token: str, stats: dict):
                     "id": answer_id,
                     "type": "request.answer",
                     "request_id": acdws.new_id(),
+                    "revision": 1,  # the request ids do not exist: any valid revision reaches request_gone
                     "option_id": "yes",
                 })
                 n += 2

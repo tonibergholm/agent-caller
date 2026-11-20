@@ -230,8 +230,9 @@ impl Adapter for HerdrAdapter {
         }
         // The reconciler does not take the agent lock, so it can have replaced
         // the pane while the screen read ran. Re-read the map entry right
-        // before the prompt. What remains is the gap between this check and
-        // herdr, closed only by targeting a terminal id (p1 follow-ups).
+        // before the prompt. A live name follows the occupant, so herdr itself
+        // refuses a replaced agent; a pane id has no such guard and the gap
+        // between this check and herdr stays for unnamed agents (p1 follow-ups).
         let unchanged = self
             .panes
             .read()
@@ -241,7 +242,15 @@ impl Adapter for HerdrAdapter {
         if !unchanged {
             return Err(DeliverError::NotDelivered(ErrorCode::AgentGone));
         }
-        let result = match timeout_at(deadline, pane.herdr.prompt(&pane.pane_id, text)).await {
+        // A live name follows its occupant and is cleared when the agent is
+        // replaced, so herdr refuses a prompt by name for a replaced agent. Only
+        // a name in herdr's own syntax is used: it cannot be read as a pane id.
+        let target = live
+            .name
+            .as_deref()
+            .filter(|n| pane.names_target && herdr_name(n))
+            .unwrap_or(&pane.pane_id);
+        let result = match timeout_at(deadline, pane.herdr.prompt(target, text)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(map_call_error(&e)),
             Err(_) => Err(DeliverError::Uncertain(
@@ -254,4 +263,12 @@ impl Adapter for HerdrAdapter {
         }
         result
     }
+}
+
+/// herdr's agent name syntax: `[a-z][a-z0-9_-]{0,31}`.
+fn herdr_name(n: &str) -> bool {
+    let mut c = n.chars();
+    n.len() <= 32
+        && c.next().is_some_and(|f| f.is_ascii_lowercase())
+        && c.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
 }
