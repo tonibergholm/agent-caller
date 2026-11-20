@@ -295,11 +295,19 @@ impl Store {
         if !client_id_ok(client_id) {
             return Err(StoreError::BadId);
         }
-        if !self.devices.contains_key(client_id) && self.devices.len() >= MAX_DEVICES {
+        // Token generations only rise on rotation. A newer entry means this
+        // write comes from a rotated-away token: it must not replace it.
+        if self.devices.values().any(|e| e.auth > auth) {
+            return Err(StoreError::Revoked);
+        }
+        // Older entries belong to a rotated-away token and are revoked anyway:
+        // drop them now, so they neither take a slot nor outlive this write.
+        let mut next = self.devices.clone();
+        next.retain(|_, e| e.auth >= auth);
+        if !next.contains_key(client_id) && next.len() >= MAX_DEVICES {
             return Err(StoreError::TooMany);
         }
         let generation = self.next_generation;
-        let mut next = self.devices.clone();
         next.insert(client_id.to_string(), Entry { device, generation, auth });
         self.commit(next)?;
         self.next_generation += 1;

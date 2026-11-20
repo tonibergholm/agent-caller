@@ -851,6 +851,72 @@ async fn revoking_cancels_a_wake_that_is_already_in_flight() {
     assert!(!rig.status("phone").await.registered);
 }
 
+/// S14: cancelling sends in flight and the cutoff for new ones must not
+/// wait for the store's file I/O.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn revoking_cancels_wakes_before_the_store_is_written() {
+    let rig = Rig::new(NO_WINDOW).await;
+    let mut cancelled = rig.push.revoked.subscribe();
+    let held = rig.push.store(); // the clear cannot run while this is held
+    let revoke = tokio::spawn({
+        let push = rig.push.clone();
+        async move { push.revoke_all(TOKEN, 1).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), cancelled.changed())
+        .await
+        .expect("sends in flight were cancelled before the store was written")
+        .unwrap();
+    assert_eq!(rig.push.min_generation.load(Ordering::SeqCst), 1, "no new send picks an old registration");
+    assert!(!revoke.is_finished(), "the clear is still waiting for the store");
+    drop(held);
+    revoke.await.unwrap();
+}
+
+/// S13: the daemon's rotation stops the old client token before push I/O.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_client_token_rotates_before_push_writes_anything() {
+    let rig = Rig::new(NO_WINDOW).await;
+    let auth = Arc::new(acd_core::server::Auth::new(TOKEN.into()));
+    let held = rig.push.store();
+    let rotate = tokio::spawn({
+        let (auth, push) = (auth.clone(), rig.push.clone());
+        async move { super::rotate_client_token(&auth, Some(&push), "rotated-client-token".into()).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while auth.generation() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the token rotated while push was blocked");
+    assert!(!rotate.is_finished(), "push is still waiting for the store");
+    drop(held);
+    rotate.await.unwrap();
+}
+
+#[test]
+fn an_older_token_generation_cannot_replace_a_newer_registration() {
+    let d = private_dir();
+    let mut st = Store::load(d.path(), &client());
+    let dev = |h: &str| Device::new(PushPlatform::Android, handle_for(h), "2026-12-04T10:00:00.000Z".into());
+    st.register_at("phone", dev("new"), 1).unwrap();
+    assert_eq!(st.register_at("phone", dev("old"), 0), Err(StoreError::Revoked));
+    assert_eq!(st.get("phone").map(|e| e.auth), Some(1));
+}
+
+#[test]
+fn old_generation_entries_do_not_take_a_new_tokens_slots() {
+    let d = private_dir();
+    let mut st = Store::load(d.path(), &client());
+    let dev = |h: &str| Device::new(PushPlatform::Android, handle_for(h), "2026-12-04T10:00:00.000Z".into());
+    for i in 0..8 {
+        st.register_at(&format!("old-{i}"), dev(&format!("old-{i}")), 0).unwrap();
+    }
+    assert_eq!(st.register_at("old-8", dev("old-8"), 0), Err(StoreError::TooMany));
+    st.register_at("new", dev("new"), 1).unwrap();
+    assert_eq!(st.len(), 1, "the old token's entries are gone");
+}
+
 #[test]
 fn a_revocation_whose_file_write_fails_is_retried_and_survives_a_restart() {
     use std::os::unix::fs::PermissionsExt;

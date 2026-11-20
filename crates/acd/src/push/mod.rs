@@ -188,21 +188,16 @@ impl Push {
     /// of any older one can no longer register.
     pub async fn revoke_all(&self, new_token: &str, generation: u64) {
         let client = store::client_fingerprint(new_token);
-        let min = self.min_generation.clone();
-        let rotated = self
-            .blocking(move |s| {
-                min.fetch_max(generation, Ordering::SeqCst);
-                s.rotate_client_from(&client, generation)
-            })
-            .await;
+        // Before any disk work: no send picks an older registration from here
+        // on, and sends already in flight are cancelled.
+        self.min_generation.fetch_max(generation, Ordering::SeqCst);
+        self.revoked.send_modify(|n| *n += 1);
+        let rotated = self.blocking(move |s| s.rotate_client_from(&client, generation)).await;
         if rotated != Some(Ok(())) {
             tracing::error!("push registrations revoked in memory; push.json could not be rewritten");
         } else {
             tracing::info!("push registrations revoked");
         }
-        // After the store is cleared: a send past its generation check is
-        // cancelled here instead of reaching the relay with a revoked handle.
-        self.revoked.send_modify(|n| *n += 1);
         self.wake.notify_one();
     }
 
@@ -243,9 +238,12 @@ impl Push {
         self.blocking(|s| s.retry_clear()).await;
         let now = Instant::now();
         let min = self.settings.min_interval;
+        let cutoff = self.min_generation.load(Ordering::SeqCst);
         let targets: Vec<_> = self
             .store()
             .iter()
+            // Registrations of a rotated-away token wait only for their clear.
+            .filter(|(_, e)| e.auth >= cutoff)
             .map(|(id, e)| (id.clone(), e.generation, e.device.handle().to_string(), e.device.wake_state()))
             .collect();
         gates.retain(|id, _| targets.iter().any(|t| &t.0 == id));
@@ -263,7 +261,8 @@ impl Push {
                 let _permit = permits.acquire_owned().await;
                 // A send that waited for a permit must not use a registration
                 // revoked (or replaced) meanwhile.
-                if this.store().get(&id).map(|e| e.generation) != Some(generation) {
+                let cutoff = this.min_generation.load(Ordering::SeqCst);
+                if this.store().get(&id).filter(|e| e.auth >= cutoff).map(|e| e.generation) != Some(generation) {
                     return (id, generation, state, Outcome::Skipped, Instant::now());
                 }
                 // The debounce window starts when the send does, not when the
@@ -401,6 +400,15 @@ impl PushControl for Push {
                     .and_then(|s| chrono::DateTime::from_timestamp(i64::try_from(s).ok()?, 0)),
             },
         }
+    }
+}
+
+/// The daemon's client token rotation. The old token stops first, before
+/// any push file I/O can delay it; then push revokes the old holders.
+pub async fn rotate_client_token(auth: &acd_core::server::Auth, push: Option<&Arc<Push>>, token: String) {
+    auth.rotate(token.clone());
+    if let Some(p) = push {
+        p.revoke_all(&token, auth.generation()).await;
     }
 }
 

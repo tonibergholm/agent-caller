@@ -731,14 +731,9 @@ pub async fn run(dir: &Path) -> Result<()> {
             match secrets::read_secret(&token_path).and_then(|t| secrets::parse_token(&t)) {
                 Ok(t) if t != current => {
                     tracing::info!("client token rotated");
-                    // The old token stops at once, before any push file I/O.
-                    rot_auth.rotate(t.clone());
                     // Spec 4.8: the old holders of the token lose their wakes
-                    // too. Registrations made under the new generation in the
-                    // meantime are kept; older ones are revoked.
-                    if let Some(p) = &rot_push {
-                        p.revoke_all(&t, rot_auth.generation()).await;
-                    }
+                    // too, after the old token itself has stopped.
+                    crate::push::rotate_client_token(&rot_auth, rot_push.as_ref(), t.clone()).await;
                     current = t;
                     invalid_logged = false;
                 }
