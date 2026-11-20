@@ -1340,6 +1340,58 @@ async fn a_herdr_error_message_never_reaches_the_logs() {
     assert!(!logs.contains("SECRET"), "{logs}");
 }
 
+/// herdr's error text and serde's decode text can echo the screen or a title:
+/// the reconciler's debug logs carry a classification, never that text.
+#[tokio::test(flavor = "current_thread")]
+async fn herdr_error_text_never_reaches_the_reconciler_logs() {
+    use acd_adapters::herdr::reconciler::Hint;
+    use std::sync::Mutex as StdMutex;
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<StdMutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let r = quiet_rig(&[("w1:p1", "claude", "idle")]).await;
+    let pane = r.adapter.panes().read().unwrap().values().next().unwrap().clone();
+    // A server error on agent.get, one on agent.list, and a list entry that
+    // does not decode (its bad field echoes in serde's message).
+    let mut bad = fake_agent("w1:p2", "claude", "idle");
+    bad["revision"] = "SECRET-DECODE".into();
+    r.fake.set_agent(bad);
+    r.fake
+        .fail_next_with_message("agent.get", "internal_error", "SECRET-GET echo of the screen");
+    r.fake
+        .fail_next_with_message("agent.list", "internal_error", "SECRET-LIST echo of the screen");
+    pane.hints.try_send(Hint::Pane(pane.pane_id.clone())).unwrap();
+    pane.hints.try_send(Hint::Resync).unwrap();
+    let logs = || String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    until("the failures are logged", || {
+        let l = logs();
+        (l.contains("agent.get failed") && l.contains("agent.list failed")).then_some(())
+    })
+    .await;
+    // A later resync reads the list again and meets the undecodable entry.
+    pane.hints.try_send(Hint::Resync).unwrap();
+    until("the skipped entry is logged", || logs().contains("entry skipped").then_some(())).await;
+    let l = logs();
+    assert!(l.contains("internal_error"), "the code is kept: {l}");
+    assert!(!l.contains("SECRET"), "{l}");
+}
+
 #[tokio::test]
 async fn a_target_for_the_current_incarnation_works() {
     let (r, rid) = bound_keys_rig(0).await;

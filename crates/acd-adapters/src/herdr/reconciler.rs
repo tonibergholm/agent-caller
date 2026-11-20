@@ -18,7 +18,7 @@ use tokio::time::{Instant, sleep, sleep_until};
 
 use super::client::{AgentList, CALL_TIMEOUT, CallError, Herdr, ScreenRead, Subscription};
 use super::fallback::{self, Fallback, FbOut};
-use super::keys::{ABSENT_READS, KeysTargets};
+use super::keys::{ABSENT_READS, KeysTargets, classify};
 use super::map;
 use super::screen::find_dialog;
 use super::wire::{AgentInfo, Event};
@@ -593,7 +593,7 @@ impl Reconciler {
                 Ok(())
             }
             Err(e) if is_server(&e) => {
-                tracing::debug!(error = %e, "herdr agent.get failed; resyncing");
+                tracing::debug!(error = %classify(&e), "herdr agent.get failed; resyncing");
                 self.resync.store(true, Ordering::Relaxed);
                 Ok(())
             }
@@ -668,7 +668,7 @@ impl Reconciler {
                 Ok(())
             }
             Err(e) if is_server(&e) => {
-                tracing::debug!(error = %e, "herdr agent.read failed");
+                tracing::debug!(error = %classify(&e), "herdr agent.read failed");
                 Ok(())
             }
             Err(e) => Err(Flow::Lost(e.to_string())),
@@ -783,7 +783,7 @@ impl Reconciler {
                 Ok(())
             }
             Err(e) if is_server(&e) => {
-                tracing::debug!(error = %e, "herdr agent.list failed");
+                tracing::debug!(error = %classify(&e), "herdr agent.list failed");
                 if !periodic {
                     // Connect-time: agents are still Unknown; retry promptly.
                     self.resync.store(true, Ordering::Relaxed);

@@ -181,7 +181,7 @@ impl Herdr {
                 Ok(info) => list.agents.push(info),
                 Err(e) => {
                     let pane_id = entry["pane_id"].as_str();
-                    tracing::debug!(?pane_id, error = %e, "herdr agent.list entry skipped");
+                    tracing::debug!(?pane_id, kind = ?e.classify(), "herdr agent.list entry skipped");
                     list.undecodable.extend(pane_id.map(str::to_owned));
                 }
             }

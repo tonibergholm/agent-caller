@@ -722,7 +722,7 @@ impl Engine {
 /// A herdr call error as a static class and its code, never herdr's
 /// message or a reply fragment: the core logs it (spec rule: agent text
 /// never reaches logs).
-fn classify(e: &CallError) -> String {
+pub(super) fn classify(e: &CallError) -> String {
     match e {
         CallError::Server { code, .. } => {
             let plain = !code.is_empty()
