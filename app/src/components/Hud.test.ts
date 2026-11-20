@@ -75,12 +75,12 @@ test("a rendered proposal is acknowledged with its id; other states are not", as
   expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
 });
 
-// jsdom has no layout: give every element a fixed scroll and client height.
-function withHeights(scroll: number, client: number) {
+// jsdom has no layout: give each element a scroll and client height.
+function withHeights(heights: (el: Element) => [number, number]) {
   const proto = Element.prototype;
   const orig = { s: Object.getOwnPropertyDescriptor(proto, "scrollHeight")!, c: Object.getOwnPropertyDescriptor(proto, "clientHeight")! };
-  Object.defineProperty(proto, "scrollHeight", { configurable: true, get: () => scroll });
-  Object.defineProperty(proto, "clientHeight", { configurable: true, get: () => client });
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get(this: Element) { return heights(this)[0]; } });
+  Object.defineProperty(proto, "clientHeight", { configurable: true, get(this: Element) { return heights(this)[1]; } });
   return () => {
     Object.defineProperty(proto, "scrollHeight", orig.s);
     Object.defineProperty(proto, "clientHeight", orig.c);
@@ -88,7 +88,7 @@ function withHeights(scroll: number, client: number) {
 }
 
 test("a block that is cut off is never acknowledged and cannot be confirmed (F1)", async () => {
-  const restore = withHeights(130, 96);
+  const restore = withHeights(() => [130, 96]);
   try {
     const api = await show({ state: "confirm", proposal: proposal({ question: "a\n".repeat(7) }), proposal_id: 70 });
     expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
@@ -105,6 +105,27 @@ test("a block that is cut off is never acknowledged and cannot be confirmed (F1)
   cleanup();
   const fits = await show({ state: "confirm", proposal: proposal(), proposal_id: 72 });
   expect(fits.calls).toContainEqual(["voiceShown", 72]);
+});
+
+test("content taller than the panel can be is not acknowledged either (F1)", async () => {
+  // No block overflows, but the content needs 600 - 200 + 300 = 700 px > 420.
+  const restore = withHeights((el) => (el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [300, 200] : el.classList.contains("hud") ? [600, 600] : [0, 0]));
+  try {
+    const api = await show({ state: "confirm", proposal: proposal(), proposal_id: 73 });
+    expect(api.calls.some((c) => c[0] === "voiceShown")).toBe(false);
+    expect(screen.getByText(/Too long to show here/)).toBeTruthy();
+    cleanup();
+    // The same blocks with content that fits (160 - 100 + 120 = 180 px) are acknowledged.
+    const restoreFit = withHeights((el) => (el.classList.contains("block") ? [50, 96] : el.classList.contains("body") ? [120, 100] : el.classList.contains("hud") ? [160, 160] : [0, 0]));
+    try {
+      const ok = await show({ state: "confirm", proposal: proposal(), proposal_id: 74 });
+      expect(ok.calls).toContainEqual(["voiceShown", 74]);
+    } finally {
+      restoreFit();
+    }
+  } finally {
+    restore();
+  }
 });
 
 test("a proposal replaced before the DOM flush is never acknowledged", async () => {

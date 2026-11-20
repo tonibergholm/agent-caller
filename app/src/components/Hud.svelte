@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import type { InboxView } from "../lib/bindings/InboxView";
-  import { awaitingDisplay, outcomeText, privacyPane, refusalText, wantsKey, type Hud, type ProposalView } from "../lib/hud";
+  import { MAX_HUD_HEIGHT, awaitingDisplay, outcomeText, privacyPane, refusalText, wantsKey, type Hud, type ProposalView } from "../lib/hud";
   import type { Api } from "../lib/ipc";
 
   /** acd-client's undo window (spec §8): the bar's full width. */
@@ -18,8 +18,9 @@
   // Listening keeps a step that waits on screen, read-only (plan S7).
   const under = $derived<Hud>(hud.state === "listening" && hud.over ? hud.over : hud);
   const listening = $derived(hud.state === "listening");
-  // A block that scrolls hides part of what a "yes" would approve (F1): such a
-  // step is not acknowledged, so the app refuses it after its display timeout.
+  // A block that scrolls, or content taller than the panel can be, hides part
+  // of what a "yes" would approve (F1): such a step is not acknowledged, so the
+  // app refuses it after its display timeout.
   let tooLong = $state(false);
 
   // Rejections are dropped silently: the console never sees voice text.
@@ -45,7 +46,7 @@
           tick().then(() => {
             if (seen.seq !== e.seq || awaitingDisplay(hud) !== id) return;
             const blocks = [...(main?.querySelectorAll<HTMLElement>(".block") ?? [])];
-            if (blocks.some((b) => b.scrollHeight > b.clientHeight)) {
+            if (blocks.some((b) => b.scrollHeight > b.clientHeight) || neededHeight() > MAX_HUD_HEIGHT) {
               tooLong = true;
               return;
             }
@@ -83,12 +84,13 @@
   // body's visible part, plus all of the body's content.
   let main = $state<HTMLElement | null>(null);
   let body = $state<HTMLElement | null>(null);
+  const neededHeight = () => (main && body ? main.scrollHeight - body.clientHeight + body.scrollHeight : 0);
   $effect(() => {
     void hud;
     const seq = seen.seq;
     void tick().then(() => {
       if (!main || !body || seen.seq !== seq) return;
-      quiet(api.voiceHudFit(seq, main.scrollHeight - body.clientHeight + body.scrollHeight));
+      quiet(api.voiceHudFit(seq, neededHeight()));
     });
   });
 
