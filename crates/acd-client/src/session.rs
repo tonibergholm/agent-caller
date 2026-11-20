@@ -1,7 +1,7 @@
 //! One connection's model of a daemon (spec §7.4). Pure: no I/O, no clock.
 use std::collections::BTreeMap;
 
-use acd_protocol::{Agent, MAX_AGENT_BYTES, MAX_AGENTS_PER_MACHINE, Cursor, Machine, Request, ResolveReason, ResolvedBy, ServerMessage};
+use acd_protocol::{Agent, Effect, MAX_AGENT_BYTES, MAX_AGENTS_PER_MACHINE, Cursor, Machine, Request, RequestOption, ResolveReason, ResolvedBy, ServerMessage};
 
 #[derive(Clone, Debug, Default)]
 pub struct Session {
@@ -40,6 +40,37 @@ pub enum Applied {
 
 fn agent_too_big(agent: &Agent) -> bool {
     serde_json::to_vec(agent).map_or(true, |v| v.len() > MAX_AGENT_BYTES)
+}
+
+/// The one place that decides a label contradicts its effect: the first word
+/// of an allow's label is a refusal, or of a deny's label is an approval.
+fn contradicts(o: &RequestOption) -> bool {
+    let label = o.label.trim().to_lowercase();
+    let first = label.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+    match o.effect {
+        Effect::Allow | Effect::AllowAlways => matches!(first, "deny" | "no" | "reject"),
+        Effect::Deny => matches!(first, "allow" | "yes" | "approve"),
+        _ => false,
+    }
+}
+
+fn clean_options(options: &mut [RequestOption]) {
+    for o in options {
+        if contradicts(o) {
+            o.effect = Effect::Unknown;
+        }
+    }
+}
+
+fn clean_request(r: &mut Request) {
+    clean_options(&mut r.options);
+    for q in r.questions.iter_mut().flatten() {
+        clean_options(&mut q.options);
+    }
+}
+
+fn clean_agent(a: &mut Agent) {
+    a.pending.iter_mut().for_each(clean_request);
 }
 
 fn event_pos(msg: &ServerMessage) -> Option<(&str, u64)> {
@@ -121,7 +152,11 @@ impl Session {
             }
             self.agents = agents
                 .iter()
-                .map(|agent| (agent.id.clone(), agent.clone()))
+                .map(|agent| {
+                    let mut agent = agent.clone();
+                    clean_agent(&mut agent);
+                    (agent.id.clone(), agent)
+                })
                 .collect();
             self.cursor = Some(Cursor {
                 epoch: epoch.clone(),
@@ -159,7 +194,9 @@ impl Session {
                 {
                     return Applied::Resync("agent over the agent limits");
                 }
-                self.agents.insert(agent.id.clone(), agent.clone());
+                let mut agent = agent.clone();
+                clean_agent(&mut agent);
+                self.agents.insert(agent.id.clone(), agent);
                 Applied::Changed
             }
             ServerMessage::AgentRemoved { agent_id, .. } => {
@@ -170,7 +207,11 @@ impl Session {
                 self.machine = Some(machine.clone());
                 Applied::Changed
             }
-            ServerMessage::RequestOpened { request, .. } => Applied::Opened(request.clone()),
+            ServerMessage::RequestOpened { request, .. } => {
+                let mut request = request.clone();
+                clean_request(&mut request);
+                Applied::Opened(request)
+            }
             ServerMessage::RequestResolved {
                 request_id,
                 agent_id,
@@ -437,7 +478,6 @@ mod tests {
     // client's confirmation table (which trusts the effect) and every renderer (which draws the
     // label) disagree. The minimal fix treats a contradicting option as `Effect::Unknown` here.
     #[test]
-    #[ignore = "finding F11: a peer option whose label contradicts its effect is stored as sent"]
     fn peer_option_whose_label_contradicts_its_effect_is_not_kept_as_an_allow() {
         let mut hostile: Agent = serde_json::from_value(serde_json::json!({"id": "a", "machine_id": "m",
             "source": "herdr", "kind": "claude", "title": "t", "cwd": null, "project": null, "state": "blocked",
