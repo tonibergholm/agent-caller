@@ -45,9 +45,10 @@ fn agent_too_big(agent: &Agent) -> bool {
 
 /// Peer text is shown as sent except that bidi controls, separators and
 /// other controls (not `\n`, `\t`) become a visible `\u{..}` escape.
-pub(crate) fn clean(s: &mut String) {
+/// Returns whether anything was escaped.
+pub(crate) fn clean(s: &mut String) -> bool {
     if !s.chars().any(|c| is_forbidden_control(c) || is_forbidden_format(c)) {
-        return;
+        return false;
     }
     *s = s
         .chars()
@@ -59,10 +60,11 @@ pub(crate) fn clean(s: &mut String) {
             }
         })
         .collect();
+    true
 }
 
-fn clean_opt(s: &mut Option<String>) {
-    s.iter_mut().for_each(clean);
+fn clean_opt(s: &mut Option<String>) -> bool {
+    s.as_mut().is_some_and(clean)
 }
 
 /// The one place that decides a label contradicts its effect. It reads the
@@ -74,7 +76,8 @@ fn clean_opt(s: &mut Option<String>) {
 fn contradicts(o: &RequestOption) -> bool {
     let label = o.label.to_lowercase();
     let first = label.split(|c: char| !c.is_alphanumeric()).find(|w| !w.is_empty()).unwrap_or("");
-    let approves = matches!(first, "yes" | "y" | "allow" | "approve" | "always" | "accept" | "ok" | "proceed");
+    // Not "always" or "ok": "Always deny", "OK, deny" read as refusals.
+    let approves = matches!(first, "yes" | "y" | "allow" | "approve" | "accept" | "proceed");
     match o.effect {
         Effect::Allow | Effect::AllowAlways => !approves,
         Effect::Deny => approves,
@@ -82,25 +85,34 @@ fn contradicts(o: &RequestOption) -> bool {
     }
 }
 
-fn clean_options(options: &mut [RequestOption]) {
+/// Returns whether a label or description had to be escaped.
+fn clean_options(options: &mut [RequestOption]) -> bool {
+    let mut escaped = false;
     for o in options {
         if contradicts(o) {
             o.effect = Effect::Unknown;
         }
-        clean(&mut o.label);
-        clean_opt(&mut o.description);
+        escaped |= clean(&mut o.label);
+        escaped |= clean_opt(&mut o.description);
     }
+    escaped
 }
 
+/// Whole or read-only: if text the user decides on had to be escaped, it is
+/// not what the peer sent, so the request is not answerable here. The daemon's
+/// own adapters escape such characters, so only a hostile peer's text hits it.
 fn clean_request(r: &mut Request) {
-    clean(&mut r.title);
-    clean(&mut r.detail);
+    let mut escaped = clean(&mut r.title);
+    escaped |= clean(&mut r.detail);
     clean_opt(&mut r.raw_screen);
-    clean_options(&mut r.options);
+    escaped |= clean_options(&mut r.options);
     for q in r.questions.iter_mut().flatten() {
         clean_opt(&mut q.header);
-        clean(&mut q.text);
-        clean_options(&mut q.options);
+        escaped |= clean(&mut q.text);
+        escaped |= clean_options(&mut q.options);
+    }
+    if escaped {
+        r.answer_path = acd_protocol::AnswerPath::None;
     }
 }
 
@@ -563,6 +575,22 @@ mod tests {
         let Applied::Opened(r) = s.apply(&ServerMessage::RequestOpened { epoch: "e1".into(), seq: 2, request: req }) else { panic!() };
         assert_eq!(r.detail, "ls\\u{202e}\nok\ttab");
         assert_eq!((r.options[0].effect, r.options[1].effect), (Effect::Allow, Effect::Deny));
+        // Whole or read-only: escaped text is not what was sent.
+        assert_eq!(r.answer_path, acd_protocol::AnswerPath::None);
+        assert!(!r.is_answerable());
+    }
+
+    #[test]
+    fn a_request_whose_text_needs_no_escape_stays_answerable() {
+        let mut s = Session::default();
+        s.welcome(machine(), vec![], "e1", 0);
+        s.apply(&snap("e1", 1, &[]));
+        let req: Request = serde_json::from_value(serde_json::json!({"id":"r1","agent_id":"a","kind":"permission",
+            "status":"open","answer_path":"hook","title":"Bash","detail":"ls\nok\ttab","free_text":false,
+            "raw_screen":"raw\u{202E}","questions":null,"opened_at":"2026-10-08T00:00:00.000Z","options":[
+            {"id":"a","label":"Yes","description":null,"effect":"allow"}]})).unwrap();
+        let Applied::Opened(r) = s.apply(&ServerMessage::RequestOpened { epoch: "e1".into(), seq: 2, request: req }) else { panic!() };
+        assert_eq!(r.answer_path, acd_protocol::AnswerPath::Hook);
     }
 
     fn option_effect(label: &str, effect: Effect) -> Effect {
@@ -573,7 +601,7 @@ mod tests {
 
     #[test]
     fn an_allow_is_kept_only_when_its_label_approves() {
-        for bad in ["Deny", "Nope", "Block", "Cancel", "Do not allow", "\u{200b}Deny", "\u{1F6AB} Deny", "", "  "] {
+        for bad in ["Deny", "Nope", "Block", "Cancel", "Do not allow", "Always deny", "OK, deny", "\u{200b}Deny", "\u{1F6AB} Deny", "", "  "] {
             assert_eq!(option_effect(bad, Effect::Allow), Effect::Unknown, "{bad:?}");
             assert_eq!(option_effect(bad, Effect::AllowAlways), Effect::Unknown, "{bad:?}");
         }
