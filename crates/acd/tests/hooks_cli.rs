@@ -2911,6 +2911,48 @@ fn a_previous_token_is_rejected_as_soon_as_it_expires() {
     assert!(store_of(&dir)["previous"].is_object());
 }
 
+#[test]
+fn rotate_without_revoke_still_accepts_the_old_token() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    let old = store_token(&dir);
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let body = claude_fixture("payload-Stop.json");
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &old, &[], &body).0,
+        200
+    );
+}
+
+#[test]
+fn rotate_revoke_drops_the_old_token_at_once_even_while_one_is_retained() {
+    let (home, dir) = home_with_acd();
+    assert!(install(&dir, home.path(), "claude", &[]).status.success());
+    assert!(rotate(&dir, home.path(), &[]).status.success());
+    let leaked = store_token(&dir);
+    // Without --revoke a second rotation is refused while a previous token is retained.
+    let out = rotate(&dir, home.path(), &["--revoke"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("lose acd until restarted"));
+    let store = store_of(&dir);
+    assert!(store["previous"].is_null());
+    assert_eq!(store["headers"]["state"], "done");
+    let new = store_token(&dir);
+    assert_ne!(leaked, new);
+    assert_eq!(settings_token(home.path()), new.as_str());
+    let started = start_daemon(&dir, None, "", &home_env(home.path()));
+    let body = claude_fixture("payload-Stop.json");
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &leaked, &[], &body).0,
+        401
+    );
+    assert_eq!(
+        post_hook(started.hook_port, "/hook/claude/Stop", &new, &[], &body).0,
+        200
+    );
+}
+
 /// A well-formed token (43 base64url characters, 32 bytes) for hand-written stores.
 fn fixed_token(c: char) -> String {
     format!("{}A", c.to_string().repeat(42))

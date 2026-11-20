@@ -142,6 +142,11 @@ enum TokenCmd {
         allow_unknown_git: bool,
         #[arg(long)]
         force: bool,
+        /// Hook token only: stop accepting the old token at once instead of
+        /// retaining it. Use when it may have leaked. Claude sessions that
+        /// still use it lose acd until restarted.
+        #[arg(long)]
+        revoke: bool,
     },
 }
 
@@ -200,6 +205,7 @@ fn real_main() -> Result<()> {
                     allow_tracked,
                     allow_unknown_git,
                     force,
+                    revoke,
                 },
         } => {
             if !dir.is_dir() {
@@ -208,6 +214,9 @@ fn real_main() -> Result<()> {
             preflight(&dir)?;
             match which {
                 TokenKind::Client => {
+                    if revoke {
+                        bail!("--revoke applies to the hook token only; a client rotation already drops the old token");
+                    }
                     let token = secrets::new_token();
                     secrets::write_secret(&dir.join("client.token"), &token)?;
                     // Spec 4.8: registrations go with the token, also while no daemon runs.
@@ -226,6 +235,7 @@ fn real_main() -> Result<()> {
                         &ctx,
                         flags,
                         force,
+                        revoke,
                         chrono::Utc::now().timestamp_millis(),
                     )?;
                     for path in &report.updated {
@@ -238,6 +248,13 @@ fn real_main() -> Result<()> {
                         bail!(
                             "hook token rotation incomplete: fix the file(s) and run `acd hooks install claude`"
                         );
+                    }
+                    if revoke {
+                        println!(
+                            "Hook token rotated to generation {} and the old token revoked. Running Claude sessions that use the old token lose acd until restarted.",
+                            store.generation
+                        );
+                        return Ok(());
                     }
                     println!(
                         "Hook token rotated to generation {}. The previous token stays valid until every Claude session started before now has exited or used the new token, at most 30 days.",

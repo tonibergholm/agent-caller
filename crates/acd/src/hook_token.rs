@@ -205,7 +205,19 @@ pub fn ensure_locked(dir: &Path, held: &WriterLock, force: bool) -> Result<bool>
     Ok(true)
 }
 
+#[cfg(test)] // the CLI goes through `rotate`
 pub fn rotate_store_locked(dir: &Path, held: &WriterLock, now_ms: i64) -> Result<Store> {
+    rotate_store_keeping(dir, held, now_ms, true)
+}
+
+/// `keep_previous` false writes `previous: None` in the same save, so the
+/// old token stops working at once (`--revoke`).
+fn rotate_store_keeping(
+    dir: &Path,
+    held: &WriterLock,
+    now_ms: i64,
+    keep_previous: bool,
+) -> Result<Store> {
     let old = load(dir)?;
     let generation = old.generation.checked_add(1).with_context(|| {
         format!(
@@ -217,7 +229,7 @@ pub fn rotate_store_locked(dir: &Path, held: &WriterLock, now_ms: i64) -> Result
         version: 1,
         generation,
         current: secrets::new_token(),
-        previous: Some(Previous {
+        previous: keep_previous.then(|| Previous {
             token: old.current,
             generation: old.generation,
             rotated_at_ms: now_ms,
@@ -289,12 +301,14 @@ pub fn update_headers(
 
 /// Rotates the hook credential and rewrites its managed Claude headers under
 /// one writer lock. `now_ms` is the rotation instant; completion uses a later
-/// clock read after the destination writes.
+/// clock read after the destination writes. `revoke` drops the old token at
+/// once instead of retaining it, and so needs no `force`.
 pub fn rotate(
     dir: &Path,
     ctx: &hooks_install::Ctx,
     flags: hooks_install::Flags,
     force: bool,
+    revoke: bool,
     now_ms: i64,
 ) -> Result<(Store, hooks_install::RewriteReport)> {
     let held = writer_lock::acquire(dir)?;
@@ -306,7 +320,7 @@ pub fn rotate(
     if let Some(previous) = &store.previous
         && now_ms < previous.expires_at_ms
     {
-        if !force {
+        if !force && !revoke {
             bail!(
                 "the previous hook token is still accepted for Claude sessions started before the last rotation (see `acd status`); rotating again cuts them off. Restart those sessions and wait, or pass --force"
             );
@@ -316,7 +330,7 @@ pub fn rotate(
         );
     }
     hooks_install::precheck_claude(ctx, &held, flags)?;
-    rotate_store_locked(dir, &held, now_ms)?;
+    rotate_store_keeping(dir, &held, now_ms, !revoke)?;
     fail_at("after-store")?;
     let report = update_headers_locked(dir, ctx, &held, flags)?;
     Ok((load(dir)?, report))

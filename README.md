@@ -367,6 +367,8 @@ Other commands:
 - `acd token rotate client` replaces the client token. Pair the apps again.
 - `acd token rotate hook` replaces the hook token. Running Claude
   sessions keep working with the old one until it is retired.
+  Add `--revoke` to drop the old one at once (after a leak); sessions
+  still using it lose acd until restarted.
 - `acd tls rotate` replaces the TLS certificate.
 
 ## Repository layout

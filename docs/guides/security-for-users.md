@@ -54,22 +54,17 @@ changes, so rotating first revokes nothing.
 
 ```sh
 git rm --cached <path-to-settings.json>
-acd token rotate hook
+acd token rotate hook --revoke
 ```
 
-One rotation does not revoke the leaked token. The daemon keeps the previous
-token valid for Claude sessions that started before the rotation, until they
-exit or use the new token, at most 30 days. To cut the leaked token off now,
-rotate a second time, which drops it:
-
-```sh
-acd token rotate hook --force
-```
-
-If the first rotation reports that it could not update every settings file,
-fix that before the second rotation. The running daemon picks up the change on
-its next refresh, normally within about two seconds. Restart or `/clear`
-Claude sessions that still fail with a retired token. Then remove the leaked
+Without `--revoke`, a rotation does not revoke the leaked token: the daemon
+keeps the previous token valid for Claude sessions that started before the
+rotation, until they exit or use the new token, at most 30 days. `--revoke`
+keeps no previous token, so the leaked one stops working at once. Claude
+sessions that still use it lose acd until you restart them (or `/clear` them).
+If the rotation reports that it could not update every settings file, fix that
+and run `acd hooks install claude`. The running daemon picks up the change on
+its next refresh, normally within about two seconds. Then remove the leaked
 file from the repository history. See
 [hooks-claude-code-and-codex.md](hooks-claude-code-and-codex.md).
 

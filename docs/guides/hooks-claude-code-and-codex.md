@@ -86,8 +86,10 @@ recorded Claude settings file that holds the old HTTP hook, and prints
 `Updated <path>` for each recorded file. The previous token stays valid until every Claude session started
 before the rotation has ended or used the new one, at most 30 days. If a file
 cannot be updated, the command fails with `hook token rotation incomplete`:
-fix the file and run `acd hooks install claude`. Do not change `hook_port`
-while a settings file still holds the HTTP hook.
+fix the file and run `acd hooks install claude`. If the token may have
+leaked, add `--revoke`: the old token stops working at once, and Claude
+sessions that still use it lose acd until restarted. Do not change
+`hook_port` while a settings file still holds the HTTP hook.
 
 ## Remove
 
