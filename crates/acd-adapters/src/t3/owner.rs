@@ -36,8 +36,22 @@ pub async fn server_is_ours(tcp: &TcpStream) -> bool {
     let (client, server) = (canonical(client), canonical(server));
     // SAFETY: geteuid has no preconditions.
     let ours = unsafe { libc::geteuid() };
-    server_uid(server, client).await == Some(ours)
+    // A connection the server has not accept()ed yet has no server-side row
+    // (macOS lsof): look again before refusing. A row with another uid
+    // refuses at once.
+    for attempt in 0..LOOKUPS {
+        if attempt > 0 {
+            tokio::time::sleep(LOOKUP_GAP).await;
+        }
+        if let Some(uid) = server_uid(server, client).await {
+            return uid == ours;
+        }
+    }
+    false
 }
+
+const LOOKUPS: u32 = 3;
+const LOOKUP_GAP: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn canonical(a: SocketAddr) -> SocketAddr {
     SocketAddr::new(a.ip().to_canonical(), a.port())
@@ -188,6 +202,22 @@ mod tests {
         assert_eq!(lsof_uid("", server, client), None);
         let v6 = "p9\nu501\nn[::1]:3789->[::1]:52000\n";
         assert_eq!(lsof_uid(v6, sa("[::1]:3789"), sa("[::1]:52000")), Some(501));
+    }
+
+    /// The server has not accept()ed when the check first looks: macOS lists no
+    /// server-side row until it does.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn a_listener_that_accepts_a_little_late_is_ours() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            l.accept().await.unwrap()
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        assert!(server_is_ours(&tcp).await);
+        let _server_end = accept.await.unwrap();
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

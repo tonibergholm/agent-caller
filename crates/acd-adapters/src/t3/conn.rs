@@ -143,9 +143,9 @@ pub enum ConnectError {
     Protocol,
     #[error("cannot reach T3")]
     Unreachable,
-    /// A loopback T3 whose server end is not held by this user. The token
-    /// was not sent.
-    #[error("the T3 port is held by another user; token not sent")]
+    /// A local T3 whose server end could not be proven to be this user's.
+    /// The token was not sent.
+    #[error("could not prove the T3 port belongs to this user; token not sent")]
     NotOurs,
 }
 
@@ -405,7 +405,7 @@ pub async fn connect(
     // or our own Tailscale or LAN address), prove this connection's server
     // end is ours before the upgrade request carries the token.
     if owner::is_local(&tcp) && !owner::server_is_ours(&tcp).await {
-        tracing::warn!("T3 loopback port is not held by this user; token not sent");
+        tracing::warn!("could not prove the T3 port belongs to this user; token not sent");
         return Err(ConnectError::NotOurs);
     }
     let _ = tcp.set_nodelay(true);

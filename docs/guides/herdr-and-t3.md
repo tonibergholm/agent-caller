@@ -90,7 +90,7 @@ Source status messages and what to do:
 | `T3 rejected the token` | Issue a new token with both scopes. |
 | `T3 does not speak orchestration protocol 2` | Update T3 or acd. |
 | `cannot reach T3` | Start T3, check the URL and port. |
-| `the T3 port is held by another user; token not sent` | Something other than your own T3 holds the loopback port. Stop it, or run T3 as your user. |
+| `could not prove the T3 port belongs to this user; token not sent` | The daemon could not show that your own T3 holds the port, so it sent no token. Another user's process may hold it: stop it, or run T3 as your user. If T3 is yours and only slow to start, the next retry connects. |
 | `N T3 items could not be read (see the debug log)` | Some items are skipped. Update acd. |
 
 T3 message text never reaches the acd logs, only tags, lengths and hashes.
