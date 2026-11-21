@@ -82,9 +82,12 @@ fn said_it(transcript: &VoiceText, text: &VoiceText) -> bool {
         let w: Vec<String> = s
             .split_whitespace()
             .map(|w| {
-                // Quotes go at either edge; sentence punctuation only at the end, so `../tmp` is not `/tmp`.
-                let w = w.trim_start_matches(['"', '\u{201C}', '\u{201D}']);
-                w.trim_end_matches(['"', '\u{201C}', '\u{201D}', '.', ',', '!', '?', ';', ':']).to_lowercase()
+                // Quotes go at either edge, but at most one sentence mark at the end, so
+                // `../tmp` is not `/tmp` and `/tmp/..` is not `/tmp/`.
+                const QUOTES: [char; 3] = ['"', '\u{201C}', '\u{201D}'];
+                let w = w.trim_matches(QUOTES);
+                let w = w.strip_suffix(['.', ',', '!', '?', ';', ':']).unwrap_or(w);
+                w.trim_end_matches(QUOTES).to_lowercase()
             })
             .filter(|w| !w.is_empty())
             .collect();
