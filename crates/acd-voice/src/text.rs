@@ -47,12 +47,15 @@ impl fmt::Debug for Redacted<'_> {
 }
 
 /// Cuts `s` to at most `max` characters on a character boundary, ending
-/// with "…" when anything was cut.
+/// with "…" when anything was cut (empty when `max` is 0).
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    if max == 0 {
+        return String::new();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
     out.push('…');
     out
 }

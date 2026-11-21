@@ -143,7 +143,7 @@ async fn invented_or_malformed_plans_are_not_understood() {
         "not json",
         r#"{"step":"answer","request":"r1","option":"12"}"#,
         r#"{"step":"answer","request":"r1"}"#,
-        r#"{"step":"send","text":"hi"}"#,
+        r#"{"step":"send","text":"do the thing"}"#,
         r#"{"step":"none"}"#,
     ] {
         assert_eq!(model(&s, "do the thing", reply).await, Routed::Refused(Refusal::DidNotUnderstand), "{reply}");
@@ -161,7 +161,9 @@ async fn text_rules_apply_to_payloads() {
     let long = "x".repeat(64 * 1024 + 1);
     for text in ["\u{202E}evil", "a\u{1b}b", "   ", long.as_str()] {
         let reply = serde_json::json!({"step": "send", "agent": "a1", "text": text}).to_string();
-        assert_eq!(model(&s, "tell it", &reply).await, Routed::Refused(Refusal::BadText), "{} chars", text.len());
+        // The text is in the transcript, so the text rules refuse it (blank
+        // text would also fail the transcript check).
+        assert_eq!(model(&s, &format!("tell it {text}"), &reply).await, Routed::Refused(Refusal::BadText), "{} chars", text.len());
     }
 }
 
@@ -232,7 +234,7 @@ async fn a_named_send_reaches_a_hidden_idle_agent_and_is_confirmed() {
     let reply = r#"{"step":"send","agent":"a2","text":"run the tests"}"#;
     let p = proposal(model(&s, "tell the minos claude to run the tests", reply).await);
     assert_eq!((p.provenance, p.off_screen, p.level), (Some(Provenance::Named), true, Level::Confirm));
-    assert_eq!(model(&s, "keep going", reply).await, Routed::Refused(Refusal::OutOfView), "unnamed");
+    assert_eq!(model(&s, "run the tests", reply).await, Routed::Refused(Refusal::OutOfView), "unnamed");
     let answer = r#"{"step":"select","agent":"a2"}"#;
     assert_eq!(model(&s, "show the minos one", answer).await, Routed::Refused(Refusal::OutOfView));
 }
@@ -270,7 +272,8 @@ async fn replays_give_the_expected_step_and_provenance() {
 #[tokio::test]
 async fn debug_never_shows_payloads() {
     let s = snapshot(vec![working("minos", "a")]);
-    let r = model(&s, "tell minos SECRET-T", r#"{"step":"send","agent":"a1","text":"SECRET-P"}"#).await;
+    let r = model(&s, "tell minos SECRET-P", r#"{"step":"send","agent":"a1","text":"SECRET-P"}"#).await;
+    assert!(matches!(r, Routed::Proposal(_)), "the payload must reach a proposal: {r:?}");
     let shown = format!("{r:?}");
     assert!(!shown.contains("SECRET"), "{shown}");
 }
@@ -323,7 +326,8 @@ async fn only_a_send_may_target_a_send_only_card() {
     s.presentation.visible = vec!["m/w".into()];
     for reply in [
         r#"{"step":"answer","request":"r1","option":"1"}"#,
-        r#"{"step":"answer_text","request":"r1","text":"purple"}"#,
+        // "the" is in both transcripts, so only the card rule refuses it.
+        r#"{"step":"answer_text","request":"r1","text":"the"}"#,
         r#"{"step":"answer","agent":"a2","option":"1"}"#,
     ] {
         for said in ["do the thing", "answer the done one"] {
@@ -377,10 +381,10 @@ async fn payload_limits_and_normalisation() {
     let at_limit = "x".repeat(16 * 1024);
     let over = "x".repeat(16 * 1024 + 1);
     let reply = |t: &str| serde_json::json!({"step": "answer_text", "request": "r1", "text": t}).to_string();
-    assert!(matches!(model(&t, "answer it", &reply(&at_limit)).await, Routed::Proposal(_)));
-    assert_eq!(model(&t, "answer it", &reply(&over)).await, Routed::Refused(Refusal::BadText));
+    assert!(matches!(model(&t, &format!("answer it {at_limit}"), &reply(&at_limit)).await, Routed::Proposal(_)));
+    assert_eq!(model(&t, &format!("answer it {over}"), &reply(&over)).await, Routed::Refused(Refusal::BadText));
     let reply = serde_json::json!({"step": "send", "agent": "a1", "text": "  line one\r\nline two \n"}).to_string();
-    let p = proposal(model(&s, "tell it", &reply).await);
+    let p = proposal(model(&s, "tell it line one line two", &reply).await);
     assert_eq!(p.step, Step::Send { card: "m/w".into(), text: VoiceText::new("line one\nline two") });
 }
 

@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 static CURRENT_SHORTCUT: Mutex<Option<Shortcut>> = Mutex::new(None);
@@ -86,7 +86,7 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .build()
 }
 
-pub fn apply(app: &AppHandle, hotkey: &str) -> Result<(), String> {
+pub fn apply<R: Runtime>(app: &AppHandle<R>, hotkey: &str) -> Result<(), String> {
     let shortcut = parse_shortcut(hotkey)?;
     apply_shortcut(app, shortcut)
 }
@@ -95,7 +95,7 @@ pub fn current_shortcut() -> Option<Shortcut> {
     CURRENT_SHORTCUT.lock().ok().and_then(|current| *current)
 }
 
-pub fn restore(app: &AppHandle, previous: Option<Shortcut>) -> Result<(), String> {
+pub fn restore<R: Runtime>(app: &AppHandle<R>, previous: Option<Shortcut>) -> Result<(), String> {
     let shortcuts = app.global_shortcut();
     let mut current = CURRENT_SHORTCUT
         .lock()
@@ -118,7 +118,7 @@ pub fn restore(app: &AppHandle, previous: Option<Shortcut>) -> Result<(), String
     Ok(())
 }
 
-fn apply_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<(), String> {
+fn apply_shortcut<R: Runtime>(app: &AppHandle<R>, shortcut: Shortcut) -> Result<(), String> {
     let label = shortcut.to_string();
     let shortcuts = app.global_shortcut();
     let mut current = CURRENT_SHORTCUT

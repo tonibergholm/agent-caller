@@ -194,6 +194,24 @@ fn apply(snapshot: &Snapshot, template: &Template, resolved: &Resolved, origin: 
     let Some(card) = snapshot.card(&resolved.card) else {
         return Routed::Refused(Refusal::NoSuchTarget);
     };
+    // A model never picks the card for a send or a select: with no card named
+    // or selected, the user picks from the visible ones (findings V1, V4).
+    if origin == Origin::Model
+        && resolved.provenance == Provenance::Inferred
+        && matches!(template, Template::Send(_) | Template::Select)
+    {
+        let candidates: Vec<String> = snapshot
+            .visible_cards()
+            .into_iter()
+            .filter(|c| target::fits(c, template.purpose()).is_ok())
+            .map(|c| c.key.clone())
+            .collect();
+        return if candidates.is_empty() {
+            Routed::Refused(Refusal::NoTarget)
+        } else {
+            Routed::WhichOne(Choice { candidates, template: template.clone(), origin })
+        };
+    }
     let (mut effect, mut by_number, mut confirm) = (None, false, false);
     let step = match template {
         Template::Answer(by) => {

@@ -45,6 +45,9 @@ pub(super) fn validate(snapshot: &Snapshot, ids: &IdMap, transcript: &VoiceText,
             let Some(text) = checked_text(plan.text.as_ref(), ANSWER_TEXT_MAX_BYTES) else {
                 return Routed::Refused(Refusal::BadText);
             };
+            if !said_it(transcript, &text) {
+                return Routed::Refused(Refusal::BadText);
+            }
             let payload = text.expose().to_owned();
             aim(snapshot, ids, transcript, &plan, Purpose::AnswerText, Template::AnswerText(text), Some(&payload))
         }
@@ -52,6 +55,9 @@ pub(super) fn validate(snapshot: &Snapshot, ids: &IdMap, transcript: &VoiceText,
             let Some(text) = checked_text(plan.text.as_ref(), REPLY_MAX_BYTES) else {
                 return Routed::Refused(Refusal::BadText);
             };
+            if !said_it(transcript, &text) {
+                return Routed::Refused(Refusal::BadText);
+            }
             let payload = text.expose().to_owned();
             aim(snapshot, ids, transcript, &plan, Purpose::Send, Template::Send(text), Some(&payload))
         }
@@ -65,6 +71,29 @@ fn checked_text(text: Option<&VoiceText>, max: usize) -> Option<VoiceText> {
     let text = text?.expose().replace("\r\n", "\n");
     let text = text.trim();
     (!text.is_empty() && text.len() <= max && !has_forbidden_chars(text)).then(|| VoiceText::new(text))
+}
+
+/// The payload is a contiguous run of the user's own words (finding V1).
+/// Only case and sentence punctuation at a word's edges may differ (so "done
+/// rm" allows "done; rm"); symbols such as `|` or `~` that `normalize` would
+/// drop may not be added. The HUD still shows the payload for confirming.
+fn said_it(transcript: &VoiceText, text: &VoiceText) -> bool {
+    let words = |s: &str| {
+        let w: Vec<String> = s
+            .split_whitespace()
+            .map(|w| {
+                // Quotes go at either edge, but at most one sentence mark at the end, so
+                // `../tmp` is not `/tmp` and `/tmp/..` is not `/tmp/`.
+                const QUOTES: [char; 3] = ['"', '\u{201C}', '\u{201D}'];
+                let w = w.trim_matches(QUOTES);
+                let w = w.strip_suffix(['.', ',', '!', '?', ';', ':']).unwrap_or(w);
+                w.trim_end_matches(QUOTES).to_lowercase()
+            })
+            .filter(|w| !w.is_empty())
+            .collect();
+        format!(" {} ", w.join(" "))
+    };
+    words(transcript.expose()).contains(&words(text.expose()))
 }
 
 fn machine_key(snapshot: &Snapshot, name: &str) -> Option<String> {
@@ -113,6 +142,12 @@ fn aim(
         if target::named(snapshot, &said).is_some() {
             return targeted(snapshot, &said, purpose, None, template, Origin::Model);
         }
+        // The model does not narrow the cards a send or a select may go to (V1, V4).
+        let keys = if matches!(template, Template::Send(_) | Template::Select) {
+            snapshot.visible_cards().into_iter().map(|c| c.key.clone()).collect()
+        } else {
+            keys
+        };
         let fitting: Vec<String> = keys
             .into_iter()
             .filter(|k| {

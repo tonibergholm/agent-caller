@@ -119,6 +119,12 @@ fn open_path(path: &Path, directory: bool) -> Result<File, SecureFsError> {
         return Err(match e.raw_os_error() {
             Some(libc::ELOOP) => SecureFsError::Symlink(path.into()),
             Some(libc::ENOENT) => SecureFsError::Missing(path.into()),
+            // O_NOFOLLOW|O_DIRECTORY on a symlink gives ENOTDIR, not ELOOP.
+            Some(libc::ENOTDIR)
+                if directory && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink()) =>
+            {
+                SecureFsError::Symlink(path.into())
+            }
             Some(libc::ENOTDIR) => SecureFsError::NotRegular(path.into()),
             _ if e.kind() == std::io::ErrorKind::PermissionDenied => diagnose_denied(path, e),
             _ => SecureFsError::Io(path.into(), e),

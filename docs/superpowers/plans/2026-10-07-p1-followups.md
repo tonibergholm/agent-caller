@@ -41,19 +41,10 @@ marks a decision only the owner can make: those are not accepted residuals.
 
 ## Core, protocol and client
 
-- **Oversized frame before `welcome` (open; PR #105 fixes it).** After an
-  established session drops, a peer can send a frame over 1 MiB before the
-  next `welcome`. `next_server()` in `crates/acd-client/src/conn.rs` maps that
-  capacity error to `End::Offline`, so the following connection still sends
-  the old resume cursor. Memory stays bounded; only the documented resync does
-  not happen on that path. An oversized frame after `welcome` is already a
-  resync (`serve`, `conn.rs`).
 - **Core 3, 7 and 8 limits (as built).** The client limits frames to 1 MiB,
   1000 agents and 64 KiB per agent; each breach ends as a resync without the
-  resume cursor. An oversized frame does so only after `welcome`; before the
-  next `welcome` (the first frames after a drop) it ends as `End::Offline` and
-  keeps the cursor (`crates/acd-client/src/conn.rs` `next_server`). PR #105
-  closes that gap; it is open, not on main. The daemon registry is fed by
+  resume cursor, before `welcome` as well as after it (#105,
+  `crates/acd-client/src/conn.rs` `next_server`). The daemon registry is fed by
   local adapters, not by peers, so it has no new cap. Pairing accepts ASCII
   hostnames only; IDNA names must be paired as punycode.
 - **Core 4 logging.** `hello` outcomes are logged at 10 lines per 10 s per
@@ -101,9 +92,20 @@ and `-local.md`). Core 1 to 8 and local F1 to F5 are fixed.
 - **Apps and voice review (#100).** The findings of
   `docs/research/2026-11-04-security-review-apps-voice.md` (F1 to F11: voice
   path, Mac app, app-core, iOS shell, frontend): F1, F3, F7, F8, F9, F10 and
-  F11 are fixed by the 2026-11-20 audit. The voice findings V1 to V4 are open;
-  the `#[ignore]`d tests in `crates/acd-voice/tests/findings.rs` demonstrate
-  them. F1 depends on real layout: the HUD measures overflow after render, and
+  F11 are fixed by the 2026-11-20 audit. The voice findings V1 to V4 (F2, F4,
+  F5, F6) are fixed by #142; their tests in
+  `crates/acd-voice/tests/findings.rs` now run. V2 records what a read-back
+  spoke, per card; a spoken alert does not count as a read-back yet (alerts
+  are spoken by `acd-voice-client`, which does not tell the executor).
+  Residuals: a payload may be any contiguous run of the user's words, so
+  "not to delete everything" allows "delete everything", and a model `answer`
+  or `answer_text` still takes the model's pick when nothing is named (both
+  stay `Confirm` with the payload and target on the HUD, spec §5.5); a card
+  whose title shares two long words with the transcript counts as named
+  (spec §5.2 rule 1), so a model `select` of it is `Level::None`. V2 records
+  a read-back when it is handed to speech, not when it was spoken: if the
+  synthesiser refuses it or the user stops it, a "yes" for that request still
+  counts down, as it did before V2 (#142 review). F1 depends on real layout: the HUD measures overflow after render, and
   vitest mocks the measurements.
 - **F3 residual (hook listeners, #87).** Since the 2026-11-20 audit Claude
   and Codex hooks use `hook.sock`, which has its own slot pool, so filling the
@@ -127,6 +129,12 @@ and `-local.md`). Core 1 to 8 and local F1 to F5 are fixed.
   (`acd_securefs::check_socket_path`). Not covered: a same-user process, and
   the instant between the check and the connect (closing it would need a
   peer-credential check on the connection).
+- **securefs trailing slash (#142 review, predates it).** `check_private_dir`
+  on `link/`, where `link` is a symlink to a directory, follows the link on
+  Linux (a trailing slash defeats `O_NOFOLLOW`), so the target is checked
+  instead of refusing the symlink. acd's own paths carry no trailing slash;
+  a user-set path with one is the user's own symlink. Fix: strip trailing
+  slashes (keeping `/`) before opening.
 - **F5 (#86).** Control characters are rejected in the home, executable and
   config-dir paths; other characters were already escaped.
 - **Whole-or-read-only (#83), accepted.** Characters such as U+034F, U+115F,
@@ -389,17 +397,10 @@ Steps 3 and 4 (final review, 2026-10-13):
 
 Open test work:
 
-- **Flaky test, macOS CI (seen 2026-11-04).** `repairing_inside_the_undo_window_sends_nothing`
-  (`crates/acd-client/tests/inbox.rs`, final `assert_eq!(answers(&f), 1)` after
-  a fixed 400 ms sleep) failed once on PR #87, which does not touch
-  `acd-client`; a rerun passed. Fix: wait for the answer to arrive. PR #105
-  does this; it is not merged. Other tests in that file still sleep for fixed
-  times (for example `pick_waits_for_the_undo_then_sends_once`).
-- **Auth log test (#90).** `crates/acd-core/tests/tls.rs` (`a_hello_naming_itself_after_the_token_does_not_log_the_token`)
-  accepts any shared "hello accepted" line, so another test can mask this
-  hello timing out, and prints a token substring in its failure message
-  (CLAUDE.md: use a static message). It also waits a fixed 200 ms. PR #105
-  fixes the first point; it is not merged.
+- **Fixed sleeps in `crates/acd-client/tests/inbox.rs`.** #105 made
+  `repairing_inside_the_undo_window_sends_nothing` wait for the answer; other
+  tests in that file still sleep for fixed times (for example
+  `pick_waits_for_the_undo_then_sends_once`).
 - Task 1: some CLI tests inherit stdout and print throwaway tokens (for
   example `acd init`, `token rotate`); capture the output in the harness.
 - Task 8: the brief's tests for the full event queue, disconnected holds and
@@ -450,10 +451,14 @@ Residuals from the 2026-11 relay and review work, none blocking:
     machine's own address) skip themselves when the address is unreachable;
     on macOS the application firewall makes that happen in
     `cargo test --workspace` runs. They run under `cargo test -p acd-core`.
-  - The window checks of `escape`, `set_hotkey` and the voice commands have
-    no IPC test (they need `VoiceState` or the Wry runtime). The other 13
-    inbox commands have one (`app/src-tauri/src/commands.rs`,
-    `window_scope`).
+  - Four window checks have no IPC test: `voice_set_settings`,
+    `voice_probe`, `voice_request_permission` and `voice_install_assets`.
+    They link the Swift bridge, and the test binary has no rpath to the Swift
+    runtime, so registering them aborts it at load (`LEFT_OUT` in
+    `app/src-tauri/src/commands.rs`, `window_scope`). Every other
+    window-checked command has one; `set_hotkey` and `voice_open_privacy`
+    only for the refused window, because the allowed one needs the
+    global-shortcut plugin or runs `/usr/bin/open`.
   - Live Claude scenarios 40 and 41 pass with the shim hooks (Claude Code
     2.1.329, Haiku). They run Claude with the real HOME, so each run records
     the scratch project, and now its folder trust, in `~/.claude.json`.
@@ -466,10 +471,9 @@ Residuals from the 2026-11 relay and review work, none blocking:
     affects the label only, never delivery.
 - **Mutation tests (#101).** Some tests wait for indirect 5 s bounds, and the
   counts quoted in the mutation document are stale.
-- **Bug-hunt reproducers (#110).** `#[ignore]`d tests that fail today: B1
-  (`claude_key`/`codex_key` ambiguous when ids contain `:`), B2 (`cap_chars`
-  at max 0), B4 (voice `truncate` at max 0). `Pairing::parse` accepts a `+`
-  port (`+8443`). Not audited: `hooks/state.rs`, the T3 and herdr reconcilers,
+- **Bug-hunt reproducers (#110).** B1, B2 and B4 are fixed by #142
+  and their tests run. `Pairing::parse` accepts a `+` port (`+8443`);
+  it parses to the same port. Not audited: `hooks/state.rs`, the T3 and herdr reconcilers,
   `acd-client/conn.rs` resume, `acd-core/engine.rs` claim/deliver. See
   `docs/research/2026-11-05-bug-hunt.md`.
 - **Fuzz campaign (#108).** The registry never evicts `keys` while an agent
@@ -515,6 +519,17 @@ Historical flakes, not reproduced in the 2026-10 audit:
 
 Checked in code on 2026-11-04.
 
+- PR #105: the oversized pre-`welcome` frame resyncs, the
+  `repairing_inside_the_undo_window_sends_nothing` flake waits for the
+  answer, and the auth log test needs its own hello and prints no token.
+- Checked on 2026-11-21, #142 (second follow-up to the 2026-11-20 audit):
+  voice findings V1
+  to V4 (a model `send` or `select` with no named or selected card asks which
+  one; a payload must be the user's own words; a cut read-back says more
+  follows; a bare "yes" for a request other than the one read back on that
+  card needs confirming), bug-hunt B1 (correlation keys length-prefix their
+  ids), B2 and B4 (cutting to 0 gives an empty string), and the securefs
+  symlinked-directory reason.
 - Omarchy J/K scroll: `Panel.qml` `revealCard` scrolls the list to the
   selection (#73).
 - Notification history on a flap: Omarchy keeps a bounded history
@@ -576,8 +591,8 @@ before 1.0.
 - The clipboard clear after pairing (0.8.1), the iOS Keychain class
   replacement, a release build on a device and the Online state right after a
   relaunch: live checks on a device, in the signed-release step.
-- The oversized pre-`welcome` frame resync (PR #105).
-- The test items above that wait on fixed sleeps (PR #105).
+- The test items above that wait on fixed sleeps (#105 fixed one; the
+  others in `inbox.rs` remain).
 
 **Verify on the 1.0 acceptance run** (implemented, not yet seen live):
 

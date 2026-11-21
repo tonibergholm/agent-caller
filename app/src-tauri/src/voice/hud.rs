@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use acd_voice::hud::{Hud, HudEvent, OutcomeView};
 use acd_voice::refusal::Refusal;
-use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Size, WebviewUrl, WebviewWindow};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, Size, WebviewUrl, WebviewWindow};
 use tauri_nspanel::{CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask, tauri_panel};
 
 use crate::frame::Frame;
@@ -205,14 +205,14 @@ pub fn fit_height(measured: f64) -> f64 {
 /// Main thread. Fits the HUD to state `seq`'s content, unless a newer
 /// state replaced it: a late fit must not shrink a step that waits for
 /// input after `apply` gave it the full size.
-pub fn fit_state(app: &AppHandle, seq: u64, height: f64) {
+pub fn fit_state<R: Runtime>(app: &AppHandle<R>, seq: u64, height: f64) {
     if fade_applies(LAST_SEQ.load(Ordering::SeqCst), seq) {
         fit(app, height);
     }
 }
 
 /// Main thread. Resizes the HUD to `height`, keeping its top edge.
-pub fn fit(app: &AppHandle, height: f64) {
+pub fn fit<R: Runtime>(app: &AppHandle<R>, height: f64) {
     if let Some(window) = app.get_webview_window(LABEL)
         && let Err(error) = window.set_size(Size::Logical(LogicalSize::new(SIZE.0, fit_height(height))))
     {

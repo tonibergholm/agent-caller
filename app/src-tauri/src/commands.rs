@@ -199,9 +199,9 @@ pub fn get_hotkey(state: State<'_, AppState>) -> String {
 }
 
 #[tauri::command]
-pub fn set_hotkey(
-    window: WebviewWindow,
-    app: AppHandle,
+pub fn set_hotkey<R: Runtime>(
+    window: WebviewWindow<R>,
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     hotkey: String,
     voice: State<'_, crate::voice::VoiceState>,
@@ -256,6 +256,29 @@ mod tests {
 
         const REFUSED: &str = "Not available from this window.";
 
+        use crate::voice::commands::*;
+
+        // The controller needs a sink and the model a port; none is called.
+        struct NoSink;
+        impl acd_voice_client::HudSink for NoSink {
+            fn hud(&self, _: u64, _: &acd_voice::hud::Hud) -> bool {
+                true
+            }
+            fn select(&self, _: &str) {}
+        }
+        #[cfg(target_os = "macos")]
+        struct NoPort;
+        #[cfg(target_os = "macos")]
+        impl crate::voice::model::ModelPort for NoPort {
+            fn plan(&self, _: u64, _: &str, _: &str, _: u32) -> i32 {
+                0
+            }
+            fn cancel(&self, _: u64) {}
+            fn cancel_all(&self) {}
+            fn prewarm(&self, _: &str) {}
+            fn query(&self, _: bool) {}
+        }
+
         struct Harness {
             app: tauri::App<MockRuntime>,
             _runtime: tokio::runtime::Runtime,
@@ -289,9 +312,36 @@ mod tests {
                     rename_machine,
                     remove_machine,
                     retry_machine,
+                    escape,
+                    set_hotkey,
+                    voice_publish_presentation,
+                    voice_text_input,
+                    voice_shown,
+                    voice_confirm,
+                    voice_choose,
+                    voice_stop_speech,
+                    voice_cancel,
+                    voice_hud_fit,
+                    voice_open_privacy,
                 ])
                 .build(mock_context(noop_assets()))
                 .unwrap();
+            let controller = runtime.block_on(async {
+                acd_voice_client::Controller::start(inbox.clone(), None, std::sync::Arc::new(NoSink), false)
+            });
+            let settings = crate::voice::settings::VoiceSettings::default();
+            app.manage(crate::voice::VoiceState {
+                controller,
+                settings: std::sync::Mutex::new(settings),
+                path: None,
+                trigger_error: std::sync::Mutex::new(None),
+                #[cfg(target_os = "macos")]
+                speech: std::sync::Arc::new(crate::voice::bridge::MacSpeech::new()),
+                #[cfg(target_os = "macos")]
+                model: std::sync::Arc::new(crate::voice::model::MacIntentModel::new(std::sync::Arc::new(NoPort), std::time::Duration::from_secs(1))),
+                #[cfg(target_os = "macos")]
+                voices: std::sync::Mutex::new(Vec::new()),
+            });
             app.manage(AppState { inbox, pairing: Default::default() });
             Harness { app, _runtime: runtime }
         }
@@ -315,7 +365,7 @@ mod tests {
             .map(|body| body.deserialize().unwrap())
         }
 
-        // Counts the "ignored an inbox command" debug events `allowed` logs while
+        // Counts the "ignored a ..." debug events the refusing handlers log while
         // `f` runs. Commands that return `false` or `()` refuse silently, so the
         // return value alone cannot tell a refusal from a real run.
         fn refusals_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
@@ -339,7 +389,7 @@ mod tests {
                 .finish();
             let out = tracing::subscriber::with_default(subscriber, f);
             let log = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
-            (out, log.matches("ignored an inbox command from another window").count())
+            (out, log.matches("ignored a").count())
         }
 
         struct Case {
@@ -347,7 +397,12 @@ mod tests {
             args: Value,
             /// A label this command accepts.
             from: &'static str,
-            /// What the HUD gets: the refusal, in the command's own return type.
+            /// A label it refuses.
+            wrong: &'static str,
+            /// How many "ignored a ..." events a refusal logs. The three commands
+            /// that refuse without logging are told apart by their result or state.
+            logs: usize,
+            /// What `wrong` gets: the refusal, in the command's own return type.
             refused: Result<Value, Value>,
             /// What `from` gets with these arguments on an empty inbox. `None`
             /// when the result depends on the real clipboard.
@@ -358,16 +413,28 @@ mod tests {
             Err(json!(REFUSED))
         }
 
-        // One line per scoped command. Left out: `escape` takes `VoiceState` (the
-        // Swift speech bridge) and `set_hotkey` is Wry-only, so the mock runtime
-        // cannot build them; the `voice_*` commands in voice/commands.rs need
-        // `VoiceState` too. `every_scoped_handler_is_in_the_table` fails when a
-        // handler with an `allowed` check is added without a line here.
+        // Window-checked commands in voice/commands.rs that the table leaves out.
+        // Each one links the Swift bridge (`voice_probe`, `voice_request_permission`,
+        // `voice_install_assets`; `voice_set_settings` through `trigger::apply`).
+        // Registering them in the mock app pulls the Swift runtime into the test
+        // binary, which has no rpath to it on purpose (see `model-contract` in
+        // Cargo.toml), so the binary would not start.
+        const LEFT_OUT: &[&str] = &["voice_set_settings", "voice_probe", "voice_request_permission", "voice_install_assets"];
+
+        // One line per other window-checked command. An `allowed` of `None` means
+        // only the refusal is checked: running it would reach the global-shortcut
+        // plugin (`set_hotkey`, absent from the mock app) or open System Settings
+        // (`voice_open_privacy`). Not window-checked: `voice_get_settings`, `voice_status`.
+        // `every_scoped_handler_is_in_the_table` fails when a handler with a
+        // window check is added without a line here.
         fn cases() -> Vec<Case> {
             let unknown_card = || Some(Err(json!("unknown card")));
             let unknown_machine = || Some(Err(json!("Unknown machine")));
             let done = || Some(Ok(Value::Null));
-            let case = |cmd, args, from, refused, allowed| Case { cmd, args, from, refused, allowed };
+            let case = |cmd, args, from, refused, allowed| Case { cmd, args, from, wrong: crate::voice::hud::LABEL, logs: 1, refused, allowed };
+            // The HUD commands refuse any other window.
+            let hud = |cmd, args, allowed| Case { from: crate::voice::hud::LABEL, wrong: "panel", ..case(cmd, args, "", Ok(Value::Null), allowed) };
+            let silent = |c: Case| Case { logs: 0, ..c };
             vec![
                 case("pick_option", json!({"cardKey": "c", "requestId": "r", "optionId": "o", "revision": 1}), "panel", refusal(), unknown_card()),
                 case("send_reply", json!({"cardKey": "c", "text": "hi"}), "panel", refusal(), unknown_card()),
@@ -382,17 +449,51 @@ mod tests {
                 case("rename_machine", json!({"key": "nope", "name": "n"}), "settings", refusal(), unknown_machine()),
                 case("remove_machine", json!({"key": "nope"}), "settings", refusal(), unknown_machine()),
                 case("retry_machine", json!({"key": "nope"}), "settings", Ok(Value::Null), done()),
+                case("escape", json!({}), "panel", Ok(json!(false)), Some(Ok(json!(false)))),
+                case("set_hotkey", json!({"hotkey": "Alt+X"}), "settings", refusal(), None),
+                // Refused with no log and no result; `only_the_panel_can_publish_a_presentation` covers it.
+                silent(case("voice_publish_presentation", json!({"presentation": presentation()}), "panel", Ok(Value::Null), done())),
+                silent(case("voice_text_input", json!({"text": "hi"}), "panel", refusal(), Some(Err(json!("Voice is off. Turn it on in Settings."))))),
+                hud("voice_shown", json!({"proposalId": 1}), done()),
+                hud("voice_confirm", json!({"proposalId": 1}), done()),
+                hud("voice_choose", json!({"choiceId": 1, "index": 0}), done()),
+                hud("voice_stop_speech", json!({"seq": 1}), done()),
+                hud("voice_cancel", json!({"id": 1}), done()),
+                hud("voice_hud_fit", json!({"seq": 1, "height": 100.0}), done()),
+                // The HUD may open System Settings too, so "panel" is the wrong window here.
+                Case { wrong: "panel", ..case("voice_open_privacy", json!({"kind": "microphone"}), "settings", Ok(Value::Null), None) },
             ]
         }
 
+        fn presentation() -> Value {
+            json!({"epoch": "e", "version": 1, "selected": null, "visible": [], "machine_filter": null, "done_collapsed": false})
+        }
+
         #[test]
-        fn the_hud_window_is_refused_by_every_inbox_command() {
+        fn a_wrong_window_is_refused_by_every_scoped_command() {
             let h = harness();
             for c in cases() {
-                let (got, refusals) = refusals_during(|| call(&h, crate::voice::hud::LABEL, c.cmd, c.args.clone()));
-                assert_eq!(got, c.refused, "{} from the HUD", c.cmd);
-                assert_eq!(refusals, 1, "{} from the HUD logged one refusal", c.cmd);
+                let (got, refusals) = refusals_during(|| call(&h, c.wrong, c.cmd, c.args.clone()));
+                assert_eq!(got, c.refused, "{} from {}", c.cmd, c.wrong);
+                assert_eq!(refusals, c.logs, "{} from {} logged its refusal", c.cmd, c.wrong);
             }
+        }
+
+        // `voice_publish_presentation` returns nothing and logs nothing, so the
+        // controller's stored presentation is the evidence: the same version is
+        // accepted again only if the first publish never got in.
+        #[test]
+        fn only_the_panel_can_publish_a_presentation() {
+            let h = harness();
+            let voice = h.app.state::<crate::voice::VoiceState>();
+            let publish = |label, epoch: &str| {
+                let mut p = presentation();
+                p["epoch"] = json!(epoch);
+                call(&h, label, "voice_publish_presentation", json!({ "presentation": p.clone() })).unwrap();
+                voice.controller.publish(serde_json::from_value(p).unwrap())
+            };
+            assert!(publish(crate::voice::hud::LABEL, "hud"), "the HUD's publish was stored");
+            assert!(!publish("panel", "panel"), "the panel's publish was not stored");
         }
 
         #[test]
@@ -412,9 +513,12 @@ mod tests {
         #[test]
         fn every_scoped_handler_is_in_the_table() {
             let check = format!("if !{}(&window", "allowed");
-            let scoped = include_str!("commands.rs").matches(&check).count();
-            // `escape` and `set_hotkey` are the two the table cannot cover.
-            assert_eq!(scoped, cases().len() + 2, "add the new command to `cases`");
+            let label = format!("if window.{}", "label()");
+            let hud = format!("if !hud::{}(window.label())", "is_hud");
+            let scoped = include_str!("commands.rs").matches(&check).count()
+                + include_str!("voice/commands.rs").matches(&label).count()
+                + include_str!("voice/commands.rs").matches(&hud).count();
+            assert_eq!(scoped, cases().len() + LEFT_OUT.len(), "add the new command to `cases`");
         }
     }
 

@@ -19,7 +19,6 @@ fn payload(session: &str, prompt: Option<&str>, turn: Option<&str>) -> Payload {
 /// B1: the correlation key joins ids with `:` but ids may contain `:`, so
 /// two different (session, prompt) pairs give one key.
 #[test]
-#[ignore = "B1: claude_key/codex_key are ambiguous when an id contains ':'"]
 fn correlation_keys_of_different_sessions_differ() {
     let a = payload("s:p1", Some("x"), Some("x"));
     let b = payload("s", Some("p1:x"), Some("p1:x"));
@@ -30,7 +29,6 @@ fn correlation_keys_of_different_sessions_differ() {
 /// B2: `cap_chars(text, max)` is documented as "the first `max` chars"; at
 /// `max == 0` it returns a one-char string.
 #[test]
-#[ignore = "B2: cap_chars(_, 0) returns \"…\" (1 char over the cap)"]
 fn cap_chars_never_exceeds_its_cap() {
     for max in 0..3 {
         let out = cap_chars("abcdef", max);
