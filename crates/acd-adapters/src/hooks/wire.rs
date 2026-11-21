@@ -181,22 +181,23 @@ pub fn command_of(input: &Value) -> Option<&str> {
     input.get("command").and_then(Value::as_str)
 }
 
-pub fn claude_key(p: &Payload) -> Option<CorrelationKey> {
+/// Ids may contain `:`, so each is length-prefixed to keep the join unambiguous.
+fn key(agent: &str, p: &Payload, turn: &str) -> Option<CorrelationKey> {
     Some(CorrelationKey(format!(
-        "claude:{}:{}:{}",
+        "{agent}:{}:{}:{}:{turn}:{}",
+        p.session_id.len(),
         p.session_id,
-        p.prompt_id.as_deref()?,
+        turn.len(),
         tool_digest(p.tool_name.as_deref()?, &p.tool_input)
     )))
 }
 
+pub fn claude_key(p: &Payload) -> Option<CorrelationKey> {
+    key("claude", p, p.prompt_id.as_deref()?)
+}
+
 pub fn codex_key(p: &Payload) -> Option<CorrelationKey> {
-    Some(CorrelationKey(format!(
-        "codex:{}:{}:{}",
-        p.session_id,
-        p.turn_id.as_deref()?,
-        tool_digest(p.tool_name.as_deref()?, &p.tool_input)
-    )))
+    key("codex", p, p.turn_id.as_deref()?)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -324,7 +325,7 @@ mod tests {
         let a = payload("claude/payload-PreToolUse-AskUserQuestion.json");
         let b = payload("claude/payload-PermissionRequest-AskUserQuestion.json");
         assert_eq!(claude_key(&a), claude_key(&b));
-        assert!(claude_key(&a).unwrap().0.starts_with("claude:4e3885ee-"));
+        assert!(claude_key(&a).unwrap().0.starts_with("claude:36:4e3885ee-"));
     }
     #[test]
     fn codex_post_tool_use_matches_by_command_not_digest() {
@@ -335,7 +336,7 @@ mod tests {
             tool_digest("Bash", &b.tool_input)
         );
         assert_eq!(command_of(&a.tool_input), command_of(&b.tool_input));
-        assert!(codex_key(&a).unwrap().0.starts_with("codex:01a116d3-"));
+        assert!(codex_key(&a).unwrap().0.starts_with("codex:36:01a116d3-"));
         assert!(codex_key(&b).is_some());
     }
     #[test]
