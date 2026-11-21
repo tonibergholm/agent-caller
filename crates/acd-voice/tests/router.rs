@@ -161,7 +161,8 @@ async fn text_rules_apply_to_payloads() {
     let long = "x".repeat(64 * 1024 + 1);
     for text in ["\u{202E}evil", "a\u{1b}b", "   ", long.as_str()] {
         let reply = serde_json::json!({"step": "send", "agent": "a1", "text": text}).to_string();
-        // The text is in the transcript, so only the text rules refuse it.
+        // The text is in the transcript, so the text rules refuse it (blank
+        // text would also fail the transcript check).
         assert_eq!(model(&s, &format!("tell it {text}"), &reply).await, Routed::Refused(Refusal::BadText), "{} chars", text.len());
     }
 }

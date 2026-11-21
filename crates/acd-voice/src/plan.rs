@@ -142,7 +142,8 @@ pub struct Executor {
     trigger_cancelled: bool,
     /// Per card, the (request id, revision) its last read-back spoke, or `None`
     /// when nothing was pending: a bare "yes" for another request on that card
-    /// was never heard (finding V2).
+    /// was never heard (finding V2). Kept across `reset`, which also runs on
+    /// lock and sleep: a stale entry only ever asks for a confirm.
     heard: std::collections::HashMap<String, Option<(String, u64)>>,
 }
 
@@ -430,7 +431,6 @@ impl Executor {
         self.transcript = None;
         self.prior = Prior::Nothing;
         self.trigger_cancelled = false;
-        self.heard.clear();
         self.utterance += 1;
     }
 

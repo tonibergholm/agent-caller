@@ -212,9 +212,10 @@ async fn reading_another_card_keeps_the_first_cards_read_back() {
     assert!(sent.is_empty(), "counting down on a request the user never heard: {sent:?}");
 }
 
-/// V2: turning voice off forgets what was read back.
+/// V2: a reset (voice off, lock, sleep) keeps what was read back, so a
+/// request that changed meanwhile is not answered on a countdown.
 #[tokio::test]
-async fn a_reset_forgets_the_read_back() {
+async fn a_reset_keeps_the_read_back() {
     let port = RecordingPort::default();
     let mut exec = Executor::new();
     let heard = select(snapshot(vec![pending("m", "a")]), "m/a");
@@ -230,7 +231,8 @@ async fn a_reset_forgets_the_read_back() {
         }
         exec.reset(&port);
     }
-    assert_eq!(port.0.lock().unwrap().len(), 1, "after a reset, yes counts down as before");
+    let sent = port.0.lock().unwrap().clone();
+    assert!(sent.is_empty(), "counting down on a request the user never heard: {sent:?}");
 }
 
 /// Control for V2: "yes" after reading the same request still counts down.
