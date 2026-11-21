@@ -97,10 +97,10 @@ and `-local.md`). Core 1 to 8 and local F1 to F5 are fixed.
   `crates/acd-voice/tests/findings.rs` now run. V2 records what a read-back
   spoke, per card; a spoken alert does not count as a read-back yet (alerts
   are spoken by `acd-voice-client`, which does not tell the executor).
-  Residuals, all still `Confirm` with the payload and target on the HUD
-  (spec §5.5): a payload may be any contiguous run of the user's words, so
-  "not to delete everything" allows "delete everything"; a model `answer` or
-  `answer_text` still takes the model's pick when nothing is named; and a card
+  Residuals: a payload may be any contiguous run of the user's words, so
+  "not to delete everything" allows "delete everything", and a model `answer`
+  or `answer_text` still takes the model's pick when nothing is named (both
+  stay `Confirm` with the payload and target on the HUD, spec §5.5); a card
   whose title shares two long words with the transcript counts as named
   (spec §5.2 rule 1), so a model `select` of it is `Level::None`. F1 depends on real layout: the HUD measures overflow after render, and
   vitest mocks the measurements.
