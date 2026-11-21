@@ -140,6 +140,9 @@ pub struct Executor {
     /// The trigger cancelled a countdown (spec §4.4). Read by the next
     /// `begin`, so that utterance's "cancel" reports it, or by `resume`.
     trigger_cancelled: bool,
+    /// (card, request id, revision) of the last read-back: a bare "yes" for
+    /// another request on that card was never heard (finding V2).
+    heard: Option<(String, String, u64)>,
 }
 
 impl Executor {
@@ -429,7 +432,13 @@ impl Executor {
         self.utterance += 1;
     }
 
-    fn take(&mut self, routed: Routed) -> Reaction {
+    fn take(&mut self, mut routed: Routed) -> Reaction {
+        if let Routed::Proposal(p) = &mut routed
+            && p.level == Level::Countdown
+            && self.unheard(&p.step)
+        {
+            p.level = Level::Confirm;
+        }
         match routed {
             Routed::Refused(refusal) => self.error(refusal),
             Routed::WhichOne(choice) => {
@@ -454,6 +463,14 @@ impl Executor {
                 }
             },
         }
+    }
+
+    /// An answer to a request on the card last read aloud, but not the one read.
+    fn unheard(&self, step: &Step) -> bool {
+        let (Step::Answer { card, request_id, revision, .. } | Step::AnswerText { card, request_id, revision, .. }) = step else {
+            return false;
+        };
+        self.heard.as_ref().is_some_and(|(c, r, v)| c == card && (r, v) != (request_id, revision))
     }
 
     /// The id of the state the HUD is showing, which its inputs carry back.
@@ -486,6 +503,10 @@ impl Executor {
                 };
             }
             _ => {}
+        }
+        if let Step::Read { card } = &p.step {
+            let req = self.snapshot.as_ref().and_then(|s| s.card(card)).and_then(|c| c.pending.as_ref());
+            self.heard = req.map(|r| (card.clone(), r.id.clone(), r.revision));
         }
         let text = self.snapshot.as_ref().and_then(|s| match &p.step {
             Step::Read { card } => s.card(card).and_then(speech::read),

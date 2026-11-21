@@ -1,6 +1,5 @@
 //! Demonstrations for docs/research/2026-11-04-security-review-apps-voice.md.
-//! Each test asserts the safe behaviour and is #[ignore]d because it fails
-//! today: run `cargo test -p acd-voice --test findings -- --ignored`.
+//! Each test asserts the safe behaviour that the fix for its finding gave.
 use acd_voice::router::model::{FakeIntentModel, IntentModel};
 use acd_voice::router::{RouteOptions, Routed, route};
 use acd_voice::safety::Level;
@@ -116,7 +115,6 @@ impl InboxPort for RecordingPort {
 /// same agent opens r-new. The next "yes" resolves against a fresh snapshot
 /// taken at that press, so it counts down on r-new, which was never read.
 #[tokio::test]
-#[ignore = "finding V2: yes after read-back applies to a different request"]
 async fn yes_after_a_read_back_does_not_apply_to_a_request_that_was_not_read() {
     let port = RecordingPort::default();
     let mut exec = Executor::new();
@@ -145,4 +143,22 @@ async fn yes_after_a_read_back_does_not_apply_to_a_request_that_was_not_read() {
     }
     let sent = port.0.lock().unwrap().clone();
     assert!(sent.is_empty(), "counting down on a request the user never heard: {sent:?}");
+}
+
+/// Control for V2: "yes" after reading the same request still counts down.
+#[tokio::test]
+async fn yes_after_a_read_back_of_the_same_request_still_counts_down() {
+    let port = RecordingPort::default();
+    let mut exec = Executor::new();
+    let heard = select(snapshot(vec![pending("m", "a")]), "m/a");
+    for said in ["read it", "yes"] {
+        let said = VoiceText::new(said);
+        let (n, _) = exec.begin(&port, heard.clone(), said.clone(), Locale::En).ok().unwrap();
+        let routed = route(&heard, &said, None, &Opts::default()).await;
+        let r = exec.routed(n, routed).unwrap();
+        if let Some(id) = r.hud.awaiting_display() {
+            exec.shown(&port, id);
+        }
+    }
+    assert_eq!(port.0.lock().unwrap().len(), 1);
 }

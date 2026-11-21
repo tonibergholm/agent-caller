@@ -2,8 +2,7 @@
 
 use acd_voice::text::{clean, truncate};
 
-/// B4: `truncate(s, max)` is documented as "at most `max` characters"; at
-/// `max == 0` it returns "…".
+/// B4: `truncate(s, max)` is "at most `max` characters", also at `max == 0`.
 #[test]
 fn truncate_never_exceeds_max() {
     assert_eq!(truncate("abc", 0).chars().count(), 0);
