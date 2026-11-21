@@ -57,6 +57,22 @@ async fn a_model_send_that_adds_symbols_is_refused() {
     assert!(matches!(r, Routed::Proposal(_)), "case and sentence punctuation may differ: {r:?}");
 }
 
+/// Findings V1 and V4: the model's candidate list does not narrow the cards
+/// a send or a select can go to.
+#[tokio::test]
+async fn a_model_candidate_list_does_not_narrow_the_choice() {
+    let s = snapshot(vec![working("minos", "a"), working("studio", "b")]);
+    for reply in [
+        r#"{"step":"send","candidates":["a2"],"text":"run the tests"}"#,
+        r#"{"step":"select","candidates":["a2"]}"#,
+    ] {
+        match model(&s, "run the tests", reply).await {
+            Routed::WhichOne(c) => assert_eq!(c.candidates.len(), 2, "{reply}"),
+            r => panic!("{reply}: {r:?}"),
+        }
+    }
+}
+
 /// Finding V4: `select` needs no confirmation (it changes nothing), but the
 /// panel then holds that card as `selected`, which is what lets a bare "yes"
 /// count down. A model may pick a card the user did not name.

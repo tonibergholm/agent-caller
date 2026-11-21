@@ -134,6 +134,12 @@ fn aim(
         if target::named(snapshot, &said).is_some() {
             return targeted(snapshot, &said, purpose, None, template, Origin::Model);
         }
+        // The model does not narrow the cards a send or a select may go to (V1, V4).
+        let keys = if matches!(template, Template::Send(_) | Template::Select) {
+            snapshot.visible_cards().into_iter().map(|c| c.key.clone()).collect()
+        } else {
+            keys
+        };
         let fitting: Vec<String> = keys
             .into_iter()
             .filter(|k| {
