@@ -83,6 +83,13 @@ Fixes from the 2026-11-20 security audit.
   and the release tag, when `gh` is installed and signed in
   (`ACD_INSTALL_SKIP_PROVENANCE=1` skips the check).
   Dependabot also covers the cargo and npm dependencies.
+- Voice: when no card is named or selected, a free-form command that sends
+  text or selects a card asks which card instead of taking the model's pick.
+  Text to send must be the user's own words. A read-back that was cut says
+  that more follows. A bare "yes" for a request other than the one just read
+  back on that card asks for confirmation instead of counting down.
+- Claude and Codex hook correlation keys can no longer collide when a session
+  or prompt id contains `:`.
 
 ### Changed
 
