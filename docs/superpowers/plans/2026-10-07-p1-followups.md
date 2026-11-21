@@ -102,7 +102,10 @@ and `-local.md`). Core 1 to 8 and local F1 to F5 are fixed.
   or `answer_text` still takes the model's pick when nothing is named (both
   stay `Confirm` with the payload and target on the HUD, spec §5.5); a card
   whose title shares two long words with the transcript counts as named
-  (spec §5.2 rule 1), so a model `select` of it is `Level::None`. F1 depends on real layout: the HUD measures overflow after render, and
+  (spec §5.2 rule 1), so a model `select` of it is `Level::None`. V2 records
+  a read-back when it is handed to speech, not when it was spoken: if the
+  synthesiser refuses it or the user stops it, a "yes" for that request still
+  counts down, as it did before V2 (#142 review). F1 depends on real layout: the HUD measures overflow after render, and
   vitest mocks the measurements.
 - **F3 residual (hook listeners, #87).** Since the 2026-11-20 audit Claude
   and Codex hooks use `hook.sock`, which has its own slot pool, so filling the
@@ -126,6 +129,12 @@ and `-local.md`). Core 1 to 8 and local F1 to F5 are fixed.
   (`acd_securefs::check_socket_path`). Not covered: a same-user process, and
   the instant between the check and the connect (closing it would need a
   peer-credential check on the connection).
+- **securefs trailing slash (#142 review, predates it).** `check_private_dir`
+  on `link/`, where `link` is a symlink to a directory, follows the link on
+  Linux (a trailing slash defeats `O_NOFOLLOW`), so the target is checked
+  instead of refusing the symlink. acd's own paths carry no trailing slash;
+  a user-set path with one is the user's own symlink. Fix: strip trailing
+  slashes (keeping `/`) before opening.
 - **F5 (#86).** Control characters are rejected in the home, executable and
   config-dir paths; other characters were already escaped.
 - **Whole-or-read-only (#83), accepted.** Characters such as U+034F, U+115F,
