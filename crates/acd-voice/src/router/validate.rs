@@ -45,6 +45,9 @@ pub(super) fn validate(snapshot: &Snapshot, ids: &IdMap, transcript: &VoiceText,
             let Some(text) = checked_text(plan.text.as_ref(), ANSWER_TEXT_MAX_BYTES) else {
                 return Routed::Refused(Refusal::BadText);
             };
+            if !said_it(transcript, &text) {
+                return Routed::Refused(Refusal::BadText);
+            }
             let payload = text.expose().to_owned();
             aim(snapshot, ids, transcript, &plan, Purpose::AnswerText, Template::AnswerText(text), Some(&payload))
         }
@@ -52,6 +55,9 @@ pub(super) fn validate(snapshot: &Snapshot, ids: &IdMap, transcript: &VoiceText,
             let Some(text) = checked_text(plan.text.as_ref(), REPLY_MAX_BYTES) else {
                 return Routed::Refused(Refusal::BadText);
             };
+            if !said_it(transcript, &text) {
+                return Routed::Refused(Refusal::BadText);
+            }
             let payload = text.expose().to_owned();
             aim(snapshot, ids, transcript, &plan, Purpose::Send, Template::Send(text), Some(&payload))
         }
@@ -65,6 +71,11 @@ fn checked_text(text: Option<&VoiceText>, max: usize) -> Option<VoiceText> {
     let text = text?.expose().replace("\r\n", "\n");
     let text = text.trim();
     (!text.is_empty() && text.len() <= max && !has_forbidden_chars(text)).then(|| VoiceText::new(text))
+}
+
+/// The payload is a contiguous run of the user's own words (finding V1).
+fn said_it(transcript: &VoiceText, text: &VoiceText) -> bool {
+    format!(" {} ", normalize(transcript.expose())).contains(&format!(" {} ", normalize(text.expose())))
 }
 
 fn machine_key(snapshot: &Snapshot, name: &str) -> Option<String> {

@@ -365,8 +365,9 @@ async fn model(s: &Snapshot, said: &str, reply: &str) -> Routed {
 async fn a_reply_of_exactly_64_kib_is_allowed() {
     let s = select(snapshot(vec![working("m", "w")]), "m/w");
     for (len, ok) in [(64 * 1024, true), (64 * 1024 + 1, false), (2000, true)] {
-        let reply = serde_json::json!({"step": "send", "agent": "a1", "text": "x".repeat(len)}).to_string();
-        let r = model(&s, "tell it", &reply).await;
+        let text = "x".repeat(len);
+        let reply = serde_json::json!({"step": "send", "agent": "a1", "text": text}).to_string();
+        let r = model(&s, &format!("tell it {text}"), &reply).await;
         assert_eq!(matches!(r, Routed::Proposal(_)), ok, "{len}: {r:?}");
         if !ok {
             assert_eq!(r, Routed::Refused(R::BadText));

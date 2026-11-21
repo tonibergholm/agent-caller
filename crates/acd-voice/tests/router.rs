@@ -143,7 +143,7 @@ async fn invented_or_malformed_plans_are_not_understood() {
         "not json",
         r#"{"step":"answer","request":"r1","option":"12"}"#,
         r#"{"step":"answer","request":"r1"}"#,
-        r#"{"step":"send","text":"hi"}"#,
+        r#"{"step":"send","text":"do the thing"}"#,
         r#"{"step":"none"}"#,
     ] {
         assert_eq!(model(&s, "do the thing", reply).await, Routed::Refused(Refusal::DidNotUnderstand), "{reply}");
@@ -232,7 +232,7 @@ async fn a_named_send_reaches_a_hidden_idle_agent_and_is_confirmed() {
     let reply = r#"{"step":"send","agent":"a2","text":"run the tests"}"#;
     let p = proposal(model(&s, "tell the minos claude to run the tests", reply).await);
     assert_eq!((p.provenance, p.off_screen, p.level), (Some(Provenance::Named), true, Level::Confirm));
-    assert_eq!(model(&s, "keep going", reply).await, Routed::Refused(Refusal::OutOfView), "unnamed");
+    assert_eq!(model(&s, "run the tests", reply).await, Routed::Refused(Refusal::OutOfView), "unnamed");
     let answer = r#"{"step":"select","agent":"a2"}"#;
     assert_eq!(model(&s, "show the minos one", answer).await, Routed::Refused(Refusal::OutOfView));
 }
@@ -377,10 +377,10 @@ async fn payload_limits_and_normalisation() {
     let at_limit = "x".repeat(16 * 1024);
     let over = "x".repeat(16 * 1024 + 1);
     let reply = |t: &str| serde_json::json!({"step": "answer_text", "request": "r1", "text": t}).to_string();
-    assert!(matches!(model(&t, "answer it", &reply(&at_limit)).await, Routed::Proposal(_)));
-    assert_eq!(model(&t, "answer it", &reply(&over)).await, Routed::Refused(Refusal::BadText));
+    assert!(matches!(model(&t, &format!("answer it {at_limit}"), &reply(&at_limit)).await, Routed::Proposal(_)));
+    assert_eq!(model(&t, &format!("answer it {over}"), &reply(&over)).await, Routed::Refused(Refusal::BadText));
     let reply = serde_json::json!({"step": "send", "agent": "a1", "text": "  line one\r\nline two \n"}).to_string();
-    let p = proposal(model(&s, "tell it", &reply).await);
+    let p = proposal(model(&s, "tell it line one line two", &reply).await);
     assert_eq!(p.step, Step::Send { card: "m/w".into(), text: VoiceText::new("line one\nline two") });
 }
 
