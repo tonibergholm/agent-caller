@@ -74,8 +74,18 @@ fn checked_text(text: Option<&VoiceText>, max: usize) -> Option<VoiceText> {
 }
 
 /// The payload is a contiguous run of the user's own words (finding V1).
+/// Only case and sentence punctuation at a word's edges may differ, so a model
+/// cannot add symbols such as `|` or `~` that `normalize` would drop.
 fn said_it(transcript: &VoiceText, text: &VoiceText) -> bool {
-    format!(" {} ", normalize(transcript.expose())).contains(&format!(" {} ", normalize(text.expose())))
+    let words = |s: &str| {
+        let w: Vec<String> = s
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c| matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | '"' | '\u{201C}' | '\u{201D}')).to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
+        format!(" {} ", w.join(" "))
+    };
+    words(transcript.expose()).contains(&words(text.expose()))
 }
 
 fn machine_key(snapshot: &Snapshot, name: &str) -> Option<String> {
