@@ -93,7 +93,7 @@ and `-local.md`). Core 1 to 8 and local F1 to F5 are fixed.
   `docs/research/2026-11-04-security-review-apps-voice.md` (F1 to F11: voice
   path, Mac app, app-core, iOS shell, frontend): F1, F3, F7, F8, F9, F10 and
   F11 are fixed by the 2026-11-20 audit. The voice findings V1 to V4 (F2, F4,
-  F5, F6) are fixed by the follow-up PR; their tests in
+  F5, F6) are fixed by #142; their tests in
   `crates/acd-voice/tests/findings.rs` now run. V2 records what a read-back
   spoke, per card; a spoken alert does not count as a read-back yet (alerts
   are spoken by `acd-voice-client`, which does not tell the executor).
@@ -462,8 +462,8 @@ Residuals from the 2026-11 relay and review work, none blocking:
     affects the label only, never delivery.
 - **Mutation tests (#101).** Some tests wait for indirect 5 s bounds, and the
   counts quoted in the mutation document are stale.
-- **Bug-hunt reproducers (#110).** B1, B2 and B4 are fixed by the follow-up
-  PR and their tests run. `Pairing::parse` accepts a `+` port (`+8443`);
+- **Bug-hunt reproducers (#110).** B1, B2 and B4 are fixed by #142
+  and their tests run. `Pairing::parse` accepts a `+` port (`+8443`);
   it parses to the same port. Not audited: `hooks/state.rs`, the T3 and herdr reconcilers,
   `acd-client/conn.rs` resume, `acd-core/engine.rs` claim/deliver. See
   `docs/research/2026-11-05-bug-hunt.md`.
@@ -513,7 +513,7 @@ Checked in code on 2026-11-04.
 - PR #105: the oversized pre-`welcome` frame resyncs, the
   `repairing_inside_the_undo_window_sends_nothing` flake waits for the
   answer, and the auth log test needs its own hello and prints no token.
-- Checked on 2026-11-21, the second follow-up PR to the 2026-11-20 audit:
+- Checked on 2026-11-21, #142 (second follow-up to the 2026-11-20 audit):
   voice findings V1
   to V4 (a model `send` or `select` with no named or selected card asks which
   one; a payload must be the user's own words; a cut read-back says more
