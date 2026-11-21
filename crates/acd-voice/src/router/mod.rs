@@ -198,7 +198,7 @@ fn apply(snapshot: &Snapshot, template: &Template, resolved: &Resolved, origin: 
     // or selected, the user picks from the visible ones (findings V1, V4).
     if origin == Origin::Model
         && resolved.provenance == Provenance::Inferred
-        && matches!(template, Template::Send(_))
+        && matches!(template, Template::Send(_) | Template::Select)
     {
         let candidates: Vec<String> = snapshot
             .visible_cards()

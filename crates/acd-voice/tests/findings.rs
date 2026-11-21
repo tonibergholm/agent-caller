@@ -49,7 +49,6 @@ async fn a_model_send_whose_text_the_user_did_not_say_is_refused() {
 /// panel then holds that card as `selected`, which is what lets a bare "yes"
 /// count down. A model may pick a card the user did not name.
 #[tokio::test]
-#[ignore = "finding V4: a model select of an unnamed card is Level::None"]
 async fn a_model_select_of_a_card_the_user_did_not_name_is_not_free() {
     let s = snapshot(vec![pending("minos", "a"), pending("studio", "b")]);
     let r = model(&s, "handle it", r#"{"step":"select","agent":"a2"}"#).await;
@@ -65,7 +64,6 @@ async fn a_model_select_of_a_card_the_user_did_not_name_is_not_free() {
 /// stays free (`Level::None`), so a router that refuses every select does not
 /// make the finding's test pass for the right reason.
 #[tokio::test]
-#[ignore = "finding V4: control for the test above; passes today and after the fix"]
 async fn a_model_select_of_a_card_the_user_named_stays_free() {
     let s = snapshot(vec![pending("minos", "a"), pending("studio", "b")]);
     let r = model(&s, "select the studio one", r#"{"step":"select","agent":"a2"}"#).await;
