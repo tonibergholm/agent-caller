@@ -227,13 +227,9 @@ fn root_owned_files_are_refused_to_an_unprivileged_user() {
     eprintln!("no location uid 65534 can reach; the unprivileged checks did not run");
 }
 
-/// KNOWN BUG, not fixed here (docs/research/2026-11-04-mutation-testing.md): a symlinked
-/// directory is refused, but as `NotRegular`, not `Symlink`. On Linux
-/// `open(O_NOFOLLOW | O_DIRECTORY)` on a symlink fails with ENOTDIR, which `open_path`
-/// maps to `NotRegular` before ELOOP could say `Symlink`. The refusal is correct
-/// (fail closed); only the reported reason, and so the message the user reads, is wrong.
+/// A symlinked directory is refused as `Symlink`. `open(O_NOFOLLOW | O_DIRECTORY)` on a
+/// symlink fails with ENOTDIR (not ELOOP), which `open_path` once reported as `NotRegular`.
 #[test]
-#[ignore = "known bug: reports NotRegular for a symlinked directory"]
 fn a_symlinked_directory_reports_a_symlink() {
     let d = private_dir();
     let real = d.path().join("real");
