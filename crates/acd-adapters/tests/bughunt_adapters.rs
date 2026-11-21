@@ -30,7 +30,6 @@ fn correlation_keys_of_different_sessions_differ() {
 /// B2: `cap_chars(text, max)` is documented as "the first `max` chars"; at
 /// `max == 0` it returns a one-char string.
 #[test]
-#[ignore = "B2: cap_chars(_, 0) returns \"…\" (1 char over the cap)"]
 fn cap_chars_never_exceeds_its_cap() {
     for max in 0..3 {
         let out = cap_chars("abcdef", max);

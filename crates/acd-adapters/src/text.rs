@@ -54,7 +54,10 @@ pub fn cap_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
-    let mut s: String = text.chars().take(max.saturating_sub(1)).collect();
+    if max == 0 {
+        return String::new();
+    }
+    let mut s: String = text.chars().take(max - 1).collect();
     s.push('…');
     s
 }
