@@ -55,6 +55,8 @@ async fn a_model_send_that_adds_symbols_is_refused() {
     }
     let r = model(&s, "tell studio, run the tests.", r#"{"step":"send","agent":"a2","text":"Run the tests"}"#).await;
     assert!(matches!(r, Routed::Proposal(_)), "case and sentence punctuation may differ: {r:?}");
+    let r = model(&s, "tell studio \u{201C}hello\u{201D}.", r#"{"step":"send","agent":"a2","text":"hello"}"#).await;
+    assert!(matches!(r, Routed::Proposal(_)), "a quoted word ending a sentence is the word: {r:?}");
 }
 
 /// Finding V1 for typed answers: the text must be the user's words too.
