@@ -185,7 +185,9 @@ async fn reading_another_card_keeps_the_first_cards_read_back() {
         let r = changed.cards.iter_mut().find(|c| c.key == "m/a").unwrap().pending.as_mut().unwrap();
         r.id = "r-new".into();
     }
-    for (s, said) in [(select(both.clone(), "m/a"), "read it"), (select(both, "n/b"), "read it"), (select(changed, "m/a"), "yes")] {
+    // Card m/a is gone while n/b is read, then comes back with another request.
+    let only_b = snapshot(vec![pending("n", "b")]);
+    for (s, said) in [(select(both, "m/a"), "read it"), (select(only_b, "n/b"), "read it"), (select(changed, "m/a"), "yes")] {
         let said = VoiceText::new(said);
         let (n, _) = exec.begin(&port, s.clone(), said.clone(), Locale::En).ok().unwrap();
         let routed = route(&s, &said, None, &Opts::default()).await;

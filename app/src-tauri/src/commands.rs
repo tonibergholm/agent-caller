@@ -492,8 +492,8 @@ mod tests {
                 call(&h, label, "voice_publish_presentation", json!({ "presentation": p.clone() })).unwrap();
                 voice.controller.publish(serde_json::from_value(p).unwrap())
             };
-            assert!(publish(crate::voice::hud::LABEL, "hud"), "the HUD's publish was not stored");
-            assert!(!publish("panel", "panel"), "the panel's publish was stored");
+            assert!(publish(crate::voice::hud::LABEL, "hud"), "the HUD's publish was stored");
+            assert!(!publish("panel", "panel"), "the panel's publish was not stored");
         }
 
         #[test]

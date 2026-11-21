@@ -508,9 +508,6 @@ impl Executor {
         if let Step::Read { card } = &p.step {
             let req = self.snapshot.as_ref().and_then(|s| s.card(card)).and_then(|c| c.pending.as_ref());
             self.heard.insert(card.clone(), req.map(|r| (r.id.clone(), r.revision)));
-            if let Some(s) = &self.snapshot {
-                self.heard.retain(|c, _| s.card(c).is_some());
-            }
         }
         let text = self.snapshot.as_ref().and_then(|s| match &p.step {
             Step::Read { card } => s.card(card).and_then(speech::read),
