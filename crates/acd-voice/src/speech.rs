@@ -3,7 +3,7 @@
 use acd_protocol::{AgentKind, RequestKind};
 
 use crate::snapshot::{CardSnap, Group, RequestSnap, Snapshot};
-use crate::text::{VoiceText, clean};
+use crate::text::{VoiceText, clean, truncate};
 
 pub const SPOKEN_TITLE_MAX: usize = 60;
 pub const READ_MAX: usize = 400;
@@ -93,7 +93,10 @@ pub fn read(card: &CardSnap) -> Option<VoiceText> {
         RequestKind::Question => req.question.as_deref().unwrap_or(&req.detail),
         _ => &req.detail,
     };
-    Some(VoiceText::new(format!("{lead}. {}", clean(body, READ_MAX))))
+    let body = clean(body, usize::MAX);
+    // A synthesiser may not voice the "…" of a cut body, so say it in words (finding V3).
+    let more = if body.chars().count() > READ_MAX { " More follows. Check the panel." } else { "" };
+    Some(VoiceText::new(format!("{lead}. {}{more}", truncate(&body, READ_MAX))))
 }
 
 /// "minos Claude needs you: bash approval" (spec §7). Built, not fired,
