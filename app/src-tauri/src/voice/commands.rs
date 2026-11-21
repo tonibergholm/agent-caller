@@ -1,5 +1,5 @@
 use acd_voice::snapshot::Presentation;
-use tauri::{AppHandle, Emitter, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Runtime, State, WebviewWindow};
 
 use super::VoiceState;
 use super::hud;
@@ -77,7 +77,7 @@ pub fn voice_set_settings(
 }
 
 #[tauri::command]
-pub fn voice_publish_presentation(window: WebviewWindow, voice: State<'_, VoiceState>, presentation: Presentation) {
+pub fn voice_publish_presentation<R: Runtime>(window: WebviewWindow<R>, voice: State<'_, VoiceState>, presentation: Presentation) {
     if window.label() != "panel" {
         return;
     }
@@ -87,7 +87,7 @@ pub fn voice_publish_presentation(window: WebviewWindow, voice: State<'_, VoiceS
 /// The step-1 trigger: typed text routed as a transcript. Errors are
 /// static strings; the text never appears in one.
 #[tauri::command]
-pub async fn voice_text_input(window: WebviewWindow, voice: State<'_, VoiceState>, text: String) -> Result<(), String> {
+pub async fn voice_text_input<R: Runtime>(window: WebviewWindow<R>, voice: State<'_, VoiceState>, text: String) -> Result<(), String> {
     if window.label() != "panel" {
         return Err("Not available from this window.".into());
     }
@@ -101,7 +101,7 @@ pub async fn voice_text_input(window: WebviewWindow, voice: State<'_, VoiceState
 /// The four HUD commands below ignore calls from any window but the HUD.
 /// The HUD rendered proposal `proposal_id` (D22).
 #[tauri::command]
-pub fn voice_shown(window: WebviewWindow, voice: State<'_, VoiceState>, proposal_id: u64) {
+pub fn voice_shown<R: Runtime>(window: WebviewWindow<R>, voice: State<'_, VoiceState>, proposal_id: u64) {
     if !hud::is_hud(window.label()) {
         tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
@@ -110,7 +110,7 @@ pub fn voice_shown(window: WebviewWindow, voice: State<'_, VoiceState>, proposal
 }
 
 #[tauri::command]
-pub fn voice_confirm(window: WebviewWindow, voice: State<'_, VoiceState>, proposal_id: u64) {
+pub fn voice_confirm<R: Runtime>(window: WebviewWindow<R>, voice: State<'_, VoiceState>, proposal_id: u64) {
     if !hud::is_hud(window.label()) {
         tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
@@ -119,7 +119,7 @@ pub fn voice_confirm(window: WebviewWindow, voice: State<'_, VoiceState>, propos
 }
 
 #[tauri::command]
-pub fn voice_choose(window: WebviewWindow, voice: State<'_, VoiceState>, choice_id: u64, index: usize) {
+pub fn voice_choose<R: Runtime>(window: WebviewWindow<R>, voice: State<'_, VoiceState>, choice_id: u64, index: usize) {
     if !hud::is_hud(window.label()) {
         tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
@@ -129,7 +129,7 @@ pub fn voice_choose(window: WebviewWindow, voice: State<'_, VoiceState>, choice_
 
 /// Esc or Stop on the HUD's spoken text (plan V12). `seq` is the state it shows.
 #[tauri::command]
-pub fn voice_stop_speech(window: WebviewWindow, voice: State<'_, VoiceState>, seq: u64) {
+pub fn voice_stop_speech<R: Runtime>(window: WebviewWindow<R>, voice: State<'_, VoiceState>, seq: u64) {
     if !hud::is_hud(window.label()) {
         tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
@@ -143,7 +143,7 @@ pub fn voice_stop_speech(window: WebviewWindow, voice: State<'_, VoiceState>, se
 /// `voice_stop_speech`. A missing id is ignored here too and is never turned
 /// into a cancel-whatever-is-current.
 #[tauri::command]
-pub fn voice_cancel(window: WebviewWindow, voice: State<'_, VoiceState>, id: Option<u64>) {
+pub fn voice_cancel<R: Runtime>(window: WebviewWindow<R>, voice: State<'_, VoiceState>, id: Option<u64>) {
     if !hud::is_hud(window.label()) {
         tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
@@ -155,7 +155,7 @@ pub fn voice_cancel(window: WebviewWindow, voice: State<'_, VoiceState>, id: Opt
 
 /// The HUD measured the content of state `seq`: fit the panel to it.
 #[tauri::command]
-pub fn voice_hud_fit(window: WebviewWindow, seq: u64, height: f64) {
+pub fn voice_hud_fit<R: Runtime>(window: WebviewWindow<R>, seq: u64, height: f64) {
     if !hud::is_hud(window.label()) {
         tracing::debug!(label = window.label(), "ignored a HUD command from another window");
         return;
@@ -187,7 +187,7 @@ pub fn voice_probe(window: WebviewWindow, voice: State<'_, VoiceState>, step: u3
 /// Opens one of three fixed System Settings panes (plan S19). Settings and
 /// HUD windows only.
 #[tauri::command]
-pub fn voice_open_privacy(window: WebviewWindow, kind: super::permissions::Permission) -> Result<(), String> {
+pub fn voice_open_privacy<R: Runtime>(window: WebviewWindow<R>, kind: super::permissions::Permission) -> Result<(), String> {
     if window.label() != "settings" && !hud::is_hud(window.label()) {
         tracing::debug!(label = window.label(), "ignored a System Settings request from another window");
         return Ok(());
