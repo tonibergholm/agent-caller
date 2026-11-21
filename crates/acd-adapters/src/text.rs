@@ -49,7 +49,7 @@ pub fn clean_screen(s: &str) -> String {
         .collect()
 }
 
-/// Keeps the first `max` chars, ending in `…` when cut.
+/// Keeps the first `max` chars, ending in `…` when cut (empty when `max` is 0).
 pub fn cap_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();

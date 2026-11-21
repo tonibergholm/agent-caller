@@ -83,6 +83,9 @@ Fixes from the 2026-11-20 security audit.
   and the release tag, when `gh` is installed and signed in
   (`ACD_INSTALL_SKIP_PROVENANCE=1` skips the check).
   Dependabot also covers the cargo and npm dependencies.
+
+From the 2026-11-04 apps and voice review and the 2026-11-05 bug hunt:
+
 - Voice: when no card is named or selected, a free-form command that sends
   text or selects a card asks which card instead of taking the model's pick.
   Text to send must be the user's own words. A read-back that was cut says
@@ -99,6 +102,8 @@ Fixes from the 2026-11-20 security audit.
 
 ### Fixed
 
+- A symlinked directory that acd refuses is reported as a symlink, not as
+  "not a regular file".
 - acd: a request whose text exceeds 40 KiB (for example a question at every
   field cap in 4-byte characters) is published read-only, and a working
   directory is cut to 8 KiB of JSON. Over 64 KiB an agent made every client

@@ -57,6 +57,18 @@ async fn a_model_send_that_adds_symbols_is_refused() {
     assert!(matches!(r, Routed::Proposal(_)), "case and sentence punctuation may differ: {r:?}");
 }
 
+/// Finding V1 for typed answers: the text must be the user's words too.
+#[tokio::test]
+async fn a_model_answer_text_the_user_did_not_say_is_refused() {
+    let mut c = pending("m", "a");
+    c.pending.as_mut().unwrap().free_text = true;
+    let s = select(snapshot(vec![c]), "m/a");
+    let reply = r#"{"step":"answer_text","request":"r1","text":"delete everything"}"#;
+    assert_eq!(model(&s, "answer purple", reply).await, Routed::Refused(acd_voice::refusal::Refusal::BadText));
+    let reply = r#"{"step":"answer_text","request":"r1","text":"purple"}"#;
+    assert!(matches!(model(&s, "answer purple", reply).await, Routed::Proposal(_)));
+}
+
 /// Findings V1 and V4: the model's candidate list does not narrow the cards
 /// a send or a select can go to.
 #[tokio::test]
@@ -198,6 +210,27 @@ async fn reading_another_card_keeps_the_first_cards_read_back() {
     }
     let sent = port.0.lock().unwrap().clone();
     assert!(sent.is_empty(), "counting down on a request the user never heard: {sent:?}");
+}
+
+/// V2: turning voice off forgets what was read back.
+#[tokio::test]
+async fn a_reset_forgets_the_read_back() {
+    let port = RecordingPort::default();
+    let mut exec = Executor::new();
+    let heard = select(snapshot(vec![pending("m", "a")]), "m/a");
+    let mut changed = heard.clone();
+    changed.cards[0].pending.as_mut().unwrap().id = "r-new".into();
+    for (s, said) in [(heard, "read it"), (changed, "yes")] {
+        let said = VoiceText::new(said);
+        let (n, _) = exec.begin(&port, s.clone(), said.clone(), Locale::En).ok().unwrap();
+        let routed = route(&s, &said, None, &Opts::default()).await;
+        let r = exec.routed(n, routed).unwrap();
+        if let Some(id) = r.hud.awaiting_display() {
+            exec.shown(&port, id);
+        }
+        exec.reset(&port);
+    }
+    assert_eq!(port.0.lock().unwrap().len(), 1, "after a reset, yes counts down as before");
 }
 
 /// Control for V2: "yes" after reading the same request still counts down.

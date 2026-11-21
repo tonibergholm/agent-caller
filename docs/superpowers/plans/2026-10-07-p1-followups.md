@@ -513,7 +513,8 @@ Checked in code on 2026-11-04.
 - PR #105: the oversized pre-`welcome` frame resyncs, the
   `repairing_inside_the_undo_window_sends_nothing` flake waits for the
   answer, and the auth log test needs its own hello and prints no token.
-- The follow-up PR to the 2026-11-20 audit, second round: voice findings V1
+- Checked on 2026-11-21, the second follow-up PR to the 2026-11-20 audit:
+  voice findings V1
   to V4 (a model `send` or `select` with no named or selected card asks which
   one; a payload must be the user's own words; a cut read-back says more
   follows; a bare "yes" for a request other than the one read back on that

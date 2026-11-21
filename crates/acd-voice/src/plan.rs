@@ -430,6 +430,7 @@ impl Executor {
         self.transcript = None;
         self.prior = Prior::Nothing;
         self.trigger_cancelled = false;
+        self.heard.clear();
         self.utterance += 1;
     }
 

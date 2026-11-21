@@ -74,8 +74,9 @@ fn checked_text(text: Option<&VoiceText>, max: usize) -> Option<VoiceText> {
 }
 
 /// The payload is a contiguous run of the user's own words (finding V1).
-/// Only case and sentence punctuation at a word's edges may differ, so a model
-/// cannot add symbols such as `|` or `~` that `normalize` would drop.
+/// Only case and sentence punctuation at a word's edges may differ (so "done
+/// rm" allows "done; rm"); symbols such as `|` or `~` that `normalize` would
+/// drop may not be added. The HUD still shows the payload for confirming.
 fn said_it(transcript: &VoiceText, text: &VoiceText) -> bool {
     let words = |s: &str| {
         let w: Vec<String> = s

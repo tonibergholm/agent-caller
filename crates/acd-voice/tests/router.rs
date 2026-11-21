@@ -161,7 +161,8 @@ async fn text_rules_apply_to_payloads() {
     let long = "x".repeat(64 * 1024 + 1);
     for text in ["\u{202E}evil", "a\u{1b}b", "   ", long.as_str()] {
         let reply = serde_json::json!({"step": "send", "agent": "a1", "text": text}).to_string();
-        assert_eq!(model(&s, "tell it", &reply).await, Routed::Refused(Refusal::BadText), "{} chars", text.len());
+        // The text is in the transcript, so only the text rules refuse it.
+        assert_eq!(model(&s, &format!("tell it {text}"), &reply).await, Routed::Refused(Refusal::BadText), "{} chars", text.len());
     }
 }
 
@@ -270,7 +271,8 @@ async fn replays_give_the_expected_step_and_provenance() {
 #[tokio::test]
 async fn debug_never_shows_payloads() {
     let s = snapshot(vec![working("minos", "a")]);
-    let r = model(&s, "tell minos SECRET-T", r#"{"step":"send","agent":"a1","text":"SECRET-P"}"#).await;
+    let r = model(&s, "tell minos SECRET-P", r#"{"step":"send","agent":"a1","text":"SECRET-P"}"#).await;
+    assert!(matches!(r, Routed::Proposal(_)), "the payload must reach a proposal: {r:?}");
     let shown = format!("{r:?}");
     assert!(!shown.contains("SECRET"), "{shown}");
 }
@@ -323,7 +325,8 @@ async fn only_a_send_may_target_a_send_only_card() {
     s.presentation.visible = vec!["m/w".into()];
     for reply in [
         r#"{"step":"answer","request":"r1","option":"1"}"#,
-        r#"{"step":"answer_text","request":"r1","text":"purple"}"#,
+        // "the" is in both transcripts, so only the card rule refuses it.
+        r#"{"step":"answer_text","request":"r1","text":"the"}"#,
         r#"{"step":"answer","agent":"a2","option":"1"}"#,
     ] {
         for said in ["do the thing", "answer the done one"] {
